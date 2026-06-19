@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 20:23'
+updated_date: '2026-06-19 20:44'
 labels:
   - design-parity
   - policies
@@ -118,11 +118,11 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Pushed commit `41b975bc` to MR 281: category cards now use active/inactive CSS classes so only the single selected category value renders active after clicking through cards. Targeted rustfmt, wasm cargo check, and diff whitespace checks passed. Skipped web-ui check per owner request.
+Pushed commit `49a2920d` to MR 281: filtered-empty Policies state now uses a smaller search icon matching the design instead of the oversized file icon. Targeted rustfmt, wasm cargo check, and diff whitespace checks passed. Skipped web-ui check per owner request.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Pushed commit `41b975bc` to MR 281 to make category selection visually singular. Category card active/inactive rendering now uses explicit CSS classes (`cf-policy-category-card` and `cf-policy-category-card-active`) instead of conditional inline background/border styles, while the selected state remains driven by the single `category` value. Verification: targeted rustfmt passed, wasm cargo check exited 0, and `git diff --check` passed. The expensive web-ui check was not run per owner request.
+Pushed commit `49a2920d` to MR 281 to match the filtered-empty Policies state to the design: when filters produce no policies, the empty state now uses a small 20px search icon instead of the large file/document icon; the unfiltered no-policies state keeps the document icon. Verification: targeted rustfmt passed, wasm cargo check exited 0, and `git diff --check` passed. The expensive web-ui check was not run per owner request.
 <!-- SECTION:FINAL_SUMMARY:END -->
