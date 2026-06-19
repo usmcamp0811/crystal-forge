@@ -1910,8 +1910,14 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                                 input {
                                                     r#type: "date",
                                                     class: "input focus-ring",
+                                                    disabled: true,
                                                     value: "{justification_review_date}",
                                                     oninput: move |evt| justification_review_date.set(evt.value()),
+                                                }
+                                                div {
+                                                    class: "help",
+                                                    style: "margin-top: 6px; color: var(--cf-text-muted);",
+                                                    "Date persistence is not yet implemented; tracked in TASK-348.1.1."
                                                 }
                                             }
 

@@ -4754,11 +4754,19 @@ const steps = [
         drawer.locator("label:has-text('Review / expiry date (optional)')"),
         "Expected review/expiry date field in accept-risk form",
       );
+      await assertVisible(
+        drawer.locator("text=Date persistence is not yet implemented; tracked in TASK-348.1.1."),
+        "Expected date persistence deferral notice",
+      );
 
       await drawer.locator("button:has-text('Schedule patch')").click();
       await assertVisible(
         drawer.locator("label:has-text('Target patch date')"),
         "Expected target patch date field when scheduling a patch",
+      );
+      await assertDisabled(
+        drawer.locator(".field:has(label:has-text('Target patch date')) input[type='date']"),
+        "Target patch date input should be disabled until persistence is implemented",
       );
 
       // Leave the drawer open so the captured screenshot shows the detail surface and triage form.
