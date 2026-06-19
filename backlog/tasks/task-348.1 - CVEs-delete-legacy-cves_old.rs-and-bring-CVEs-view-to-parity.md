@@ -5,7 +5,7 @@ status: Review
 assignee:
   - opencode-agent
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 03:24'
+updated_date: '2026-06-19 03:44'
 labels:
   - design-parity
   - cves
@@ -73,5 +73,5 @@ Bring the CVEs view to parity (grouped + flat views, severity filter, stat strip
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Executed: confirmed legacy file removal + mod.rs cleanliness; verified view parity; added missing CVE triage review/target date field; strengthened web-ui check for grouped + drawer + triage date labels; ran targeted fmt/check and nix web-ui check; updated MR !280; task remains in Review.
+Executed: confirmed legacy file removal + mod.rs cleanliness; verified view parity; added missing CVE triage review/target date field in disabled deferred-persistence state; strengthened web-ui check for grouped + drawer + triage date labels + disabled state; created TASK-348.1.1 for persistence; ran targeted fmt/check and nix web-ui check; updated MR !280; task remains in Review.
 <!-- SECTION:PLAN:END -->
