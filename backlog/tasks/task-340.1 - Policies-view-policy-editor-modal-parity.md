@@ -5,7 +5,7 @@ status: Review
 assignee:
   - gpt-5.5
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 04:12'
+updated_date: '2026-06-19 14:11'
 labels:
   - design-parity
   - policies
@@ -111,11 +111,11 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR opened for review: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/281
+Rebased local task branch onto latest `origin/dev` (`fd4501af`, includes TASK-348.1 merge). Verification after rebase passed: `nix build .#web-ui`, `nix build .#checks.x86_64-linux.web-ui`.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Implemented Policies design parity updates: design-style header/subtitle, category stat strip and filters, grouped sections, rule-summary cards, editor modal copy/template improvements including multi-rule advanced template, and expanded web-ui policy assertions. No backend/API/SQLx changes were required. Verification passed: `nix build .#web-ui`, wasm `cargo check`, changed-file rustfmt check, and `nix build .#checks.x86_64-linux.web-ui`. MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/281
+Rebased local task branch onto `origin/dev` at `fd4501af` after TASK-348.1 merged. Replayed only the TASK-340.1 implementation commit as `374e6ee4`. Post-rebase verification passed: `nix build .#web-ui` and `nix build .#checks.x86_64-linux.web-ui`.
 <!-- SECTION:FINAL_SUMMARY:END -->
