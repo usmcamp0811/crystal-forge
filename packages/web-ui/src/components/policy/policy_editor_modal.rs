@@ -128,29 +128,33 @@ impl PolicyEvidence {
     }
 }
 
-const CATEGORIES: [(&str, &str, &str, &str); 4] = [
+const CATEGORIES: [(&str, &str, &str, &str, &str); 4] = [
     (
         "deployment",
         "Deployment",
         "#60a5fa",
+        "deploy",
         "Base strategy — how and when a system picks up a new configuration.",
     ),
     (
         "pipeline",
         "Pipeline gates",
         "#a78bfa",
+        "build",
         "Gates on pipeline output — eval, build, and CVE results must pass before promotion.",
     ),
     (
         "rollout",
         "Rollout control",
         "#fbbf24",
+        "sync",
         "Govern the timing, approvals, and staging of a rollout.",
     ),
     (
         "security",
         "Security & hardening",
         "#f87171",
+        "shield",
         "Config-level assertions — STIG / hardening controls a system must satisfy.",
     ),
 ];
@@ -509,7 +513,7 @@ pub fn PolicyEditorModal(
                 } else {
                     // ── Header ──────────────────────────────────────────────────
                     div { class: "modal-head",
-                        h2 {
+                        h2 { style: "white-space:nowrap;",
                             svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:6px;vertical-align:text-bottom;",
                                 if is_editing {
                                     circle { cx: "12", cy: "12", r: "3" }
@@ -520,7 +524,7 @@ pub fn PolicyEditorModal(
                             }
                             "{title}"
                         }
-                        p { "{subtitle}" }
+                        p { style: "white-space:nowrap;", "{subtitle}" }
                     }
 
                     // ── Body ────────────────────────────────────────────────────
@@ -556,7 +560,7 @@ pub fn PolicyEditorModal(
                                 span { class: "cf-policy-ui-only-badge", "UI only — not persisted yet" }
                             }
                             div { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;",
-                                for (id, label, color, blurb) in CATEGORIES {
+                                for (id, label, color, icon, blurb) in CATEGORIES {
                                     button {
                                         key: "{id}",
                                         class: "focus-ring",
@@ -568,7 +572,18 @@ pub fn PolicyEditorModal(
                                         onclick: move |_| category.set(id.to_string()),
                                         span { style: "flex-shrink:0;width:24px;height:24px;border-radius:6px;display:grid;place-items:center;background:color-mix(in oklab, {color} 16%, transparent);color:{color};",
                                             svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                                                path { d: "M20 6 9 17l-5-5" }
+                                                if icon == "deploy" {
+                                                    path { d: "M12 3v12M6 9l6-6 6 6" }
+                                                    rect { x: "4", y: "17", width: "16", height: "4", rx: "1" }
+                                                } else if icon == "build" {
+                                                    path { d: "M12 3l9 5-9 5-9-5 9-5z" }
+                                                    path { d: "M3 13l9 5 9-5" }
+                                                } else if icon == "sync" {
+                                                    path { d: "M20 12a8 8 0 0 1-14 5.3L3 14m1-4a8 8 0 0 1 14-5.3L21 8" }
+                                                    path { d: "M21 3v5h-5M3 21v-5h5" }
+                                                } else {
+                                                    path { d: "M12 3l8 3v6c0 4.5-3.3 8.5-8 9-4.7-.5-8-4.5-8-9V6l8-3z" }
+                                                }
                                             }
                                         }
                                         span { style: "min-width:0;",
@@ -586,15 +601,18 @@ pub fn PolicyEditorModal(
                                 "Severity "
                                 span { class: "cf-policy-ui-only-badge", "UI only — not persisted yet" }
                             }
-                            div { class: "seg seg-sev", style: "width:fit-content;",
+                            div { class: "seg seg-sev", role: "radiogroup", style: "width:fit-content;",
                                 for (value, label, color) in [("high", "High (CAT I)", "#f87171"), ("medium", "Medium (CAT II)", "#fbbf24"), ("low", "Low (CAT III)", "#60a5fa")] {
                                     button {
                                         key: "{value}",
+                                        r#type: "button",
+                                        role: "radio",
+                                        aria_checked: if severity.read().as_str() == value { "true" } else { "false" },
                                         class: if severity.read().as_str() == value { "active" } else { "" },
                                         style: if severity.read().as_str() == value {
                                             "color:{color};background:color-mix(in oklab, {color} 16%, transparent);box-shadow:inset 0 0 0 1px color-mix(in oklab, {color} 45%, transparent);"
                                         } else {
-                                            "color:var(--cf-text-secondary);"
+                                            "color:var(--cf-text-secondary);background:transparent;box-shadow:none;"
                                         },
                                         onclick: move |_| severity.set(value.to_string()),
                                         span { style: "display:inline-flex;align-items:center;gap:6px;",
@@ -664,9 +682,21 @@ pub fn PolicyEditorModal(
                                         }
                                         add_rule_kind.set(String::new());
                                     },
-                                    option { value: "", "+ Add assertion / rule…" }
-                                    for (id, label, persisted) in RULE_OPTIONS {
-                                        option { value: "{id}", { if persisted { label.to_string() } else { format!("{label} (UI only)") } } }
+                                    option { value: "", disabled: true, "+ Add assertion / rule…" }
+                                    optgroup { label: "NixOS config assertions",
+                                        option { value: "packages_installed", "Packages installed" }
+                                        option { value: "nixos_option", "NixOS option equals" }
+                                        option { value: "custom_eval", "Custom nix expression" }
+                                    }
+                                    optgroup { label: "Pipeline gates",
+                                        option { value: "eval_passed", "Eval must pass" }
+                                        option { value: "build_succeeded", "Build must succeed" }
+                                        option { value: "cve_block", "CVE gate" }
+                                    }
+                                    optgroup { label: "Rollout gates",
+                                        option { value: "time_window", "Time window" }
+                                        option { value: "approval_required", "Approval required" }
+                                        option { value: "rollout_percent", "Canary rollout" }
                                     }
                                 }
                             }
