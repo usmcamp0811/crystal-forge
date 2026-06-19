@@ -1,11 +1,11 @@
 ---
 id: TASK-348.1
 title: 'CVEs: delete legacy cves_old.rs and bring CVEs view to parity'
-status: In Progress
+status: Review
 assignee:
   - opencode-agent
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 01:52'
+updated_date: '2026-06-19 02:09'
 labels:
   - design-parity
   - cves
@@ -21,9 +21,6 @@ documentation:
   - design/doc-8 - CrystalForgelatest-UI-Parity-Matrix-TASK-328.md
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
 modified_files:
-  - packages/web-ui/src/views/cves.rs
-  - packages/web-ui/src/views/mod.rs
-  - packages/web-ui/src/components/cve/mod.rs
   - checks/web-ui/tests/integration-test.js
 parent_task_id: TASK-348
 priority: high
@@ -65,28 +62,27 @@ Bring the CVEs view to parity (grouped + flat views, severity filter, stat strip
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Legacy cves_old.rs is confirmed unused and removed; views/mod.rs updated
-- [ ] #2 CVEs stat strip + severity breakdown match the design
-- [ ] #3 Grouped and flat views match the design and severity filter re-issues the API query
-- [ ] #4 Triage statuses render from real data with no fabricated values
-- [ ] #5 Steps 16-cves and 16b-cves-severity-filter pass with parity assertions
+- [x] #1 Legacy cves_old.rs is confirmed unused and removed; views/mod.rs updated
+- [x] #2 CVEs stat strip + severity breakdown match the design
+- [x] #3 Grouped and flat views match the design and severity filter re-issues the API query
+- [x] #4 Triage statuses render from real data with no fabricated values
+- [x] #5 Steps 16-cves and 16b-cves-severity-filter pass with parity assertions
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Proposed implementation plan (awaiting user approval before code changes):
-1. Create and work in dedicated worktree `/home/mcamp/code/crystal-forge/TASK-348.1-cves-parity` on branch `TASK-348.1-cves-parity` from `dev`.
-2. Compare current `packages/web-ui/src/views/cves.rs`, `components/cve`, and web-ui check steps against `/home/mcamp/code/crystal-forge/CrystalForgelatest/components/CvesView.jsx`.
-3. Confirm whether `packages/web-ui/src/views/cves_old.rs` exists and is unused; remove it and update `views/mod.rs` only if no references remain.
-4. Implement scoped CVEs parity: stat strip, severity breakdown, grouped/flat modes, severity filter API refresh, and real triage-status rendering without fabricated values.
-5. Update `checks/web-ui/tests/integration-test.js` steps `16-cves` and `16b-cves-severity-filter` to assert the parity behavior and capture the needed UI state.
-6. Verify with targeted commands: web-ui cargo check, relevant rustfmt checks, and `nix build .#checks.x86_64-linux.web-ui` if feasible for the UI screenshot requirement.
-7. Commit, push, open/update MR, move task to Review only after verification and MR creation.
+Executed: confirmed legacy file removal + mod.rs cleanliness; verified view parity; strengthened web-ui check for grouped + drawer; ran nix web-ui check; opened MR !280; moved to Review.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: opencode-agent on reckless in /home/mcamp/code/crystal-forge/TASK-348.1-cves-parity
+Confirmed legacy cves_old.rs already removed and not referenced in views/mod.rs (removed under TASK-341). CVEs view + components/cve already at parity and backed by real API resources, so no Rust source changes were needed.
+
+Extended web-ui check step 16-cves to assert grouped default surface and open/assert the CVE detail drawer; kept 16b-cves-severity-filter.
+
+Verification: nix build .#checks.x86_64-linux.web-ui passed; steps 16-cves and 16b-cves-severity-filter reported OK with screenshots.
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/280
 <!-- SECTION:NOTES:END -->
