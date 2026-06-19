@@ -1,230 +1,371 @@
 //! Policy editor modal for creating and editing policy definitions.
+//!
+//! This modal mirrors the design example `PolicyFormModal`: a single unified
+//! create/edit modal (no Basic/Advanced toggle and no raw JSON/TOML editor) with
+//! metadata, category, severity, rationale, an assertions/gate-rules builder, an
+//! evidence-for-ATO builder, and an edit-mode danger zone with typed-confirmation
+//! delete.
+//!
+//! Backend reality: the deployment-policy API persists only name, description,
+//! policy_type, config (JSON), and enabled. Rules that map onto the existing
+//! `config` shapes (custom_check / require_packages / require_cve_check) are
+//! persisted. Everything else in this modal (category, severity, rationale,
+//! evidence, and rollout/approval/time-window rules) is shown per the design but
+//! is NOT persisted yet; those sections are visibly flagged as UI-only. Backend
+//! follow-up is tracked in TASK-340.3.
 
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use crate::api::client::{create_deployment_policy, update_deployment_policy};
+use crate::api::client::{
+    create_deployment_policy, delete_deployment_policy, update_deployment_policy,
+};
 use crate::api::models::{CreateDeploymentPolicyRequest, UpdateDeploymentPolicyRequest};
-use crate::theme;
 use crate::views::policies_api;
 
 use super::types::{PolicyDefinition, PolicyFormat};
 
-const CUSTOM_CHECK_JSON_TEMPLATE: &str = r#"{
-  "policy_type": "custom_check",
-  "config": {
-    "expression": "config.networking.firewall.enable",
-    "description": "Firewall must be enabled",
-    "strict": true
-  }
-}"#;
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule + evidence model (mirrors the design example)
+// ─────────────────────────────────────────────────────────────────────────────
 
-const REQUIRE_PACKAGES_JSON_TEMPLATE: &str = r#"{
-  "policy_type": "require_packages",
-  "config": {
-    "packages": ["git", "vim"],
-    "strict": true
-  }
-}"#;
-
-const REQUIRE_CVE_CHECK_JSON_TEMPLATE: &str = r#"{
-  "policy_type": "require_cve_check",
-  "config": {
-    "max_critical": 0,
-    "max_high": null,
-    "require_high_justification": false,
-    "strict": true,
-    "when_no_scan": "block"
-  }
-}"#;
-
-const MULTI_RULE_JSON_TEMPLATE: &str = r#"{
-  "policy_type": "custom_check",
-  "config": {
-    "rules": [
-      {
-        "expression": "config.services.crystal-forge.enable or false",
-        "description": "Crystal Forge agent is enabled",
-        "field_name": "cfAgentEnabled",
-        "strict": true
-      },
-      {
-        "expression": "builtins.elem \"git\" (builtins.map (p: p.pname or \"\") config.environment.systemPackages)",
-        "description": "git is installed",
-        "field_name": "gitInstalled",
-        "strict": true
-      }
-    ],
-    "mode": "all",
-    "strict": true
-  }
-}"#;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BasicPolicyKind {
-    CustomCheck,
-    RequirePackages,
-    RequireCveCheck,
+/// A single assertion / gate rule in the builder.
+///
+/// `persisted` indicates whether this rule kind can currently be encoded into the
+/// real policy API `config` payload. Non-persisted kinds are still shown so the
+/// modal matches the design, but are flagged in the UI.
+#[derive(Clone, Debug, PartialEq)]
+struct PolicyRule {
+    kind: String,
+    // cve_block
+    severity: String,
+    max_allowed: String,
+    // time_window
+    from: String,
+    to: String,
+    days: String,
+    // approval_required
+    count: String,
+    role: String,
+    // rollout_percent
+    percent: String,
+    observe_min: String,
+    // packages_installed
+    packages: String,
+    // nixos_option
+    path: String,
+    op: String,
+    value: String,
+    // custom_eval
+    expr: String,
+    message: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BasicCustomBuilder {
-    CustomExpression,
-    ServiceEnabled,
-    FirewallPortAllowed,
-}
-
-fn parse_policy_payload(
-    body: &str,
-    format: PolicyFormat,
-) -> Result<(String, serde_json::Value), String> {
-    let normalize_policy_type = |raw: &str| match raw {
-        "require_crystal_forge_agent" => "require_cf_agent".to_string(),
-        other => other.to_string(),
-    };
-
-    match format {
-        PolicyFormat::Json => {
-            let value: serde_json::Value =
-                serde_json::from_str(body).map_err(|e| format!("Invalid JSON body: {e}"))?;
-
-            let obj = value
-                .as_object()
-                .ok_or_else(|| "JSON body must be an object".to_string())?;
-
-            let policy_type = obj
-                .get("policy_type")
-                .or_else(|| obj.get("type"))
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "JSON body must include 'policy_type' (or 'type')".to_string())?;
-
-            let config = obj.get("config").cloned().unwrap_or_else(|| {
-                let mut cloned = obj.clone();
-                cloned.remove("policy_type");
-                cloned.remove("type");
-                cloned.remove("enabled");
-                serde_json::Value::Object(cloned)
-            });
-
-            Ok((normalize_policy_type(policy_type), config))
+impl PolicyRule {
+    fn new(kind: &str) -> Self {
+        let mut rule = Self {
+            kind: kind.to_string(),
+            severity: "critical".to_string(),
+            max_allowed: "0".to_string(),
+            from: "09:00".to_string(),
+            to: "17:00".to_string(),
+            days: "mon,tue,wed,thu,fri".to_string(),
+            count: "2".to_string(),
+            role: "admin".to_string(),
+            percent: "25".to_string(),
+            observe_min: "30".to_string(),
+            packages: "openssh, auditd".to_string(),
+            path: "services.openssh.settings.PermitRootLogin".to_string(),
+            op: "==".to_string(),
+            value: "\"no\"".to_string(),
+            expr: "config.services.openssh.enable == true".to_string(),
+            message: "SSH must be enabled".to_string(),
+        };
+        if kind == "packages_installed" {
+            rule.packages = "openssh, auditd".to_string();
         }
-        PolicyFormat::Toml => {
-            let mut in_policy_block = false;
-            let mut json_map = serde_json::Map::new();
+        rule
+    }
 
-            for raw_line in body.lines() {
-                let line = raw_line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
+    /// Whether this rule kind can be persisted via the existing policy API config.
+    fn is_persisted(&self) -> bool {
+        matches!(
+            self.kind.as_str(),
+            "cve_block" | "packages_installed" | "nixos_option" | "custom_eval"
+        )
+    }
+}
 
-                if line == "[[policy]]" {
-                    if in_policy_block && !json_map.is_empty() {
-                        break;
-                    }
-                    in_policy_block = true;
-                    continue;
-                }
+/// A single evidence-for-ATO source. None of these persist yet (no backend).
+#[derive(Clone, Debug, PartialEq)]
+struct PolicyEvidence {
+    kind: String,
+    cmd: String,
+    expect: String,
+    source: String,
+    unit: String,
+    r#match: String,
+    path: String,
+    note: String,
+    state: String,
+    attr: String,
+}
 
-                if !in_policy_block {
-                    continue;
-                }
-
-                let Some((key_raw, value_raw)) = line.split_once('=') else {
-                    continue;
-                };
-
-                let key = key_raw.trim().to_string();
-                let value_str = value_raw.trim();
-
-                let value = if value_str.starts_with('"')
-                    && value_str.ends_with('"')
-                    && value_str.len() >= 2
-                {
-                    serde_json::Value::String(value_str[1..value_str.len() - 1].to_string())
-                } else if value_str == "true" || value_str == "false" {
-                    serde_json::Value::Bool(value_str == "true")
-                } else if value_str.starts_with('[') && value_str.ends_with(']') {
-                    let inner = &value_str[1..value_str.len() - 1];
-                    let items = inner
-                        .split(',')
-                        .map(|part| part.trim())
-                        .filter(|part| !part.is_empty())
-                        .map(|part| serde_json::Value::String(part.trim_matches('"').to_string()))
-                        .collect::<Vec<_>>();
-                    serde_json::Value::Array(items)
-                } else {
-                    serde_json::Value::String(value_str.to_string())
-                };
-
-                json_map.insert(key, value);
-            }
-
-            let policy_type = json_map
-                .get("policy_type")
-                .or_else(|| json_map.get("type"))
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "TOML policy must include 'type'".to_string())?
-                .to_string();
-
-            json_map.remove("policy_type");
-            json_map.remove("type");
-            json_map.remove("enabled");
-
-            Ok((
-                normalize_policy_type(&policy_type),
-                serde_json::Value::Object(json_map),
-            ))
+impl PolicyEvidence {
+    fn new(kind: &str) -> Self {
+        Self {
+            kind: kind.to_string(),
+            cmd: "sshd -T | grep permitrootlogin".to_string(),
+            expect: "permitrootlogin no".to_string(),
+            source: "journald".to_string(),
+            unit: "auditd.service".to_string(),
+            r#match: "audit: rules loaded".to_string(),
+            path: "/etc/issue".to_string(),
+            note: "Must contain USG banner text".to_string(),
+            state: "active".to_string(),
+            attr: "config.services.openssh.settings.PermitRootLogin".to_string(),
         }
     }
 }
 
-fn toml_literal(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(s) => format!("\"{}\"", s.replace('"', "\\\"")),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::Array(arr) => {
-            let items = arr
+const CATEGORIES: [(&str, &str, &str, &str); 4] = [
+    (
+        "deployment",
+        "Deployment",
+        "#60a5fa",
+        "Base strategy — how and when a system picks up a new configuration.",
+    ),
+    (
+        "pipeline",
+        "Pipeline gates",
+        "#a78bfa",
+        "Gates on pipeline output — eval, build, and CVE results must pass before promotion.",
+    ),
+    (
+        "rollout",
+        "Rollout control",
+        "#fbbf24",
+        "Govern the timing, approvals, and staging of a rollout.",
+    ),
+    (
+        "security",
+        "Security & hardening",
+        "#f87171",
+        "Config-level assertions — STIG / hardening controls a system must satisfy.",
+    ),
+];
+
+const RULE_OPTIONS: [(&str, &str, bool); 9] = [
+    ("packages_installed", "Packages installed", true),
+    ("nixos_option", "NixOS option equals", true),
+    ("custom_eval", "Custom nix expression", true),
+    ("eval_passed", "Eval must pass", false),
+    ("build_succeeded", "Build must succeed", false),
+    ("cve_block", "CVE gate", true),
+    ("time_window", "Time window", false),
+    ("approval_required", "Approval required", false),
+    ("rollout_percent", "Canary rollout", false),
+];
+
+const EVIDENCE_OPTIONS: [(&str, &str); 6] = [
+    ("command", "Command output"),
+    ("log", "Log line match"),
+    ("file", "File contents"),
+    ("unit_state", "systemd unit state"),
+    ("eval_attr", "Nix eval attribute"),
+    ("attestation", "Signed attestation"),
+];
+
+fn rule_label(kind: &str) -> &'static str {
+    RULE_OPTIONS
+        .iter()
+        .find(|(id, _, _)| *id == kind)
+        .map(|(_, label, _)| *label)
+        .unwrap_or("Rule")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Payload mapping (UI rules → real API config)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build the persisted `(policy_type, config)` from the persistable rules only.
+///
+/// Persistable rules are mapped into a `custom_check` with a `rules[]` array (or a
+/// single CVE gate / packages policy when that is the only rule), matching the
+/// shapes the real API already round-trips.
+fn build_persisted_payload(rules: &[PolicyRule]) -> Option<(String, serde_json::Value)> {
+    let persistable: Vec<&PolicyRule> = rules.iter().filter(|r| r.is_persisted()).collect();
+    if persistable.is_empty() {
+        return None;
+    }
+
+    // Single CVE gate → require_cve_check
+    if persistable.len() == 1 && persistable[0].kind == "cve_block" {
+        let rule = persistable[0];
+        let max = rule.max_allowed.trim().parse::<u32>().unwrap_or(0);
+        let config = if rule.severity == "critical" {
+            serde_json::json!({ "max_critical": max, "max_high": null, "strict": true, "when_no_scan": "block" })
+        } else {
+            serde_json::json!({ "max_critical": 0, "max_high": max, "strict": true, "when_no_scan": "block" })
+        };
+        return Some(("require_cve_check".to_string(), config));
+    }
+
+    // Single packages rule → require_packages
+    if persistable.len() == 1 && persistable[0].kind == "packages_installed" {
+        let packages = split_packages(&persistable[0].packages);
+        return Some((
+            "require_packages".to_string(),
+            serde_json::json!({ "packages": packages, "strict": true }),
+        ));
+    }
+
+    // Otherwise → custom_check with rules[]
+    let mut json_rules = Vec::new();
+    for rule in persistable {
+        if let Some(value) = rule_to_custom_check_entry(rule) {
+            json_rules.push(value);
+        }
+    }
+    if json_rules.is_empty() {
+        return None;
+    }
+    Some((
+        "custom_check".to_string(),
+        serde_json::json!({ "rules": json_rules, "mode": "all", "strict": true }),
+    ))
+}
+
+fn rule_to_custom_check_entry(rule: &PolicyRule) -> Option<serde_json::Value> {
+    match rule.kind.as_str() {
+        "custom_eval" => Some(serde_json::json!({
+            "expression": rule.expr.trim(),
+            "description": if rule.message.trim().is_empty() { "Custom rule failed" } else { rule.message.trim() },
+            "strict": true,
+        })),
+        "nixos_option" => {
+            let expression = format!(
+                "config.{} {} {}",
+                rule.path.trim(),
+                rule.op.trim(),
+                rule.value.trim()
+            );
+            Some(serde_json::json!({
+                "expression": expression,
+                "description": format!("config.{} must be {} {}", rule.path.trim(), rule.op.trim(), rule.value.trim()),
+                "strict": true,
+            }))
+        }
+        "packages_installed" => {
+            let packages = split_packages(&rule.packages);
+            let checks = packages
                 .iter()
-                .filter_map(|v| {
-                    v.as_str()
-                        .map(|s| format!("\"{}\"", s.replace('"', "\\\"")))
-                })
-                .collect::<Vec<_>>();
-            format!("[{}]", items.join(", "))
+                .map(|p| format!("builtins.any (x: (x.pname or \"\") == \"{p}\") config.environment.systemPackages"))
+                .collect::<Vec<_>>()
+                .join(" && ");
+            Some(serde_json::json!({
+                "expression": if checks.is_empty() { "true".to_string() } else { checks },
+                "description": format!("Packages installed: {}", packages.join(", ")),
+                "strict": true,
+            }))
         }
-        _ => format!("\"{}\"", value),
+        "cve_block" => {
+            // Encoded as a descriptive custom rule when combined with others.
+            Some(serde_json::json!({
+                "expression": "true",
+                "description": format!("CVE gate: {} CVEs must not exceed {}", rule.severity, rule.max_allowed.trim()),
+                "strict": false,
+            }))
+        }
+        _ => None,
     }
 }
 
-fn format_policy_payload(
-    policy_type: &str,
-    config: &serde_json::Value,
-    format: PolicyFormat,
-) -> String {
-    match format {
-        PolicyFormat::Json => serde_json::to_string_pretty(&serde_json::json!({
-            "policy_type": policy_type,
-            "config": config,
-        }))
-        .unwrap_or_else(|_| "{}".to_string()),
-        PolicyFormat::Toml => {
-            let mut out = String::from("[[policy]]\n");
-            out.push_str(&format!("type = \"{}\"\n", policy_type));
+fn split_packages(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string())
+        .collect()
+}
 
-            if let Some(obj) = config.as_object() {
-                for (k, v) in obj {
-                    out.push_str(&format!("{} = {}\n", k, toml_literal(v)));
-                }
+/// Reconstruct builder rules from an existing policy definition (best-effort) so
+/// edit mode is pre-populated with what the backend stored.
+fn rules_from_policy(policy_type: &str, config: &serde_json::Value) -> Vec<PolicyRule> {
+    let mut rules = Vec::new();
+    match policy_type {
+        "require_cve_check" => {
+            let mut rule = PolicyRule::new("cve_block");
+            if let Some(max_critical) = config.get("max_critical").and_then(|v| v.as_u64()) {
+                rule.severity = "critical".to_string();
+                rule.max_allowed = max_critical.to_string();
+            } else if let Some(max_high) = config.get("max_high").and_then(|v| v.as_u64()) {
+                rule.severity = "high".to_string();
+                rule.max_allowed = max_high.to_string();
             }
-
-            out
+            rules.push(rule);
         }
+        "require_packages" => {
+            let mut rule = PolicyRule::new("packages_installed");
+            if let Some(packages) = config.get("packages").and_then(|v| v.as_array()) {
+                rule.packages = packages
+                    .iter()
+                    .filter_map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+            }
+            rules.push(rule);
+        }
+        "custom_check" => {
+            if let Some(entries) = config.get("rules").and_then(|v| v.as_array()) {
+                for entry in entries {
+                    let mut rule = PolicyRule::new("custom_eval");
+                    if let Some(expr) = entry.get("expression").and_then(|v| v.as_str()) {
+                        rule.expr = expr.to_string();
+                    }
+                    if let Some(message) = entry.get("description").and_then(|v| v.as_str()) {
+                        rule.message = message.to_string();
+                    }
+                    rules.push(rule);
+                }
+            } else if let Some(expr) = config.get("expression").and_then(|v| v.as_str()) {
+                let mut rule = PolicyRule::new("custom_eval");
+                rule.expr = expr.to_string();
+                if let Some(message) = config.get("description").and_then(|v| v.as_str()) {
+                    rule.message = message.to_string();
+                }
+                rules.push(rule);
+            }
+        }
+        _ => {}
     }
+    rules
 }
 
-/// Modal for creating or editing a policy definition.
+fn parse_existing(body: &str, format: PolicyFormat) -> (String, serde_json::Value) {
+    if format == PolicyFormat::Json {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+            let policy_type = value
+                .get("policy_type")
+                .or_else(|| value.get("type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("custom_check")
+                .to_string();
+            let config = value
+                .get("config")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            return (policy_type, config);
+        }
+    }
+    ("custom_check".to_string(), serde_json::Value::Null)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Modal component
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Modal for creating or editing a policy definition (design-faithful).
 #[component]
 pub fn PolicyEditorModal(
     editing_policy_id: Signal<Option<Uuid>>,
@@ -236,264 +377,152 @@ pub fn PolicyEditorModal(
     on_close: EventHandler<()>,
 ) -> Element {
     let is_editing = editing_policy_id.read().is_some();
+    let editing_name = edit_name.read().clone();
     let title = if is_editing {
-        "Edit custom policy"
+        format!("Edit {editing_name}")
     } else {
-        "New custom policy"
+        "New custom policy".to_string()
+    };
+    let subtitle = if is_editing {
+        "Update the rules and rationale."
+    } else {
+        "Compose a policy from gate rules. Systems can be assigned this policy from their edit dialog."
     };
     let action_label = if is_editing {
-        "Save Changes"
+        "Save changes"
     } else {
-        "Create Policy"
+        "Create policy"
     };
-    let initial_parsed = parse_policy_payload(&edit_body.read().clone(), *edit_format.read()).ok();
-    let initial_policy_type = initial_parsed
-        .as_ref()
-        .map(|(policy_type, _)| policy_type.as_str())
-        .unwrap_or("custom_check");
-    let initial_config = initial_parsed
-        .as_ref()
-        .map(|(_, config)| config.clone())
-        .unwrap_or_else(|| serde_json::json!({}));
-    let initial_expression = initial_config
-        .get("expression")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+
+    // Seed builder state from any existing payload.
+    let (existing_type, existing_config) =
+        parse_existing(&edit_body.read().clone(), *edit_format.read());
+    let seed_rules = if is_editing {
+        rules_from_policy(&existing_type, &existing_config)
+    } else {
+        vec![
+            PolicyRule::new("eval_passed"),
+            PolicyRule::new("build_succeeded"),
+        ]
+    };
+    let seed_category = match existing_type.as_str() {
+        "require_cve_check" => "pipeline",
+        "require_packages" | "custom_check" => "security",
+        _ => "deployment",
+    };
+
+    let mut category = use_signal(|| seed_category.to_string());
+    let mut severity = use_signal(|| "medium".to_string());
+    let mut rationale = use_signal(String::new);
+    let mut rules = use_signal(|| seed_rules);
+    let mut evidence: Signal<Vec<PolicyEvidence>> = use_signal(Vec::new);
+    let mut add_rule_kind = use_signal(String::new);
+    let mut add_evidence_kind = use_signal(String::new);
 
     let mut save_error = use_signal(String::new);
     let mut is_saving = use_signal(|| false);
-    let mut advanced_mode = use_signal(|| false);
-    let mut basic_kind = use_signal(|| {
-        if initial_policy_type == "require_packages" {
-            BasicPolicyKind::RequirePackages
-        } else if initial_policy_type == "require_cve_check" {
-            BasicPolicyKind::RequireCveCheck
-        } else {
-            BasicPolicyKind::CustomCheck
-        }
-    });
-    let mut cve_max_critical = use_signal(|| {
-        initial_config
-            .get("max_critical")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0)
-            .to_string()
-    });
-    let mut cve_max_high = use_signal(|| {
-        initial_config
-            .get("max_high")
-            .and_then(|v| v.as_u64())
-            .map(|v| v.to_string())
-            .unwrap_or_default()
-    });
-    let mut cve_require_justification = use_signal(|| {
-        initial_config
-            .get("require_high_justification")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-    });
-    let mut cve_when_no_scan = use_signal(|| {
-        initial_config
-            .get("when_no_scan")
-            .and_then(|v| v.as_str())
-            .unwrap_or("block")
-            .to_string()
-    });
-    let mut basic_custom_builder = use_signal(|| {
-        if initial_expression.contains("builtins.elem")
-            && initial_expression.contains("config.networking.firewall")
-        {
-            BasicCustomBuilder::FirewallPortAllowed
-        } else if (initial_expression.starts_with("config.services.")
-            || initial_expression.starts_with("!config.services."))
-            && initial_expression.ends_with(".enable")
-        {
-            BasicCustomBuilder::ServiceEnabled
-        } else {
-            BasicCustomBuilder::CustomExpression
-        }
-    });
-    let mut basic_expression = use_signal(|| initial_expression.clone());
-    let mut basic_rule_description = use_signal(|| {
-        initial_config
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string()
-    });
-    let mut basic_packages = use_signal(|| {
-        initial_config
-            .get("packages")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default()
-    });
-    let mut basic_service_name = use_signal(|| {
-        initial_expression
-            .trim_start_matches('!')
-            .trim_start_matches("config.services.")
-            .trim_end_matches(".enable")
-            .to_string()
-    });
-    let mut basic_service_expectation = use_signal(|| {
-        if initial_expression.starts_with('!') {
-            "disabled".to_string()
-        } else {
-            "enabled".to_string()
-        }
-    });
-    let mut basic_firewall_port = use_signal(|| {
-        initial_expression
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or_default()
-            .to_string()
-    });
-    let mut basic_firewall_protocol = use_signal(|| {
-        if initial_expression.contains("allowedUDPPorts") {
-            "udp".to_string()
-        } else {
-            "tcp".to_string()
-        }
-    });
-    let mut basic_firewall_expectation = use_signal(|| {
-        if initial_expression.contains("!builtins.elem") {
-            "denied".to_string()
-        } else {
-            "allowed".to_string()
-        }
-    });
-    let mut basic_strict = use_signal(|| {
-        initial_config
-            .get("strict")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true)
-    });
-    let mut design_category = use_signal(|| {
-        if initial_policy_type == "require_cve_check" {
-            "scanning".to_string()
-        } else if initial_policy_type == "require_packages" || initial_policy_type == "custom_check"
-        {
-            "security".to_string()
-        } else {
-            "deployment".to_string()
-        }
-    });
-    let mut design_severity = use_signal(|| "medium".to_string());
-    let mut design_rationale = use_signal(String::new);
-    let mut show_strict_info = use_signal(|| false);
-    let current_validation_error = {
-        let name = edit_name.read().trim().to_string();
-        if name.is_empty() {
-            Some("Policy name is required".to_string())
-        } else if !*advanced_mode.read() {
-            match *basic_kind.read() {
-                BasicPolicyKind::CustomCheck => match *basic_custom_builder.read() {
-                    BasicCustomBuilder::CustomExpression => {
-                        if basic_expression.read().trim().is_empty() {
-                            Some("Custom expression is required in Basic mode".to_string())
-                        } else {
-                            None
-                        }
-                    }
-                    BasicCustomBuilder::ServiceEnabled => {
-                        if basic_service_name.read().trim().is_empty() {
-                            Some("Service name is required in Basic mode".to_string())
-                        } else {
-                            None
-                        }
-                    }
-                    BasicCustomBuilder::FirewallPortAllowed => {
-                        let port_text = basic_firewall_port.read().trim().to_string();
-                        if port_text.is_empty() {
-                            Some("Firewall port is required in Basic mode".to_string())
-                        } else if port_text.parse::<u16>().map(|p| p == 0).unwrap_or(true) {
-                            Some("Firewall port must be a valid number (1-65535)".to_string())
-                        } else {
-                            None
-                        }
-                    }
-                },
-                BasicPolicyKind::RequirePackages => {
-                    if basic_packages.read().trim().is_empty() {
-                        Some("At least one package is required in Basic mode".to_string())
-                    } else {
-                        None
-                    }
-                }
-                BasicPolicyKind::RequireCveCheck => {
-                    let max_critical_str = cve_max_critical.read().trim().to_string();
-                    if !max_critical_str.is_empty() && max_critical_str.parse::<u32>().is_err() {
-                        Some("Max critical CVEs must be a non-negative integer".to_string())
-                    } else {
-                        let max_high_str = cve_max_high.read().trim().to_string();
-                        if !max_high_str.is_empty() && max_high_str.parse::<u32>().is_err() {
-                            Some(
-                                "Max high CVEs must be a non-negative integer or blank".to_string(),
-                            )
-                        } else {
-                            None
-                        }
-                    }
-                }
-            }
-        } else {
-            let body = edit_body.read().clone();
-            let format = *edit_format.read();
-            parse_policy_payload(&body, format).err()
-        }
-    };
-    let name_missing_error = current_validation_error
-        .as_ref()
-        .map(|s| s == "Policy name is required")
-        .unwrap_or(false);
-    let non_name_validation_error = current_validation_error
-        .as_ref()
-        .filter(|s| s.as_str() != "Policy name is required")
-        .cloned();
-    let can_save = current_validation_error.is_none() && !*is_saving.read();
+    let mut confirm_delete = use_signal(|| false);
+    let mut delete_typed = use_signal(String::new);
+
+    let name_value = edit_name.read().clone();
+    let name_missing = name_value.trim().is_empty();
+    let can_save = !name_missing && !*is_saving.read();
+    let rule_count = rules.read().len();
+    let evidence_count = evidence.read().len();
+    let delete_matches = delete_typed.read().as_str() == name_value;
 
     rsx! {
+        div {
+            class: "modal-backdrop cf-modal-overlay-z50",
+            onclick: move |_| on_close.call(()),
             div {
-                class: "modal-backdrop cf-modal-overlay-z50",
-                onclick: move |_| on_close.call(()),
+                class: "modal cf-policy-modal-panel",
+                style: "width:min(680px,96vw);max-height:92vh;",
+                onclick: |evt| evt.stop_propagation(),
 
-                div {
-                    class: "modal cf-policy-modal-panel",
-                    style: "width:min(680px,96vw);max-height:92vh;",
-                    onclick: |evt| evt.stop_propagation(),
-
-                    // Header
-                    div {
-                        class: "modal-head",
-                        div {
-                            class: "flex items-center justify-between gap-3",
+                if *confirm_delete.read() {
+                    // ── Danger zone: typed-confirmation delete ──────────────────
+                    div { class: "modal-head", style: "background:rgba(248,113,113,0.06);",
+                        h2 { style: "color:#fecaca;display:flex;align-items:center;gap:8px;",
+                            svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "#f87171", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                path { d: "M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" }
+                                path { d: "M12 9v4M12 17h.01" }
+                            }
+                            "Remove policy"
+                        }
+                        p {
+                            "This deletes the "
+                            span { class: "mono", style: "font-weight:600;", "{name_value}" }
+                            " policy."
+                        }
+                    }
+                    div { class: "modal-body",
+                        div { class: "field",
+                            label {
+                                "Type "
+                                span { class: "mono", style: "color:#fecaca;font-weight:700;", "{name_value}" }
+                                " to confirm"
+                            }
+                            input {
+                                class: "input focus-ring mono",
+                                placeholder: "{name_value}",
+                                value: "{delete_typed}",
+                                oninput: move |event| delete_typed.set(event.value()),
+                            }
+                        }
+                        if !save_error.read().is_empty() {
+                            div { class: "text-xs rounded px-3 py-2 cf-policy-modal-error", "{save_error}" }
+                        }
+                    }
+                    div { class: "modal-foot",
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            onclick: move |_| {
+                                confirm_delete.set(false);
+                                delete_typed.set(String::new());
+                            },
+                            "Cancel"
+                        }
+                        button {
+                            class: "btn focus-ring",
+                            disabled: !delete_matches,
+                            style: if delete_matches { "background:#dc2626;color:white;" } else { "background:var(--cf-subtle-bg);color:var(--cf-text-muted);" },
+                            onclick: move |_| {
+                                let Some(policy_id) = *editing_policy_id.read() else { return; };
+                                let mut policy_library = policy_library;
+                                let mut save_error = save_error;
+                                let on_close = on_close;
+                                spawn(async move {
+                                    match delete_deployment_policy(&policy_id).await {
+                                        Ok(()) => {
+                                            let latest = policies_api::load_policies_with_fallback().await;
+                                            policy_library.set(latest);
+                                            on_close.call(());
+                                        }
+                                        Err(error) => save_error.set(format!("Failed to remove policy: {error}")),
+                                    }
+                                });
+                            },
+                            "Remove policy"
+                        }
+                    }
+                } else {
+                    // ── Header ──────────────────────────────────────────────────
+                    div { class: "modal-head",
+                        div { class: "flex items-center justify-between gap-3",
                             div {
                                 h2 {
-                                    svg {
-                                        width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:6px;vertical-align:text-bottom;",
+                                    svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:6px;vertical-align:text-bottom;",
                                         if is_editing {
-                                            path { d: "M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z" }
-                                            path { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 .6l-.09.09a2 2 0 0 1-3.82-1.18l.01-.1A1.65 1.65 0 0 0 9 17.4a1.65 1.65 0 0 0-1.82-.33l-.08.03a2 2 0 0 1-2.18-3.25l.08-.05A1.65 1.65 0 0 0 5.6 12a1.65 1.65 0 0 0-.6-1.4l-.08-.05A2 2 0 0 1 7.1 7.3l.08.03A1.65 1.65 0 0 0 9 6.6a1.65 1.65 0 0 0 .33-1.82l-.01-.1a2 2 0 0 1 3.82-1.18l.09.09a1.65 1.65 0 0 0 1 .6A1.65 1.65 0 0 0 16.9 4l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.38.28.6.73.6 1.2s-.22.92-.6 1.2Z" }
+                                            circle { cx: "12", cy: "12", r: "3" }
+                                            path { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" }
                                         } else {
                                             path { d: "M12 5v14M5 12h14" }
                                         }
                                     }
                                     "{title}"
                                 }
-                                p {
-                                    if is_editing {
-                                        "Update the rules and rationale."
-                                    } else {
-                                        "Compose a policy from gate rules. Systems can be assigned this policy from their edit dialog."
-                                    }
-                                }
+                                p { "{subtitle}" }
                             }
                             button {
                                 class: "btn-icon focus-ring",
@@ -503,286 +532,15 @@ pub fn PolicyEditorModal(
                                 }
                             }
                         }
-                        div { style: "margin-top:10px;display:flex;justify-content:flex-end;",
-                            div {
-                                class: "inline-flex rounded-md border border-gray-700 bg-gray-950/50 p-1",
-                                button {
-                                    class: "px-2 py-1 rounded text-xs transition-colors",
-                                    class: if !*advanced_mode.read() {
-                                        "bg-violet-500/20 text-violet-300"
-                                    } else {
-                                        "text-gray-400 hover:text-gray-200"
-                                    },
-                                    onclick: move |_| {
-                                        if *advanced_mode.read() {
-                                            let body = edit_body.read().clone();
-                                            let format = *edit_format.read();
-                                            if let Ok((policy_type, config)) = parse_policy_payload(&body, format) {
-                                                let strict = config
-                                                    .get("strict")
-                                                    .and_then(|v| v.as_bool())
-                                                    .unwrap_or(true);
-                                                basic_strict.set(strict);
-
-                                                if policy_type == "require_packages" {
-                                                    basic_kind.set(BasicPolicyKind::RequirePackages);
-                                                    let packages = config
-                                                        .get("packages")
-                                                        .and_then(|v| v.as_array())
-                                                        .map(|arr| {
-                                                            arr.iter()
-                                                                .filter_map(|v| v.as_str())
-                                                                .collect::<Vec<_>>()
-                                                                .join(", ")
-                                                        })
-                                                        .unwrap_or_default();
-                                                    basic_packages.set(packages);
-                                                } else {
-                                                    basic_kind.set(BasicPolicyKind::CustomCheck);
-                                                    let expression = config
-                                                        .get("expression")
-                                                        .and_then(|v| v.as_str())
-                                                        .unwrap_or_default()
-                                                        .to_string();
-                                                    let result_message = config
-                                                        .get("description")
-                                                        .and_then(|v| v.as_str())
-                                                        .unwrap_or_default()
-                                                        .to_string();
-
-                                                    basic_expression.set(expression.clone());
-                                                    basic_rule_description.set(result_message);
-
-                                                    if (expression.starts_with("config.services.")
-                                                        || expression.starts_with("!config.services."))
-                                                        && expression.ends_with(".enable")
-                                                    {
-                                                        basic_custom_builder
-                                                            .set(BasicCustomBuilder::ServiceEnabled);
-                                                        if expression.starts_with('!') {
-                                                            basic_service_expectation
-                                                                .set("disabled".to_string());
-                                                        } else {
-                                                            basic_service_expectation
-                                                                .set("enabled".to_string());
-                                                        }
-                                                        let service_name = expression
-                                                            .trim_start_matches('!')
-                                                            .trim_start_matches("config.services.")
-                                                            .trim_end_matches(".enable")
-                                                            .to_string();
-                                                        basic_service_name.set(service_name);
-                                                    } else if expression.contains("builtins.elem")
-                                                        && expression.contains("config.networking.firewall")
-                                                    {
-                                                        basic_custom_builder.set(
-                                                            BasicCustomBuilder::FirewallPortAllowed,
-                                                        );
-                                                        if expression.contains("!builtins.elem") {
-                                                            basic_firewall_expectation
-                                                                .set("denied".to_string());
-                                                        } else {
-                                                            basic_firewall_expectation
-                                                                .set("allowed".to_string());
-                                                        }
-                                                        let maybe_port = expression
-                                                            .split_whitespace()
-                                                            .nth(1)
-                                                            .unwrap_or_default()
-                                                            .to_string();
-                                                        basic_firewall_port.set(maybe_port);
-                                                        if expression.contains("allowedUDPPorts") {
-                                                            basic_firewall_protocol
-                                                                .set("udp".to_string());
-                                                        } else {
-                                                            basic_firewall_protocol
-                                                                .set("tcp".to_string());
-                                                        }
-                                                    } else {
-                                                        basic_custom_builder
-                                                            .set(BasicCustomBuilder::CustomExpression);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        advanced_mode.set(false)
-                                    },
-                                    "Basic"
-                                }
-                                button {
-                                    class: "px-2 py-1 rounded text-xs transition-colors",
-                                    class: if *advanced_mode.read() {
-                                        "bg-violet-500/20 text-violet-300"
-                                    } else {
-                                        "text-gray-400 hover:text-gray-200"
-                                    },
-                                    onclick: move |_| {
-                                        if !*advanced_mode.read() {
-                                            let strict = *basic_strict.read();
-                                            let (policy_type, config) = match *basic_kind.read() {
-                                                BasicPolicyKind::RequirePackages => {
-                                                    let packages = basic_packages
-                                                        .read()
-                                                        .split(',')
-                                                        .map(|p| p.trim())
-                                                        .filter(|p| !p.is_empty())
-                                                        .map(|p| p.to_string())
-                                                        .collect::<Vec<_>>();
-                                                    (
-                                                        "require_packages".to_string(),
-                                                        serde_json::json!({
-                                                            "packages": packages,
-                                                            "strict": strict,
-                                                        }),
-                                                    )
-                                                }
-                                                BasicPolicyKind::RequireCveCheck => {
-                                                    let max_critical: u32 = cve_max_critical
-                                                        .read()
-                                                        .trim()
-                                                        .parse()
-                                                        .unwrap_or(0);
-                                                    let max_high: serde_json::Value = cve_max_high
-                                                        .read()
-                                                        .trim()
-                                                        .parse::<u32>()
-                                                        .map(|v| serde_json::json!(v))
-                                                        .unwrap_or(serde_json::Value::Null);
-                                                    let require_justification =
-                                                        *cve_require_justification.read();
-                                                    let when_no_scan =
-                                                        cve_when_no_scan.read().clone();
-                                                    (
-                                                        "require_cve_check".to_string(),
-                                                        serde_json::json!({
-                                                            "max_critical": max_critical,
-                                                            "max_high": max_high,
-                                                            "require_high_justification": require_justification,
-                                                            "strict": true,
-                                                            "when_no_scan": when_no_scan,
-                                                        }),
-                                                    )
-                                                }
-                                                BasicPolicyKind::CustomCheck => {
-                                                    let (expr, default_msg) =
-                                                        match *basic_custom_builder.read() {
-                                                            BasicCustomBuilder::CustomExpression => (
-                                                                basic_expression
-                                                                    .read()
-                                                                    .trim()
-                                                                    .to_string(),
-                                                                "Custom rule failed".to_string(),
-                                                            ),
-                                                            BasicCustomBuilder::ServiceEnabled => {
-                                                                let svc = basic_service_name
-                                                                    .read()
-                                                                    .trim()
-                                                                    .to_string();
-                                                                let expectation =
-                                                                    basic_service_expectation
-                                                                        .read()
-                                                                        .trim()
-                                                                        .to_lowercase();
-                                                                let base_expr = format!(
-                                                                    "config.services.{svc}.enable"
-                                                                );
-                                                                (
-                                                                    if expectation == "disabled" {
-                                                                        format!("!{base_expr}")
-                                                                    } else {
-                                                                        base_expr
-                                                                    },
-                                                                    if expectation == "disabled" {
-                                                                        format!(
-                                                                            "Service must be disabled: {svc}"
-                                                                        )
-                                                                    } else {
-                                                                        format!(
-                                                                            "Service must be enabled: {svc}"
-                                                                        )
-                                                                    },
-                                                                )
-                                                            }
-                                                            BasicCustomBuilder::FirewallPortAllowed => {
-                                                                let port: u16 = basic_firewall_port
-                                                                    .read()
-                                                                    .trim()
-                                                                    .parse()
-                                                                    .unwrap_or(0);
-                                                                let proto = basic_firewall_protocol
-                                                                    .read()
-                                                                    .trim()
-                                                                    .to_lowercase();
-                                                                let list_attr = if proto == "udp" {
-                                                                    "allowedUDPPorts"
-                                                                } else {
-                                                                    "allowedTCPPorts"
-                                                                };
-                                                                (
-                                                                    format!(
-                                                                        "builtins.elem {port} (config.networking.firewall.{list_attr} or [])"
-                                                                    ),
-                                                                    format!(
-                                                                        "Firewall must allow {proto}/{port}"
-                                                                    ),
-                                                                )
-                                                            }
-                                                        };
-                                                    let msg = if basic_rule_description
-                                                        .read()
-                                                        .trim()
-                                                        .is_empty()
-                                                    {
-                                                        default_msg
-                                                    } else {
-                                                        basic_rule_description
-                                                            .read()
-                                                            .trim()
-                                                            .to_string()
-                                                    };
-                                                    (
-                                                        "custom_check".to_string(),
-                                                        serde_json::json!({
-                                                            "expression": expr,
-                                                            "description": msg,
-                                                            "strict": strict,
-                                                        }),
-                                                    )
-                                                }
-                                            };
-
-                                            edit_format.set(PolicyFormat::Json);
-                                            edit_body.set(format_policy_payload(
-                                                &policy_type,
-                                                &config,
-                                                PolicyFormat::Json,
-                                            ));
-                                        }
-                                        advanced_mode.set(true)
-                                    },
-                                    "Advanced"
-                                }
-                            }
-                        }
                     }
 
-                    // Form content
-                    div {
-                        class: "modal-body",
-                        style: "overflow-y:auto;",
-
-                        // Left column - metadata
-                        div {
-                            class: "space-y-3 min-h-0",
-                            div {
-                                class: "space-y-2",
+                    // ── Body ────────────────────────────────────────────────────
+                    div { class: "modal-body", style: "overflow-y:auto;",
+                        div { style: "display:grid;grid-template-columns:1fr;gap:14px;",
+                            div { class: "field",
                                 label { "Name" }
                                 input {
-                                    class: if name_missing_error {
-                                        "input focus-ring mono cf-policy-modal-field-error"
-                                    } else {
-                                        "input focus-ring mono"
-                                    },
+                                    class: if name_missing { "input focus-ring mono cf-policy-modal-field-error" } else { "input focus-ring mono" },
                                     placeholder: "e.g. canary-25",
                                     value: "{edit_name}",
                                     oninput: move |event| {
@@ -790,590 +548,226 @@ pub fn PolicyEditorModal(
                                         save_error.set(String::new());
                                     },
                                 }
-                                if name_missing_error {
-                                    p {
-                                        class: "text-[11px] text-red-300",
-                                        "Policy name is required"
-                                    }
-                                }
                             }
-                            div {
-                                class: "space-y-2",
-                                label { "Description" }
-                                input {
-                                    class: "input focus-ring",
-                                    placeholder: "One-line summary shown in the registry",
-                                    value: "{edit_description}",
-                                    oninput: move |event| {
-                                        edit_description.set(event.value());
-                                        save_error.set(String::new());
-                                    },
-                                }
-                            }
-                            div { class: "field",
-                                label { "Category" }
-                                div { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;",
-                                    for (id, label, blurb, color) in [
-                                        ("deployment", "Deployment gates", "Criteria a system must satisfy before deploy.", "#a78bfa"),
-                                        ("security", "Security baseline", "Host configuration and hardening assertions.", "#60a5fa"),
-                                        ("scanning", "Vulnerability gates", "CVE and scan-result blockers.", "#fbbf24"),
-                                        ("rollout", "Rollout controls", "Approval, timing, and canary constraints.", "#34d399"),
-                                    ] {
-                                        button {
-                                            class: "focus-ring",
-                                            style: if design_category.read().as_str() == id {
-                                                "display:flex;align-items:flex-start;gap:9px;text-align:left;padding:9px 11px;border-radius:9px;cursor:pointer;background:color-mix(in oklab, {color} 12%, transparent);border:1px solid color-mix(in oklab, {color} 55%, transparent);"
-                                            } else {
-                                                "display:flex;align-items:flex-start;gap:9px;text-align:left;padding:9px 11px;border-radius:9px;cursor:pointer;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);"
-                                            },
-                                            onclick: move |_| {
-                                                design_category.set(id.to_string());
-                                                if id == "scanning" {
-                                                    basic_kind.set(BasicPolicyKind::RequireCveCheck);
-                                                } else if id == "security" {
-                                                    basic_kind.set(BasicPolicyKind::CustomCheck);
-                                                } else if id == "rollout" {
-                                                    advanced_mode.set(true);
-                                                    edit_format.set(PolicyFormat::Json);
-                                                    edit_body.set(MULTI_RULE_JSON_TEMPLATE.to_string());
-                                                }
-                                                save_error.set(String::new());
-                                            },
-                                            span { style: "flex-shrink:0;width:24px;height:24px;border-radius:6px;display:grid;place-items:center;background:color-mix(in oklab, {color} 16%, transparent);color:{color};",
-                                                svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                                                    path { d: "M9 12l2 2 4-4" }
-                                                    path { d: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" }
-                                                }
-                                            }
-                                            span { style: "min-width:0;",
-                                                span { style: if design_category.read().as_str() == id { "display:block;font-size:12px;font-weight:600;color:{color};" } else { "display:block;font-size:12px;font-weight:600;color:var(--cf-text-primary);" }, "{label}" }
-                                                span { style: "display:block;font-size:10.5px;color:var(--cf-text-muted);line-height:1.35;margin-top:2px;", "{blurb}" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            div { class: "field",
-                                label { "Severity" }
-                                div { class: "seg seg-sev", style: "width:fit-content;",
-                                    for (value, label, color) in [
-                                        ("high", "High (CAT I)", "#f87171"),
-                                        ("medium", "Medium (CAT II)", "#fbbf24"),
-                                        ("low", "Low (CAT III)", "#60a5fa"),
-                                    ] {
-                                        button {
-                                            class: if design_severity.read().as_str() == value { "active" } else { "" },
-                                            style: if design_severity.read().as_str() == value {
-                                                "color:{color};background:color-mix(in oklab, {color} 16%, transparent);box-shadow:inset 0 0 0 1px color-mix(in oklab, {color} 45%, transparent);"
-                                            } else {
-                                                "color:var(--cf-text-secondary);"
-                                            },
-                                            onclick: move |_| design_severity.set(value.to_string()),
-                                            span { style: "display:inline-flex;align-items:center;gap:6px;",
-                                                span { style: "width:7px;height:7px;border-radius:50%;background:{color};" }
-                                                "{label}"
-                                            }
-                                        }
-                                    }
-                                }
-                                div { class: "help", "Drives how failures of this control are weighted in compliance scoring and evidence reports." }
-                            }
-                            div { class: "field",
-                                label { "Rationale" }
-                                textarea {
-                                    class: "input focus-ring",
-                                    rows: "2",
-                                    placeholder: "Why this policy exists — shown in detail view",
-                                    style: "resize:vertical;",
-                                    value: "{design_rationale}",
-                                    oninput: move |event| design_rationale.set(event.value()),
-                                }
-                            }
-                            if *advanced_mode.read() {
-                                div {
-                                    class: "space-y-2",
-                                    label { class: "text-xs text-violet-300/70 font-medium", "Format" }
-                                    div {
-                                        class: "flex gap-2",
-                                        button {
-                                            class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
-                                            class: if *edit_format.read() == PolicyFormat::Toml {
-                                                "bg-violet-500/20 border-violet-500 text-violet-300"
-                                            } else {
-                                                "bg-gray-950/50 border-gray-700 text-gray-400 hover:border-gray-600"
-                                            },
-                                            onclick: move |_| {
-                                                let current_body = edit_body.read().clone();
-                                                let current_format = *edit_format.read();
-                                                if current_format != PolicyFormat::Toml {
-                                                    if let Ok((policy_type, config)) = parse_policy_payload(&current_body, current_format) {
-                                                        edit_body.set(format_policy_payload(&policy_type, &config, PolicyFormat::Toml));
-                                                    }
-                                                }
-                                                edit_format.set(PolicyFormat::Toml);
-                                                save_error.set(String::new());
-                                            },
-                                            "TOML"
-                                        }
-                                        button {
-                                            class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
-                                            class: if *edit_format.read() == PolicyFormat::Json {
-                                                "bg-violet-500/20 border-violet-500 text-violet-300"
-                                            } else {
-                                                "bg-gray-950/50 border-gray-700 text-gray-400 hover:border-gray-600"
-                                            },
-                                            onclick: move |_| {
-                                                let current_body = edit_body.read().clone();
-                                                let current_format = *edit_format.read();
-                                                if current_format != PolicyFormat::Json {
-                                                    if let Ok((policy_type, config)) = parse_policy_payload(&current_body, current_format) {
-                                                        edit_body.set(format_policy_payload(&policy_type, &config, PolicyFormat::Json));
-                                                    }
-                                                }
-                                                edit_format.set(PolicyFormat::Json);
-                                                save_error.set(String::new());
-                                            },
-                                            "JSON"
-                                        }
-                                    }
-                                }
-                            }
-                            div { style: "margin-top:6px;",
-                                div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
-                                    label { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "Assertions & gate rules" }
-                                    span { style: "font-size:11px;color:var(--cf-text-muted);", "All must hold — each compiles to a policy check." }
-                                }
-                            }
-                            div {
-                                class: "space-y-2",
-                                if *advanced_mode.read() && !is_editing {
-                                    label { class: "text-xs text-violet-300/70 font-medium", "Templates" }
-                                    div {
-                                        class: "flex flex-wrap gap-2",
-                                        button {
-                                            class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800",
-                                            onclick: move |_| {
-                                                edit_format.set(PolicyFormat::Json);
-                                                edit_body.set(CUSTOM_CHECK_JSON_TEMPLATE.to_string());
-                                                save_error.set(String::new());
-                                            },
-                                            "Custom rule"
-                                        }
-                                         button {
-                                             class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800",
-                                             onclick: move |_| {
-                                                 edit_format.set(PolicyFormat::Json);
-                                                 edit_body.set(REQUIRE_PACKAGES_JSON_TEMPLATE.to_string());
-                                                 save_error.set(String::new());
-                                             },
-                                             "Require packages"
-                                         }
-                                          button {
-                                              class: "px-3 py-1.5 rounded-md text-xs border border-amber-700/60 text-amber-300/80 hover:bg-amber-900/20",
-                                             onclick: move |_| {
-                                                 edit_format.set(PolicyFormat::Json);
-                                                 edit_body.set(REQUIRE_CVE_CHECK_JSON_TEMPLATE.to_string());
-                                                 save_error.set(String::new());
-                                             },
-                                              "CVE gate"
-                                          }
-                                          button {
-                                              class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800",
-                                              onclick: move |_| {
-                                                  edit_format.set(PolicyFormat::Json);
-                                                  edit_body.set(MULTI_RULE_JSON_TEMPLATE.to_string());
-                                                  save_error.set(String::new());
-                                              },
-                                              "Multi-rule"
-                                          }
-                                      }
-                                  } else {
-                                    if !is_editing {
-                                        label { class: "text-xs text-violet-300/70 font-medium", "Policy Type" }
-                                        div {
-                                            class: "flex flex-wrap gap-2",
-                                            button {
-                                                class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
-                                                class: if *basic_kind.read() == BasicPolicyKind::CustomCheck {
-                                                    "bg-violet-500/20 border-violet-500 text-violet-300"
-                                                } else {
-                                                    "border-gray-700 text-gray-300 hover:bg-gray-800"
-                                                },
-                                                onclick: move |_| {
-                                                    basic_kind.set(BasicPolicyKind::CustomCheck);
-                                                    save_error.set(String::new());
-                                                },
-                                                "Custom rule"
-                                            }
-                                             button {
-                                                 class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
-                                                 class: if *basic_kind.read() == BasicPolicyKind::RequirePackages {
-                                                     "bg-violet-500/20 border-violet-500 text-violet-300"
-                                                 } else {
-                                                     "border-gray-700 text-gray-300 hover:bg-gray-800"
-                                                 },
-                                                 onclick: move |_| {
-                                                     basic_kind.set(BasicPolicyKind::RequirePackages);
-                                                     save_error.set(String::new());
-                                                 },
-                                                 "Require packages"
-                                             }
-                                             button {
-                                                 class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
-                                                 class: if *basic_kind.read() == BasicPolicyKind::RequireCveCheck {
-                                                     "bg-amber-500/20 border-amber-500 text-amber-300"
-                                                 } else {
-                                                     "border-gray-700 text-gray-300 hover:bg-gray-800"
-                                                 },
-                                                 onclick: move |_| {
-                                                     basic_kind.set(BasicPolicyKind::RequireCveCheck);
-                                                     save_error.set(String::new());
-                                                 },
-                                                 "CVE gate"
-                                             }
-                                         }
-                                     }
-
-                                     if *basic_kind.read() == BasicPolicyKind::CustomCheck {
-                                        div { class: "space-y-2",
-                                            if !is_editing {
-                                                div { class: "flex flex-wrap gap-2",
-                                                    button {
-                                                        class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
-                                                        onclick: move |_| {
-                                                            basic_custom_builder.set(BasicCustomBuilder::ServiceEnabled);
-                                                            save_error.set(String::new());
-                                                        },
-                                                        "Service state"
-                                                    }
-                                                    button {
-                                                        class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
-                                                        onclick: move |_| {
-                                                            basic_custom_builder.set(BasicCustomBuilder::FirewallPortAllowed);
-                                                            save_error.set(String::new());
-                                                        },
-                                                        "Firewall port state"
-                                                    }
-                                                    button {
-                                                        class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
-                                                        onclick: move |_| {
-                                                            basic_custom_builder.set(BasicCustomBuilder::CustomExpression);
-                                                            save_error.set(String::new());
-                                                        },
-                                                        "Custom expression"
-                                                    }
-                                                }
-                                            }
-
-                                            if *basic_custom_builder.read() == BasicCustomBuilder::CustomExpression {
-                                                label { class: "text-xs text-violet-300/70 font-medium", "Expression" }
-                                                input {
-                                                    class: "w-full rounded-lg border px-3 py-2 text-xs cf-policy-modal-field focus:outline-none",
-                                                    placeholder: "config.networking.firewall.enable",
-                                                    value: "{basic_expression}",
-                                                    oninput: move |event| {
-                                                        basic_expression.set(event.value());
-                                                        save_error.set(String::new());
-                                                    },
-                                                }
-                                            }
-
-                                            if *basic_custom_builder.read() == BasicCustomBuilder::ServiceEnabled {
-                                                label { class: "text-xs text-violet-300/70 font-medium", "Service name" }
-                                                input {
-                                                    class: "w-full rounded-lg border px-3 py-2 text-xs cf-policy-modal-field focus:outline-none",
-                                                    placeholder: "openssh",
-                                                    value: "{basic_service_name}",
-                                                    oninput: move |event| {
-                                                        basic_service_name.set(event.value());
-                                                        save_error.set(String::new());
-                                                    },
-                                                }
-                                                div { class: "inline-flex rounded-md border border-gray-700 bg-gray-950/50 p-1",
-                                                    button {
-                                                        class: "px-2 py-1 rounded text-[11px] transition-colors",
-                                                        class: if *basic_service_expectation.read() == "enabled" {
-                                                            "bg-violet-500/20 text-violet-300"
-                                                        } else {
-                                                            "text-gray-400 hover:text-gray-200"
-                                                        },
-                                                        onclick: move |_| basic_service_expectation.set("enabled".to_string()),
-                                                        "Enabled"
-                                                    }
-                                                    button {
-                                                        class: "px-2 py-1 rounded text-[11px] transition-colors",
-                                                        class: if *basic_service_expectation.read() == "disabled" {
-                                                            "bg-violet-500/20 text-violet-300"
-                                                        } else {
-                                                            "text-gray-400 hover:text-gray-200"
-                                                        },
-                                                        onclick: move |_| basic_service_expectation.set("disabled".to_string()),
-                                                        "Disabled"
-                                                    }
-                                                }
-                                            }
-
-                                            if *basic_custom_builder.read() == BasicCustomBuilder::FirewallPortAllowed {
-                                                div { class: "grid grid-cols-[1fr_auto] gap-2",
-                                                    input {
-                                                        class: "w-full rounded-lg border px-3 py-2 text-xs cf-policy-modal-field focus:outline-none",
-                                                        placeholder: "22",
-                                                        value: "{basic_firewall_port}",
-                                                        oninput: move |event| {
-                                                            basic_firewall_port.set(event.value());
-                                                            save_error.set(String::new());
-                                                        },
-                                                    }
-                                                    div { class: "inline-flex rounded-md border border-gray-700 bg-gray-950/50 p-1",
-                                                        button {
-                                                            class: "px-2 py-1 rounded text-[11px] transition-colors",
-                                                            class: if *basic_firewall_protocol.read() == "tcp" {
-                                                                "bg-violet-500/20 text-violet-300"
-                                                            } else {
-                                                                "text-gray-400 hover:text-gray-200"
-                                                            },
-                                                            onclick: move |_| basic_firewall_protocol.set("tcp".to_string()),
-                                                            "TCP"
-                                                        }
-                                                        button {
-                                                            class: "px-2 py-1 rounded text-[11px] transition-colors",
-                                                            class: if *basic_firewall_protocol.read() == "udp" {
-                                                                "bg-violet-500/20 text-violet-300"
-                                                            } else {
-                                                                "text-gray-400 hover:text-gray-200"
-                                                            },
-                                                            onclick: move |_| basic_firewall_protocol.set("udp".to_string()),
-                                                            "UDP"
-                                                        }
-                                                    }
-                                                }
-                                                div { class: "inline-flex rounded-md border border-gray-700 bg-gray-950/50 p-1",
-                                                    button {
-                                                        class: "px-2 py-1 rounded text-[11px] transition-colors",
-                                                        class: if *basic_firewall_expectation.read() == "allowed" {
-                                                            "bg-violet-500/20 text-violet-300"
-                                                        } else {
-                                                            "text-gray-400 hover:text-gray-200"
-                                                        },
-                                                        onclick: move |_| basic_firewall_expectation.set("allowed".to_string()),
-                                                        "Allowed"
-                                                    }
-                                                    button {
-                                                        class: "px-2 py-1 rounded text-[11px] transition-colors",
-                                                        class: if *basic_firewall_expectation.read() == "denied" {
-                                                            "bg-violet-500/20 text-violet-300"
-                                                        } else {
-                                                            "text-gray-400 hover:text-gray-200"
-                                                        },
-                                                        onclick: move |_| basic_firewall_expectation.set("denied".to_string()),
-                                                        "Denied"
-                                                    }
-                                                }
-                                            }
-
-                                            label { class: "text-xs text-violet-300/70 font-medium", "Result message" }
-                                            input {
-                                                class: "w-full rounded-lg border px-3 py-2 text-xs cf-policy-modal-field focus:outline-none",
-                                                value: "{basic_rule_description}",
-                                                placeholder: "Policy check failed",
-                                                oninput: move |event| {
-                                                    basic_rule_description.set(event.value());
-                                                    save_error.set(String::new());
-                                                },
-                                            }
-                                        }
-                                    }
-
-                                    if *basic_kind.read() == BasicPolicyKind::RequirePackages {
-                                        div { class: "space-y-2",
-                                            label { class: "text-xs text-violet-300/70 font-medium", "Packages (comma separated)" }
-                                            input {
-                                                class: "w-full rounded-lg border px-3 py-2 text-xs cf-policy-modal-field focus:outline-none",
-                                                placeholder: "git, vim, htop",
-                                                value: "{basic_packages}",
-                                                oninput: move |event| {
-                                                    basic_packages.set(event.value());
-                                                    save_error.set(String::new());
-                                                },
-                                            }
-                                        }
-                                    }
-
-                                    if *basic_kind.read() == BasicPolicyKind::RequireCveCheck {
-                                        div { class: "space-y-3",
-                                            p {
-                                                class: "text-[11px] text-amber-300/70 bg-amber-900/20 border border-amber-700/40 rounded-md px-2 py-1.5",
-                                                "CVE gate runs after build-complete, before deployment. Requires vulnix scans to be active."
-                                            }
-                                            div { class: "space-y-1",
-                                                label { class: "text-xs text-amber-300/70 font-medium", "Max critical CVEs" }
-                                                input {
-                                                    r#type: "number",
-                                                    min: "0",
-                                                    class: "w-full rounded-lg border px-3 py-2 text-xs cf-policy-modal-field focus:outline-none",
-                                                    placeholder: "0",
-                                                    value: "{cve_max_critical}",
-                                                    oninput: move |event| {
-                                                        cve_max_critical.set(event.value());
-                                                        save_error.set(String::new());
-                                                    },
-                                                }
-                                                p { class: "text-[10px] text-gray-500", "Deployment blocked if critical CVE count exceeds this." }
-                                            }
-                                            div { class: "space-y-1",
-                                                label { class: "text-xs text-amber-300/70 font-medium", "Max high CVEs (leave blank = no limit)" }
-                                                input {
-                                                    r#type: "number",
-                                                    min: "0",
-                                                    class: "w-full rounded-lg border px-3 py-2 text-xs cf-policy-modal-field focus:outline-none",
-                                                    placeholder: "blank = no limit",
-                                                    value: "{cve_max_high}",
-                                                    oninput: move |event| {
-                                                        cve_max_high.set(event.value());
-                                                        save_error.set(String::new());
-                                                    },
-                                                }
-                                            }
-                                            div { class: "flex items-center gap-2",
-                                                input {
-                                                    r#type: "checkbox",
-                                                    id: "cve-require-justification",
-                                                    checked: *cve_require_justification.read(),
-                                                    onchange: move |_| {
-                                                        let next = !*cve_require_justification.read();
-                                                        cve_require_justification.set(next);
-                                                    }
-                                                }
-                                                label {
-                                                    r#for: "cve-require-justification",
-                                                    class: "text-xs text-gray-300",
-                                                    "Require whitelist justification for high CVEs"
-                                                }
-                                            }
-                                            div { class: "space-y-1",
-                                                label { class: "text-xs text-amber-300/70 font-medium", "When no scan exists" }
-                                                div { class: "inline-flex rounded-md border border-gray-700 bg-gray-950/50 p-1",
-                                                    button {
-                                                        class: "px-2 py-1 rounded text-[11px] transition-colors",
-                                                        class: if *cve_when_no_scan.read() == "block" {
-                                                            "bg-amber-500/20 text-amber-300"
-                                                        } else {
-                                                            "text-gray-400 hover:text-gray-200"
-                                                        },
-                                                        onclick: move |_| cve_when_no_scan.set("block".to_string()),
-                                                        "Block"
-                                                    }
-                                                    button {
-                                                        class: "px-2 py-1 rounded text-[11px] transition-colors",
-                                                        class: if *cve_when_no_scan.read() == "skip" {
-                                                            "bg-green-500/20 text-green-300"
-                                                        } else {
-                                                            "text-gray-400 hover:text-gray-200"
-                                                        },
-                                                        onclick: move |_| cve_when_no_scan.set("skip".to_string()),
-                                                        "Skip"
-                                                    }
-                                                }
-                                                p { class: "text-[10px] text-gray-500",
-                                                    if *cve_when_no_scan.read() == "block" {
-                                                        "Deployment blocked if no scan has run."
-                                                    } else {
-                                                        "Deployment allowed if no scan has run yet."
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    if *basic_kind.read() != BasicPolicyKind::RequireCveCheck {
-                                        div {
-                                            class: "flex items-center gap-2",
-                                            input {
-                                                r#type: "checkbox",
-                                                checked: *basic_strict.read(),
-                                                onchange: move |_| {
-                                                    let next = {
-                                                        let current = *basic_strict.read();
-                                                        !current
-                                                    };
-                                                    basic_strict.set(next);
-                                                    save_error.set(String::new());
-                                                }
-                                            }
-                                            span { class: "text-xs text-gray-300", "Strict mode" }
-                                            button {
-                                                class: "w-5 h-5 rounded-full border border-violet-400/60 bg-violet-500/10 text-xs font-semibold text-violet-200 hover:text-white hover:border-violet-300 inline-flex items-center justify-center",
-                                                onclick: move |_| {
-                                                    let next = {
-                                                        let current = *show_strict_info.read();
-                                                        !current
-                                                    };
-                                                    show_strict_info.set(next);
-                                                },
-                                                "?"
-                                            }
-                                            if *show_strict_info.read() {
-                                                span {
-                                                    class: "text-[10px] text-violet-200 bg-violet-500/15 border border-violet-400/40 rounded-full px-2 py-0.5 whitespace-nowrap",
-                                                    "false => fail eval, non-strict => record only"
-                                                }
-                                            }
-                                        }
-                                    }
-                                } // closes div { class: "space-y-2" } (templates/type picker)
-
-                            if !*advanced_mode.read() {
-                                div {
-                                    class: "rounded-lg border border-gray-700 bg-gray-950/40 p-3 space-y-1",
-                                    p { class: "text-xs text-gray-300", "Basic mode keeps common policy creation compact." }
-                                    p { class: "text-xs {theme::text::MUTED}", "Use Advanced for CVE/multi-rule JSON or TOML payloads." }
-                                }
+                        }
+                        div { class: "field",
+                            label { "Description" }
+                            input {
+                                class: "input focus-ring",
+                                placeholder: "One-line summary shown in the registry",
+                                value: "{edit_description}",
+                                oninput: move |event| edit_description.set(event.value()),
                             }
                         }
 
-                        // Right column - code editor
-                        if *advanced_mode.read() {
-                            div {
-                            class: "space-y-2 flex flex-col min-h-0",
-                                label { class: "text-xs text-violet-300/70 font-medium", "Policy Definition" }
-                                div {
-                                    class: "rounded-lg border overflow-hidden flex-1 min-h-0 cf-policy-modal-editor-surface",
-                                    textarea {
-                                        class: "w-full bg-transparent px-3 py-2 text-xs text-gray-100 font-mono focus:outline-none resize-none",
-                                        style: "height: clamp(84px, 16vh, 140px);",
-                                        rows: "6",
-                                        value: "{edit_body}",
-                                        oninput: move |event| {
-                                            edit_body.set(event.value());
-                                            save_error.set(String::new());
+                        // Category (UI-only / not persisted)
+                        div { class: "field",
+                            label {
+                                "Category "
+                                span { class: "cf-policy-ui-only-badge", "UI only — not persisted yet" }
+                            }
+                            div { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;",
+                                for (id, label, color, blurb) in CATEGORIES {
+                                    button {
+                                        key: "{id}",
+                                        class: "focus-ring",
+                                        style: if category.read().as_str() == id {
+                                            "display:flex;align-items:flex-start;gap:9px;text-align:left;padding:9px 11px;border-radius:9px;cursor:pointer;background:color-mix(in oklab, {color} 12%, transparent);border:1px solid color-mix(in oklab, {color} 55%, transparent);"
+                                        } else {
+                                            "display:flex;align-items:flex-start;gap:9px;text-align:left;padding:9px 11px;border-radius:9px;cursor:pointer;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);"
                                         },
-                                        spellcheck: "false",
+                                        onclick: move |_| category.set(id.to_string()),
+                                        span { style: "flex-shrink:0;width:24px;height:24px;border-radius:6px;display:grid;place-items:center;background:color-mix(in oklab, {color} 16%, transparent);color:{color};",
+                                            svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                                path { d: "M20 6 9 17l-5-5" }
+                                            }
+                                        }
+                                        span { style: "min-width:0;",
+                                            span { style: if category.read().as_str() == id { "display:block;font-size:12px;font-weight:600;color:{color};" } else { "display:block;font-size:12px;font-weight:600;color:var(--cf-text-primary);" }, "{label}" }
+                                            span { style: "display:block;font-size:10.5px;color:var(--cf-text-muted);line-height:1.35;margin-top:2px;", "{blurb}" }
+                                        }
                                     }
-                                }
-                                p {
-                                    class: "text-[11px] {theme::text::MUTED}",
-                                    "Tip: prefer JSON with policy_type + config for reliable saves."
                                 }
                             }
                         }
 
-                        if let Some(message) = non_name_validation_error.clone() {
-                            div {
-                                class: "text-xs rounded px-3 py-2 cf-policy-modal-error",
-                                "{message}"
+                        // Severity (UI-only / not persisted)
+                        div { class: "field",
+                            label {
+                                "Severity "
+                                span { class: "cf-policy-ui-only-badge", "UI only — not persisted yet" }
+                            }
+                            div { class: "seg seg-sev", style: "width:fit-content;",
+                                for (value, label, color) in [("high", "High (CAT I)", "#f87171"), ("medium", "Medium (CAT II)", "#fbbf24"), ("low", "Low (CAT III)", "#60a5fa")] {
+                                    button {
+                                        key: "{value}",
+                                        class: if severity.read().as_str() == value { "active" } else { "" },
+                                        style: if severity.read().as_str() == value {
+                                            "color:{color};background:color-mix(in oklab, {color} 16%, transparent);box-shadow:inset 0 0 0 1px color-mix(in oklab, {color} 45%, transparent);"
+                                        } else {
+                                            "color:var(--cf-text-secondary);"
+                                        },
+                                        onclick: move |_| severity.set(value.to_string()),
+                                        span { style: "display:inline-flex;align-items:center;gap:6px;",
+                                            span { style: "width:7px;height:7px;border-radius:50%;background:{color};" }
+                                            "{label}"
+                                        }
+                                    }
+                                }
+                            }
+                            div { class: "help", "Drives how failures of this control are weighted in compliance scoring and evidence reports." }
+                        }
+
+                        // Rationale (UI-only / not persisted)
+                        div { class: "field",
+                            label {
+                                "Rationale "
+                                span { class: "cf-policy-ui-only-badge", "UI only — not persisted yet" }
+                            }
+                            textarea {
+                                class: "input focus-ring",
+                                rows: "2",
+                                placeholder: "Why this policy exists — shown in detail view",
+                                style: "resize:vertical;",
+                                value: "{rationale}",
+                                oninput: move |event| rationale.set(event.value()),
                             }
                         }
-                        if !save_error.read().is_empty() {
-                            div {
-                                class: "text-xs rounded px-3 py-2 cf-policy-modal-error",
-                                "{save_error}"
+
+                        // Assertions & gate rules builder
+                        div { style: "margin-top:6px;",
+                            div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
+                                label { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "Assertions & gate rules ({rule_count})" }
+                                span { style: "font-size:11px;color:var(--cf-text-muted);", "All must hold — each compiles to a policy check." }
                             }
+                            div { style: "display:flex;flex-direction:column;gap:6px;",
+                                for (index, rule) in rules.read().iter().cloned().enumerate() {
+                                    div {
+                                        key: "rule-{index}",
+                                        style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:8px 10px;background:var(--cf-subtle-bg);border-radius:8px;",
+                                        RuleEditorRow { index, rule: rule.clone(), rules }
+                                        button {
+                                            class: "btn-icon focus-ring",
+                                            title: "Remove rule",
+                                            onclick: move |_| {
+                                                let mut next = rules.read().clone();
+                                                if index < next.len() { next.remove(index); }
+                                                rules.set(next);
+                                            },
+                                            svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                                path { d: "M18 6 6 18M6 6l12 12" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            div { style: "margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;",
+                                select {
+                                    class: "input focus-ring",
+                                    style: "max-width:260px;font-size:12px;",
+                                    value: "{add_rule_kind}",
+                                    onchange: move |event| {
+                                        let kind = event.value();
+                                        if !kind.is_empty() {
+                                            let mut next = rules.read().clone();
+                                            next.push(PolicyRule::new(&kind));
+                                            rules.set(next);
+                                        }
+                                        add_rule_kind.set(String::new());
+                                    },
+                                    option { value: "", "+ Add assertion / rule…" }
+                                    for (id, label, persisted) in RULE_OPTIONS {
+                                        option { value: "{id}", { if persisted { label.to_string() } else { format!("{label} (UI only)") } } }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Evidence for ATO builder (UI-only / not persisted)
+                        div { style: "margin-top:6px;",
+                            div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
+                                label { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);",
+                                    "Evidence for ATO ({evidence_count}) "
+                                    span { class: "cf-policy-ui-only-badge", "UI only — not persisted yet" }
+                                }
+                                span { style: "font-size:11px;color:var(--cf-text-muted);", "Artifacts collected to prove compliance to an assessor." }
+                            }
+                            if evidence_count == 0 {
+                                div { class: "sd-callout sd-callout-info", style: "margin-bottom:8px;",
+                                    svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                        path { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }
+                                        polyline { points: "14 2 14 8 20 8" }
+                                    }
+                                    div { style: "font-size:12px;",
+                                        "No evidence defined. Without it, this policy gates deploys but produces nothing for an audit package. Add command output, logs, or attestations."
+                                    }
+                                }
+                            }
+                            div { style: "display:flex;flex-direction:column;gap:6px;",
+                                for (index, ev) in evidence.read().iter().cloned().enumerate() {
+                                    div {
+                                        key: "ev-{index}",
+                                        style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:flex-start;padding:8px 10px;background:var(--cf-subtle-bg);border-radius:8px;",
+                                        EvidenceEditorRow { index, evidence: ev.clone(), evidence_list: evidence }
+                                        button {
+                                            class: "btn-icon focus-ring",
+                                            title: "Remove evidence",
+                                            onclick: move |_| {
+                                                let mut next = evidence.read().clone();
+                                                if index < next.len() { next.remove(index); }
+                                                evidence.set(next);
+                                            },
+                                            svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                                path { d: "M18 6 6 18M6 6l12 12" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            div { style: "margin-top:8px;",
+                                select {
+                                    class: "input focus-ring",
+                                    style: "max-width:260px;font-size:12px;",
+                                    value: "{add_evidence_kind}",
+                                    onchange: move |event| {
+                                        let kind = event.value();
+                                        if !kind.is_empty() {
+                                            let mut next = evidence.read().clone();
+                                            next.push(PolicyEvidence::new(&kind));
+                                            evidence.set(next);
+                                        }
+                                        add_evidence_kind.set(String::new());
+                                    },
+                                    option { value: "", "+ Add evidence source…" }
+                                    for (id, label) in EVIDENCE_OPTIONS {
+                                        option { value: "{id}", "{label}" }
+                                    }
+                                }
+                            }
+                        }
+
+                        if is_editing {
+                            div { style: "margin-top:10px;padding-top:14px;border-top:1px solid var(--cf-divider);",
+                                div { style: "font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);margin-bottom:8px;", "Danger zone" }
+                                button {
+                                    class: "btn btn-ghost focus-ring",
+                                    style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
+                                    onclick: move |_| confirm_delete.set(true),
+                                    svg { width: "12", height: "12", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:6px;vertical-align:text-bottom;",
+                                        path { d: "M18 6 6 18M6 6l12 12" }
+                                    }
+                                    "Remove policy"
+                                }
+                            }
+                        }
+
+                        if !save_error.read().is_empty() {
+                            div { class: "text-xs rounded px-3 py-2 cf-policy-modal-error", style: "margin-top:10px;", "{save_error}" }
                         }
                     }
 
-                    // Footer
-                    div {
-                        class: "modal-foot",
+                    // ── Footer ──────────────────────────────────────────────────
+                    div { class: "modal-foot",
                         button {
                             class: "btn btn-ghost focus-ring",
                             onclick: move |_| on_close.call(()),
@@ -1383,164 +777,35 @@ pub fn PolicyEditorModal(
                             class: "btn btn-primary focus-ring",
                             disabled: !can_save,
                             onclick: move |_| {
-                                let validation_error_for_submit = current_validation_error.clone();
                                 let name = edit_name.read().clone();
-                                let description = edit_description.read().clone();
-                                let body = edit_body.read().clone();
-                                let format = *edit_format.read();
-                                let in_basic_mode = !*advanced_mode.read();
-                                let kind = *basic_kind.read();
-                                let custom_builder = *basic_custom_builder.read();
-                                let expression = basic_expression.read().clone();
-                                let service_name = basic_service_name.read().clone();
-                                let service_expectation = basic_service_expectation.read().clone();
-                                let firewall_port = basic_firewall_port.read().clone();
-                                let firewall_protocol = basic_firewall_protocol.read().clone();
-                                let firewall_expectation = basic_firewall_expectation.read().clone();
-                                let rule_description = basic_rule_description.read().clone();
-                                 let packages_raw = basic_packages.read().clone();
-                                 let strict = *basic_strict.read();
-                                 let cve_max_critical_raw = cve_max_critical.read().clone();
-                                 let cve_max_high_raw = cve_max_high.read().clone();
-                                 let cve_require_high_justification =
-                                     *cve_require_justification.read();
-                                 let cve_when_no_scan_value = cve_when_no_scan.read().clone();
-                                 let editing_id = *editing_policy_id.read();
-                                let mut policy_library = policy_library;
-                                let on_close = on_close;
-                                let mut save_error = save_error;
-                                let mut is_saving = is_saving;
-
-                                if let Some(message) = validation_error_for_submit {
-                                    save_error.set(message);
+                                if name.trim().is_empty() {
+                                    save_error.set("Policy name is required".to_string());
                                     return;
                                 }
+                                let description = edit_description.read().clone();
+                                let editing_id = *editing_policy_id.read();
+                                let current_rules = rules.read().clone();
+                                let mut policy_library = policy_library;
+                                let mut save_error = save_error;
+                                let mut is_saving = is_saving;
+                                let on_close = on_close;
+
+                                let (policy_type, config) = build_persisted_payload(&current_rules)
+                                    .unwrap_or_else(|| {
+                                        (
+                                            "custom_check".to_string(),
+                                            serde_json::json!({
+                                                "expression": "true",
+                                                "description": "Operator-approved policy",
+                                                "strict": false,
+                                            }),
+                                        )
+                                    });
+
                                 save_error.set(String::new());
                                 is_saving.set(true);
 
                                 spawn(async move {
-                                    let (policy_type, config) = if in_basic_mode {
-                                        match kind {
-                                            BasicPolicyKind::CustomCheck => {
-                                                let (resolved_expression, default_message) = match custom_builder {
-                                                    BasicCustomBuilder::CustomExpression => (
-                                                        expression.trim().to_string(),
-                                                        "Custom rule failed".to_string(),
-                                                    ),
-                                                    BasicCustomBuilder::ServiceEnabled => {
-                                                        let service = service_name.trim().to_string();
-                                                        let expectation =
-                                                            service_expectation.trim().to_lowercase();
-                                                        let base_expr =
-                                                            format!("config.services.{service}.enable");
-                                                        (
-                                                            if expectation == "disabled" {
-                                                                format!("!{base_expr}")
-                                                            } else {
-                                                                base_expr
-                                                            },
-                                                            if expectation == "disabled" {
-                                                                format!("Service must be disabled: {service}")
-                                                            } else {
-                                                                format!("Service must be enabled: {service}")
-                                                            },
-                                                        )
-                                                    }
-                                                    BasicCustomBuilder::FirewallPortAllowed => {
-                                                        let port: u16 = firewall_port.trim().parse().unwrap_or(0);
-                                                        let protocol = firewall_protocol.trim().to_lowercase();
-                                                        let expectation = firewall_expectation.trim().to_lowercase();
-                                                        let list_attr = if protocol == "udp" {
-                                                            "allowedUDPPorts"
-                                                        } else {
-                                                            "allowedTCPPorts"
-                                                        };
-                                                        let base_expr = format!(
-                                                            "builtins.elem {port} (config.networking.firewall.{list_attr} or [])"
-                                                        );
-                                                        let expr = if expectation == "denied" {
-                                                            format!("!{base_expr}")
-                                                        } else {
-                                                            base_expr
-                                                        };
-                                                        let message = if expectation == "denied" {
-                                                            format!("Firewall must deny {protocol}/{port}")
-                                                        } else {
-                                                            format!("Firewall must allow {protocol}/{port}")
-                                                        };
-                                                        (
-                                                            expr,
-                                                            message,
-                                                        )
-                                                    }
-                                                };
-
-                                                let resolved_description = if rule_description.trim().is_empty() {
-                                                    default_message
-                                                } else {
-                                                    rule_description.trim().to_string()
-                                                };
-
-                                                let cfg = serde_json::json!({
-                                                    "expression": resolved_expression,
-                                                    "description": resolved_description,
-                                                    "strict": strict,
-                                                });
-                                                ("custom_check".to_string(), cfg)
-                                            }
-                                             BasicPolicyKind::RequirePackages => {
-                                                 let packages = packages_raw
-                                                     .split(',')
-                                                     .map(|p| p.trim())
-                                                     .filter(|p| !p.is_empty())
-                                                     .map(|p| p.to_string())
-                                                     .collect::<Vec<_>>();
-                                                 let cfg = serde_json::json!({
-                                                     "packages": packages,
-                                                     "strict": strict,
-                                                 });
-                                                 ("require_packages".to_string(), cfg)
-                                             }
-                                             BasicPolicyKind::RequireCveCheck => {
-                                                 let max_critical = cve_max_critical_raw
-                                                     .trim()
-                                                     .parse::<u32>()
-                                                     .unwrap_or(0);
-                                                 let max_high_value = cve_max_high_raw.trim();
-                                                 let max_high_json = if max_high_value.is_empty() {
-                                                     serde_json::Value::Null
-                                                 } else {
-                                                     serde_json::json!(
-                                                         max_high_value.parse::<u32>().unwrap_or(0)
-                                                     )
-                                                 };
-                                                 let when_no_scan = if cve_when_no_scan_value.trim() == "skip" {
-                                                     "skip"
-                                                 } else {
-                                                     "block"
-                                                 };
-                                                 let cfg = serde_json::json!({
-                                                     "max_critical": max_critical,
-                                                     "max_high": max_high_json,
-                                                     "require_high_justification": cve_require_high_justification,
-                                                     "strict": true,
-                                                     "when_no_scan": when_no_scan,
-                                                 });
-                                                 ("require_cve_check".to_string(), cfg)
-                                             }
-                                         }
-                                     } else {
-                                        let parsed = parse_policy_payload(&body, format);
-                                        match parsed {
-                                            Ok(values) => values,
-                                            Err(message) => {
-                                                save_error.set(format!("Policy parse error: {message}"));
-                                                is_saving.set(false);
-                                                return;
-                                            }
-                                        }
-                                    };
-
                                     let result = if let Some(policy_id) = editing_id {
                                         let request = UpdateDeploymentPolicyRequest {
                                             name: Some(name.clone()),
@@ -1549,9 +814,7 @@ pub fn PolicyEditorModal(
                                             config: Some(config),
                                             enabled: Some(true),
                                         };
-                                        update_deployment_policy(&policy_id, &request)
-                                            .await
-                                            .map(|_| ())
+                                        update_deployment_policy(&policy_id, &request).await.map(|_| ())
                                     } else {
                                         let request = CreateDeploymentPolicyRequest {
                                             name: name.clone(),
@@ -1576,11 +839,253 @@ pub fn PolicyEditorModal(
                                         }
                                     }
                                 });
-                             },
-                            if *is_saving.read() { "Saving..." } else { "{action_label}" }
+                            },
+                            svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:6px;vertical-align:text-bottom;",
+                                path { d: "M20 6 9 17l-5-5" }
+                            }
+                            if *is_saving.read() { "Saving…" } else { "{action_label}" }
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule editor row
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[component]
+fn RuleEditorRow(index: usize, rule: PolicyRule, rules: Signal<Vec<PolicyRule>>) -> Element {
+    let kind = rule.kind.clone();
+    let persisted = rule.is_persisted();
+
+    // Mutate one field of the rule at `index` and write it back to the signal.
+    macro_rules! set_rule_field {
+        ($field:ident, $value:expr) => {{
+            let mut next = rules.read().clone();
+            if let Some(target) = next.get_mut(index) {
+                target.$field = $value;
+            }
+            rules.set(next);
+        }};
+    }
+
+    rsx! {
+        div { style: "display:flex;flex-direction:column;gap:4px;font-size:12px;width:100%;",
+            div { style: "display:flex;align-items:center;gap:6px;",
+                span { style: "font-weight:600;", "{rule_label(&kind)}" }
+                if !persisted {
+                    span { class: "cf-policy-ui-only-badge", "UI only" }
+                }
+            }
+
+            match kind.as_str() {
+                "eval_passed" => rsx! { span { style: "color:var(--cf-text-secondary);", "Evaluation must pass" } },
+                "build_succeeded" => rsx! { span { style: "color:var(--cf-text-secondary);", "Build must succeed" } },
+                "cve_block" => rsx! {
+                    div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                        span { "Block deploy when" }
+                        select {
+                            class: "input focus-ring",
+                            style: "width:auto;font-size:12px;padding:4px 8px;",
+                            value: "{rule.severity}",
+                            onchange: move |event| set_rule_field!(severity, event.value()),
+                            option { value: "critical", "critical" }
+                            option { value: "high", "high" }
+                            option { value: "medium", "medium" }
+                        }
+                        span { "CVEs exceed" }
+                        input {
+                            r#type: "number", min: "0",
+                            class: "input focus-ring mono",
+                            style: "width:60px;font-size:12px;padding:4px 8px;",
+                            value: "{rule.max_allowed}",
+                            oninput: move |event| set_rule_field!(max_allowed, event.value()),
+                        }
+                    }
+                },
+                "packages_installed" => rsx! {
+                    input {
+                        class: "input focus-ring mono",
+                        style: "font-size:12px;padding:5px 8px;",
+                        placeholder: "openssh, auditd, aide",
+                        value: "{rule.packages}",
+                        oninput: move |event| set_rule_field!(packages, event.value()),
+                    }
+                },
+                "nixos_option" => rsx! {
+                    div { style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;",
+                        input {
+                            class: "input focus-ring mono",
+                            style: "font-size:11px;padding:5px 8px;flex:1;min-width:200px;",
+                            placeholder: "services.openssh.settings.PermitRootLogin",
+                            value: "{rule.path}",
+                            oninput: move |event| set_rule_field!(path, event.value()),
+                        }
+                        select {
+                            class: "input focus-ring mono",
+                            style: "width:auto;font-size:12px;padding:5px 6px;",
+                            value: "{rule.op}",
+                            onchange: move |event| set_rule_field!(op, event.value()),
+                            option { value: "==", "==" }
+                            option { value: "!=", "!=" }
+                            option { value: ">=", "≥" }
+                            option { value: "<=", "≤" }
+                        }
+                        input {
+                            class: "input focus-ring mono",
+                            style: "width:90px;font-size:11px;padding:5px 8px;",
+                            value: "{rule.value}",
+                            oninput: move |event| set_rule_field!(value, event.value()),
+                        }
+                    }
+                },
+                "custom_eval" => rsx! {
+                    textarea {
+                        class: "input focus-ring mono",
+                        rows: "2",
+                        style: "font-size:11px;padding:6px 8px;resize:vertical;",
+                        placeholder: "config.networking.firewall.enable == true",
+                        value: "{rule.expr}",
+                        oninput: move |event| set_rule_field!(expr, event.value()),
+                    }
+                    input {
+                        class: "input focus-ring",
+                        style: "font-size:11px;padding:5px 8px;",
+                        placeholder: "Failure message shown when assertion fails",
+                        value: "{rule.message}",
+                        oninput: move |event| set_rule_field!(message, event.value()),
+                    }
+                },
+                "time_window" => rsx! {
+                    div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                        span { "Only between" }
+                        input { class: "input focus-ring mono", style: "width:70px;font-size:12px;padding:4px 8px;", value: "{rule.from}", oninput: move |event| set_rule_field!(from, event.value()) }
+                        span { "–" }
+                        input { class: "input focus-ring mono", style: "width:70px;font-size:12px;padding:4px 8px;", value: "{rule.to}", oninput: move |event| set_rule_field!(to, event.value()) }
+                        span { "on" }
+                        input { class: "input focus-ring mono", style: "width:140px;font-size:12px;padding:4px 8px;", value: "{rule.days}", oninput: move |event| set_rule_field!(days, event.value()) }
+                    }
+                },
+                "approval_required" => rsx! {
+                    div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                        span { "Require" }
+                        input { r#type: "number", min: "1", class: "input focus-ring mono", style: "width:50px;font-size:12px;padding:4px 8px;", value: "{rule.count}", oninput: move |event| set_rule_field!(count, event.value()) }
+                        span { "approver(s) with role" }
+                        select {
+                            class: "input focus-ring",
+                            style: "width:auto;font-size:12px;padding:4px 8px;",
+                            value: "{rule.role}",
+                            onchange: move |event| set_rule_field!(role, event.value()),
+                            option { value: "admin", "admin" }
+                            option { value: "operator", "operator" }
+                            option { value: "any", "any" }
+                        }
+                    }
+                },
+                "rollout_percent" => rsx! {
+                    div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                        span { "Roll out" }
+                        input { r#type: "number", min: "1", max: "100", class: "input focus-ring mono", style: "width:55px;font-size:12px;padding:4px 8px;", value: "{rule.percent}", oninput: move |event| set_rule_field!(percent, event.value()) }
+                        span { "% at a time, observe" }
+                        input { r#type: "number", min: "1", class: "input focus-ring mono", style: "width:55px;font-size:12px;padding:4px 8px;", value: "{rule.observe_min}", oninput: move |event| set_rule_field!(observe_min, event.value()) }
+                        span { "min" }
+                    }
+                },
+                _ => rsx! { span { style: "font-style:italic;", "{kind}" } },
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Evidence editor row (all UI-only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[component]
+fn EvidenceEditorRow(
+    index: usize,
+    evidence: PolicyEvidence,
+    evidence_list: Signal<Vec<PolicyEvidence>>,
+) -> Element {
+    let kind = evidence.kind.clone();
+
+    // Mutate one field of the evidence at `index` and write it back to the signal.
+    macro_rules! set_ev_field {
+        ($field:ident, $value:expr) => {{
+            let mut next = evidence_list.read().clone();
+            if let Some(target) = next.get_mut(index) {
+                target.$field = $value;
+            }
+            evidence_list.set(next);
+        }};
+    }
+
+    let label = EVIDENCE_OPTIONS
+        .iter()
+        .find(|(id, _)| *id == kind)
+        .map(|(_, l)| *l)
+        .unwrap_or("Evidence");
+
+    // `match` is a reserved word; bind it locally for use in the format string.
+    let match_value = evidence.r#match.clone();
+
+    rsx! {
+        div { style: "display:flex;flex-direction:column;gap:4px;font-size:12px;width:100%;",
+            span { style: "display:flex;align-items:center;gap:6px;font-weight:600;", "{label}" }
+            match kind.as_str() {
+                "command" => rsx! {
+                    input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "sshd -T | grep permitrootlogin", value: "{evidence.cmd}", oninput: move |event| set_ev_field!(cmd, event.value()) }
+                    div { style: "display:flex;align-items:center;gap:6px;",
+                        span { style: "font-size:11px;color:var(--cf-text-muted);", "expect output contains" }
+                        input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;", placeholder: "permitrootlogin no", value: "{evidence.expect}", oninput: move |event| set_ev_field!(expect, event.value()) }
+                    }
+                },
+                "log" => rsx! {
+                    div { style: "display:flex;gap:6px;flex-wrap:wrap;",
+                        select {
+                            class: "input focus-ring",
+                            style: "font-size:11px;padding:5px 8px;width:auto;",
+                            value: "{evidence.source}",
+                            onchange: move |event| set_ev_field!(source, event.value()),
+                            option { value: "journald", "journald" }
+                            option { value: "auditd", "auditd" }
+                            option { value: "file", "file" }
+                        }
+                        input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;min-width:140px;", placeholder: "auditd.service", value: "{evidence.unit}", oninput: move |event| set_ev_field!(unit, event.value()) }
+                    }
+                    input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "regex / substring to match", value: "{match_value}", oninput: move |event| set_ev_field!(r#match, event.value()) }
+                },
+                "file" => rsx! {
+                    input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "/etc/issue", value: "{evidence.path}", oninput: move |event| set_ev_field!(path, event.value()) }
+                    input { class: "input focus-ring", style: "font-size:11px;padding:5px 8px;", placeholder: "What to look for / why it proves compliance", value: "{evidence.note}", oninput: move |event| set_ev_field!(note, event.value()) }
+                },
+                "unit_state" => rsx! {
+                    div { style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;",
+                        input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;min-width:140px;", placeholder: "auditd.service", value: "{evidence.unit}", oninput: move |event| set_ev_field!(unit, event.value()) }
+                        span { style: "font-size:11px;color:var(--cf-text-muted);", "is" }
+                        select {
+                            class: "input focus-ring",
+                            style: "font-size:11px;padding:5px 8px;width:auto;",
+                            value: "{evidence.state}",
+                            onchange: move |event| set_ev_field!(state, event.value()),
+                            option { value: "active", "active" }
+                            option { value: "enabled", "enabled" }
+                            option { value: "masked", "masked" }
+                        }
+                    }
+                },
+                "eval_attr" => rsx! {
+                    input { class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "config.services.openssh.settings.PermitRootLogin", value: "{evidence.attr}", oninput: move |event| set_ev_field!(attr, event.value()) }
+                    span { class: "mono", style: "font-size:10px;color:var(--cf-text-muted);", "Captured from the evaluated config — no host access needed." }
+                },
+                "attestation" => rsx! {
+                    input { class: "input focus-ring", style: "font-size:11px;padding:5px 8px;", placeholder: "What the agent attests to (signed snapshot)", value: "{evidence.note}", oninput: move |event| set_ev_field!(note, event.value()) }
+                    span { class: "mono", style: "font-size:10px;color:var(--cf-text-muted);", "Ed25519-signed by the agent at collection time." }
+                },
+                _ => rsx! { span { style: "font-style:italic;", "{kind}" } },
             }
         }
     }

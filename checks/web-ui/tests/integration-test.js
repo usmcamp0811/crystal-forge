@@ -4938,34 +4938,39 @@ const steps = [
     },
   },
   {
-    name: "19-policies-new-modal-basic",
-    description: "Policies new modal in basic mode",
+    name: "19-policies-new-modal-fields",
+    description: "Policies new modal shows the unified design-faithful form",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       const newPolicyBtn = page.getByRole("button", { name: /New custom policy/i }).first();
       await newPolicyBtn.waitFor({ timeout: 5000 });
       await newPolicyBtn.click();
       await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
-      await assertVisible(page.getByText("Policy Type").first(), "Expected basic policy type picker");
-      await assertVisible(page.getByRole("button", { name: "CVE gate" }).first(), "Expected CVE gate option in basic modal");
-      await assertVisible(page.getByText("Use Advanced for CVE/multi-rule JSON or TOML payloads.").first(), "Expected basic modal advanced helper text");
+      // Unified design form sections (no Basic/Advanced toggle, no raw JSON editor).
+      await assertHidden(page.getByRole("button", { name: "Advanced" }), "Advanced toggle should not exist in unified modal");
+      await assertVisible(page.getByText("Category", { exact: false }).first(), "Expected Category section");
+      await assertVisible(page.getByText("Severity", { exact: false }).first(), "Expected Severity section");
+      await assertVisible(page.getByText("Rationale", { exact: false }).first(), "Expected Rationale section");
+      await assertVisible(page.getByText("Assertions & gate rules", { exact: false }).first(), "Expected assertions/gate rules builder");
+      await assertVisible(page.getByText("Evidence for ATO", { exact: false }).first(), "Expected evidence-for-ATO builder");
+      // UI-only / not-persisted markers are visible for unsupported fields.
+      await assertVisible(page.getByText("UI only — not persisted yet").first(), "Expected UI-only/not-persisted markers");
     },
   },
   {
-    name: "20-policies-new-modal-advanced",
-    description: "Policies new modal in advanced mode",
+    name: "20-policies-new-modal-rule-builder",
+    description: "Policies new modal can add an assertion rule via the builder",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       const newPolicyBtn = page.getByRole("button", { name: /New custom policy/i }).first();
       await newPolicyBtn.waitFor({ timeout: 5000 });
       await newPolicyBtn.click();
-      const advancedBtn = page.getByRole("button", { name: "Advanced" });
-      await advancedBtn.waitFor({ timeout: 5000 });
-      await advancedBtn.click();
-      await page.getByText("Policy Definition").first().waitFor({ timeout: 5000 });
-      await assertVisible(page.getByRole("button", { name: "Multi-rule" }).first(), "Expected multi-rule advanced template");
-      await page.getByRole("button", { name: "Multi-rule" }).first().click();
-      await assertVisible(page.getByDisplayValue(/"rules"/).first(), "Expected multi-rule template JSON in advanced editor");
+      await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
+      // Add a CVE gate rule through the design's rule dropdown.
+      const addRule = page.locator("select").filter({ hasText: "Add assertion / rule" }).first();
+      await addRule.waitFor({ timeout: 5000 });
+      await addRule.selectOption("cve_block");
+      await assertVisible(page.getByText("Block deploy when").first(), "Expected CVE gate rule editor row after adding rule");
     },
   },
   // ── CVE policy API round-trip checks ────────────────────────────────────
@@ -6126,8 +6131,8 @@ const CI_FAST_STEP_NAMES = new Set([
   "16c-scanning-view",
   // TASK-340.1: Policies parity evidence
   "18-policies",
-  "19-policies-new-modal-basic",
-  "20-policies-new-modal-advanced",
+  "19-policies-new-modal-fields",
+  "20-policies-new-modal-rule-builder",
   "20b-policies-cve-gate-create-roundtrip",
   "20c-policies-multirule-create-roundtrip",
   "20d-policies-cve-gate-invalid-rejected",

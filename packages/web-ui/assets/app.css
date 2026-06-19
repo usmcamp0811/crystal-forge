@@ -742,6 +742,21 @@ body {
   box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.22) !important;
 }
 
+.cf-policy-ui-only-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: #fcd34d;
+  background-color: rgba(251, 191, 36, 0.14);
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  white-space: nowrap;
+}
+
 :root[data-theme="light"] .cf-policy-modal-field {
   background-color: var(--cf-subtle-bg) !important;
   border-color: var(--cf-card-border) !important;
