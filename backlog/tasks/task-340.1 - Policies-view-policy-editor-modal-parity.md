@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-20 01:21'
+updated_date: '2026-06-20 01:52'
 labels:
   - design-parity
   - policies
@@ -118,11 +118,11 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Pushed commit `5fc828ef` to MR 281 for the semantic-loss review blockers: blocks unsupported/UI-only saves, blocks CVE combinations, preserves high CVE reconstruction, blocks complex CVE/custom/TOML destructive edits, requires backend-supported assertions, and preserves enabled state on edit by omitting `enabled` in update requests. Targeted unit tests, rustfmt, wasm cargo check, and diff whitespace checks passed. Skipped web-ui check per owner request.
+Pushed commit `e16ba9d6` to MR 281: tightened exact supported-shape checks for custom_check and require_packages, added the requested tests for extra custom fields and package strict false, and aligned policy card chip spacing with the design. Targeted rustfmt, 9 modal unit tests, wasm cargo check, and diff whitespace checks passed. Skipped web-ui check per owner request.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Pushed commit `5fc828ef` to MR 281 addressing policy editor semantic-loss review blockers. The editor now blocks unsupported/UI-only rules from saving, refuses CVE+other-rule combinations instead of serializing CVE as `expression: true`, reconstructs high CVE thresholds before critical fallback, blocks complex CVE configs and custom-check configs the form cannot preserve, treats TOML edits as read-only in this design form, requires at least one backend-supported assertion before save, and preserves existing enabled state on edits by sending `enabled: None` in update requests. Added six targeted unit tests for these serialization/preservation blockers. Verification: rustfmt check passed; `cargo test --manifest-path packages/web-ui/Cargo.toml policy_editor_modal::tests` exited 0; wasm `cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` exited 0; `git diff --check` passed. The expensive web-ui check was not run per owner request.
+Pushed commit `e16ba9d6` to MR 281 for the remaining semantic-loss blocker and chip-spacing feedback. Custom-check representability now requires exact supported top-level keys and exact supported per-rule keys/types; require-packages representability now rejects unsupported keys, non-string package values, and `strict: false`; added tests for extra top-level custom fields, extra per-rule custom fields, and package strict false. Policy card chip stack now uses explicit 5px flex gap matching the design reference. Verification: rustfmt check passed; `cargo test --manifest-path packages/web-ui/Cargo.toml policy_editor_modal::tests` exited 0 with 9 tests passing; wasm `cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` exited 0; `git diff --check` passed. The expensive web-ui check was not run per owner request.
 <!-- SECTION:FINAL_SUMMARY:END -->
