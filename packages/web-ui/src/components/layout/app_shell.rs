@@ -6,7 +6,9 @@ use crate::api::client::{fetch_classification_config, fetch_config_health};
 use crate::api::models::{AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role};
 use crate::components::layout::TopBar;
 use crate::components::layout::sidebar::{MobileDrawer, SidebarContext, SidebarNav};
-use crate::components::layout::{BannerPlacement, DevModeBanner};
+use crate::components::layout::{
+    BannerPlacement, DEV_MODE_BANNER_HEIGHT_PX, DevModeBanner, use_dev_mode_enabled,
+};
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::onboarding::OnboardingCoachPanel;
 use crate::routes::Route;
@@ -179,10 +181,9 @@ pub fn AppShell() -> Element {
     // Stores result in AppState so the Admin card can show an error + retry.
     use_effect(move || {
         let fetch_state = app_state.read().classification_fetch_state.clone();
-        // Only fetch if we haven't attempted yet (None) or previously failed.
-        let should_fetch =
-            fetch_state.is_none() || fetch_state.as_ref().is_some_and(|r| r.is_err());
-        if !should_fetch {
+        // Fetch only when no attempt has been made. A failure remains visible
+        // until the Admin card's Retry button resets this state to None.
+        if fetch_state.is_some() {
             return;
         }
         spawn(async move {
@@ -280,19 +281,19 @@ pub fn AppShell() -> Element {
         .unwrap_or(false);
     let classification_top = classification_config.clone();
     let classification_bottom = classification_config;
+    let dev_mode_enabled = use_dev_mode_enabled()();
 
     rsx! {
         div {
             class: "min-h-screen {theme::surface::PAGE_BG} {theme::text::PRIMARY} flex flex-col overflow-x-hidden",
 
-            // Top banner stack: both banners share one position:fixed flex
-            // container so they stack naturally without manual offset math.
-            // Classification is outermost (first child = closest to viewport
-            // edge) and dev banner sits below it. Each active banner also
-            // contributes an in-flow spacer so page content is pushed down.
+            // Top banner stack: the classification banner offsets only when
+            // the dev banner is actually visible. Each active fixed banner has
+            // a matching in-flow spacer so page content is not obscured.
             TopBannerStack {
                 classification: classification_top,
                 classification_enabled,
+                dev_mode_enabled,
             }
             // ── end top banners ──────────────────────────────────────────────
 
@@ -352,6 +353,7 @@ pub fn AppShell() -> Element {
             BottomBannerStack {
                 classification: classification_bottom,
                 classification_enabled,
+                dev_mode_enabled,
             }
         }
     }
@@ -375,26 +377,28 @@ fn classification_display(
     (text, bg, fg)
 }
 
-/// Renders top banners (classification + dev) in a single `position:fixed`
-/// flex column anchored to `top:0`.  Each active banner is a 24px row inside
-/// that container, so they stack without any manual offset arithmetic.
-/// In-flow spacers matching the active banner count push page content down.
+/// Renders top banners with offsets that match the banners that are actually
+/// visible. In-flow spacers matching the active banner count push content down.
 #[component]
 fn TopBannerStack(
     classification: Option<ClassificationBannerConfig>,
     classification_enabled: bool,
+    dev_mode_enabled: bool,
 ) -> Element {
     let show_classification = classification_enabled;
+    let classification_offset = if dev_mode_enabled {
+        DEV_MODE_BANNER_HEIGHT_PX
+    } else {
+        0
+    };
 
     rsx! {
-        // In-flow spacers — one per active banner — push content below the
-        // fixed container.  DevModeBanner also renders its own spacer.
+        // DevModeBanner renders its own spacer when active.
+        DevModeBanner { placement: BannerPlacement::Top, enabled: dev_mode_enabled }
         if show_classification {
             div { style: "height:24px;flex-shrink:0;" }
         }
-        DevModeBanner { placement: BannerPlacement::Top }
 
-        // Single fixed container stacking all top banners.
         if show_classification {
             if let Some(ref cfg) = classification {
                 {
@@ -403,13 +407,7 @@ fn TopBannerStack(
                         div {
                             role: "note",
                             "aria-label": "Classification banner",
-                            // Offset by 28px (DevModeBanner height) so the
-                            // dev banner renders above classification at top:0.
-                            // When dev mode is off, the fixed dev bar is absent
-                            // so the 28px offset leaves a small transparent gap;
-                            // this is acceptable to guarantee no overlap when
-                            // dev mode is on.
-                            style: "position:fixed;top:28px;left:0;right:0;z-index:990;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};pointer-events:none;",
+                            style: "position:fixed;top:{classification_offset}px;left:0;right:0;z-index:990;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};pointer-events:none;",
                             "{text}"
                         }
                     }
@@ -424,11 +422,17 @@ fn TopBannerStack(
 fn BottomBannerStack(
     classification: Option<ClassificationBannerConfig>,
     classification_enabled: bool,
+    dev_mode_enabled: bool,
 ) -> Element {
     let show_classification = classification_enabled;
+    let classification_offset = if dev_mode_enabled {
+        DEV_MODE_BANNER_HEIGHT_PX
+    } else {
+        0
+    };
 
     rsx! {
-        DevModeBanner { placement: BannerPlacement::Bottom }
+        DevModeBanner { placement: BannerPlacement::Bottom, enabled: dev_mode_enabled }
         if show_classification {
             div { style: "height:24px;flex-shrink:0;" }
         }
@@ -441,7 +445,7 @@ fn BottomBannerStack(
                         div {
                             role: "note",
                             "aria-label": "Classification banner",
-                            style: "position:fixed;bottom:28px;left:0;right:0;z-index:990;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};pointer-events:none;",
+                            style: "position:fixed;bottom:{classification_offset}px;left:0;right:0;z-index:990;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};pointer-events:none;",
                             "{text}"
                         }
                     }
