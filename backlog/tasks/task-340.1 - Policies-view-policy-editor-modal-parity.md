@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 20:44'
+updated_date: '2026-06-20 01:21'
 labels:
   - design-parity
   - policies
@@ -118,11 +118,11 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Pushed commit `49a2920d` to MR 281: filtered-empty Policies state now uses a smaller search icon matching the design instead of the oversized file icon. Targeted rustfmt, wasm cargo check, and diff whitespace checks passed. Skipped web-ui check per owner request.
+Pushed commit `5fc828ef` to MR 281 for the semantic-loss review blockers: blocks unsupported/UI-only saves, blocks CVE combinations, preserves high CVE reconstruction, blocks complex CVE/custom/TOML destructive edits, requires backend-supported assertions, and preserves enabled state on edit by omitting `enabled` in update requests. Targeted unit tests, rustfmt, wasm cargo check, and diff whitespace checks passed. Skipped web-ui check per owner request.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Pushed commit `49a2920d` to MR 281 to match the filtered-empty Policies state to the design: when filters produce no policies, the empty state now uses a small 20px search icon instead of the large file/document icon; the unfiltered no-policies state keeps the document icon. Verification: targeted rustfmt passed, wasm cargo check exited 0, and `git diff --check` passed. The expensive web-ui check was not run per owner request.
+Pushed commit `5fc828ef` to MR 281 addressing policy editor semantic-loss review blockers. The editor now blocks unsupported/UI-only rules from saving, refuses CVE+other-rule combinations instead of serializing CVE as `expression: true`, reconstructs high CVE thresholds before critical fallback, blocks complex CVE configs and custom-check configs the form cannot preserve, treats TOML edits as read-only in this design form, requires at least one backend-supported assertion before save, and preserves existing enabled state on edits by sending `enabled: None` in update requests. Added six targeted unit tests for these serialization/preservation blockers. Verification: rustfmt check passed; `cargo test --manifest-path packages/web-ui/Cargo.toml policy_editor_modal::tests` exited 0; wasm `cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` exited 0; `git diff --check` passed. The expensive web-ui check was not run per owner request.
 <!-- SECTION:FINAL_SUMMARY:END -->
