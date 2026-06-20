@@ -427,7 +427,7 @@ function mockBuilderDetail(id = "55555555-5555-4555-8555-555555555555") {
   const builder = mockBuilders().find((item) => item.id === id) || mockBuilders()[0];
   return {
     ...builder,
-    public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICrystalForgeBuilderKeyExample crystal-forge@builder",
+    public_key: "Y3J5c3RhbC1mb3JnZS1idWlsZGVyLWtleS0xMjM=",
     created_at: nowIso(),
     updated_at: nowIso(),
     assigned_environment_ids: ["11111111-1111-4111-8111-111111111111"],
