@@ -1,11 +1,11 @@
 ---
 id: TASK-364
 title: 'Builders: bring Builders view to CrystalForgelatest parity'
-status: In Progress
+status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-20 03:08'
+updated_date: '2026-06-20 04:25'
 labels:
   - design-parity
   - builders
@@ -16,6 +16,7 @@ dependencies: []
 references:
   - >-
     /home/mcamp/code/crystal-forge/CrystalForgelatest/components/BuildersView.jsx
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/283'
 documentation:
   - design/doc-8 - CrystalForgelatest-UI-Parity-Matrix-TASK-328.md
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
@@ -78,11 +79,36 @@ This task is sprint-selected and ready for execution, but it is not implemented 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Builders view layout, density, cards/table structure, status treatments, and action surfaces match `CrystalForgelatest/components/BuildersView.jsx` within Dioxus constraints
-- [ ] #2 Builders view uses real API-backed data and does not introduce fabricated production data or UI-only business state
-- [ ] #3 Builder mutation/action controls preserve existing authorization behavior and do not expose operator/admin actions to unauthorized users
-- [ ] #4 Loading, empty, and error states match the reference design patterns and do not silently fall back to mock data
-- [ ] #5 Existing and/or updated web-ui check steps capture the Builders parity surface in screenshots
-- [ ] #6 Targeted formatting and web-ui compile checks pass
-- [ ] #7 `nix build .#checks.x86_64-linux.web-ui -L` passes or any unrelated existing failures are explicitly documented with the Builders steps passing
+- [x] #1 Builders view layout, density, cards/table structure, status treatments, and action surfaces match `CrystalForgelatest/components/BuildersView.jsx` within Dioxus constraints
+- [x] #2 Builders view uses real API-backed data and does not introduce fabricated production data or UI-only business state
+- [x] #3 Builder mutation/action controls preserve existing authorization behavior and do not expose operator/admin actions to unauthorized users
+- [x] #4 Loading, empty, and error states match the reference design patterns and do not silently fall back to mock data
+- [x] #5 Existing and/or updated web-ui check steps capture the Builders parity surface in screenshots
+- [x] #6 Targeted formatting and web-ui compile checks pass
+- [x] #7 `nix build .#checks.x86_64-linux.web-ui -L` passes or any unrelated existing failures are explicitly documented with the Builders steps passing
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/283
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/283
+
+Summary:
+- Aligned Builders list/table/card surface with the CrystalForgelatest reference while preserving real API data flow.
+- Removed fabricated 24h/load metric values and displays unavailable state when BuilderSummary lacks those metrics.
+- Corrected builder registration public-key guidance to base64 Ed25519 format.
+- Hid builder mutation controls from non-admin users in both BuildersView and legacy BuildersList, matching backend admin-only builder management endpoints.
+- Updated web-ui fixtures/checks so Builders list and edit modal screenshots are captured deterministically.
+
+Verification:
+- `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check` passed.
+- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed with existing warnings.
+- `node --check checks/web-ui/tests/integration-test.js` passed.
+- `nix build .#checks.x86_64-linux.web-ui -L` passed with exit status 0; Builders steps `[OK] 11b-builders` and `[OK] 11c-builders-edit-modal` were captured.
+<!-- SECTION:FINAL_SUMMARY:END -->
