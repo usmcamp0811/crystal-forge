@@ -2903,11 +2903,9 @@ const steps = [
 
         await assertVisible(page.getByRole("button", { name: /Register builder/i }).first(), "Expected admin builder registration CTA before editing");
 
-        await page.getByRole("button", { name: /Table/i }).first().click();
-
-        const firstBuilderRow = page.locator("table tbody tr").first();
-        await assertVisible(firstBuilderRow, "Expected at least one builder row", 15000);
-        await firstBuilderRow.locator("button[title='Edit']").click();
+        const firstBuilderCard = page.locator(".sys-card:has-text('builder-primary')").first();
+        await assertVisible(firstBuilderCard, "Expected builder card before opening edit modal", 15000);
+        await firstBuilderCard.getByRole("button", { name: /Edit/i }).click();
 
         await assertVisible(
           page.getByText("Update builder registration.").first(),
