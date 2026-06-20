@@ -4,7 +4,7 @@ title: 'Admin Server: view parity + real server settings flows'
 status: Review
 assignee: []
 created_date: '2026-06-20 02:19'
-updated_date: '2026-06-20 16:38'
+updated_date: '2026-06-20 16:46'
 labels:
   - design-parity
   - admin
@@ -109,5 +109,5 @@ Medium-high. The task touches an Admin/Server surface where incorrect placeholde
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Final OIDC rename blocker fixed in MR !282 commit 6e82af07: the IdP group name field is now read-only/disabled when editing an existing mapping, preventing accidental creation of a second active mapping under the backend's current upsert-by-group-name behavior. Verification passed: nix develop -c bash -lc 'cd packages/web-ui && cargo fmt -- --check && cargo check --target wasm32-unknown-unknown'.
+Classification placement correction in MR !282 commit 47251170: the session-local classification preview now renders as fixed top and bottom viewport banners instead of in-flow Admin content, matching the app-frame placement from the reference. Persistence and true global app rendering remain tracked by TASK-336.7. Verification passed: nix develop -c bash -lc 'cd packages/web-ui && cargo fmt -- --check && cargo check --target wasm32-unknown-unknown'.
 <!-- SECTION:FINAL_SUMMARY:END -->
