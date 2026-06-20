@@ -1,11 +1,11 @@
 ---
 id: TASK-340.1
 title: 'Policies: view + policy editor modal parity'
-status: In Progress
+status: Done
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-20 01:52'
+updated_date: '2026-06-20 02:10'
 labels:
   - design-parity
   - policies
@@ -112,17 +112,17 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 - [x] #9 Edit mode includes a Danger zone with a typed-confirmation delete flow matching the design
 - [x] #10 Fields or rule/evidence types without backend persistence are shown per design but visibly flagged as UI-only/not-persisted yet
 - [x] #11 Backend follow-up task(s) are created for any UI-only/not-persisted policy modal fields and rule/evidence types
-- [ ] #12 Policy create/edit/delete still round-trip through the real API for backend-supported fields
+- [x] #12 Policy create/edit/delete still round-trip through the real API for backend-supported fields
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Pushed commit `e16ba9d6` to MR 281: tightened exact supported-shape checks for custom_check and require_packages, added the requested tests for extra custom fields and package strict false, and aligned policy card chip spacing with the design. Targeted rustfmt, 9 modal unit tests, wasm cargo check, and diff whitespace checks passed. Skipped web-ui check per owner request.
+Post-merge cleanup completed: removed task worktree `../TASK-340.1-policies-view-editor-parity`, pruned worktree metadata, and moved task to Done after owner confirmed MR merge.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Pushed commit `e16ba9d6` to MR 281 for the remaining semantic-loss blocker and chip-spacing feedback. Custom-check representability now requires exact supported top-level keys and exact supported per-rule keys/types; require-packages representability now rejects unsupported keys, non-string package values, and `strict: false`; added tests for extra top-level custom fields, extra per-rule custom fields, and package strict false. Policy card chip stack now uses explicit 5px flex gap matching the design reference. Verification: rustfmt check passed; `cargo test --manifest-path packages/web-ui/Cargo.toml policy_editor_modal::tests` exited 0 with 9 tests passing; wasm `cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` exited 0; `git diff --check` passed. The expensive web-ui check was not run per owner request.
+MR 281 was reported merged by the owner. Removed the dedicated worktree `../TASK-340.1-policies-view-editor-parity`, ran `git worktree prune`, and marked the task Done. Follow-up tasks for modal refactor and backend persistence were already created.
 <!-- SECTION:FINAL_SUMMARY:END -->
