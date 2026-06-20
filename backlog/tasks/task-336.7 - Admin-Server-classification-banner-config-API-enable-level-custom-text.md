@@ -4,7 +4,7 @@ title: 'Admin Server: classification banner config API (enable/level/custom text
 status: Review
 assignee: []
 created_date: '2026-06-20 02:59'
-updated_date: '2026-06-20 20:25'
+updated_date: '2026-06-20 20:40'
 labels:
   - admin
   - server
@@ -26,6 +26,8 @@ modified_files:
   - packages/web-ui/src/api/client.rs
   - packages/web-ui/src/api/models.rs
   - packages/web-ui/src/components/layout/app_shell.rs
+  - packages/web-ui/src/components/layout/dev_banner.rs
+  - packages/web-ui/src/components/layout/mod.rs
   - packages/web-ui/src/state/app_state.rs
   - packages/web-ui/src/views/admin.rs
 parent_task_id: TASK-336
@@ -98,11 +100,11 @@ Medium. This touches global app rendering and persisted admin/server configurati
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR !284 follow-up pushed: 81d1af61 fix: handle classification config load failures. Verification already run before commit: packages/web-ui cargo fmt -- --check passed, packages/web-ui cargo check --target wasm32-unknown-unknown passed with existing warnings, and targeted classification handler tests passed (5 passed).
+MR !284 re-review fixes pushed: c5d22c66 fix: prevent classification banner overlap and retry loops. Verification: nix develop -c bash -lc 'cd packages/web-ui && cargo fmt -- --check && cargo check --target wasm32-unknown-unknown' exited 0; targeted classification tests exited 0 with 5 passed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Follow-up commit 81d1af61 pushed to MR !284. It tracks classification config fetch success/failure in AppState, shows an Admin Server load error with Retry, and keeps the validation unit coverage reachable as a synchronous test.
+Re-review blocker fixes pushed in c5d22c66. Classification config fetch now only auto-runs while fetch state is None, so failed loads wait for explicit Retry. Classification banner offsets now depend on actual dev-banner active state, preventing page-content overlap when dev mode is off.
 <!-- SECTION:FINAL_SUMMARY:END -->
