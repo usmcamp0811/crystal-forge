@@ -2181,6 +2181,24 @@ pub struct ConfigHealthResponse {
     pub checks: Vec<ConfigHealthCheck>,
 }
 
+/// Runtime database information displayed in Admin → Server.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatabaseRuntimeInfo {
+    pub status: String,
+    pub name: String,
+    pub size: String,
+    pub server_version: String,
+}
+
+/// Runtime server/build information displayed in Admin → Server.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerRuntimeInfoResponse {
+    pub version: String,
+    pub commit: Option<String>,
+    pub uptime_seconds: u64,
+    pub database: DatabaseRuntimeInfo,
+}
+
 /// Persisted classification banner configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClassificationBannerConfig {

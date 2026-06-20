@@ -12,9 +12,11 @@ use uuid::Uuid;
 
 use crate::api::models::{
     AdminUserSummary, ApiError, AuditAction, AuditEvent, ClassificationBannerConfig,
-    IdentitySource, OidcGroupMapping, PaginatedResponse, Role, UpdateClassificationBannerRequest,
+    DatabaseRuntimeInfo, IdentitySource, OidcGroupMapping, PaginatedResponse, Role,
+    ServerRuntimeInfoResponse, UpdateClassificationBannerRequest,
 };
 use crate::auth::password::hash_password;
+use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{extract_request_origin, require_admin as require_admin_user};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::admin::{self, GuardedMutationOutcome, OidcMappingRow};
@@ -88,6 +90,37 @@ pub async fn list_users(State(pool): State<PgPool>, headers: HeaderMap) -> impl 
     }
 
     (StatusCode::OK, Json(result)).into_response()
+}
+
+pub async fn server_runtime_info(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let pool = state.pool().clone();
+    let Some(_admin_user) = require_admin_user(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let database = match admin::database_runtime_info(&pool).await {
+        Ok(row) => DatabaseRuntimeInfo {
+            status: "healthy".to_string(),
+            name: row.database_name,
+            size: row.database_size,
+            server_version: row.server_version,
+        },
+        Err(_) => return internal_error("Failed to load server runtime info"),
+    };
+
+    Json(ServerRuntimeInfoResponse {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        commit: option_env!("SRC_HASH")
+            .or(option_env!("GIT_COMMIT"))
+            .or(option_env!("VERGEN_GIT_SHA"))
+            .map(ToString::to_string),
+        uptime_seconds: state.started_at.elapsed().as_secs(),
+        database,
+    })
+    .into_response()
 }
 
 pub async fn list_oidc_mappings(

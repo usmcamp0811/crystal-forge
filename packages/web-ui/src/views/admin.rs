@@ -4,14 +4,15 @@ use std::collections::HashMap;
 
 use crate::api::client::{
     create_admin_user, delete_admin_oidc_mapping, delete_admin_user, fetch_admin_audit_events,
-    fetch_admin_oidc_mappings, fetch_admin_users, fetch_environments, set_classification_config,
-    set_setup_wizard_dismissed, update_admin_user, upsert_admin_oidc_mapping,
+    fetch_admin_oidc_mappings, fetch_admin_server_info, fetch_admin_users, fetch_environments,
+    set_classification_config, set_setup_wizard_dismissed, update_admin_user,
+    upsert_admin_oidc_mapping,
 };
 use crate::api::models::{
     AdminAuditEventsParams, AdminCreateUserRequest, AdminUpdateUserRequest,
     AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, AuthMode,
     ClassificationBannerConfig, EnvironmentSummary, IdentitySource, OidcGroupMapping, Role,
-    UpdateClassificationBannerRequest,
+    ServerRuntimeInfoResponse, UpdateClassificationBannerRequest,
 };
 use crate::components::{Icon, IconName};
 use crate::state::app_state::AppState;
@@ -97,6 +98,7 @@ pub fn AdminView() -> Element {
     let mut audit_events = use_signal(Vec::<AuditEvent>::new);
     let mut oidc_mappings = use_signal(Vec::<OidcGroupMapping>::new);
     let mut environments = use_signal(Vec::<EnvironmentSummary>::new);
+    let mut server_info = use_signal(|| None::<ServerRuntimeInfoResponse>);
     let mut audit_total = use_signal(|| 0_i64);
     let mut audit_page = use_signal(|| 1_i64);
 
@@ -106,6 +108,8 @@ pub fn AdminView() -> Element {
     let mut audit_error = use_signal(|| None::<String>);
     let mut oidc_error = use_signal(|| None::<String>);
     let mut environments_error = use_signal(|| None::<String>);
+    let mut server_info_loading = use_signal(|| true);
+    let mut server_info_error = use_signal(|| None::<String>);
 
     let mut user_search = use_signal(String::new);
     let mut user_role_filter = use_signal(|| "all".to_string());
@@ -250,6 +254,28 @@ pub fn AdminView() -> Element {
         });
     }
 
+    // Load real server/build/database runtime information.
+    {
+        let mut server_info = server_info.clone();
+        let mut server_info_loading = server_info_loading.clone();
+        let mut server_info_error = server_info_error.clone();
+        use_effect(move || {
+            spawn(async move {
+                match fetch_admin_server_info().await {
+                    Ok(next) => {
+                        server_info.set(Some(next));
+                        server_info_error.set(None);
+                    }
+                    Err(e) => {
+                        server_info_error.set(Some(format!("Failed to load server info: {e}")));
+                    }
+                }
+
+                server_info_loading.set(false);
+            });
+        });
+    }
+
     let total_pages = {
         let total = *audit_total.read();
         if total <= 0 {
@@ -288,7 +314,7 @@ pub fn AdminView() -> Element {
             // ── Tab card ─────────────────────────────────────────────────────
             div { class: "card", style: "overflow:hidden;",
                 // ── Tab bar ──────────────────────────────────────────────────
-                div { class: "sd-tabs", style: "padding:0 16px;border-bottom:1px solid var(--cf-card-border);",
+                div { class: "sd-tabs", style: "padding:0 16px;border-bottom:1px solid var(--cf-card-border);margin-top:0;background:color-mix(in oklab, var(--cf-page-bg) 58%, var(--cf-card-bg));box-shadow:inset 0 -1px 0 var(--cf-card-border);",
                     for (tab_id, tab_label, icon) in [
                         ("users", "Users", IconName::Server),
                         ("roles", "Roles", IconName::Key),
@@ -368,6 +394,9 @@ pub fn AdminView() -> Element {
                     ServerTab {
                         environments: environments.read().clone(),
                         environments_error: environments_error.read().clone(),
+                        server_info: server_info.read().clone(),
+                        server_info_loading: *server_info_loading.read(),
+                        server_info_error: server_info_error.read().clone(),
                         auth_mode: app_state.read().auth.as_ref().map(|a| a.auth_mode).unwrap_or(AuthMode::Local),
                         classification_enabled,
                         classification_level,
@@ -1214,7 +1243,7 @@ fn OidcMappingModal(
                         EnvironmentChipPicker {
                             title: "Environments".to_string(),
                             selected_csv: mapping_environments,
-                            available: environments,
+                            available: environments.clone(),
                         }
                     }
                 }
@@ -1257,6 +1286,14 @@ fn OidcMappingModal(
                         class: "btn btn-primary focus-ring",
                         disabled: *mapping_submitting.read(),
                         onclick: move |_| {
+                            let unknown = unknown_environments(&mapping_environments.read(), &environments);
+                            if !unknown.is_empty() {
+                                oidc_error.set(Some(format!(
+                                    "Unknown environment(s): {}. Use the environment chips or choose all.",
+                                    unknown.join(", ")
+                                )));
+                                return;
+                            }
                             let request = AdminUpsertOidcMappingRequest {
                                 group_name: mapping_group.read().trim().to_string(),
                                 role: Some(parse_role(&mapping_role.read())),
@@ -1514,10 +1551,33 @@ fn AuditTab(
 // SERVER TAB
 // ============================================================================
 
+fn short_commit(commit: &str) -> String {
+    commit.chars().take(12).collect()
+}
+
+fn format_uptime(total_seconds: u64) -> String {
+    let days = total_seconds / 86_400;
+    let hours = (total_seconds % 86_400) / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{total_seconds}s")
+    }
+}
+
 #[component]
 fn ServerTab(
     environments: Vec<EnvironmentSummary>,
     environments_error: Option<String>,
+    server_info: Option<ServerRuntimeInfoResponse>,
+    server_info_loading: bool,
+    server_info_error: Option<String>,
     auth_mode: AuthMode,
     classification_enabled: Signal<bool>,
     classification_level: Signal<String>,
@@ -1533,25 +1593,44 @@ fn ServerTab(
         AuthMode::Local => "Local",
         AuthMode::Oidc => "OIDC",
     };
+    let server_info_error_text = server_info_error.clone();
 
     rsx! {
         div { style: "padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:14px;",
             // Build info card
             div { class: "card", style: "padding:16px;",
                 h3 { style: "margin:0 0 12px;font-size:13px;font-weight:600;", "Build info" }
-                dl { class: "kv-grid",
-                    dt { "Version" }
-                    dd { span { class: "chip chip-unknown", "unavailable" } }
-                    dt { "Commit" }
-                    dd { span { class: "chip chip-unknown", "unavailable" } }
-                    dt { "Uptime" }
-                    dd { span { class: "chip chip-unknown", "unavailable" } }
-                    dt { "Database" }
-                    dd {
-                        span { class: "chip chip-unknown", "unavailable" }
-                        " "
-                        span { style: "color:var(--cf-text-muted);", "· API not implemented yet" }
+                if server_info_loading {
+                    div { style: "font-size:12px;color:var(--cf-text-muted);", "Loading server info…" }
+                } else if let Some(ref err) = server_info_error_text {
+                    div { class: "sd-callout sd-callout-danger", style: "font-size:12px;", "{err}" }
+                } else if let Some(ref info) = server_info {
+                    dl { class: "kv-grid",
+                        dt { "Version" }
+                        dd { class: "mono", "{info.version}" }
+                        dt { "Commit" }
+                        dd { class: "mono",
+                            if let Some(ref commit) = info.commit {
+                                "{short_commit(commit)}"
+                            } else {
+                                span { class: "chip chip-unknown", "unavailable" }
+                            }
+                        }
+                        dt { "Uptime" }
+                        dd { "{format_uptime(info.uptime_seconds)}" }
+                        dt { "Database" }
+                        dd {
+                            span { class: "chip chip-healthy", "{info.database.status}" }
+                            " "
+                            span { style: "color:var(--cf-text-muted);", "· {info.database.size}" }
+                        }
+                        dt { "DB name" }
+                        dd { class: "mono", "{info.database.name}" }
+                        dt { "DB version" }
+                        dd { class: "mono", style: "font-size:11px;word-break:break-word;", "{info.database.server_version}" }
                     }
+                } else {
+                    div { style: "font-size:12px;color:var(--cf-text-muted);", "Server info unavailable." }
                 }
             }
 
@@ -1995,6 +2074,18 @@ fn parse_environments(environments: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|env| !env.is_empty())
         .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn unknown_environments(environments: &str, available: &[EnvironmentSummary]) -> Vec<String> {
+    let known = available
+        .iter()
+        .map(|env| env.name.as_str())
+        .collect::<Vec<_>>();
+
+    parse_environments(environments)
+        .into_iter()
+        .filter(|selected| !known.iter().any(|known_name| known_name == selected))
         .collect()
 }
 

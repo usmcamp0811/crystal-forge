@@ -1866,3 +1866,25 @@ pub struct ConfigHealthResponse {
     /// Per-check details for all pipeline readiness checks.
     pub checks: Vec<ConfigHealthCheck>,
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin Server Info DTOs — GET /api/v1/admin/server-info
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Runtime database information displayed in Admin → Server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseRuntimeInfo {
+    pub status: String,
+    pub name: String,
+    pub size: String,
+    pub server_version: String,
+}
+
+/// Runtime server/build information displayed in Admin → Server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerRuntimeInfoResponse {
+    pub version: String,
+    pub commit: Option<String>,
+    pub uptime_seconds: u64,
+    pub database: DatabaseRuntimeInfo,
+}

@@ -1187,6 +1187,12 @@ pub async fn fetch_config_health() -> Result<ConfigHealthResponse, ApiClientErro
     fetch_json(&url).await
 }
 
+/// Fetch real server/build/database runtime info (admin only).
+pub async fn fetch_admin_server_info() -> Result<ServerRuntimeInfoResponse, ApiClientError> {
+    let url = format!("{}/admin/server-info", base_url());
+    fetch_json(&url).await
+}
+
 /// Fetch admin audit events.
 pub async fn fetch_admin_audit_events(
     params: &AdminAuditEventsParams,

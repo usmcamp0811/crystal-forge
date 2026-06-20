@@ -54,6 +54,13 @@ pub struct EnvironmentLookupRow {
     pub name: String,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+pub struct DatabaseRuntimeInfoRow {
+    pub database_name: String,
+    pub database_size: String,
+    pub server_version: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardedMutationOutcome {
     Applied,
@@ -86,6 +93,18 @@ pub async fn list_admin_users(pool: &PgPool) -> Result<Vec<AdminUserRow>> {
     .fetch_all(pool)
     .await?;
     Ok(rows)
+}
+
+pub async fn database_runtime_info(pool: &PgPool) -> Result<DatabaseRuntimeInfoRow> {
+    let row = sqlx::query_as::<_, DatabaseRuntimeInfoRow>(
+        "SELECT current_database() AS database_name,
+                pg_size_pretty(pg_database_size(current_database())) AS database_size,
+                current_setting('server_version') AS server_version",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row)
 }
 
 pub async fn find_admin_user(pool: &PgPool, user_id: Uuid) -> Result<Option<AdminUserRow>> {
