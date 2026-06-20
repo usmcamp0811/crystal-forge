@@ -36,6 +36,7 @@ pub struct UpdateAdminUserRequest {
     pub role: Option<Role>,
     pub enabled: Option<bool>,
     pub environments: Option<Vec<String>>,
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -421,6 +422,25 @@ pub async fn update_user(
                 serde_json::json!({ "from": prior_environments, "to": environments }),
             ));
         }
+    }
+
+    if let Some(password) = payload.password.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+        let password_hash = match hash_password(password) {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to hash password"),
+        };
+
+        if update_password_hash_by_user_id(&pool, target_user_id, &password_hash)
+            .await
+            .is_err()
+        {
+            return internal_error("Failed to update user password");
+        }
+
+        audit_events.push((
+            AuditAction::UserUpdated,
+            serde_json::json!({ "password_reset": true }),
+        ));
     }
 
     if !audit_events.is_empty() {
@@ -1315,6 +1335,7 @@ mod tests {
                 role: Some(Role::Operator),
                 enabled: Some(true),
                 environments: Some(vec![]),
+                password: None,
             }),
         )
         .await

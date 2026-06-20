@@ -289,6 +289,9 @@ pub fn AdminView() -> Element {
     let mut to_filter = use_signal(String::new);
 
     let mut active_tab = use_signal(|| "users".to_string());
+    let mut classification_enabled = use_signal(|| false);
+    let mut classification_level = use_signal(|| "UNCLASSIFIED".to_string());
+    let mut classification_custom_text = use_signal(String::new);
 
     // Load users and OIDC mappings
     {
@@ -374,10 +377,23 @@ pub fn AdminView() -> Element {
 
     let can_go_prev = *audit_page.read() > 1;
     let can_go_next = *audit_page.read() < total_pages;
+    let classification_text = classification_display_text(
+        &classification_level.read(),
+        &classification_custom_text.read(),
+    );
+    let (classification_bg, classification_fg) =
+        classification_colors(&classification_level.read());
 
     rsx! {
         div {
             style: "display:flex;flex-direction:column;gap:16px;",
+            if *classification_enabled.read() {
+                ClassificationBanner {
+                    text: classification_text.clone(),
+                    bg: classification_bg,
+                    fg: classification_fg,
+                }
+            }
 
             // ── Page head ───────────────────────────────────────────────────
             div { class: "page-head",
@@ -437,6 +453,7 @@ pub fn AdminView() -> Element {
                         users_error: users_error.clone(),
                         user_search: user_search.clone(),
                         user_role_filter: user_role_filter.clone(),
+                        environments: environments.read().clone(),
                     }
                 }
 
@@ -451,6 +468,7 @@ pub fn AdminView() -> Element {
                         oidc_mappings: oidc_mappings.clone(),
                         oidc_error: oidc_error.clone(),
                         auth_mode: app_state.read().auth.as_ref().map(|a| a.auth_mode).unwrap_or(AuthMode::Local),
+                        environments: environments.read().clone(),
                     }
                 }
 
@@ -481,7 +499,17 @@ pub fn AdminView() -> Element {
                         environments: environments.read().clone(),
                         environments_error: environments_error.read().clone(),
                         auth_mode: app_state.read().auth.as_ref().map(|a| a.auth_mode).unwrap_or(AuthMode::Local),
+                        classification_enabled,
+                        classification_level,
+                        classification_custom_text,
                     }
+                }
+            }
+            if *classification_enabled.read() {
+                ClassificationBanner {
+                    text: classification_text,
+                    bg: classification_bg,
+                    fg: classification_fg,
                 }
             }
         }
@@ -491,6 +519,17 @@ pub fn AdminView() -> Element {
 // ============================================================================
 // SERVER INFO STRIP
 // ============================================================================
+
+#[component]
+fn ClassificationBanner(text: String, bg: &'static str, fg: &'static str) -> Element {
+    rsx! {
+        div {
+            role: "note",
+            style: "height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};box-shadow:0 1px 0 rgba(255,255,255,0.08) inset;",
+            "{text}"
+        }
+    }
+}
 
 #[component]
 fn ServerInfoStrip(users: Vec<AdminUserSummary>, auth_mode: AuthMode) -> Element {
@@ -550,6 +589,7 @@ fn UsersTab(
     users_error: Signal<Option<String>>,
     user_search: Signal<String>,
     user_role_filter: Signal<String>,
+    environments: Vec<EnvironmentSummary>,
 ) -> Element {
     let mut editing_user_id = use_signal(|| Option::<String>::None);
     let mut adding_user = use_signal(|| false);
@@ -718,6 +758,7 @@ fn UsersTab(
                         users,
                         user_drafts,
                         users_error,
+                        environments: environments.clone(),
                         on_close: move |_| editing_user_id.set(None),
                     }
                 }
@@ -727,6 +768,7 @@ fn UsersTab(
                     users,
                     user_drafts,
                     users_error,
+                    environments,
                     on_close: move |_| adding_user.set(false),
                 }
             }
@@ -739,13 +781,14 @@ fn CreateUserModal(
     users: Signal<Vec<AdminUserSummary>>,
     user_drafts: Signal<HashMap<String, UserEditDraft>>,
     users_error: Signal<Option<String>>,
+    environments: Vec<EnvironmentSummary>,
     on_close: EventHandler<()>,
 ) -> Element {
     let mut email = use_signal(String::new);
     let mut display_name = use_signal(String::new);
     let mut password = use_signal(String::new);
     let mut role = use_signal(|| "Viewer".to_string());
-    let mut environments = use_signal(String::new);
+    let mut selected_environments = use_signal(String::new);
     let mut saving = use_signal(|| false);
     let mut local_error = use_signal(|| Option::<String>::None);
 
@@ -766,7 +809,11 @@ fn CreateUserModal(
                     div { class: "field", style: "margin:0;", label { "Display name" } input { class: "input focus-ring", value: "{display_name.read()}", oninput: move |evt| display_name.set(evt.value()) } }
                     div { class: "field", style: "margin:0;", label { "Temporary password" } input { class: "input focus-ring", r#type: "password", value: "{password.read()}", oninput: move |evt| password.set(evt.value()) } }
                     div { class: "field", style: "margin:0;", label { "Role" } select { class: "input focus-ring", value: "{role.read()}", onchange: move |evt| role.set(evt.value()), option { "Admin" } option { "Operator" } option { "Viewer" } } }
-                    div { class: "field", style: "margin:0;", label { "Environment scope" } input { class: "input focus-ring", value: "{environments.read()}", placeholder: "prod, staging — blank for all", oninput: move |evt| environments.set(evt.value()) } }
+                    EnvironmentChipPicker {
+                        title: "Environments".to_string(),
+                        selected_csv: selected_environments,
+                        available: environments.clone(),
+                    }
                 }
                 div { class: "modal-foot",
                     button { class: "btn btn-ghost focus-ring", onclick: move |_| on_close.call(()), "Cancel" }
@@ -776,7 +823,7 @@ fn CreateUserModal(
                             display_name: optional_value(display_name.read().clone()),
                             password: optional_value(password.read().clone()),
                             role: parse_role(&role.read()),
-                            environments: parse_environments(&environments.read()),
+                            environments: parse_environments(&selected_environments.read()),
                         };
                         saving.set(true);
                         local_error.set(None);
@@ -808,6 +855,7 @@ fn EditUserModal(
     users: Signal<Vec<AdminUserSummary>>,
     user_drafts: Signal<HashMap<String, UserEditDraft>>,
     users_error: Signal<Option<String>>,
+    environments: Vec<EnvironmentSummary>,
     on_close: EventHandler<()>,
 ) -> Element {
     let mut saving = use_signal(|| false);
@@ -819,6 +867,7 @@ fn EditUserModal(
         .cloned()
         .unwrap_or_else(|| UserEditDraft::from_user(&user));
     let is_oidc_user = user.identity_source == IdentitySource::OidcDerived;
+    let selected_environments = use_signal(|| draft.environments.clone());
 
     rsx! {
         div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
@@ -861,19 +910,11 @@ fn EditUserModal(
                         }
                     }
                     div { class: "field", style: "margin:0;",
-                        label { "Environment scope" }
-                        input {
-                            class: "input focus-ring",
-                            value: "{draft.environments}",
-                            placeholder: "prod, staging, lab — leave blank for all",
-                            oninput: {
-                                let user_id = user.id.clone();
-                                move |evt| {
-                                    update_user_draft(user_drafts, &user_id, |draft| draft.environments = evt.value());
-                                }
-                            }
+                        EnvironmentChipPicker {
+                            title: "Environments".to_string(),
+                            selected_csv: selected_environments,
+                            available: environments.clone(),
                         }
-                        div { class: "help", "Comma-separated environment names. Empty means all environments." }
                     }
                     div { class: "field", style: "margin:0;",
                         label { "Password reset" }
@@ -923,7 +964,7 @@ fn EditUserModal(
                                 let request = AdminUpdateUserRequest {
                                     role: Some(parse_role(&draft.role)),
                                     enabled: Some(draft.enabled),
-                                    environments: Some(parse_environments(&draft.environments)),
+                                    environments: Some(parse_environments(&selected_environments.read())),
                                     password: optional_value(draft.password.clone()),
                                 };
                                 let user_id_for_request = user_id.clone();
@@ -994,6 +1035,55 @@ fn EditUserModal(
     }
 }
 
+#[component]
+fn EnvironmentChipPicker(
+    title: String,
+    selected_csv: Signal<String>,
+    available: Vec<EnvironmentSummary>,
+) -> Element {
+    let selected = parse_environments(&selected_csv.read());
+    let all_selected = selected.is_empty();
+
+    rsx! {
+        div { class: "field", style: "margin:0;",
+            label { "{title}" }
+            div { style: "display:flex;flex-wrap:wrap;gap:6px;",
+                button {
+                    class: "focus-ring",
+                    onclick: move |_| selected_csv.set(String::new()),
+                    style: environment_pill_style(all_selected, "#60a5fa"),
+                    "all"
+                }
+                if available.is_empty() {
+                    span { class: "chip chip-unknown", style: "font-size:10px;", "No environments loaded" }
+                } else {
+                    for env in available.iter().filter(|env| env.is_active) {
+                        {
+                            let env_name = env.name.clone();
+                            let env_color = env.color_hex.clone();
+                            let is_selected = selected.iter().any(|value| value == &env_name);
+                            rsx! {
+                                button {
+                                    class: "focus-ring",
+                                    onclick: move |_| {
+                                        let current = selected_csv.read().clone();
+                                        let next = toggle_environment_selection(&current, &env_name);
+                                        selected_csv.set(next);
+                                    },
+                                    style: environment_pill_style(is_selected, &env_color),
+                                    span { style: "width:6px;height:6px;border-radius:50%;background:{env_color};" }
+                                    "{env_name}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            div { class: "help", "Choose all environments or select one or more scoped environments." }
+        }
+    }
+}
+
 // ============================================================================
 // ROLES TAB
 // ============================================================================
@@ -1046,6 +1136,7 @@ fn OidcTab(
     oidc_mappings: Signal<Vec<OidcGroupMapping>>,
     oidc_error: Signal<Option<String>>,
     auth_mode: AuthMode,
+    environments: Vec<EnvironmentSummary>,
 ) -> Element {
     let mut mapping_group = use_signal(String::new);
     let mut mapping_role = use_signal(|| "Viewer".to_string());
@@ -1196,6 +1287,7 @@ fn OidcTab(
                     mapping_submitting,
                     oidc_mappings,
                     oidc_error,
+                    environments,
                     on_close: move |_| mapping_modal_mode.set(None),
                 }
             }
@@ -1213,6 +1305,7 @@ fn OidcMappingModal(
     mapping_submitting: Signal<bool>,
     oidc_mappings: Signal<Vec<OidcGroupMapping>>,
     oidc_error: Signal<Option<String>>,
+    environments: Vec<EnvironmentSummary>,
     on_close: EventHandler<()>,
 ) -> Element {
     let is_edit = mode == "edit";
@@ -1268,14 +1361,11 @@ fn OidcMappingModal(
                         }
                     }
                     div { class: "field", style: "margin:0;",
-                        label { "Environments" }
-                        input {
-                            class: "input focus-ring",
-                            value: "{mapping_environments.read()}",
-                            placeholder: "prod, staging, lab — leave blank for all",
-                            oninput: move |evt| mapping_environments.set(evt.value())
+                        EnvironmentChipPicker {
+                            title: "Environments".to_string(),
+                            selected_csv: mapping_environments,
+                            available: environments,
                         }
-                        div { class: "help", "Comma-separated environment names. Empty means all environments." }
                     }
                 }
                 div { class: "modal-foot",
@@ -1607,6 +1697,9 @@ fn ServerTab(
     environments: Vec<EnvironmentSummary>,
     environments_error: Option<String>,
     auth_mode: AuthMode,
+    classification_enabled: Signal<bool>,
+    classification_level: Signal<String>,
+    classification_custom_text: Signal<String>,
 ) -> Element {
     let nav = navigator();
     let auth_mode_label = match auth_mode {
@@ -1660,7 +1753,11 @@ fn ServerTab(
             }
 
             // Classification banners card
-            ClassificationBannerCard {}
+            ClassificationBannerCard {
+                enabled: classification_enabled,
+                level: classification_level,
+                custom_text: classification_custom_text,
+            }
 
             // Onboarding card
             div { class: "card", style: "padding:16px;grid-column:1 / -1;",
@@ -1745,18 +1842,18 @@ fn ServerTab(
 // ============================================================================
 
 #[component]
-fn ClassificationBannerCard() -> Element {
-    let mut enabled = use_signal(|| false);
-    let mut level = use_signal(|| "UNCLASSIFIED".to_string());
-    let mut custom_text = use_signal(String::new);
-
+fn ClassificationBannerCard(
+    enabled: Signal<bool>,
+    level: Signal<String>,
+    custom_text: Signal<String>,
+) -> Element {
     // Classification levels with colors
     let levels = [
-        ("UNCLASSIFIED", "#10b981", "#fff"),
-        ("CUI", "#a78bfa", "#fff"),
-        ("CONFIDENTIAL", "#3b82f6", "#fff"),
-        ("SECRET", "#ef4444", "#fff"),
-        ("TOP SECRET", "#fbbf24", "#000"),
+        "UNCLASSIFIED",
+        "CUI",
+        "CONFIDENTIAL",
+        "SECRET",
+        "TOP SECRET",
     ];
 
     rsx! {
@@ -1771,6 +1868,9 @@ fn ClassificationBannerCard() -> Element {
                     }
                     p { style: "margin:0;font-size:12px;color:var(--cf-text-muted);max-width:60ch;",
                         "Display a CNSS/DoD classification marking at the top and bottom of every screen. Required on many DoD / IC information systems."
+                    }
+                    p { style: "margin:6px 0 0;font-size:11px;color:var(--cf-text-muted);",
+                        "Session-local preview only · persistence and global app rendering are tracked by TASK-336.7."
                     }
                 }
                 // Toggle switch
@@ -1806,7 +1906,7 @@ fn ClassificationBannerCard() -> Element {
                             class: "input focus-ring",
                             value: "{level.read()}",
                             onchange: move |evt| level.set(evt.value()),
-                            for (lvl, _, _) in &levels {
+                            for lvl in &levels {
                                 option { value: "{lvl}", "{lvl}" }
                             }
                         }
@@ -1823,15 +1923,8 @@ fn ClassificationBannerCard() -> Element {
                     div { style: "grid-column:1 / -1;",
                         div { style: "font-size:11px;color:var(--cf-text-muted);margin-bottom:6px;", "Preview" }
                         {
-                            let display_text = if custom_text.read().trim().is_empty() {
-                                level.read().clone()
-                            } else {
-                                custom_text.read().trim().to_uppercase()
-                            };
-                            let (bg, fg) = levels.iter()
-                                .find(|(l, _, _)| l == &level.read().as_str())
-                                .map(|(_, bg, fg)| (*bg, *fg))
-                                .unwrap_or(("#10b981", "#fff"));
+                            let display_text = classification_display_text(&level.read(), &custom_text.read());
+                            let (bg, fg) = classification_colors(&level.read());
 
                             rsx! {
                                 div {
@@ -1984,6 +2077,47 @@ fn parse_environments(environments: &str) -> Vec<String> {
         .filter(|env| !env.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn toggle_environment_selection(current: &str, env_name: &str) -> String {
+    let mut selected = parse_environments(current);
+    if selected.iter().any(|value| value == env_name) {
+        selected.retain(|value| value != env_name);
+    } else {
+        selected.push(env_name.to_string());
+    }
+    selected.join(", ")
+}
+
+fn environment_pill_style(selected: bool, color: &str) -> String {
+    if selected {
+        format!(
+            "border:1px solid {color};background:color-mix(in oklab, {color} 18%, var(--cf-card-bg));color:{color};border-radius:999px;padding:5px 10px;font-size:12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer;"
+        )
+    } else {
+        format!(
+            "border:1px solid var(--cf-divider);background:var(--cf-card-bg);color:var(--cf-text-muted);border-radius:999px;padding:5px 10px;font-size:12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer;"
+        )
+    }
+}
+
+fn classification_display_text(level: &str, custom_text: &str) -> String {
+    let custom = custom_text.trim();
+    if custom.is_empty() {
+        level.to_string()
+    } else {
+        custom.to_uppercase()
+    }
+}
+
+fn classification_colors(level: &str) -> (&'static str, &'static str) {
+    match level {
+        "CUI" => ("#a78bfa", "#fff"),
+        "CONFIDENTIAL" => ("#3b82f6", "#fff"),
+        "SECRET" => ("#ef4444", "#fff"),
+        "TOP SECRET" => ("#fbbf24", "#000"),
+        _ => ("#10b981", "#fff"),
+    }
 }
 
 fn update_user_draft(

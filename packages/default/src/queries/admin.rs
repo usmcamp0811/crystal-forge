@@ -158,7 +158,7 @@ pub async fn upsert_oidc_mapping(
 ) -> Result<OidcMappingRow> {
     let row = sqlx::query_as::<_, OidcMappingRow>(
         "INSERT INTO oidc_group_mappings (group_name, role, environments)
-         VALUES ($1, $2, $3)
+         VALUES ($1, $2::auth_role, $3::text[])
          ON CONFLICT (group_name)
          DO UPDATE SET role = EXCLUDED.role, environments = EXCLUDED.environments
          RETURNING id, group_name, role, environments, updated_at",
