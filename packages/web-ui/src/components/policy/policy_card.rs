@@ -50,7 +50,7 @@ pub fn PolicyCard(
                     }
                     div { class: "text-[11px] text-gray-400 line-clamp-2", "{policy.description}" }
                 }
-                div { class: "flex flex-col items-end gap-1.5 shrink-0",
+                div { style: "display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0;",
                     span { class: "chip", style: "color: {category_color}; background: color-mix(in oklab, {category_color} 14%, transparent);", "{category.short_label()}" }
                     span { class: "{type_chip}", "{type_label}" }
                     if policy_type == "require_cve_check" {

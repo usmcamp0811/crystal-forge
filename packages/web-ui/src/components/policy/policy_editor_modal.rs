@@ -321,16 +321,32 @@ fn cve_config_is_representable(config: &serde_json::Value) -> bool {
             .unwrap_or(false)
 }
 
+fn object_keys_are_subset(value: &serde_json::Value, allowed: &[&str]) -> bool {
+    value.as_object().is_some_and(|object| {
+        object
+            .keys()
+            .all(|key| allowed.iter().any(|allowed_key| key == allowed_key))
+    })
+}
+
 fn custom_check_config_is_representable(config: &serde_json::Value) -> bool {
+    if !object_keys_are_subset(
+        config,
+        &["rules", "expression", "description", "mode", "strict"],
+    ) {
+        return false;
+    }
+
+    if config.get("rules").is_some() && config.get("expression").is_some() {
+        return false;
+    }
+
     let mode_ok = config
         .get("mode")
-        .and_then(|value| value.as_str())
-        .unwrap_or("all")
-        == "all";
+        .is_none_or(|value| value.as_str() == Some("all"));
     let strict_ok = config
         .get("strict")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(true);
+        .is_none_or(|value| value.as_bool() == Some(true));
 
     if !mode_ok || !strict_ok {
         return false;
@@ -338,10 +354,13 @@ fn custom_check_config_is_representable(config: &serde_json::Value) -> bool {
 
     if let Some(entries) = config.get("rules").and_then(|value| value.as_array()) {
         return entries.iter().all(|entry| {
-            entry
-                .get("strict")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(true)
+            object_keys_are_subset(entry, &["expression", "description", "strict"])
+                && entry
+                    .get("description")
+                    .is_none_or(|value| value.as_str().is_some())
+                && entry
+                    .get("strict")
+                    .is_none_or(|value| value.as_bool() == Some(true))
                 && entry
                     .get("expression")
                     .and_then(|value| value.as_str())
@@ -353,6 +372,20 @@ fn custom_check_config_is_representable(config: &serde_json::Value) -> bool {
         .get("expression")
         .and_then(|value| value.as_str())
         .is_some()
+        && config
+            .get("description")
+            .is_none_or(|value| value.as_str().is_some())
+}
+
+fn require_packages_config_is_representable(config: &serde_json::Value) -> bool {
+    object_keys_are_subset(config, &["packages", "strict"])
+        && config
+            .get("packages")
+            .and_then(|value| value.as_array())
+            .is_some_and(|items| items.iter().all(|item| item.as_str().is_some()))
+        && config
+            .get("strict")
+            .is_none_or(|value| value.as_bool() == Some(true))
 }
 
 fn save_blocker(
@@ -381,6 +414,16 @@ fn save_blocker(
     {
         return Some(
             "This custom policy uses JSON fields this form cannot preserve yet; edit it in the raw policy editor after backend parity lands."
+                .to_string(),
+        );
+    }
+
+    if is_editing
+        && existing_type == "require_packages"
+        && !require_packages_config_is_representable(existing_config)
+    {
+        return Some(
+            "This package policy uses backend fields this form cannot preserve yet; edit it in the raw policy editor after backend parity lands."
                 .to_string(),
         );
     }
@@ -1356,5 +1399,59 @@ mod tests {
         let rules = rules_from_policy("custom_check", &config);
 
         assert!(save_blocker(true, PolicyFormat::Json, "custom_check", &config, &rules).is_some());
+    }
+
+    #[test]
+    fn custom_check_extra_top_level_field_is_blocked() {
+        let config = serde_json::json!({
+            "rules": [
+                { "expression": "config.foo", "description": "foo", "strict": true }
+            ],
+            "mode": "all",
+            "strict": true,
+            "metadata": { "control": "AC-3" }
+        });
+        let rules = rules_from_policy("custom_check", &config);
+
+        assert!(save_blocker(true, PolicyFormat::Json, "custom_check", &config, &rules).is_some());
+    }
+
+    #[test]
+    fn custom_check_extra_rule_field_is_blocked() {
+        let config = serde_json::json!({
+            "rules": [
+                {
+                    "expression": "config.foo",
+                    "description": "foo",
+                    "strict": true,
+                    "remediation": "enable foo"
+                }
+            ],
+            "mode": "all",
+            "strict": true
+        });
+        let rules = rules_from_policy("custom_check", &config);
+
+        assert!(save_blocker(true, PolicyFormat::Json, "custom_check", &config, &rules).is_some());
+    }
+
+    #[test]
+    fn require_packages_strict_false_is_blocked() {
+        let config = serde_json::json!({
+            "packages": ["openssh", "auditd"],
+            "strict": false
+        });
+        let rules = rules_from_policy("require_packages", &config);
+
+        assert!(
+            save_blocker(
+                true,
+                PolicyFormat::Json,
+                "require_packages",
+                &config,
+                &rules
+            )
+            .is_some()
+        );
     }
 }
