@@ -1,10 +1,10 @@
 ---
 id: TASK-336.2
 title: 'Admin Server: view parity + real server settings flows'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-06-20 02:19'
-updated_date: '2026-06-20 02:21'
+updated_date: '2026-06-20 02:33'
 labels:
   - design-parity
   - admin
@@ -100,4 +100,6 @@ Medium-high. The task touches an Admin/Server surface where incorrect placeholde
 
 <!-- SECTION:NOTES:BEGIN -->
 Sprint-ready grooming completed at owner request: added explicit verification plan, clarified parent umbrella is contextual rather than execution-blocking, removed dependency blocker, and moved task to To Do.
+
+LOCK: claude-sonnet-4-6 on reckless in /home/mcamp/code/crystal-forge/TASK-336.2-admin-server-parity
 <!-- SECTION:NOTES:END -->
