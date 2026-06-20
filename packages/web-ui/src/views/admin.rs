@@ -9,9 +9,10 @@ use crate::api::client::{
 };
 use crate::api::models::{
     AdminAuditEventsParams, AdminCreateUserRequest, AdminUpdateUserRequest,
-    AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, IdentitySource, OidcGroupMapping,
-    Role,
+    AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, AuthMode, IdentitySource,
+    OidcGroupMapping, Role,
 };
+use crate::state::app_state::AppState;
 use crate::theme;
 
 const AUDIT_PER_PAGE: i64 = 20;
@@ -262,6 +263,7 @@ const ENVIRONMENTS_MOCK: &[EnvironmentDef] = &[
 #[component]
 pub fn AdminView() -> Element {
     let nav = navigator();
+    let app_state = use_context::<Signal<AppState>>();
     let mut users = use_signal(Vec::<AdminUserSummary>::new);
     let mut user_drafts = use_signal(HashMap::<String, UserEditDraft>::new);
 
@@ -380,7 +382,10 @@ pub fn AdminView() -> Element {
             }
 
             // ── Server info strip ──────────────────────────────────────────
-            ServerInfoStrip { users: users.read().clone() }
+            ServerInfoStrip {
+                users: users.read().clone(),
+                auth_mode: app_state.read().auth.as_ref().map(|a| a.auth_mode).unwrap_or(AuthMode::Local)
+            }
 
             // ── Tab card ─────────────────────────────────────────────────────
             div { class: "card", style: "overflow:hidden;",
@@ -471,9 +476,15 @@ pub fn AdminView() -> Element {
 // ============================================================================
 
 #[component]
-fn ServerInfoStrip(users: Vec<AdminUserSummary>) -> Element {
+fn ServerInfoStrip(users: Vec<AdminUserSummary>, auth_mode: AuthMode) -> Element {
     let s = &SERVER_INFO_MOCK;
     let active_users = users.iter().filter(|u| u.enabled).count();
+
+    let auth_mode_label = match auth_mode {
+        AuthMode::Dev => "Dev",
+        AuthMode::Local => "Local",
+        AuthMode::Oidc => "OIDC",
+    };
 
     rsx! {
         div { class: "stat-strip",
@@ -486,7 +497,7 @@ fn ServerInfoStrip(users: Vec<AdminUserSummary>) -> Element {
             div { class: "stat",
                 span { class: "stat-accent", style: "--stat-color:#34d399;" }
                 div { class: "stat-label", "Auth mode" }
-                div { class: "stat-value", style: "font-size:16px;", "{s.auth_mode}" }
+                div { class: "stat-value", style: "font-size:16px;", "{auth_mode_label}" }
                 div { class: "stat-meta", "{active_users} active users" }
             }
             div { class: "stat",
@@ -692,7 +703,7 @@ fn UsersTab(
                                                     title: "Edit",
                                                     svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                                                         circle { cx: "12", cy: "12", r: "3" }
-                                                        path { d: "M12 1v6M12 17v6M3.51 9h6M14.51 9h6M6 20.51l3-3M15 11.51l3-3M3.51 15h6M14.51 15h6M6 3.51l3 3M15 12.51l3 3" }
+                                                        path { d: "M12 2v3m0 14v3m9-9h-3M6 12H3m15.66-6.66l-2.12 2.12M8.46 15.54l-2.12 2.12m12.02 0l-2.12-2.12M8.46 8.46L6.34 6.34" }
                                                     }
                                                 }
                                             }
@@ -1420,32 +1431,60 @@ fn get_audit_action_color(
 ) -> (&'static str, &'static str, &'static str) {
     use crate::api::models::AuditAction;
     match action {
-        AuditAction::UserCreated | AuditAction::UserDeleted | AuditAction::UserRoleAssigned => {
-            ("#f87171", "chip-critical", "security")
+        AuditAction::UserCreated
+        | AuditAction::UserCreate
+        | AuditAction::UserDeleted
+        | AuditAction::UserRoleAssigned
+        | AuditAction::BuilderRotateKey
+        | AuditAction::PolicyEdit
+        | AuditAction::CveAccept => ("#f87171", "chip-critical", "security"),
+        AuditAction::SystemDeployRequested
+        | AuditAction::SystemDeploy
+        | AuditAction::SystemRollbackRequested
+        | AuditAction::SystemRollback => ("#a78bfa", "chip-info", "deploy"),
+        AuditAction::BuildComplete | AuditAction::EvalCancel | AuditAction::CveScanRequested => {
+            ("#60a5fa", "chip-info", "build")
         }
-        AuditAction::SystemDeployRequested | AuditAction::SystemRollbackRequested => {
-            ("#a78bfa", "chip-info", "deploy")
+        AuditAction::SessionInvalidated | AuditAction::AuthLogin | AuditAction::AuthLoginDenied => {
+            ("#fbbf24", "chip-warning", "auth")
         }
-        AuditAction::SessionInvalidated => ("#fbbf24", "chip-warning", "auth"),
+        AuditAction::FlakeSync | AuditAction::CacheCreate | AuditAction::OidcMappingChanged => {
+            ("var(--cf-text-secondary)", "chip-unknown", "config")
+        }
         _ => ("var(--cf-text-primary)", "chip-unknown", "config"),
     }
 }
 
-fn format_action_label(action: &crate::api::models::AuditAction) -> &'static str {
+fn format_action_label(action: &crate::api::models::AuditAction) -> String {
     use crate::api::models::AuditAction;
     match action {
-        AuditAction::UserCreated => "user.create",
-        AuditAction::UserUpdated => "user.update",
-        AuditAction::UserDeleted => "user.delete",
-        AuditAction::UserEnabled => "user.enable",
-        AuditAction::UserDisabled => "user.disable",
-        AuditAction::UserRoleAssigned => "user.role_change",
-        AuditAction::UserEnvironmentMembershipUpdated => "user.env_change",
-        AuditAction::OidcMappingChanged => "oidc.mapping_edit",
-        AuditAction::SystemSyncRequested => "system.sync",
-        AuditAction::SystemDeployRequested => "system.deploy",
-        AuditAction::SystemRollbackRequested => "system.rollback",
-        AuditAction::SessionInvalidated => "auth.session_kill",
+        AuditAction::UserCreated | AuditAction::UserCreate => "user.create".to_string(),
+        AuditAction::UserUpdated => "user.update".to_string(),
+        AuditAction::UserDeleted => "user.delete".to_string(),
+        AuditAction::UserEnabled => "user.enable".to_string(),
+        AuditAction::UserDisabled => "user.disable".to_string(),
+        AuditAction::UserRoleAssigned => "user.role_change".to_string(),
+        AuditAction::UserEnvironmentMembershipUpdated => "user.env_change".to_string(),
+        AuditAction::OidcMappingChanged => "oidc.mapping_edit".to_string(),
+        AuditAction::SystemSyncRequested => "system.sync".to_string(),
+        AuditAction::SystemDeployRequested | AuditAction::SystemDeploy => {
+            "system.deploy".to_string()
+        }
+        AuditAction::SystemRollbackRequested | AuditAction::SystemRollback => {
+            "system.rollback".to_string()
+        }
+        AuditAction::SessionInvalidated => "auth.session_kill".to_string(),
+        AuditAction::CveScanRequested => "cve.scan".to_string(),
+        AuditAction::CveAccept => "cve.accept".to_string(),
+        AuditAction::BuilderRotateKey => "builder.rotate_key".to_string(),
+        AuditAction::FlakeSync => "flake.sync".to_string(),
+        AuditAction::EvalCancel => "eval.cancel".to_string(),
+        AuditAction::CacheCreate => "cache.create".to_string(),
+        AuditAction::PolicyEdit => "policy.edit".to_string(),
+        AuditAction::BuildComplete => "build.complete".to_string(),
+        AuditAction::AuthLogin => "auth.login".to_string(),
+        AuditAction::AuthLoginDenied => "auth.login_denied".to_string(),
+        AuditAction::Unknown => "unknown".to_string(),
     }
 }
 

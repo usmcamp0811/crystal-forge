@@ -1657,7 +1657,7 @@ pub enum IdentitySource {
 }
 
 /// Audit event action classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditAction {
     UserCreated,
@@ -1672,6 +1672,21 @@ pub enum AuditAction {
     SystemDeployRequested,
     SystemRollbackRequested,
     SessionInvalidated,
+    CveScanRequested,
+    BuilderRotateKey,
+    FlakeSync,
+    EvalCancel,
+    CacheCreate,
+    PolicyEdit,
+    UserCreate,
+    SystemRollback,
+    AuthLogin,
+    AuthLoginDenied,
+    BuildComplete,
+    CveAccept,
+    SystemDeploy,
+    #[serde(other)]
+    Unknown,
 }
 
 /// Admin audit log entry.
