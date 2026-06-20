@@ -192,6 +192,649 @@ pub fn AdminView() -> Element {
                         span { style: "color:var(--cf-text-muted);font-size:11px;", "not implemented yet" }
                     }
                 }
+                }
+
+            // ── Tab card ─────────────────────────────────────────────────────
+            div { class: "card", style: "overflow:hidden;",
+                // ── Tab bar ──────────────────────────────────────────────────
+                div { class: "sd-tabs",
+                    for tab_id in ["users", "roles", "oidc", "jobs", "audit", "server"] {
+                        {
+                            let tab_label = match tab_id {
+                                "users" => "Users",
+                                "roles" => "Roles",
+                                "oidc" => "OIDC",
+                                "jobs" => "Background Jobs",
+                                "audit" => "Audit Log",
+                                "server" => "Server",
+                                _ => "?",
+                            };
+                            let is_active = *active_tab.read() == tab_id;
+                            let btn_class = if is_active { "sd-tab active" } else { "sd-tab" };
+                            rsx! {
+                                button {
+                                    class: "{btn_class}",
+                                    onclick: {
+                                        let id = tab_id.to_string();
+                                        move |_| active_tab.set(id.clone())
+                                    },
+                                    "{tab_label}"
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Users tab ────────────────────────────────────────────────
+                if active_tab.read().as_str() == "users" {
+                div { style: "padding:16px;",
+                // Info notes
+                p { class: "text-xs", style: "color:var(--cf-text-muted);margin:0 0 4px;",
+                    "Role and environment membership changes take effect after the user signs in again."
+                }
+                p { class: "text-xs", style: "color:var(--cf-text-muted);margin:0 0 4px;",
+                    "Users sourced from OIDC are IdP-derived and their role/memberships are managed through OIDC group mappings."
+                }
+                p { class: "text-xs", style: "color:var(--cf-text-muted);margin:0 0 16px;",
+                    "Environment entries must be exact names (comma-separated); wildcard patterns are not supported."
+                }
+
+                // Create user form
+                div {
+                    class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-4",
+                    h3 { class: "text-sm font-semibold text-white", "Create user" }
+                    div {
+                        class: "grid gap-4 sm:grid-cols-2 xl:grid-cols-5",
+                        div {
+                            class: "space-y-1",
+                            label { class: "text-xs font-medium {theme::text::MUTED}", "Email" }
+                            input {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "email",
+                                placeholder: "user@example.com",
+                                value: "{create_email.read()}",
+                                oninput: move |evt| create_email.set(evt.value())
+                            }
+                        }
+                        div {
+                            class: "space-y-1",
+                            label { class: "text-xs font-medium {theme::text::MUTED}", "Display Name" }
+                            input {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "text",
+                                placeholder: "Optional",
+                                value: "{create_display_name.read()}",
+                                oninput: move |evt| create_display_name.set(evt.value())
+                            }
+                        }
+                        div {
+                            class: "space-y-1",
+                            label { class: "text-xs font-medium {theme::text::MUTED}", "Initial Password" }
+                            input {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "password",
+                                placeholder: "Min 8 characters",
+                                value: "{create_password.read()}",
+                                oninput: move |evt| create_password.set(evt.value())
+                            }
+                        }
+                        div {
+                            class: "space-y-1",
+                            label { class: "text-xs font-medium {theme::text::MUTED}", "Role" }
+                            select {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                                value: "{create_role.read()}",
+                                onchange: move |evt| create_role.set(evt.value()),
+                                option { value: "Admin", "Admin" }
+                                option { value: "Operator", "Operator" }
+                                option { value: "Viewer", "Viewer" }
+                            }
+                        }
+                        div {
+                            class: "space-y-1",
+                            label { class: "text-xs font-medium {theme::text::MUTED}", "Environments" }
+                            input {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "text",
+                                placeholder: "prod, staging (comma-separated)",
+                                value: "{create_environments.read()}",
+                                oninput: move |evt| create_environments.set(evt.value())
+                            }
+                        }
+                    }
+                    div {
+                        class: "flex justify-end pt-2",
+                        button {
+                            class: "rounded-lg px-3 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                            disabled: *create_submitting.read(),
+                            onclick: move |_| {
+                                let email = create_email.read().clone();
+                                let display_name = create_display_name.read().clone();
+                                let password = create_password.read().clone();
+                                let role = role_from_string(&create_role.read());
+                                let environments = match validate_and_parse_environments(&create_environments.read()) {
+                                    Ok(value) => value,
+                                    Err(message) => {
+                                        users_error.set(Some(message));
+                                        return;
+                                    }
+                                };
+
+                                let request = AdminCreateUserRequest {
+                                    email,
+                                    display_name: optional_value(display_name),
+                                    password: optional_value(password),
+                                    role,
+                                    environments,
+                                };
+
+                                let mut users = users.clone();
+                                let mut user_drafts = user_drafts.clone();
+                                let mut users_error = users_error.clone();
+                                let mut create_submitting = create_submitting.clone();
+                                let mut create_email = create_email.clone();
+                                let mut create_display_name = create_display_name.clone();
+                                let mut create_password = create_password.clone();
+                                let mut create_environments = create_environments.clone();
+
+                                create_submitting.set(true);
+                                spawn(async move {
+                                    match create_admin_user(&request).await {
+                                        Ok(_) => {
+                                            refresh_users(users, user_drafts, users_error).await;
+                                            create_email.set(String::new());
+                                            create_display_name.set(String::new());
+                                            create_password.set(String::new());
+                                            create_environments.set(String::new());
+                                        }
+                                        Err(e) => users_error.set(Some(format!("Failed to create user: {e}"))),
+                                    }
+                                    create_submitting.set(false);
+                                });
+                            },
+                            if *create_submitting.read() { "Creating..." } else { "Create user" }
+                        }
+                    }
+                }
+
+                // Search / filter
+                div {
+                    class: "grid gap-3 sm:grid-cols-2 lg:grid-cols-4",
+                    input {
+                        class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                        r#type: "text",
+                        placeholder: "Search users...",
+                        value: "{user_search.read()}",
+                        oninput: move |evt| user_search.set(evt.value())
+                    }
+                    select {
+                        class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                        value: "{user_status_filter.read()}",
+                        onchange: move |evt| user_status_filter.set(evt.value()),
+                        option { value: "all", "All statuses" }
+                        option { value: "enabled", "Enabled only" }
+                        option { value: "disabled", "Disabled only" }
+                    }
+                }
+
+                // User table
+                if users_render_state_with_data(
+                    *users_loading.read(),
+                    users_error.read().as_deref(),
+                    !users.read().is_empty(),
+                )
+                    == UsersRenderState::Loading
+                {
+                    div { class: "text-sm", style: "color:var(--cf-text-muted);", "Loading users..." }
+                } else if users_render_state_with_data(
+                    *users_loading.read(),
+                    users_error.read().as_deref(),
+                    !users.read().is_empty(),
+                )
+                    == UsersRenderState::Error
+                {
+                    div {
+                        class: "rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-3 text-sm text-red-200",
+                        "{users_error_message(users_error.read().clone())}"
+                    }
+                } else {
+                    if let Some(message) = users_error.read().clone() {
+                        div {
+                            class: "mb-3 rounded-lg border border-amber-500/40 bg-amber-950/30 px-4 py-3 text-sm text-amber-200",
+                            "{message}"
+                        }
+                    }
+                    div {
+                        class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm bg-gray-900/60",
+                        div {
+                            class: "overflow-x-auto",
+                            table {
+                                class: "w-full text-sm",
+                                thead {
+                                    class: "{theme::surface::SUBTLE_BG}",
+                                    tr {
+                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Identifier" }
+                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Source" }
+                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Role" }
+                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Status" }
+                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Environments" }
+                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Updated" }
+                                        th { class: "px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider", "Actions" }
+                                    }
+                                }
+                                tbody {
+                                    class: "divide-y {theme::surface::DIVIDER}",
+                                for user in filtered_admin_users(
+                                    &users.read(),
+                                    &user_search.read(),
+                                    &user_status_filter.read(),
+                                ) {
+                                    {
+                                        let user_id = user.id.clone();
+                                        let draft = user_drafts
+                                            .read()
+                                            .get(&user_id)
+                                            .cloned()
+                                            .unwrap_or_else(|| UserEditDraft::from_user(&user));
+
+                                        rsx! {
+                                            tr {
+                                                class: "hover:bg-gray-800/40 transition",
+                                                td { class: "px-4 py-3 text-sm text-white", {user.identifier.clone()} }
+                                                td {
+                                                    class: "px-4 py-3",
+                                                    span {
+                                                        class: "inline-flex rounded-md px-2.5 py-1 text-xs font-medium {identity_source_badge_class(user.identity_source)}",
+                                                        "{identity_source_label(user.identity_source)}"
+                                                    }
+                                                }
+                                                td {
+                                                    class: "px-4 py-3",
+                                                    {
+                                                        let is_oidc_derived = user.identity_source == IdentitySource::OidcDerived;
+                                                        rsx! {
+                                                    select {
+                                                        class: "rounded-md border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-2 py-1 text-xs text-white",
+                                                        value: "{draft.role}",
+                                                        disabled: is_oidc_derived,
+                                                        onchange: {
+                                                            let mut user_drafts = user_drafts.clone();
+                                                            let user_id = user_id.clone();
+                                                            move |evt| {
+                                                                let mut drafts = user_drafts.write();
+                                                                if let Some(entry) = drafts.get_mut(&user_id) {
+                                                                    entry.role = evt.value();
+                                                                }
+                                                            }
+                                                        },
+                                                        option { value: "Admin", "Admin" }
+                                                        option { value: "Operator", "Operator" }
+                                                        option { value: "Viewer", "Viewer" }
+                                                    }
+                                                        }
+                                                    }
+                                                }
+                                                td {
+                                                    class: "px-4 py-3",
+                                                    {
+                                                        let is_oidc_derived = user.identity_source == IdentitySource::OidcDerived;
+                                                        rsx! {
+                                                    label { class: "inline-flex items-center gap-2 text-xs {theme::text::SECONDARY}",
+                                                        input {
+                                                            r#type: "checkbox",
+                                                            checked: draft.enabled,
+                                                            disabled: is_oidc_derived,
+                                                            onchange: {
+                                                                let mut user_drafts = user_drafts.clone();
+                                                                let user_id = user_id.clone();
+                                                                move |evt| {
+                                                                    let mut drafts = user_drafts.write();
+                                                                    if let Some(entry) = drafts.get_mut(&user_id) {
+                                                                        entry.enabled = evt.checked();
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if draft.enabled { "Enabled" } else { "Disabled" }
+                                                    }
+                                                        }
+                                                    }
+                                                }
+                                                td {
+                                                    class: "px-4 py-3",
+                                                    input {
+                                                        class: "w-full rounded-md border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-2 py-1 text-xs text-white",
+                                                        r#type: "text",
+                                                        value: "{draft.environments}",
+                                                        disabled: user.identity_source == IdentitySource::OidcDerived,
+                                                        oninput: {
+                                                            let mut user_drafts = user_drafts.clone();
+                                                            let user_id = user_id.clone();
+                                                            move |evt| {
+                                                                let mut drafts = user_drafts.write();
+                                                                if let Some(entry) = drafts.get_mut(&user_id) {
+                                                                    entry.environments = evt.value();
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                td { class: "px-4 py-3 {theme::text::MUTED}", {format_time(user.updated_at)} }
+                                                td {
+                                                    class: "px-4 py-3",
+                                                    div {
+                                                        class: "flex items-center gap-2",
+                                                        button {
+                                                            class: "rounded-md bg-gray-700 border {theme::surface::CARD_BORDER} px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
+                                                            disabled: user.identity_source == IdentitySource::OidcDerived,
+                                                            onclick: {
+                                                                let user_id = user_id.clone();
+                                                                let mut users = users.clone();
+                                                                let mut user_drafts = user_drafts.clone();
+                                                                let mut users_error = users_error.clone();
+                                                                move |_| {
+                                                                    let draft = user_drafts
+                                                                        .read()
+                                                                        .get(&user_id)
+                                                                        .cloned();
+                                                                    let Some(draft) = draft else {
+                                                                        return;
+                                                                    };
+
+                                                                    let environments = match validate_and_parse_environments(&draft.environments) {
+                                                                        Ok(value) => value,
+                                                                        Err(message) => {
+                                                                            users_error.set(Some(message));
+                                                                            return;
+                                                                        }
+                                                                    };
+
+                                                                    let request = AdminUpdateUserRequest {
+                                                                        role: Some(role_from_string(&draft.role)),
+                                                                        enabled: Some(draft.enabled),
+                                                                        environments: Some(environments),
+                                                                        password: None,
+                                                                    };
+
+                                                                    let user_id = user_id.clone();
+                                                                    let mut users = users.clone();
+                                                                    let mut user_drafts = user_drafts.clone();
+                                                                    let mut users_error = users_error.clone();
+                                                                    spawn(async move {
+                                                                        match update_admin_user(&user_id, &request).await {
+                                                                            Ok(_) => refresh_users(users, user_drafts, users_error).await,
+                                                                            Err(e) => users_error.set(Some(format!("Failed to update user: {e}"))),
+                                                                        }
+                                                                    });
+                                                                }
+                                                            },
+                                                            if user.identity_source == IdentitySource::OidcDerived {
+                                                                "IdP managed"
+                                                            } else {
+                                                                "Save"
+                                                            }
+                                                        }
+                                                        // Reset password button
+                                                        if user.identity_source == IdentitySource::LocalManaged {
+                                                            button {
+                                                                class: "rounded-md bg-gray-700 border {theme::surface::CARD_BORDER} px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-600 transition-colors",
+                                                                onclick: {
+                                                                    let user_clone = user.clone();
+                                                                    move |_| {
+                                                                        reset_password_user.set(Some(user_clone.clone()));
+                                                                        reset_password_value.set(String::new());
+                                                                        reset_password_error.set(None);
+                                                                    }
+                                                                },
+                                                                "Reset Password"
+                                                            }
+                                                        }
+                                                        button {
+                                                            class: "rounded-md bg-red-900/60 border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-800/60 transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
+                                                            disabled: user.identity_source == IdentitySource::OidcDerived,
+                                                            onclick: {
+                                                                let user_id = user_id.clone();
+                                                                let identifier = user.identifier.clone();
+                                                                let mut users = users.clone();
+                                                                let mut user_drafts = user_drafts.clone();
+                                                                let mut users_error = users_error.clone();
+                                                                move |_| {
+                                                                    if !confirm_user_delete(&identifier) {
+                                                                        return;
+                                                                    }
+
+                                                                    let user_id = user_id.clone();
+                                                                    let mut users = users.clone();
+                                                                    let mut user_drafts = user_drafts.clone();
+                                                                    let mut users_error = users_error.clone();
+                                                                    spawn(async move {
+                                                                        match delete_admin_user(&user_id).await {
+                                                                            Ok(_) => refresh_users(users, user_drafts, users_error).await,
+                                                                            Err(e) => users_error.set(Some(format!("Failed to delete user: {e}"))),
+                                                                        }
+                                                                    });
+                                                                }
+                                                            },
+                                                            "Delete"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                }
+                }
+                } // end users tab
+
+                // ── Roles tab ────────────────────────────────────────────────
+                if active_tab.read().as_str() == "roles" {
+                div { style: "padding:16px;",
+                    div { class: "sd-callout sd-callout-info", style: "font-size:12px;",
+                        svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                            circle { cx: "12", cy: "12", r: "10" }
+                            line { x1: "12", y1: "16", x2: "12", y2: "12" }
+                            line { x1: "12", y1: "8", x2: "12.01", y2: "8" }
+                        }
+                        div {
+                            "Role definitions and role-based access control (RBAC) configuration. "
+                            span { style: "color:var(--cf-text-muted);", "Not implemented yet — tracked in TASK-336.4." }
+                        }
+                    }
+                }
+                } // end roles tab
+
+                // ── OIDC tab ─────────────────────────────────────────────────
+                if active_tab.read().as_str() == "oidc" {
+                div { style: "padding:16px;",
+                // OIDC description
+                p { class: "text-xs", style: "color:var(--cf-text-muted);margin:0 0 16px;",
+                    "Map OIDC identity provider groups to Crystal Forge roles and environment access. When users authenticate via OIDC, their group memberships determine their permissions."
+                }
+
+                // Add new mapping form
+                div {
+                    class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-4",
+                    h3 { class: "text-sm font-semibold text-white", "Add new mapping" }
+                    div {
+                        class: "grid gap-4 sm:grid-cols-3",
+                        div {
+                            class: "space-y-1",
+                            label { class: "text-xs font-medium {theme::text::MUTED}", "IdP Group Name" }
+                            input {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "text",
+                                placeholder: "e.g. admins, devops-team",
+                                value: "{mapping_group.read()}",
+                                oninput: move |evt| mapping_group.set(evt.value())
+                            }
+                        }
+                        div {
+                            class: "space-y-1",
+                            label { class: "text-xs font-medium {theme::text::MUTED}", "Assigned Role" }
+                            select {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                                value: "{mapping_role.read()}",
+                                onchange: move |evt| mapping_role.set(evt.value()),
+                                option { value: "Admin", "Admin" }
+                                option { value: "Operator", "Operator" }
+                                option { value: "Viewer", "Viewer" }
+                            }
+                        }
+                        div {
+                            class: "space-y-1",
+                            label { class: "text-xs font-medium {theme::text::MUTED}", "Environment Access" }
+                            input {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "text",
+                                placeholder: "Leave empty for all, or: prod, staging",
+                                value: "{mapping_environments.read()}",
+                                oninput: move |evt| mapping_environments.set(evt.value())
+                            }
+                        }
+                    }
+                    div {
+                        class: "flex justify-end pt-2",
+                        button {
+                            class: "rounded-lg px-4 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                            disabled: *mapping_submitting.read() || mapping_group.read().trim().is_empty(),
+                            onclick: move |_| {
+                                let environments = match validate_and_parse_environments(&mapping_environments.read()) {
+                                    Ok(value) => value,
+                                    Err(message) => {
+                                        oidc_error.set(Some(message));
+                                        return;
+                                    }
+                                };
+
+                                let request = AdminUpsertOidcMappingRequest {
+                                    group_name: mapping_group.read().clone(),
+                                    role: Some(role_from_string(&mapping_role.read())),
+                                    environments,
+                                };
+
+                                let mut oidc_mappings = oidc_mappings.clone();
+                                let mut oidc_error = oidc_error.clone();
+                                let mut mapping_group = mapping_group.clone();
+                                let mut mapping_environments = mapping_environments.clone();
+                                let mut mapping_submitting = mapping_submitting.clone();
+                                mapping_submitting.set(true);
+
+                                spawn(async move {
+                                    match upsert_admin_oidc_mapping(&request).await {
+                                        Ok(_) => match fetch_admin_oidc_mappings().await {
+                                            Ok(next) => {
+                                                oidc_mappings.set(next);
+                                                oidc_error.set(None);
+                                                mapping_group.set(String::new());
+                                                mapping_environments.set(String::new());
+                                            }
+                                            Err(e) => {
+                                                oidc_error.set(Some(format!("Failed to reload OIDC mappings: {e}")));
+                                            }
+                                        },
+                                        Err(e) => oidc_error.set(Some(format!("Failed to save OIDC mapping: {e}"))),
+                                    }
+                                    mapping_submitting.set(false);
+                                });
+                            },
+                            if *mapping_submitting.read() { "Saving..." } else { "Save mapping" }
+                        }
+                    }
+                }
+
+                if let Some(message) = oidc_error.read().clone() {
+                    div {
+                        class: "rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-3 text-sm text-red-200",
+                        "{message}"
+                    }
+                }
+
+                // OIDC mappings table
+                div {
+                    class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm bg-gray-900/60",
+                    div {
+                        class: "overflow-x-auto",
+                        table {
+                            class: "w-full text-sm",
+                            thead {
+                                class: "{theme::surface::SUBTLE_BG}",
+                                tr {
+                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Group" }
+                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Role" }
+                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Environments" }
+                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Updated" }
+                                    th { class: "px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider", "Actions" }
+                                }
+                            }
+                            tbody {
+                                class: "divide-y {theme::surface::DIVIDER}",
+                                for mapping in oidc_mappings.read().iter() {
+                                    tr {
+                                        class: "hover:bg-gray-800/40 transition",
+                                        td { class: "px-4 py-3 text-sm text-white", "{mapping.group_name}" }
+                                        td { class: "px-4 py-3 text-sm {theme::text::SECONDARY}", "{editable_role_label(mapping.role)}" }
+                                        td { class: "px-4 py-3 text-sm text-slate-300", "{format_environments(&mapping.environments)}" }
+                                        td { class: "px-4 py-3 text-sm {theme::text::MUTED}", "{format_time(mapping.updated_at)}" }
+                                        td {
+                                            class: "px-4 py-3 text-right",
+                                            button {
+                                                class: "rounded-md bg-red-900/60 border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-800/60 transition-colors",
+                                                onclick: {
+                                                    let mapping_id = mapping.id.clone();
+                                                    let mut oidc_mappings = oidc_mappings.clone();
+                                                    let mut oidc_error = oidc_error.clone();
+                                                    move |_| {
+                                                        let mapping_id = mapping_id.clone();
+                                                        let mut oidc_mappings = oidc_mappings.clone();
+                                                        let mut oidc_error = oidc_error.clone();
+                                                        spawn(async move {
+                                                            match delete_admin_oidc_mapping(&mapping_id).await {
+                                                                Ok(()) => match fetch_admin_oidc_mappings().await {
+                                                                    Ok(next) => {
+                                                                        oidc_mappings.set(next);
+                                                                        oidc_error.set(None);
+                                                                    }
+                                                                    Err(e) => {
+                                                                        oidc_error.set(Some(format!("Failed to reload OIDC mappings: {e}")));
+                                                                    }
+                                                                },
+                                                                Err(e) => oidc_error.set(Some(format!("Failed to delete OIDC mapping: {e}"))),
+                                                            }
+                                                        });
+                                                    }
+                                                },
+                                                "Delete"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                }
+                } // end oidc tab
+
+                // ── Background Jobs tab ───────────────────────────────────────
+                if active_tab.read().as_str() == "jobs" {
+                div { style: "padding:16px;",
+                    div { class: "sd-callout sd-callout-info", style: "font-size:12px;",
+                        svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                            circle { cx: "12", cy: "12", r: "10" }
+                            line { x1: "12", y1: "16", x2: "12", y2: "12" }
+                            line { x1: "12", y1: "8", x2: "12.01", y2: "8" }
+                        }
+                        div {
+                            "Background job queue and execution history — syncs, rollbacks, and maintenance tasks. "
+                            span { style: "color:var(--cf-text-muted);", "Not implemented yet — tracked in TASK-336.5." }
+                        }
+                    }
+                }
                 } // end jobs tab
 
                 // ── Audit Log tab ───────────────────────────────────────────
@@ -345,6 +988,7 @@ pub fn AdminView() -> Element {
                             }
                         }
                     }
+                }
                 }
                 }
                 } // end audit tab
