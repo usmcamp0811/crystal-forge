@@ -3,9 +3,9 @@ id: TASK-364
 title: 'Builders: bring Builders view to CrystalForgelatest parity'
 status: In Progress
 assignee:
-  - opencode-agent
+  - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-20 02:32'
+updated_date: '2026-06-20 03:08'
 labels:
   - design-parity
   - builders
@@ -24,6 +24,7 @@ modified_files:
   - packages/web-ui/src/components/builders/add_builder_modal.rs
   - packages/web-ui/src/components/builders/builder_card.rs
   - packages/web-ui/src/components/builders/builder_row.rs
+  - packages/web-ui/src/components/builders/builders_list.rs
   - checks/web-ui/tests/integration-test.js
 priority: high
 ordinal: 1785
@@ -85,9 +86,3 @@ This task is sprint-selected and ready for execution, but it is not implemented 
 - [ ] #6 Targeted formatting and web-ui compile checks pass
 - [ ] #7 `nix build .#checks.x86_64-linux.web-ui -L` passes or any unrelated existing failures are explicitly documented with the Builders steps passing
 <!-- AC:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-Progress update: first implementation pass committed locally as `b97e3dd2` in `/home/mcamp/code/crystal-forge/TASK-364-builders-view-parity`. Changes: matched the reference `Register builder` CTA, narrowed Builders status filters to the reference set (`all`, `running`, `paused`, `offline`), stopped displaying fabricated `0` values for unavailable 24h build/load metrics, and strengthened Builders web-ui assertions with deterministic real-shaped builder list/detail/environment fixtures. Verification run so far: `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check`, `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`, and `node --check checks/web-ui/tests/integration-test.js`. A full web-ui screenshot check was run once during iteration; `11b-builders` passed, `11c-builders-edit-modal` exposed a fixture gap that was fixed afterward without rerunning the full check per maintainer preference to avoid repeated expensive runs. Final MR still needs a one-time web-ui screenshot check before Review.
-<!-- SECTION:NOTES:END -->
