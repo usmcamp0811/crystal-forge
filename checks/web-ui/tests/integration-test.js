@@ -1982,7 +1982,7 @@ const steps = [
       await page.goto(`${baseUrl}/builders`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
-      await page.locator("button:has-text('Add Builder')").first().click();
+      await page.locator("button:has-text('Register builder')").first().click();
       await page.waitForTimeout(800);
 
       await assertVisible(
@@ -2011,7 +2011,7 @@ const steps = [
         "Expected resource guidance callout after name and key are filled",
       );
 
-      await page.locator("button:has-text('Create Builder')").click();
+      await page.locator(".modal button:has-text('Register builder')").click();
       await page.waitForTimeout(2000);
 
       const builderReminderModal = page.locator("[data-testid='setup-coach-builder-runtime-reminder-modal']");
