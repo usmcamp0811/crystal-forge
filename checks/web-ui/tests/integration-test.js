@@ -2852,7 +2852,18 @@ const steps = [
     action: async (page) => {
       await routeBuildsData(page);
       try {
-        await page.goto(`${baseUrl}/builders`, { timeout: LOAD_TIMEOUT });
+        const viewerPage = await page.context().newPage();
+        await routeBuildsData(viewerPage);
+        try {
+          await viewerPage.goto(`${baseUrl}/builders?ui_check_auth=1&ui_check_role=viewer`, { timeout: LOAD_TIMEOUT });
+          await viewerPage.waitForTimeout(1000);
+          await assertHidden(viewerPage.getByRole("button", { name: /Register builder/i }).first(), "Expected viewer role to hide builder registration CTA");
+        } finally {
+          await unrouteBuildsData(viewerPage);
+          await viewerPage.close();
+        }
+
+        await page.goto(`${baseUrl}/builders?ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
         await page.waitForTimeout(1500);
 
         await assertVisible(page.getByRole("heading", { name: "Builders" }).first(), "Expected Builders page heading");
@@ -2882,8 +2893,10 @@ const steps = [
     action: async (page) => {
       await routeBuildsData(page);
       try {
-        await page.goto(`${baseUrl}/builders`, { timeout: LOAD_TIMEOUT });
+        await page.goto(`${baseUrl}/builders?ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
         await page.waitForTimeout(1500);
+
+        await assertVisible(page.getByRole("button", { name: /Register builder/i }).first(), "Expected admin builder registration CTA before editing");
 
         await page.getByRole("button", { name: /Table/i }).first().click();
 

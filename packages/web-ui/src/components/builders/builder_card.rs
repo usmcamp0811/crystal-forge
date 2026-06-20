@@ -23,7 +23,11 @@ fn builder_status_chip(builder: &BuilderSummary) -> Element {
 }
 
 #[component]
-pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element {
+pub fn BuilderCard(
+    builder: BuilderSummary,
+    can_manage: bool,
+    on_edit: EventHandler<()>,
+) -> Element {
     let slot_pct = if builder.max_concurrent_jobs > 0 {
         ((builder.active_jobs as f64 / builder.max_concurrent_jobs as f64) * 100.0).round() as i32
     } else {
@@ -170,15 +174,17 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                         "24h metrics unavailable"
                     }
                 }
-                button {
-                    class: "btn btn-subtle focus-ring",
-                    style: "padding: 4px 10px; font-size: 12px;",
-                    onclick: move |e| {
-                        e.stop_propagation();
-                        on_edit.call(())
-                    },
-                    Icon { name: IconName::Gear, size: 12 }
-                    " Edit"
+                if can_manage {
+                    button {
+                        class: "btn btn-subtle focus-ring",
+                        style: "padding: 4px 10px; font-size: 12px;",
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            on_edit.call(())
+                        },
+                        Icon { name: IconName::Gear, size: 12 }
+                        " Edit"
+                    }
                 }
             }
         }

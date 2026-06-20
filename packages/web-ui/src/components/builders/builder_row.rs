@@ -23,7 +23,7 @@ fn builder_status_chip(builder: &BuilderSummary) -> Element {
 }
 
 #[component]
-pub fn BuilderRow(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element {
+pub fn BuilderRow(builder: BuilderSummary, can_manage: bool, on_edit: EventHandler<()>) -> Element {
     let slot_pct = if builder.max_concurrent_jobs > 0 {
         ((builder.active_jobs as f64 / builder.max_concurrent_jobs as f64) * 100.0).round() as i32
     } else {
@@ -65,8 +65,12 @@ pub fn BuilderRow(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element
 
     rsx! {
         tr {
-            style: "cursor: pointer;",
-            onclick: move |_| on_edit.call(()),
+            style: if can_manage { "cursor: pointer;" } else { "cursor: default;" },
+            onclick: move |_| {
+                if can_manage {
+                    on_edit.call(())
+                }
+            },
 
             // Builder name + host
             td {
@@ -151,14 +155,16 @@ pub fn BuilderRow(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element
             td {
                 div {
                     class: "row-actions",
-                    button {
-                        class: "btn-icon focus-ring",
-                        title: "Edit",
-                        onclick: move |e| {
-                            e.stop_propagation();
-                            on_edit.call(())
-                        },
-                        Icon { name: IconName::Gear, size: 14 }
+                    if can_manage {
+                        button {
+                            class: "btn-icon focus-ring",
+                            title: "Edit",
+                            onclick: move |e| {
+                                e.stop_propagation();
+                                on_edit.call(())
+                            },
+                            Icon { name: IconName::Gear, size: 14 }
+                        }
                     }
                 }
             }

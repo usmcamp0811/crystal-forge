@@ -6,6 +6,8 @@ use crate::api;
 use crate::components::builders::{AddBuilderModal, EditBuilderModal};
 use crate::components::loading::LoadingSpinner;
 use crate::components::{Icon, IconName};
+use crate::state::app_state::AppState;
+use crate::state::auth;
 
 fn came_from_setup() -> bool {
     if let Some(storage) = web_sys::window()
@@ -30,6 +32,8 @@ enum ViewMode {
 /// Builders management page matching BuildersView.jsx structure.
 #[component]
 pub fn BuildersView() -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let can_manage_builders = auth::is_admin(&app_state.read().auth);
     let mut query = use_signal(String::new);
     let mut status_filter = use_signal(|| "all".to_string());
     let mut arch_filter = use_signal(|| "all".to_string());
@@ -102,12 +106,14 @@ pub fn BuildersView() -> Element {
                         }
                     }
                 }
-                button {
-                    class: "btn btn-primary focus-ring",
-                    "data-coach-target": "builder",
-                    onclick: move |_| show_add_modal.set(true),
-                    Icon { name: IconName::Plus, size: 14 }
-                    " Register builder"
+                if can_manage_builders {
+                    button {
+                        class: "btn btn-primary focus-ring",
+                        "data-coach-target": "builder",
+                        onclick: move |_| show_add_modal.set(true),
+                        Icon { name: IconName::Plus, size: 14 }
+                        " Register builder"
+                    }
                 }
             }
 
@@ -345,6 +351,7 @@ pub fn BuildersView() -> Element {
                                                 BuilderCard {
                                                     key: "{builder.id}",
                                                     builder: builder.clone(),
+                                                    can_manage: can_manage_builders,
                                                     on_edit: move |_| on_edit_builder(builder.id)
                                                 }
                                             }
@@ -380,6 +387,7 @@ pub fn BuildersView() -> Element {
                                                         BuilderRow {
                                                             key: "{builder.id}",
                                                             builder: builder.clone(),
+                                                            can_manage: can_manage_builders,
                                                             on_edit: move |_| on_edit_builder(builder.id)
                                                         }
                                                     }
@@ -405,7 +413,7 @@ pub fn BuildersView() -> Element {
         }
 
         // Modals
-        if show_add_modal() {
+        if show_add_modal() && can_manage_builders {
             AddBuilderModal {
                 on_close: move |_| show_add_modal.set(false),
                 on_success: move |_| on_builder_added(),
@@ -413,11 +421,13 @@ pub fn BuildersView() -> Element {
             }
         }
 
-        if let Some(id) = edit_builder_id() {
-            EditBuilderModal {
-                builder_id: id,
-                on_close: move |_| edit_builder_id.set(None),
-                on_success: move |_| on_builder_updated()
+        if can_manage_builders {
+            if let Some(id) = edit_builder_id() {
+                EditBuilderModal {
+                    builder_id: id,
+                    on_close: move |_| edit_builder_id.set(None),
+                    on_success: move |_| on_builder_updated()
+                }
             }
         }
     }
