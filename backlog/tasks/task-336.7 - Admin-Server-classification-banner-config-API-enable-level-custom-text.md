@@ -1,10 +1,10 @@
 ---
 id: TASK-336.7
 title: 'Admin Server: classification banner config API (enable/level/custom text)'
-status: Review
+status: Done
 assignee: []
 created_date: '2026-06-20 02:59'
-updated_date: '2026-06-20 20:40'
+updated_date: '2026-06-20 20:58'
 labels:
   - admin
   - server
@@ -100,11 +100,28 @@ Medium. This touches global app rendering and persisted admin/server configurati
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR !284 re-review fixes pushed: c5d22c66 fix: prevent classification banner overlap and retry loops. Verification: nix develop -c bash -lc 'cd packages/web-ui && cargo fmt -- --check && cargo check --target wasm32-unknown-unknown' exited 0; targeted classification tests exited 0 with 5 passed.
+MR !284 verified merged via glab. Target branch: TASK-336.2-admin-server-parity. Merge commit: c7064160. Squash commit: 8c7e61fa. Marking TASK-336.7 Done and cleaning up its task worktree.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Re-review blocker fixes pushed in c5d22c66. Classification config fetch now only auto-runs while fetch state is None, so failed loads wait for explicit Retry. Classification banner offsets now depend on actual dev-banner active state, preventing page-content overlap when dev mode is off.
+Implemented persisted classification banner configuration end-to-end in MR !284.
+
+Summary:
+- Added database persistence for classification banner configuration with migration 0142.
+- Added backend GET/PUT API support for enabled, level, and custom text.
+- Added web-ui API DTO/client support and AppState wiring.
+- Wired the Admin Server Classification banners card to read/save through the real API.
+- Rendered global top and bottom classification banners when enabled.
+- Fixed re-review issues so failed loads wait for explicit Retry and classification banners do not overlap content when the dev banner is absent.
+
+Verification:
+- UI fmt/check via nix develop exited 0.
+- Targeted classification handler tests exited 0 with 5 passed.
+- MR pipeline passed before merge.
+
+Merge:
+- MR !284 merged into TASK-336.2-admin-server-parity on 2026-06-20.
+- GitLab reported merge commit c7064160 and squash commit 8c7e61fa.
 <!-- SECTION:FINAL_SUMMARY:END -->
