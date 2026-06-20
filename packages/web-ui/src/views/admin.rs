@@ -133,635 +133,71 @@ pub fn AdminView() -> Element {
     let can_go_prev = *audit_page.read() > 1;
     let can_go_next = *audit_page.read() < total_pages;
 
+    let mut active_tab = use_signal(|| "users".to_string());
+
     rsx! {
         div {
-            class: "space-y-6",
-            header {
-                class: "space-y-2",
+            class: "space-y-4",
+
+            // ── Page head ───────────────────────────────────────────────────
+            div { class: "page-head",
                 div {
-                    class: "flex flex-wrap items-center justify-between gap-2",
-                    h1 { class: "{theme::typography::PAGE_TITLE}", "Server Management" }
-                    button {
-                        class: "rounded-lg px-3 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
-                        onclick: move |_| {
-                            spawn(async move {
-                                let _ = set_setup_wizard_dismissed(false).await;
-                                if let Some(storage) = web_sys::window()
-                                    .and_then(|w| w.local_storage().ok())
-                                    .flatten()
-                                {
-                                    let _ = storage.set_item("cf.coach.collapsed", "false");
-                                }
-                                nav.push("/");
-                            });
-                        },
-                        "Re-open Setup Coach"
-                    }
+                    h1 { class: "page-title", "Server Management" }
+                    p { class: "page-subtitle", "Admin-only · users, access control, audit, and server configuration" }
                 }
-                p { class: "text-sm {theme::text::SECONDARY}", "Manage users, role assignments, and review recent security-sensitive actions." }
-            }
-
-            section {
-                class: "space-y-3",
-                h2 { class: "text-lg font-semibold text-white", "Users" }
-                p {
-                    class: "text-xs {theme::text::SECONDARY}",
-                    "Role and environment membership changes take effect after the user signs in again."
-                }
-                p {
-                    class: "text-xs {theme::text::SECONDARY}",
-                    "Users sourced from OIDC are IdP-derived and their role/memberships are managed through OIDC group mappings."
-                }
-                p {
-                    class: "text-xs {theme::text::SECONDARY}",
-                    "Environment entries must be exact names (comma-separated); wildcard patterns are not supported."
-                }
-
-                div {
-                    class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-4",
-                    h3 { class: "text-sm font-semibold text-white", "Create user" }
-                    div {
-                        class: "grid gap-4 sm:grid-cols-2 xl:grid-cols-5",
-                        div {
-                            class: "space-y-1",
-                            label {
-                                class: "text-xs font-medium {theme::text::MUTED}",
-                                "Email"
-                            }
-                            input {
-                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
-                                r#type: "email",
-                                placeholder: "user@example.com",
-                                value: "{create_email.read()}",
-                                oninput: move |evt| create_email.set(evt.value())
-                            }
-                        }
-                        div {
-                            class: "space-y-1",
-                            label {
-                                class: "text-xs font-medium {theme::text::MUTED}",
-                                "Display Name"
-                            }
-                            input {
-                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
-                                r#type: "text",
-                                placeholder: "Optional",
-                                value: "{create_display_name.read()}",
-                                oninput: move |evt| create_display_name.set(evt.value())
-                            }
-                        }
-                        div {
-                            class: "space-y-1",
-                            label {
-                                class: "text-xs font-medium {theme::text::MUTED}",
-                                "Initial Password"
-                            }
-                            input {
-                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
-                                r#type: "password",
-                                placeholder: "Min 8 characters",
-                                value: "{create_password.read()}",
-                                oninput: move |evt| create_password.set(evt.value())
-                            }
-                        }
-                        div {
-                            class: "space-y-1",
-                            label {
-                                class: "text-xs font-medium {theme::text::MUTED}",
-                                "Role"
-                            }
-                            select {
-                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
-                                value: "{create_role.read()}",
-                                onchange: move |evt| create_role.set(evt.value()),
-                                option { value: "Admin", "Admin" }
-                                option { value: "Operator", "Operator" }
-                                option { value: "Viewer", "Viewer" }
-                            }
-                        }
-                        div {
-                            class: "space-y-1",
-                            label {
-                                class: "text-xs font-medium {theme::text::MUTED}",
-                                "Environments"
-                            }
-                            input {
-                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
-                                r#type: "text",
-                                placeholder: "prod, staging (comma-separated)",
-                                value: "{create_environments.read()}",
-                                oninput: move |evt| create_environments.set(evt.value())
-                            }
-                        }
+                span { class: "chip chip-critical", style: "align-self:center;",
+                    svg { width: "11", height: "11", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:4px;vertical-align:text-bottom;",
+                        path { d: "M12 3l8 3v6c0 4.5-3.3 8.5-8 9-4.7-.5-8-4.5-8-9V6l8-3z" }
                     }
-                    div {
-                        class: "flex justify-end pt-2",
-                        button {
-                            class: "rounded-lg px-3 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
-                            disabled: *create_submitting.read(),
-                            onclick: move |_| {
-                                let email = create_email.read().clone();
-                                let display_name = create_display_name.read().clone();
-                                let password = create_password.read().clone();
-                                let role = role_from_string(&create_role.read());
-                                let environments = match validate_and_parse_environments(&create_environments.read()) {
-                                    Ok(value) => value,
-                                    Err(message) => {
-                                        users_error.set(Some(message));
-                                        return;
-                                    }
-                                };
-
-                                let request = AdminCreateUserRequest {
-                                    email,
-                                    display_name: optional_value(display_name),
-                                    password: optional_value(password),
-                                    role,
-                                    environments,
-                                };
-
-                                let mut users = users.clone();
-                                let mut user_drafts = user_drafts.clone();
-                                let mut users_error = users_error.clone();
-                                let mut create_submitting = create_submitting.clone();
-                                let mut create_email = create_email.clone();
-                                let mut create_display_name = create_display_name.clone();
-                                let mut create_password = create_password.clone();
-                                let mut create_environments = create_environments.clone();
-
-                                create_submitting.set(true);
-                                spawn(async move {
-                                    match create_admin_user(&request).await {
-                                        Ok(_) => {
-                                            refresh_users(users, user_drafts, users_error).await;
-                                            create_email.set(String::new());
-                                            create_display_name.set(String::new());
-                                            create_password.set(String::new());
-                                            create_environments.set(String::new());
-                                        }
-                                        Err(e) => users_error.set(Some(format!("Failed to create user: {e}"))),
-                                    }
-                                    create_submitting.set(false);
-                                });
-                            },
-                            if *create_submitting.read() { "Creating..." } else { "Create user" }
-                        }
-                    }
-                }
-
-                div {
-                    class: "grid gap-3 sm:grid-cols-2 lg:grid-cols-4",
-                    input {
-                        class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
-                        r#type: "text",
-                        placeholder: "Search users...",
-                        value: "{user_search.read()}",
-                        oninput: move |evt| user_search.set(evt.value())
-                    }
-                    select {
-                        class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
-                        value: "{user_status_filter.read()}",
-                        onchange: move |evt| user_status_filter.set(evt.value()),
-                        option { value: "all", "All statuses" }
-                        option { value: "enabled", "Enabled only" }
-                        option { value: "disabled", "Disabled only" }
-                    }
-                }
-
-                if users_render_state_with_data(
-                    *users_loading.read(),
-                    users_error.read().as_deref(),
-                    !users.read().is_empty(),
-                )
-                    == UsersRenderState::Loading
-                {
-                    div { class: "text-sm {theme::text::SECONDARY}", "Loading users..." }
-                } else if users_render_state_with_data(
-                    *users_loading.read(),
-                    users_error.read().as_deref(),
-                    !users.read().is_empty(),
-                )
-                    == UsersRenderState::Error
-                {
-                    div {
-                        class: "rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-3 text-sm text-red-200",
-                        "{users_error_message(users_error.read().clone())}"
-                    }
-                } else {
-                    if let Some(message) = users_error.read().clone() {
-                        div {
-                            class: "mb-3 rounded-lg border border-amber-500/40 bg-amber-950/30 px-4 py-3 text-sm text-amber-200",
-                            "{message}"
-                        }
-                    }
-                    div {
-                        class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm bg-gray-900/60",
-                        div {
-                            class: "overflow-x-auto",
-                            table {
-                                class: "w-full text-sm",
-                                thead {
-                                    class: "{theme::surface::SUBTLE_BG}",
-                                    tr {
-                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Identifier" }
-                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Source" }
-                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Role" }
-                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Status" }
-                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Environments" }
-                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Updated" }
-                                        th { class: "px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider", "Actions" }
-                                    }
-                                }
-                                tbody {
-                                    class: "divide-y {theme::surface::DIVIDER}",
-                                for user in filtered_admin_users(
-                                    &users.read(),
-                                    &user_search.read(),
-                                    &user_status_filter.read(),
-                                ) {
-                                    {
-                                        let user_id = user.id.clone();
-                                        let draft = user_drafts
-                                            .read()
-                                            .get(&user_id)
-                                            .cloned()
-                                            .unwrap_or_else(|| UserEditDraft::from_user(&user));
-
-                                        rsx! {
-                                            tr {
-                                                class: "hover:bg-gray-800/40 transition",
-                                                td { class: "px-4 py-3 text-sm text-white", {user.identifier.clone()} }
-                                                td {
-                                                    class: "px-4 py-3",
-                                                    span {
-                                                        class: "inline-flex rounded-md px-2.5 py-1 text-xs font-medium {identity_source_badge_class(user.identity_source)}",
-                                                        "{identity_source_label(user.identity_source)}"
-                                                    }
-                                                }
-                                                td {
-                                                    class: "px-4 py-3",
-                                                    {
-                                                        let is_oidc_derived = user.identity_source == IdentitySource::OidcDerived;
-                                                        rsx! {
-                                                    select {
-                                                        class: "rounded-md border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-2 py-1 text-xs text-white",
-                                                        value: "{draft.role}",
-                                                        disabled: is_oidc_derived,
-                                                        onchange: {
-                                                            let mut user_drafts = user_drafts.clone();
-                                                            let user_id = user_id.clone();
-                                                            move |evt| {
-                                                                let mut drafts = user_drafts.write();
-                                                                if let Some(entry) = drafts.get_mut(&user_id) {
-                                                                    entry.role = evt.value();
-                                                                }
-                                                            }
-                                                        },
-                                                        option { value: "Admin", "Admin" }
-                                                        option { value: "Operator", "Operator" }
-                                                        option { value: "Viewer", "Viewer" }
-                                                    }
-                                                        }
-                                                    }
-                                                }
-                                                td {
-                                                    class: "px-4 py-3",
-                                                    {
-                                                        let is_oidc_derived = user.identity_source == IdentitySource::OidcDerived;
-                                                        rsx! {
-                                                    label { class: "inline-flex items-center gap-2 text-xs {theme::text::SECONDARY}",
-                                                        input {
-                                                            r#type: "checkbox",
-                                                            checked: draft.enabled,
-                                                            disabled: is_oidc_derived,
-                                                            onchange: {
-                                                                let mut user_drafts = user_drafts.clone();
-                                                                let user_id = user_id.clone();
-                                                                move |evt| {
-                                                                    let mut drafts = user_drafts.write();
-                                                                    if let Some(entry) = drafts.get_mut(&user_id) {
-                                                                        entry.enabled = evt.checked();
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                        if draft.enabled { "Enabled" } else { "Disabled" }
-                                                    }
-                                                        }
-                                                    }
-                                                }
-                                                td {
-                                                    class: "px-4 py-3",
-                                                    input {
-                                                        class: "w-full rounded-md border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-2 py-1 text-xs text-white",
-                                                        r#type: "text",
-                                                        value: "{draft.environments}",
-                                                        disabled: user.identity_source == IdentitySource::OidcDerived,
-                                                        oninput: {
-                                                            let mut user_drafts = user_drafts.clone();
-                                                            let user_id = user_id.clone();
-                                                            move |evt| {
-                                                                let mut drafts = user_drafts.write();
-                                                                if let Some(entry) = drafts.get_mut(&user_id) {
-                                                                    entry.environments = evt.value();
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                td { class: "px-4 py-3 {theme::text::MUTED}", {format_time(user.updated_at)} }
-                                                td {
-                                                    class: "px-4 py-3",
-                                                    div {
-                                                        class: "flex items-center gap-2",
-                                                        button {
-                                                            class: "rounded-md bg-gray-700 border {theme::surface::CARD_BORDER} px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
-                                                            disabled: user.identity_source == IdentitySource::OidcDerived,
-                                                            onclick: {
-                                                                let user_id = user_id.clone();
-                                                                let mut users = users.clone();
-                                                                let mut user_drafts = user_drafts.clone();
-                                                                let mut users_error = users_error.clone();
-                                                                move |_| {
-                                                                    let draft = user_drafts
-                                                                        .read()
-                                                                        .get(&user_id)
-                                                                        .cloned();
-                                                                    let Some(draft) = draft else {
-                                                                        return;
-                                                                    };
-
-                                                                    let environments = match validate_and_parse_environments(&draft.environments) {
-                                                                        Ok(value) => value,
-                                                                        Err(message) => {
-                                                                            users_error.set(Some(message));
-                                                                            return;
-                                                                        }
-                                                                    };
-
-                                                                    let request = AdminUpdateUserRequest {
-                                                                        role: Some(role_from_string(&draft.role)),
-                                                                        enabled: Some(draft.enabled),
-                                                                        environments: Some(environments),
-                                                                        password: None,
-                                                                    };
-
-                                                                    let user_id = user_id.clone();
-                                                                    let mut users = users.clone();
-                                                                    let mut user_drafts = user_drafts.clone();
-                                                                    let mut users_error = users_error.clone();
-                                                                    spawn(async move {
-                                                                        match update_admin_user(&user_id, &request).await {
-                                                                            Ok(_) => refresh_users(users, user_drafts, users_error).await,
-                                                                            Err(e) => users_error.set(Some(format!("Failed to update user: {e}"))),
-                                                                        }
-                                                                    });
-                                                                }
-                                                            },
-                                                            if user.identity_source == IdentitySource::OidcDerived {
-                                                                "IdP managed"
-                                                            } else {
-                                                                "Save"
-                                                            }
-                                                        }
-                                                        // Reset password button
-                                                        if user.identity_source == IdentitySource::LocalManaged {
-                                                            button {
-                                                                class: "rounded-md bg-gray-700 border {theme::surface::CARD_BORDER} px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-600 transition-colors",
-                                                                onclick: {
-                                                                    let user_clone = user.clone();
-                                                                    move |_| {
-                                                                        reset_password_user.set(Some(user_clone.clone()));
-                                                                        reset_password_value.set(String::new());
-                                                                        reset_password_error.set(None);
-                                                                    }
-                                                                },
-                                                                "Reset Password"
-                                                            }
-                                                        }
-                                                        button {
-                                                            class: "rounded-md bg-red-900/60 border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-800/60 transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
-                                                            disabled: user.identity_source == IdentitySource::OidcDerived,
-                                                            onclick: {
-                                                                let user_id = user_id.clone();
-                                                                let identifier = user.identifier.clone();
-                                                                let mut users = users.clone();
-                                                                let mut user_drafts = user_drafts.clone();
-                                                                let mut users_error = users_error.clone();
-                                                                move |_| {
-                                                                    if !confirm_user_delete(&identifier) {
-                                                                        return;
-                                                                    }
-
-                                                                    let user_id = user_id.clone();
-                                                                    let mut users = users.clone();
-                                                                    let mut user_drafts = user_drafts.clone();
-                                                                    let mut users_error = users_error.clone();
-                                                                    spawn(async move {
-                                                                        match delete_admin_user(&user_id).await {
-                                                                            Ok(_) => refresh_users(users, user_drafts, users_error).await,
-                                                                            Err(e) => users_error.set(Some(format!("Failed to delete user: {e}"))),
-                                                                        }
-                                                                    });
-                                                                }
-                                                            },
-                                                            "Delete"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        }
-                    }
+                    "admin only"
                 }
             }
 
-            section {
-                class: "space-y-4",
-                div {
-                    h2 { class: "text-lg font-semibold text-white", "OIDC Group Mappings" }
-                    p {
-                        class: "text-sm {theme::text::SECONDARY} mt-1",
-                        "Map OIDC identity provider groups to Crystal Forge roles and environment access. When users authenticate via OIDC, their group memberships determine their permissions."
+            // ── Server info strip ──────────────────────────────────────────
+            div { class: "stat-strip",
+                div { class: "stat",
+                    span { class: "stat-accent", style: "--stat-color:#a78bfa;" }
+                    div { class: "stat-label", "CF Version" }
+                    div { class: "stat-value", style: "font-size:20px;", "—" }
+                    div { class: "stat-meta mono",
+                        span { style: "color:var(--cf-text-muted);font-size:11px;", "not implemented yet" }
                     }
                 }
-
-                div {
-                    class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-4",
-                    h3 { class: "text-sm font-semibold text-white", "Add new mapping" }
-                    div {
-                        class: "grid gap-4 sm:grid-cols-3",
-                        div {
-                            class: "space-y-1",
-                            label {
-                                class: "text-xs font-medium {theme::text::MUTED}",
-                                "IdP Group Name"
-                            }
-                            input {
-                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
-                                r#type: "text",
-                                placeholder: "e.g. admins, devops-team",
-                                value: "{mapping_group.read()}",
-                                oninput: move |evt| mapping_group.set(evt.value())
-                            }
-                        }
-                        div {
-                            class: "space-y-1",
-                            label {
-                                class: "text-xs font-medium {theme::text::MUTED}",
-                                "Assigned Role"
-                            }
-                            select {
-                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
-                                value: "{mapping_role.read()}",
-                                onchange: move |evt| mapping_role.set(evt.value()),
-                                option { value: "Admin", "Admin" }
-                                option { value: "Operator", "Operator" }
-                                option { value: "Viewer", "Viewer" }
-                            }
-                        }
-                        div {
-                            class: "space-y-1",
-                            label {
-                                class: "text-xs font-medium {theme::text::MUTED}",
-                                "Environment Access"
-                            }
-                            input {
-                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
-                                r#type: "text",
-                                placeholder: "Leave empty for all, or: prod, staging",
-                                value: "{mapping_environments.read()}",
-                                oninput: move |evt| mapping_environments.set(evt.value())
-                            }
-                        }
-                    }
-                    div {
-                        class: "flex justify-end pt-2",
-                        button {
-                            class: "rounded-lg px-4 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
-                            disabled: *mapping_submitting.read() || mapping_group.read().trim().is_empty(),
-                            onclick: move |_| {
-                                let environments = match validate_and_parse_environments(&mapping_environments.read()) {
-                                    Ok(value) => value,
-                                    Err(message) => {
-                                        oidc_error.set(Some(message));
-                                        return;
-                                    }
-                                };
-
-                                let request = AdminUpsertOidcMappingRequest {
-                                    group_name: mapping_group.read().clone(),
-                                    role: Some(role_from_string(&mapping_role.read())),
-                                    environments,
-                                };
-
-                                let mut oidc_mappings = oidc_mappings.clone();
-                                let mut oidc_error = oidc_error.clone();
-                                let mut mapping_group = mapping_group.clone();
-                                let mut mapping_environments = mapping_environments.clone();
-                                let mut mapping_submitting = mapping_submitting.clone();
-                                mapping_submitting.set(true);
-
-                                spawn(async move {
-                                    match upsert_admin_oidc_mapping(&request).await {
-                                        Ok(_) => match fetch_admin_oidc_mappings().await {
-                                            Ok(next) => {
-                                                oidc_mappings.set(next);
-                                                oidc_error.set(None);
-                                                mapping_group.set(String::new());
-                                                mapping_environments.set(String::new());
-                                            }
-                                            Err(e) => {
-                                                oidc_error.set(Some(format!("Failed to reload OIDC mappings: {e}")));
-                                            }
-                                        },
-                                        Err(e) => oidc_error.set(Some(format!("Failed to save OIDC mapping: {e}"))),
-                                    }
-                                    mapping_submitting.set(false);
-                                });
-                            },
-                            if *mapping_submitting.read() { "Saving..." } else { "Save mapping" }
-                        }
+                div { class: "stat",
+                    span { class: "stat-accent", style: "--stat-color:#34d399;" }
+                    div { class: "stat-label", "Auth mode" }
+                    div { class: "stat-value", style: "font-size:16px;", "—" }
+                    div { class: "stat-meta",
+                        "{users.read().iter().filter(|u| u.enabled).count()} active users"
                     }
                 }
-
-                if let Some(message) = oidc_error.read().clone() {
-                    div {
-                        class: "rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-3 text-sm text-red-200",
-                        "{message}"
+                div { class: "stat",
+                    span { class: "stat-accent", style: "--stat-color:#60a5fa;" }
+                    div { class: "stat-label", "Database" }
+                    div { class: "stat-value", style: "font-size:16px;color:var(--cf-text-muted);", "—" }
+                    div { class: "stat-meta",
+                        span { style: "color:var(--cf-text-muted);font-size:11px;", "not implemented yet" }
                     }
                 }
-
-                div {
-                    class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm bg-gray-900/60",
-                    div {
-                        class: "overflow-x-auto",
-                        table {
-                            class: "w-full text-sm",
-                            thead {
-                                class: "{theme::surface::SUBTLE_BG}",
-                                tr {
-                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Group" }
-                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Role" }
-                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Environments" }
-                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Updated" }
-                                    th { class: "px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider", "Actions" }
-                                }
-                            }
-                            tbody {
-                                class: "divide-y {theme::surface::DIVIDER}",
-                                for mapping in oidc_mappings.read().iter() {
-                                    tr {
-                                        class: "hover:bg-gray-800/40 transition",
-                                        td { class: "px-4 py-3 text-sm text-white", "{mapping.group_name}" }
-                                        td { class: "px-4 py-3 text-sm {theme::text::SECONDARY}", "{editable_role_label(mapping.role)}" }
-                                        td { class: "px-4 py-3 text-sm text-slate-300", "{format_environments(&mapping.environments)}" }
-                                        td { class: "px-4 py-3 text-sm {theme::text::MUTED}", "{format_time(mapping.updated_at)}" }
-                                        td {
-                                            class: "px-4 py-3 text-right",
-                                            button {
-                                                class: "rounded-md bg-red-900/60 border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-800/60 transition-colors",
-                                                onclick: {
-                                                    let mapping_id = mapping.id.clone();
-                                                    let mut oidc_mappings = oidc_mappings.clone();
-                                                    let mut oidc_error = oidc_error.clone();
-                                                    move |_| {
-                                                        let mapping_id = mapping_id.clone();
-                                                        let mut oidc_mappings = oidc_mappings.clone();
-                                                        let mut oidc_error = oidc_error.clone();
-                                                        spawn(async move {
-                                                            match delete_admin_oidc_mapping(&mapping_id).await {
-                                                                Ok(()) => match fetch_admin_oidc_mappings().await {
-                                                                    Ok(next) => {
-                                                                        oidc_mappings.set(next);
-                                                                        oidc_error.set(None);
-                                                                    }
-                                                                    Err(e) => {
-                                                                        oidc_error.set(Some(format!("Failed to reload OIDC mappings: {e}")));
-                                                                    }
-                                                                },
-                                                                Err(e) => oidc_error.set(Some(format!("Failed to delete OIDC mapping: {e}"))),
-                                                            }
-                                                        });
-                                                    }
-                                                },
-                                                "Delete"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                div { class: "stat",
+                    span { class: "stat-accent", style: "--stat-color:#fbbf24;" }
+                    div { class: "stat-label", "Active sessions" }
+                    div { class: "stat-value", "—" }
+                }
+                div { class: "stat",
+                    span { class: "stat-accent", style: "--stat-color:#f87171;" }
+                    div { class: "stat-label", "TLS cert" }
+                    div { class: "stat-value", style: "font-size:20px;", "—" }
+                    div { class: "stat-meta",
+                        span { style: "color:var(--cf-text-muted);font-size:11px;", "not implemented yet" }
                     }
                 }
-            }
+                } // end jobs tab
 
-            section {
-                class: "space-y-3",
+                // ── Audit Log tab ───────────────────────────────────────────
+                if active_tab.read().as_str() == "audit" {
+                div { style: "padding:16px;",
+                div { class: "space-y-3",
                 h2 { class: "text-lg font-semibold text-white", "Audit Log" }
                 div {
                     class: "flex flex-col gap-3",
@@ -910,8 +346,196 @@ pub fn AdminView() -> Element {
                         }
                     }
                 }
-            }
-        }
+                }
+                } // end audit tab
+
+                // ── Server tab ──────────────────────────────────────────────
+                if active_tab.read().as_str() == "server" {
+                div { style: "padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:14px;",
+
+                    // Build info card
+                    div { class: "card", style: "padding:16px;",
+                        h3 { style: "margin:0 0 12px;font-size:13px;font-weight:600;", "Build info" }
+                        dl { class: "kv-grid",
+                            dt { "Version" }
+                            dd { class: "mono",
+                                span { style: "color:var(--cf-text-muted);font-size:11px;", "not implemented yet — TASK-336.5" }
+                            }
+                            dt { "Commit" }
+                            dd { class: "mono",
+                                span { style: "color:var(--cf-text-muted);font-size:11px;", "not implemented yet" }
+                            }
+                            dt { "Uptime" }
+                            dd {
+                                span { style: "color:var(--cf-text-muted);font-size:11px;", "not implemented yet" }
+                            }
+                            dt { "Database" }
+                            dd {
+                                span { style: "color:var(--cf-text-muted);font-size:11px;", "not implemented yet" }
+                            }
+                        }
+                    }
+
+                    // Authentication info card
+                    div { class: "card", style: "padding:16px;",
+                        h3 { style: "margin:0 0 12px;font-size:13px;font-weight:600;", "Authentication" }
+                        dl { class: "kv-grid",
+                            dt { "Mode" }
+                            dd {
+                                span { style: "color:var(--cf-text-muted);font-size:11px;", "not implemented yet — TASK-336.5" }
+                            }
+                            dt { "OIDC issuer" }
+                            dd { class: "mono", style: "font-size:11px;word-break:break-all;white-space:normal;",
+                                span { style: "color:var(--cf-text-muted);font-size:11px;", "not implemented yet" }
+                            }
+                            dt { "Sessions" }
+                            dd {
+                                span { style: "color:var(--cf-text-muted);font-size:11px;", "not implemented yet" }
+                            }
+                            dt { "TLS expiry" }
+                            dd {
+                                span { style: "color:var(--cf-text-muted);font-size:11px;", "not implemented yet" }
+                            }
+                        }
+                    }
+
+                    // Heartbeat config (not implemented yet)
+                    div { class: "card", style: "padding:16px;grid-column:1 / -1;",
+                        div { style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;",
+                            h3 { style: "margin:0;font-size:13px;font-weight:600;", "Agent heartbeat" }
+                            span { style: "font-size:11px;color:var(--cf-text-muted);", "How often agents phone home — drives the Systems heartbeat indicator" }
+                        }
+                        div { class: "sd-callout sd-callout-info", style: "font-size:11px;margin:10px 0 14px;",
+                            svg { width: "12", height: "12", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                rect { x: "3", y: "4", width: "18", height: "8", rx: "2" }
+                                rect { x: "3", y: "14", width: "18", height: "6", rx: "2" }
+                            }
+                            div {
+                                "Lower intervals detect drift and outages faster but add load. Each environment can override the global default. "
+                                span { style: "color:var(--cf-text-muted);", "Heartbeat config API not implemented yet — tracked in TASK-336.6." }
+                            }
+                        }
+                        div { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;opacity:0.45;pointer-events:none;",
+                            div { class: "field",
+                                label { "Global default" }
+                                select { class: "input", disabled: true,
+                                    option { "Every 30s" }
+                                }
+                                div { class: "help", "Applied to any environment without an override." }
+                            }
+                            div { class: "field",
+                                label { "Mark stale after" }
+                                select { class: "input", disabled: true,
+                                    option { "3 missed (90s)" }
+                                }
+                            }
+                            div { class: "field",
+                                label { "Mark offline after" }
+                                select { class: "input", disabled: true,
+                                    option { "5 missed (2m30s)" }
+                                }
+                            }
+                        }
+                    }
+
+                    // Classification banners (not implemented yet)
+                    div { class: "card", style: "padding:16px;grid-column:1 / -1;",
+                        div { style: "display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;",
+                            div {
+                                h3 { style: "margin:0 0 4px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:7px;",
+                                    svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                        path { d: "M12 3l8 3v6c0 4.5-3.3 8.5-8 9-4.7-.5-8-4.5-8-9V6l8-3z" }
+                                    }
+                                    "Classification banners"
+                                }
+                                p { style: "margin:0;font-size:12px;color:var(--cf-text-muted);max-width:60ch;",
+                                    "Display a CNSS/DoD classification marking at the top and bottom of every screen. "
+                                    span { style: "color:var(--cf-text-muted);", "Not implemented yet — tracked in TASK-336.7." }
+                                }
+                            }
+                            div { style: "flex-shrink:0;width:44px;height:24px;border-radius:999px;background:var(--cf-subtle-bg);cursor:not-allowed;opacity:0.45;", title: "not implemented yet" }
+                        }
+                    }
+
+                    // Onboarding card (real)
+                    div { class: "card", style: "padding:16px;grid-column:1 / -1;",
+                        div { style: "display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;",
+                            div {
+                                h3 { style: "margin:0 0 4px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:7px;",
+                                    svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                        rect { x: "3", y: "3", width: "7", height: "7" }
+                                        rect { x: "14", y: "3", width: "7", height: "7" }
+                                        rect { x: "14", y: "14", width: "7", height: "7" }
+                                        rect { x: "3", y: "14", width: "7", height: "7" }
+                                    }
+                                    "Onboarding"
+                                }
+                                p { style: "margin:0;font-size:12px;color:var(--cf-text-muted);",
+                                    "The Setup Coach walks admins through first-run configuration."
+                                }
+                            }
+                            button {
+                                class: "btn btn-primary focus-ring",
+                                onclick: move |_| {
+                                    spawn(async move {
+                                        let _ = set_setup_wizard_dismissed(false).await;
+                                        if let Some(storage) = web_sys::window()
+                                            .and_then(|w| w.local_storage().ok())
+                                            .flatten()
+                                        {
+                                            let _ = storage.set_item("cf.coach.collapsed", "false");
+                                        }
+                                        nav.push("/");
+                                    });
+                                },
+                                svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:5px;vertical-align:text-bottom;",
+                                    path { d: "M20 12a8 8 0 0 1-14 5.3L3 14m1-4a8 8 0 0 1 14-5.3L21 8M21 3v5h-5M3 21v-5h5" }
+                                }
+                                "Relaunch Setup Coach"
+                            }
+                        }
+                    }
+
+                    // Maintenance card (not implemented yet)
+                    div { class: "card", style: "padding:16px;grid-column:1 / -1;",
+                        h3 { style: "margin:0 0 12px;font-size:13px;font-weight:600;", "Maintenance" }
+                        div { style: "font-size:12px;color:var(--cf-text-muted);margin-bottom:10px;",
+                            "Backup, reload, and session management actions. Not implemented yet — tracked in TASK-336.8."
+                        }
+                        div { style: "display:flex;gap:8px;flex-wrap:wrap;",
+                            button { class: "btn btn-ghost focus-ring", disabled: true, title: "not implemented yet",
+                                svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:5px;vertical-align:text-bottom;",
+                                    path { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" }
+                                }
+                                "Backup database"
+                            }
+                            button { class: "btn btn-ghost focus-ring", disabled: true, title: "not implemented yet",
+                                svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:5px;vertical-align:text-bottom;",
+                                    path { d: "M20 12a8 8 0 0 1-14 5.3L3 14m1-4a8 8 0 0 1 14-5.3L21 8M21 3v5h-5M3 21v-5h5" }
+                                }
+                                "Reload config"
+                            }
+                            button { class: "btn btn-ghost focus-ring", disabled: true, title: "not implemented yet",
+                                svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:5px;vertical-align:text-bottom;",
+                                    path { d: "M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" }
+                                }
+                                "Export audit log"
+                            }
+                            button { class: "btn btn-ghost focus-ring", style: "color:#fbbf24;border-color:rgba(251,191,36,0.3);", disabled: true, title: "not implemented yet",
+                                svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:5px;vertical-align:text-bottom;",
+                                    path { d: "M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" }
+                                    line { x1: "12", y1: "9", x2: "12", y2: "13" }
+                                    line { x1: "12", y1: "17", x2: "12.01", y2: "17" }
+                                }
+                                "Invalidate all sessions"
+                            }
+                        }
+                    }
+                }
+                } // end server tab
+
+            } // end tab card
+        } // end outer div
 
         // Password Reset Modal (outside page container for proper z-index layering)
         if let Some(target_user) = reset_password_user.read().clone() {
