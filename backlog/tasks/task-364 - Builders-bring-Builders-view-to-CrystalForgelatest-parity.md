@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-agent
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-20 02:09'
+updated_date: '2026-06-20 02:32'
 labels:
   - design-parity
   - builders
@@ -21,9 +21,9 @@ documentation:
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
 modified_files:
   - packages/web-ui/src/views/builders.rs
-  - packages/web-ui/src/components/builders
-  - packages/web-ui/src/api/client.rs
-  - packages/web-ui/src/api/models.rs
+  - packages/web-ui/src/components/builders/add_builder_modal.rs
+  - packages/web-ui/src/components/builders/builder_card.rs
+  - packages/web-ui/src/components/builders/builder_row.rs
   - checks/web-ui/tests/integration-test.js
 priority: high
 ordinal: 1785
@@ -89,13 +89,5 @@ This task is sprint-selected and ready for execution, but it is not implemented 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Initial plan: create a dedicated TASK-364 worktree from fetched origin/dev head; compare CrystalForgelatest BuildersView.jsx against current Dioxus builders view/components; implement minimal parity updates scoped to Builders view/API DTOs if needed; update web-ui Builders screenshot assertions; run targeted fmt/check and web-ui Nix check.
+In progress: compare BuildersView.jsx against current Dioxus Builders view; implement minimal parity updates; keep real API-backed data and avoid fabricated metrics; update Builders web-ui fixtures/assertions; run lightweight checks during iteration; reserve full web-ui screenshot check for final MR gate.
 <!-- SECTION:PLAN:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-LOCK: opencode-agent on reckless in /home/mcamp/code/crystal-forge/TASK-364-builders-view-parity
-
-Started from fetched origin/dev head ed66bcc8. Per worktree policy, did not run git pull/merge in the shared dev integration worktree.
-<!-- SECTION:NOTES:END -->
