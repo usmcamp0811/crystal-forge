@@ -4,7 +4,7 @@ title: 'Admin Server: classification banner config API (enable/level/custom text
 status: Review
 assignee: []
 created_date: '2026-06-20 02:59'
-updated_date: '2026-06-20 18:45'
+updated_date: '2026-06-20 20:25'
 labels:
   - admin
   - server
@@ -95,8 +95,14 @@ Medium. This touches global app rendering and persisted admin/server configurati
 - [x] #4 Classification config is persisted in the database through a migration and SQLx metadata is refreshed
 <!-- AC:END -->
 
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+MR !284 follow-up pushed: 81d1af61 fix: handle classification config load failures. Verification already run before commit: packages/web-ui cargo fmt -- --check passed, packages/web-ui cargo check --target wasm32-unknown-unknown passed with existing warnings, and targeted classification handler tests passed (5 passed).
+<!-- SECTION:NOTES:END -->
+
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-All four acceptance criteria met in MR !284 commit 1d7c404b. Migration 0142 creates classification_banner_config table seeded to disabled/UNCLASSIFIED. Backend GET/PUT /api/v1/admin/classification-config endpoints added (write requires admin). AppShell fetches config on mount and renders ClassificationBar (position:fixed top+bottom) for all authenticated routes whenever enabled. Admin Server card reads from AppState and saves via real API, propagating changes to AppState immediately. SQLx prepare passed with all 142 migrations applied.
+Follow-up commit 81d1af61 pushed to MR !284. It tracks classification config fetch success/failure in AppState, shows an Admin Server load error with Retry, and keeps the validation unit coverage reachable as a synchronous test.
 <!-- SECTION:FINAL_SUMMARY:END -->
