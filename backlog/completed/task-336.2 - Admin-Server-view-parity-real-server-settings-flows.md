@@ -4,7 +4,7 @@ title: 'Admin Server: view parity + real server settings flows'
 status: Review
 assignee: []
 created_date: '2026-06-20 02:19'
-updated_date: '2026-06-20 17:22'
+updated_date: '2026-06-20 21:16'
 labels:
   - design-parity
   - admin
@@ -32,6 +32,7 @@ documentation:
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
 modified_files:
   - packages/web-ui/src/views/admin.rs
+  - packages/web-ui/src/components/icon.rs
   - packages/default/src/handlers/api/admin.rs
   - packages/default/src/queries/admin.rs
 parent_task_id: TASK-336
@@ -106,8 +107,14 @@ Medium-high. The task touches an Admin/Server surface where incorrect placeholde
 - [x] #7 No unsupported Server setting/action may appear to succeed unless it is actually persisted or executed by backend/API behavior
 <!-- AC:END -->
 
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+MR !282 review fix pushed: 583e5a3b fix: restore admin tab icons. Verification: nix develop -c bash -lc 'cd packages/web-ui && cargo fmt -- --check && cargo check --target wasm32-unknown-unknown' exited 0.
+<!-- SECTION:NOTES:END -->
+
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Additional MR !282 blockers fixed in commit 9d0fcfe4: Background Jobs no longer renders fabricated scheduler data/actions and now shows an explicit TASK-336.5 unavailable state; audit category controls were removed, audit search placeholder is actor-only, audit export is disabled pending TASK-336.8, and source IP displays unavailable instead of a fake address; maintenance and reset-progress no-op controls are disabled with unavailable labels; user table timestamp was renamed to Updated; Edit User now keeps role/status/password edits modal-local until save so cancel/close discards unsaved changes and passwords are not retained in shared state. Verification passed: nix develop -c bash -lc 'cd packages/web-ui && cargo fmt -- --check && cargo check --target wasm32-unknown-unknown'.
+Review fix 583e5a3b pushed to MR !282. The Server Management tab strip now renders the same design-reference icons for Users, Roles, OIDC Mappings, Background Jobs, Audit Log, and Server, using the existing sd-tab theming. Added missing shared Server and Link SVG glyphs to the Rust icon component.
 <!-- SECTION:FINAL_SUMMARY:END -->
