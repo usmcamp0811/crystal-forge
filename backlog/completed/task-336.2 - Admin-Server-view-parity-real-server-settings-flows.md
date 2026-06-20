@@ -4,7 +4,7 @@ title: 'Admin Server: view parity + real server settings flows'
 status: Review
 assignee: []
 created_date: '2026-06-20 02:19'
-updated_date: '2026-06-20 23:09'
+updated_date: '2026-06-20 23:31'
 labels:
   - design-parity
   - admin
@@ -42,6 +42,7 @@ modified_files:
   - packages/web-ui/src/api/models.rs
   - packages/web-ui/src/components/layout/app_shell.rs
   - packages/web-ui/src/components/onboarding/coach_panel.rs
+  - packages/web-ui/assets/app.css
 parent_task_id: TASK-336
 priority: high
 ordinal: 1671
@@ -117,5 +118,5 @@ Medium-high. The task touches an Admin/Server surface where incorrect placeholde
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Review fix e7527916 pushed to MR !282. Server Management strip cards now use real runtime data instead of unavailable placeholders where the backend has data, Build info no longer repeats DB name/version, the Background Jobs sync icon matches the design SVG, the bottom classification banner is full-width without covering the sidebar profile footer, and Relaunch Setup Coach force-shows the coach even after completed setup.
+Review fix 3d9c9f73 pushed to MR !282. The Authentication card now renders real OIDC issuer and active session count from the runtime endpoint; unsupported TLS expiry was replaced with real request transport/TLS status. The sidebar profile now reserves bottom-banner space so classification/dev banners no longer overlap lower-left user details.
 <!-- SECTION:FINAL_SUMMARY:END -->
