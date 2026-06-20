@@ -86,8 +86,8 @@ This task is sprint-selected and ready for execution, but it is not implemented 
 - [ ] #7 `nix build .#checks.x86_64-linux.web-ui -L` passes or any unrelated existing failures are explicitly documented with the Builders steps passing
 <!-- AC:END -->
 
-## Implementation Plan
+## Implementation Notes
 
-<!-- SECTION:PLAN:BEGIN -->
-In progress: compare BuildersView.jsx against current Dioxus Builders view; implement minimal parity updates; keep real API-backed data and avoid fabricated metrics; update Builders web-ui fixtures/assertions; run lightweight checks during iteration; reserve full web-ui screenshot check for final MR gate.
-<!-- SECTION:PLAN:END -->
+<!-- SECTION:NOTES:BEGIN -->
+Progress update: first implementation pass committed locally as `b97e3dd2` in `/home/mcamp/code/crystal-forge/TASK-364-builders-view-parity`. Changes: matched the reference `Register builder` CTA, narrowed Builders status filters to the reference set (`all`, `running`, `paused`, `offline`), stopped displaying fabricated `0` values for unavailable 24h build/load metrics, and strengthened Builders web-ui assertions with deterministic real-shaped builder list/detail/environment fixtures. Verification run so far: `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check`, `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`, and `node --check checks/web-ui/tests/integration-test.js`. A full web-ui screenshot check was run once during iteration; `11b-builders` passed, `11c-builders-edit-modal` exposed a fixture gap that was fixed afterward without rerunning the full check per maintainer preference to avoid repeated expensive runs. Final MR still needs a one-time web-ui screenshot check before Review.
+<!-- SECTION:NOTES:END -->
