@@ -4,7 +4,7 @@ title: 'Admin Server: view parity + real server settings flows'
 status: Review
 assignee: []
 created_date: '2026-06-20 02:19'
-updated_date: '2026-06-20 03:00'
+updated_date: '2026-06-20 04:00'
 labels:
   - design-parity
   - admin
@@ -101,6 +101,25 @@ Medium-high. The task touches an Admin/Server surface where incorrect placeholde
 - [x] #6 UI remains separated from backend/API/domain logic and follows existing Admin/web-ui architecture patterns
 - [x] #7 No unsupported Server setting/action may appear to succeed unless it is actually persisted or executed by backend/API behavior
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## What was done
+### Root cause of the rendering bug
+1. **Stray closing brace** on line 195 (`} // end jobs tab`) prematurely closed the outer `space-y-4` div, ejecting all tab content outside the main container
+2. **Tab bar and card wrapper were missing** — the `sd-tabs` tab bar and its container `div.card` were never written
+3. **Each tab panel was missing one closing brace** — each RSX `if active_tab=="X" { div { style:"padding:16px;", ... } }` pattern needs 2 closes (padding div + if block), plus internal if/else chains add more. All tabs (except Server) were under-closed by 1.
+4. **Tab bar for loop was invalid RSX** — `let (tab_id, tab_label) = tab;` in a Dioxus RSX for loop caused `expected identifier` compile error. Fixed by moving all let statements into `{ ... rsx! { ... } }` Rust blocks.
+
+### Fix applied
+- Added card wrapper + sd-tabs tab bar with 6 buttons
+- Restored Users (create user form + search/filter + user table) and OIDC (mapping form + table) tab panels
+- Added stub Roles and Background Jobs panels
+- Fixed brace counts for all tab panels
+- Fixed RSX for loop compatibility with `{ ... rsx! { ... } }` Rust-block wrapper pattern
+- All 75 tests pass, 0 failures, rustfmt clean
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
