@@ -392,6 +392,7 @@ pub fn AdminView() -> Element {
                     text: classification_text.clone(),
                     bg: classification_bg,
                     fg: classification_fg,
+                    top: true,
                 }
             }
 
@@ -510,6 +511,7 @@ pub fn AdminView() -> Element {
                     text: classification_text,
                     bg: classification_bg,
                     fg: classification_fg,
+                    top: false,
                 }
             }
         }
@@ -521,11 +523,13 @@ pub fn AdminView() -> Element {
 // ============================================================================
 
 #[component]
-fn ClassificationBanner(text: String, bg: &'static str, fg: &'static str) -> Element {
+fn ClassificationBanner(text: String, bg: &'static str, fg: &'static str, top: bool) -> Element {
+    let placement = if top { "top:0;" } else { "bottom:0;" };
+
     rsx! {
         div {
             role: "note",
-            style: "height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};box-shadow:0 1px 0 rgba(255,255,255,0.08) inset;",
+            style: "position:fixed;{placement}left:0;right:0;z-index:10000;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};box-shadow:0 1px 0 rgba(255,255,255,0.08) inset;pointer-events:none;",
             "{text}"
         }
     }
