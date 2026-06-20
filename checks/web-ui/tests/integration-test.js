@@ -528,6 +528,7 @@ async function routeBuildsData(page) {
     });
   });
 
+  await page.route("**/api/v1/builders/**", fulfillBuildersRoute);
   await page.route("**/api/v1/builders*", fulfillBuildersRoute);
 
   await page.route("**/api/v1/environments*", async (route) => {
@@ -559,6 +560,7 @@ async function routeBuildsData(page) {
 
 async function unrouteBuildsData(page) {
   await page.unroute("**/api/v1/dashboard/summary*");
+  await page.unroute("**/api/v1/builders/**");
   await page.unroute("**/api/v1/builders*");
   await page.unroute("**/api/v1/environments*");
   await page.unroute("**/api/v1/build-jobs*");
@@ -658,6 +660,7 @@ async function routeBuildsDataWithCancelStates(page) {
     });
   });
 
+  await page.route("**/api/v1/builders/**", fulfillBuildersRoute);
   await page.route("**/api/v1/builders*", fulfillBuildersRoute);
 
   await page.route("**/api/v1/environments*", async (route) => {
@@ -688,6 +691,7 @@ async function routeBuildsDataWithCancelStates(page) {
 
 async function unrouteBuildsDataWithCancelStates(page) {
   await page.unroute("**/api/v1/dashboard/summary*");
+  await page.unroute("**/api/v1/builders/**");
   await page.unroute("**/api/v1/builders*");
   await page.unroute("**/api/v1/environments*");
   await page.unroute("**/api/v1/build-jobs*");
