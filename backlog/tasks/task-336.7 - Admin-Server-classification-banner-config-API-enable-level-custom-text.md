@@ -1,10 +1,10 @@
 ---
 id: TASK-336.7
 title: 'Admin Server: classification banner config API (enable/level/custom text)'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-06-20 02:59'
-updated_date: '2026-06-20 17:02'
+updated_date: '2026-06-20 17:03'
 labels:
   - admin
   - server
@@ -86,5 +86,5 @@ Medium. This touches global app rendering and persisted admin/server configurati
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Human selected TASK-336.7 for implementation and instructed the worktree to be based from TASK-336.2-admin-server-parity.
+LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-336.7-classification-banner-config
 <!-- SECTION:NOTES:END -->
