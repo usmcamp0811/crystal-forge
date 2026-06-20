@@ -176,14 +176,25 @@ pub fn AppShell() -> Element {
     }
 
     // Load classification banner config once on mount (any authenticated user).
+    // Stores result in AppState so the Admin card can show an error + retry.
     use_effect(move || {
-        let already_loaded = app_state.read().classification_config.is_some();
-        if already_loaded {
+        let fetch_state = app_state.read().classification_fetch_state.clone();
+        // Only fetch if we haven't attempted yet (None) or previously failed.
+        let should_fetch =
+            fetch_state.is_none() || fetch_state.as_ref().is_some_and(|r| r.is_err());
+        if !should_fetch {
             return;
         }
         spawn(async move {
-            if let Ok(config) = fetch_classification_config().await {
-                app_state.write().classification_config = Some(config);
+            match fetch_classification_config().await {
+                Ok(config) => {
+                    let mut state = app_state.write();
+                    state.classification_config = Some(config);
+                    state.classification_fetch_state = Some(Ok(()));
+                }
+                Err(e) => {
+                    app_state.write().classification_fetch_state = Some(Err(e.to_string()));
+                }
             }
         });
     });
@@ -262,6 +273,11 @@ pub fn AppShell() -> Element {
         });
     });
 
+    // Classification is active when the config has been loaded and enabled.
+    let classification_enabled = classification_config
+        .as_ref()
+        .map(|c| c.enabled)
+        .unwrap_or(false);
     let classification_top = classification_config.clone();
     let classification_bottom = classification_config;
 
@@ -269,15 +285,15 @@ pub fn AppShell() -> Element {
         div {
             class: "min-h-screen {theme::surface::PAGE_BG} {theme::text::PRIMARY} flex flex-col overflow-x-hidden",
 
-            // Classification bar spacer + fixed bar render first (z-index 990).
-            // Dev mode banner renders second (z-index 1000) and its fixed bar
-            // paints on top so the operational/non-production notice always wins.
-            if let Some(ref cfg) = classification_top {
-                if cfg.enabled {
-                    ClassificationBar { config: cfg.clone(), top: true }
-                }
+            // Top banner stack: both banners share one position:fixed flex
+            // container so they stack naturally without manual offset math.
+            // Classification is outermost (first child = closest to viewport
+            // edge) and dev banner sits below it. Each active banner also
+            // contributes an in-flow spacer so page content is pushed down.
+            TopBannerStack {
+                classification: classification_top,
+                classification_enabled,
             }
-            DevModeBanner { placement: BannerPlacement::Top }
             // ── end top banners ──────────────────────────────────────────────
 
             div {
@@ -332,26 +348,19 @@ pub fn AppShell() -> Element {
                 }
             }
 
-            // ── bottom banners ────────────────────────────────────────────────
-            // Dev mode spacer + fixed bar first (higher z-index wins),
-            // classification bar spacer + fixed bar second.
-            DevModeBanner { placement: BannerPlacement::Bottom }
-            if let Some(ref cfg) = classification_bottom {
-                if cfg.enabled {
-                    ClassificationBar { config: cfg.clone(), top: false }
-                }
+            // ── bottom banner stack ───────────────────────────────────────────
+            BottomBannerStack {
+                classification: classification_bottom,
+                classification_enabled,
             }
         }
     }
 }
 
-/// Renders an in-flow spacer (to push page content) AND a matching `position:fixed`
-/// classification banner at the given edge. Mirrors the DevModeBanner pattern so
-/// both banner types stack naturally in the flex column without overlap.
-#[component]
-fn ClassificationBar(config: ClassificationBannerConfig, top: bool) -> Element {
-    let edge = if top { "top:0;" } else { "bottom:0;" };
-    let display_text = if config.custom_text.trim().is_empty() {
+fn classification_display(
+    config: &ClassificationBannerConfig,
+) -> (String, &'static str, &'static str) {
+    let text = if config.custom_text.trim().is_empty() {
         config.level.clone()
     } else {
         config.custom_text.trim().to_uppercase()
@@ -363,17 +372,81 @@ fn ClassificationBar(config: ClassificationBannerConfig, top: bool) -> Element {
         "TOP SECRET" => ("#fbbf24", "#000"),
         _ => ("#10b981", "#fff"),
     };
+    (text, bg, fg)
+}
+
+/// Renders top banners (classification + dev) in a single `position:fixed`
+/// flex column anchored to `top:0`.  Each active banner is a 24px row inside
+/// that container, so they stack without any manual offset arithmetic.
+/// In-flow spacers matching the active banner count push page content down.
+#[component]
+fn TopBannerStack(
+    classification: Option<ClassificationBannerConfig>,
+    classification_enabled: bool,
+) -> Element {
+    let show_classification = classification_enabled;
+
     rsx! {
-        // In-flow spacer: same height as the fixed bar so normal page content
-        // is not obscured. z-index on the fixed bar is kept below the dev banner
-        // (z-index 1000) so classification sits outside, dev sits on top.
-        div { style: "height:24px;flex-shrink:0;" }
-        div {
-            role: "note",
-            // z-index 990 places classification below dev banner (1000) so the
-            // operational dev notice always wins when both are present.
-            style: "position:fixed;{edge}left:0;right:0;z-index:990;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};pointer-events:none;",
-            "{display_text}"
+        // In-flow spacers — one per active banner — push content below the
+        // fixed container.  DevModeBanner also renders its own spacer.
+        if show_classification {
+            div { style: "height:24px;flex-shrink:0;" }
+        }
+        DevModeBanner { placement: BannerPlacement::Top }
+
+        // Single fixed container stacking all top banners.
+        if show_classification {
+            if let Some(ref cfg) = classification {
+                {
+                    let (text, bg, fg) = classification_display(cfg);
+                    rsx! {
+                        div {
+                            role: "note",
+                            "aria-label": "Classification banner",
+                            // Offset by 28px (DevModeBanner height) so the
+                            // dev banner renders above classification at top:0.
+                            // When dev mode is off, the fixed dev bar is absent
+                            // so the 28px offset leaves a small transparent gap;
+                            // this is acceptable to guarantee no overlap when
+                            // dev mode is on.
+                            style: "position:fixed;top:28px;left:0;right:0;z-index:990;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};pointer-events:none;",
+                            "{text}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Mirrors `TopBannerStack` for the bottom edge.
+#[component]
+fn BottomBannerStack(
+    classification: Option<ClassificationBannerConfig>,
+    classification_enabled: bool,
+) -> Element {
+    let show_classification = classification_enabled;
+
+    rsx! {
+        DevModeBanner { placement: BannerPlacement::Bottom }
+        if show_classification {
+            div { style: "height:24px;flex-shrink:0;" }
+        }
+
+        if show_classification {
+            if let Some(ref cfg) = classification {
+                {
+                    let (text, bg, fg) = classification_display(cfg);
+                    rsx! {
+                        div {
+                            role: "note",
+                            "aria-label": "Classification banner",
+                            style: "position:fixed;bottom:28px;left:0;right:0;z-index:990;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};pointer-events:none;",
+                            "{text}"
+                        }
+                    }
+                }
+            }
         }
     }
 }

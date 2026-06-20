@@ -89,7 +89,7 @@ const ROLE_DEFINITIONS: &[RoleDefinition] = &[
 #[component]
 pub fn AdminView() -> Element {
     let nav = navigator();
-    let app_state = use_context::<Signal<AppState>>();
+    let mut app_state = use_context::<Signal<AppState>>();
     let mut users = use_signal(Vec::<AdminUserSummary>::new);
     let mut user_drafts = use_signal(HashMap::<String, UserEditDraft>::new);
 
@@ -130,12 +130,24 @@ pub fn AdminView() -> Element {
         });
     // True when AppState already had a value on mount — no sync needed.
     let already_loaded = app_state.read().classification_config.is_some();
+    let already_failed = app_state
+        .read()
+        .classification_fetch_state
+        .as_ref()
+        .is_some_and(|r| r.is_err());
     let mut classification_enabled = use_signal(|| initial_cfg.enabled);
     let mut classification_level = use_signal(|| initial_cfg.level.clone());
     let mut classification_custom_text = use_signal(|| initial_cfg.custom_text.clone());
     // Tracks whether the user has made edits so the sync effect skips overwriting them.
     let mut classification_dirty = use_signal(|| false);
     let mut classification_loaded = use_signal(|| already_loaded);
+    let mut classification_fetch_error = use_signal(|| {
+        if already_failed {
+            Some("Failed to load classification config from server.".to_string())
+        } else {
+            None
+        }
+    });
 
     // Sync effect: fires whenever AppState.classification_config changes. Only
     // writes to local signals if the user has not made unsaved edits AND the
@@ -144,7 +156,13 @@ pub fn AdminView() -> Element {
         if *classification_loaded.read() {
             return;
         }
-        let config = app_state.read().classification_config.clone();
+        let (config, fetch_state) = {
+            let state = app_state.read();
+            (
+                state.classification_config.clone(),
+                state.classification_fetch_state.clone(),
+            )
+        };
         if let Some(cfg) = config {
             if !*classification_dirty.read() {
                 classification_enabled.set(cfg.enabled);
@@ -152,6 +170,9 @@ pub fn AdminView() -> Element {
                 classification_custom_text.set(cfg.custom_text);
             }
             classification_loaded.set(true);
+            classification_fetch_error.set(None);
+        } else if let Some(Err(e)) = fetch_state {
+            classification_fetch_error.set(Some(e));
         }
     });
 
@@ -350,7 +371,13 @@ pub fn AdminView() -> Element {
                         classification_level,
                         classification_custom_text,
                         classification_loaded,
+                        classification_fetch_error: classification_fetch_error.read().clone(),
                         on_classification_dirty: move |_| classification_dirty.set(true),
+                        on_classification_retry: move |_| {
+                            // Reset fetch state so AppShell will retry on next render.
+                            app_state.write().classification_fetch_state = None;
+                            classification_fetch_error.set(None);
+                        },
                     }
                 }
             }
@@ -1494,7 +1521,9 @@ fn ServerTab(
     classification_level: Signal<String>,
     classification_custom_text: Signal<String>,
     classification_loaded: Signal<bool>,
+    classification_fetch_error: Option<String>,
     on_classification_dirty: EventHandler<()>,
+    on_classification_retry: EventHandler<()>,
 ) -> Element {
     let nav = navigator();
     let auth_mode_label = match auth_mode {
@@ -1553,7 +1582,9 @@ fn ServerTab(
                 level: classification_level,
                 custom_text: classification_custom_text,
                 loaded: classification_loaded,
+                fetch_error: classification_fetch_error,
                 on_dirty: move |_| on_classification_dirty.call(()),
+                on_retry: move |_| on_classification_retry.call(()),
             }
 
             // Onboarding card
@@ -1645,8 +1676,12 @@ fn ClassificationBannerCard(
     custom_text: Signal<String>,
     /// True once a real persisted value has been loaded into the signals.
     loaded: Signal<bool>,
+    /// Set if the initial config fetch failed; None while loading or after success.
+    fetch_error: Option<String>,
     /// Called when the user makes any unsaved edit so the parent can guard syncs.
     on_dirty: EventHandler<()>,
+    /// Called to request a retry of the initial fetch after a failure.
+    on_retry: EventHandler<()>,
 ) -> Element {
     let mut saving = use_signal(|| false);
     let mut save_error = use_signal(|| Option::<String>::None);
@@ -1676,8 +1711,18 @@ fn ClassificationBannerCard(
                         "Display a CNSS/DoD classification marking at the top and bottom of every screen. Required on many DoD / IC information systems."
                     }
                 }
-                // Loading placeholder until the persisted config arrives
-                if !*loaded.read() {
+                // State banner: loading / fetch error with retry / nothing when ready
+                if let Some(ref err) = fetch_error {
+                    div { class: "sd-callout sd-callout-danger", style: "font-size:12px;display:flex;align-items:center;gap:10px;",
+                        span { style: "flex:1;", "Failed to load configuration: {err}" }
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            style: "font-size:11px;padding:4px 10px;",
+                            onclick: move |_| on_retry.call(()),
+                            "Retry"
+                        }
+                    }
+                } else if !*loaded.read() {
                     div { style: "font-size:11px;color:var(--cf-text-muted);", "Loading…" }
                 }
                 // Toggle switch — toggling immediately saves

@@ -1517,18 +1517,12 @@ mod classification_tests {
         );
     }
 
-    #[tokio::test]
-    async fn update_classification_config_rejects_invalid_level() {
-        // Inject a fake admin header so auth passes, then send a bad level.
-        // The handler validates the level before the DB query.
-        // Without a real DB behind lazy_pool this will still hit the level check
-        // because validation runs before the DB call.
-        // Construct a HeaderMap that will look like an admin session.
-        // The lazy pool will fail the DB call, but we want to verify the 400
-        // is returned for an invalid level regardless. Since require_admin is
-        // called first and will return FORBIDDEN without a real DB, we cannot
-        // reach the level validation here through the handler in a unit test.
-        // Instead we test the validation function directly.
+    /// Verifies that `valid_classification_level` rejects unknown strings.
+    /// NOTE: A full handler-level 400 test requires an authenticated integration
+    /// environment; see valid_classification_level_rejects_unknown_values above
+    /// for the unit coverage that backs the handler validation path.
+    #[test]
+    fn validation_fn_rejects_unknown_levels_used_by_handler() {
         assert!(!valid_classification_level("RESTRICTED"));
         assert!(!valid_classification_level(""));
         assert!(!valid_classification_level("super secret"));
