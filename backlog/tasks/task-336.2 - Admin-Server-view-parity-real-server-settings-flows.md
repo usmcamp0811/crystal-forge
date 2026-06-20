@@ -4,7 +4,7 @@ title: 'Admin Server: view parity + real server settings flows'
 status: Review
 assignee: []
 created_date: '2026-06-20 02:19'
-updated_date: '2026-06-20 16:25'
+updated_date: '2026-06-20 16:38'
 labels:
   - design-parity
   - admin
@@ -109,5 +109,5 @@ Medium-high. The task touches an Admin/Server surface where incorrect placeholde
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Additional review fixes in MR !282 commit 29093a1b: classification toggle now renders top and bottom Admin-view banners as a session-local preview while clearly noting persistence/global rendering is TASK-336.7; edit-user and OIDC mapping modals now use real environment chip selectors from fetch_environments instead of free-form text; OIDC mapping upsert SQL now casts auth_role/text[] parameters to address HTTP 500 save failures; admin user update now persists password reset requests. Existing follow-ups confirmed: TASK-336.3 server info/auth/build API, TASK-336.5 background jobs API, TASK-336.6 heartbeat persistence, TASK-336.7 classification persistence/global rendering, TASK-336.8 maintenance/export actions. New follow-ups created: TASK-336.9 real MFA status, TASK-336.10 real OIDC matched-user counts. Verification passed: UI Nix check, backend Nix check, and SQLx prepare against local process-compose DB.
+Final OIDC rename blocker fixed in MR !282 commit 6e82af07: the IdP group name field is now read-only/disabled when editing an existing mapping, preventing accidental creation of a second active mapping under the backend's current upsert-by-group-name behavior. Verification passed: nix develop -c bash -lc 'cd packages/web-ui && cargo fmt -- --check && cargo check --target wasm32-unknown-unknown'.
 <!-- SECTION:FINAL_SUMMARY:END -->
