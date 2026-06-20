@@ -13,6 +13,7 @@ use crate::api::models::{
     ClassificationBannerConfig, EnvironmentSummary, IdentitySource, OidcGroupMapping, Role,
     UpdateClassificationBannerRequest,
 };
+use crate::components::{Icon, IconName};
 use crate::state::app_state::AppState;
 use crate::theme;
 
@@ -288,13 +289,13 @@ pub fn AdminView() -> Element {
             div { class: "card", style: "overflow:hidden;",
                 // ── Tab bar ──────────────────────────────────────────────────
                 div { class: "sd-tabs", style: "padding:0 16px;border-bottom:1px solid var(--cf-card-border);",
-                    for (tab_id, tab_label, _icon) in [
-                        ("users", "Users", "server"),
-                        ("roles", "Roles", "key"),
-                        ("oidc", "OIDC Mappings", "link"),
-                        ("jobs", "Background Jobs", "sync"),
-                        ("audit", "Audit Log", "history"),
-                        ("server", "Server", "gear"),
+                    for (tab_id, tab_label, icon) in [
+                        ("users", "Users", IconName::Server),
+                        ("roles", "Roles", IconName::Key),
+                        ("oidc", "OIDC Mappings", IconName::Link),
+                        ("jobs", "Background Jobs", IconName::Sync),
+                        ("audit", "Audit Log", IconName::History),
+                        ("server", "Server", IconName::Gear),
                     ] {
                         {
                             let is_active = *active_tab.read() == tab_id;
@@ -306,6 +307,7 @@ pub fn AdminView() -> Element {
                                         let id = tab_id.to_string();
                                         move |_| active_tab.set(id.clone())
                                     },
+                                    Icon { name: icon, size: 12 }
                                     "{tab_label}"
                                 }
                             }
