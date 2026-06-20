@@ -269,12 +269,16 @@ pub fn AppShell() -> Element {
         div {
             class: "min-h-screen {theme::surface::PAGE_BG} {theme::text::PRIMARY} flex flex-col overflow-x-hidden",
 
+            // Classification bar spacer + fixed bar render first (z-index 990).
+            // Dev mode banner renders second (z-index 1000) and its fixed bar
+            // paints on top so the operational/non-production notice always wins.
             if let Some(ref cfg) = classification_top {
                 if cfg.enabled {
                     ClassificationBar { config: cfg.clone(), top: true }
                 }
             }
             DevModeBanner { placement: BannerPlacement::Top }
+            // ── end top banners ──────────────────────────────────────────────
 
             div {
                 class: "app flex-1 min-h-0 relative",
@@ -328,6 +332,9 @@ pub fn AppShell() -> Element {
                 }
             }
 
+            // ── bottom banners ────────────────────────────────────────────────
+            // Dev mode spacer + fixed bar first (higher z-index wins),
+            // classification bar spacer + fixed bar second.
             DevModeBanner { placement: BannerPlacement::Bottom }
             if let Some(ref cfg) = classification_bottom {
                 if cfg.enabled {
@@ -338,9 +345,12 @@ pub fn AppShell() -> Element {
     }
 }
 
+/// Renders an in-flow spacer (to push page content) AND a matching `position:fixed`
+/// classification banner at the given edge. Mirrors the DevModeBanner pattern so
+/// both banner types stack naturally in the flex column without overlap.
 #[component]
 fn ClassificationBar(config: ClassificationBannerConfig, top: bool) -> Element {
-    let placement = if top { "top:0;" } else { "bottom:0;" };
+    let edge = if top { "top:0;" } else { "bottom:0;" };
     let display_text = if config.custom_text.trim().is_empty() {
         config.level.clone()
     } else {
@@ -354,9 +364,15 @@ fn ClassificationBar(config: ClassificationBannerConfig, top: bool) -> Element {
         _ => ("#10b981", "#fff"),
     };
     rsx! {
+        // In-flow spacer: same height as the fixed bar so normal page content
+        // is not obscured. z-index on the fixed bar is kept below the dev banner
+        // (z-index 1000) so classification sits outside, dev sits on top.
+        div { style: "height:24px;flex-shrink:0;" }
         div {
             role: "note",
-            style: "position:fixed;{placement}left:0;right:0;z-index:10000;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};pointer-events:none;",
+            // z-index 990 places classification below dev banner (1000) so the
+            // operational dev notice always wins when both are present.
+            style: "position:fixed;{edge}left:0;right:0;z-index:990;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};pointer-events:none;",
             "{display_text}"
         }
     }

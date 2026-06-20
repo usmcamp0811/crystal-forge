@@ -1425,8 +1425,7 @@ pub async fn update_classification_config(
     };
 
     let level = payload.level.trim();
-    let allowed_levels = ["UNCLASSIFIED", "CUI", "CONFIDENTIAL", "SECRET", "TOP SECRET"];
-    if !allowed_levels.contains(&level) {
+    if !valid_classification_level(level) {
         return bad_request("Invalid classification level");
     }
 
@@ -1448,5 +1447,96 @@ pub async fn update_classification_config(
         )
             .into_response(),
         Err(_) => internal_error("Failed to save classification banner config"),
+    }
+}
+
+// ── Classification config validation ─────────────────────────────────────────
+
+fn valid_classification_level(level: &str) -> bool {
+    matches!(
+        level,
+        "UNCLASSIFIED" | "CUI" | "CONFIDENTIAL" | "SECRET" | "TOP SECRET"
+    )
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+
+    #[test]
+    fn valid_classification_level_accepts_known_values() {
+        for lvl in &["UNCLASSIFIED", "CUI", "CONFIDENTIAL", "SECRET", "TOP SECRET"] {
+            assert!(valid_classification_level(lvl), "should accept {lvl}");
+        }
+    }
+
+    #[test]
+    fn valid_classification_level_rejects_unknown_values() {
+        for lvl in &["RESTRICTED", "", "unclassified", "top_secret"] {
+            assert!(!valid_classification_level(lvl), "should reject {lvl}");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_classification_config_does_not_require_auth() {
+        // GET is unauthenticated (public read), so it should attempt the DB
+        // query and return either 200 (connected DB) or 500 (no DB in test),
+        // but specifically not 403 FORBIDDEN.
+        let response = get_classification_config(
+            State(lazy_pool()),
+            HeaderMap::new(),
+        )
+        .await
+        .into_response();
+
+        assert_ne!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "GET classification config must not require auth"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_classification_config_requires_admin_session() {
+        let response = update_classification_config(
+            State(lazy_pool()),
+            HeaderMap::new(),
+            Json(UpdateClassificationBannerRequest {
+                enabled: true,
+                level: "SECRET".to_string(),
+                custom_text: String::new(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "PUT classification config must require admin"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_classification_config_rejects_invalid_level() {
+        // Inject a fake admin header so auth passes, then send a bad level.
+        // The handler validates the level before the DB query.
+        // Without a real DB behind lazy_pool this will still hit the level check
+        // because validation runs before the DB call.
+        // Construct a HeaderMap that will look like an admin session.
+        // The lazy pool will fail the DB call, but we want to verify the 400
+        // is returned for an invalid level regardless. Since require_admin is
+        // called first and will return FORBIDDEN without a real DB, we cannot
+        // reach the level validation here through the handler in a unit test.
+        // Instead we test the validation function directly.
+        assert!(!valid_classification_level("RESTRICTED"));
+        assert!(!valid_classification_level(""));
+        assert!(!valid_classification_level("super secret"));
+    }
+
+    fn lazy_pool() -> sqlx::PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct")
     }
 }

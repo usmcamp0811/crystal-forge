@@ -116,6 +116,9 @@ pub fn AdminView() -> Element {
     let mut active_tab = use_signal(|| "users".to_string());
 
     // Seed classification state from AppState (set by AppShell on load).
+    // If AppState already has the config (fast path: navigated in after the
+    // async fetch completed), use it; otherwise fall back to safe defaults and
+    // let the sync effect below overwrite them when the fetch arrives.
     let initial_cfg = app_state
         .read()
         .classification_config
@@ -125,9 +128,32 @@ pub fn AdminView() -> Element {
             level: "UNCLASSIFIED".to_string(),
             custom_text: String::new(),
         });
+    // True when AppState already had a value on mount — no sync needed.
+    let already_loaded = app_state.read().classification_config.is_some();
     let mut classification_enabled = use_signal(|| initial_cfg.enabled);
     let mut classification_level = use_signal(|| initial_cfg.level.clone());
     let mut classification_custom_text = use_signal(|| initial_cfg.custom_text.clone());
+    // Tracks whether the user has made edits so the sync effect skips overwriting them.
+    let mut classification_dirty = use_signal(|| false);
+    let mut classification_loaded = use_signal(|| already_loaded);
+
+    // Sync effect: fires whenever AppState.classification_config changes. Only
+    // writes to local signals if the user has not made unsaved edits AND the
+    // form has not yet been loaded from a real value.
+    use_effect(move || {
+        if *classification_loaded.read() {
+            return;
+        }
+        let config = app_state.read().classification_config.clone();
+        if let Some(cfg) = config {
+            if !*classification_dirty.read() {
+                classification_enabled.set(cfg.enabled);
+                classification_level.set(cfg.level);
+                classification_custom_text.set(cfg.custom_text);
+            }
+            classification_loaded.set(true);
+        }
+    });
 
     // Load users and OIDC mappings
     {
@@ -323,6 +349,8 @@ pub fn AdminView() -> Element {
                         classification_enabled,
                         classification_level,
                         classification_custom_text,
+                        classification_loaded,
+                        on_classification_dirty: move |_| classification_dirty.set(true),
                     }
                 }
             }
@@ -1465,6 +1493,8 @@ fn ServerTab(
     classification_enabled: Signal<bool>,
     classification_level: Signal<String>,
     classification_custom_text: Signal<String>,
+    classification_loaded: Signal<bool>,
+    on_classification_dirty: EventHandler<()>,
 ) -> Element {
     let nav = navigator();
     let auth_mode_label = match auth_mode {
@@ -1522,6 +1552,8 @@ fn ServerTab(
                 enabled: classification_enabled,
                 level: classification_level,
                 custom_text: classification_custom_text,
+                loaded: classification_loaded,
+                on_dirty: move |_| on_classification_dirty.call(()),
             }
 
             // Onboarding card
@@ -1611,10 +1643,15 @@ fn ClassificationBannerCard(
     enabled: Signal<bool>,
     level: Signal<String>,
     custom_text: Signal<String>,
+    /// True once a real persisted value has been loaded into the signals.
+    loaded: Signal<bool>,
+    /// Called when the user makes any unsaved edit so the parent can guard syncs.
+    on_dirty: EventHandler<()>,
 ) -> Element {
     let mut saving = use_signal(|| false);
     let mut save_error = use_signal(|| Option::<String>::None);
     let mut app_state = use_context::<Signal<AppState>>();
+    let controls_disabled = *saving.read() || !*loaded.read();
 
     // Classification levels with colors
     let levels = [
@@ -1639,13 +1676,18 @@ fn ClassificationBannerCard(
                         "Display a CNSS/DoD classification marking at the top and bottom of every screen. Required on many DoD / IC information systems."
                     }
                 }
+                // Loading placeholder until the persisted config arrives
+                if !*loaded.read() {
+                    div { style: "font-size:11px;color:var(--cf-text-muted);", "Loading…" }
+                }
                 // Toggle switch — toggling immediately saves
                 button {
                     class: "focus-ring",
                     role: "switch",
                     "aria-checked": "{enabled}",
-                    disabled: *saving.read(),
+                    disabled: controls_disabled,
                     onclick: move |_| {
+                        on_dirty.call(());
                         let new_enabled = !*enabled.read();
                         enabled.set(new_enabled);
                         let req = UpdateClassificationBannerRequest {
@@ -1702,7 +1744,7 @@ fn ClassificationBannerCard(
                         select {
                             class: "input focus-ring",
                             value: "{level.read()}",
-                            onchange: move |evt| level.set(evt.value()),
+                            onchange: move |evt| { on_dirty.call(()); level.set(evt.value()); },
                             for lvl in &levels {
                                 option { value: "{lvl}", "{lvl}" }
                             }
@@ -1714,7 +1756,7 @@ fn ClassificationBannerCard(
                             class: "input focus-ring",
                             value: "{custom_text.read()}",
                             placeholder: "e.g. UNCLASSIFIED//FOUO",
-                            oninput: move |evt| custom_text.set(evt.value())
+                            oninput: move |evt| { on_dirty.call(()); custom_text.set(evt.value()); }
                         }
                     }
                     div { style: "grid-column:1 / -1;",
@@ -1734,8 +1776,9 @@ fn ClassificationBannerCard(
                     div { style: "grid-column:1 / -1;display:flex;justify-content:flex-end;",
                         button {
                             class: "btn btn-primary focus-ring",
-                            disabled: *saving.read(),
+                            disabled: controls_disabled,
                             onclick: move |_| {
+                                on_dirty.call(());
                                 let req = UpdateClassificationBannerRequest {
                                     enabled: *enabled.read(),
                                     level: level.read().clone(),
