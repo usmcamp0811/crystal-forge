@@ -742,6 +742,39 @@ body {
   box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.22) !important;
 }
 
+.cf-policy-ui-only-badge {
+  display: inline;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--cf-text-muted);
+  white-space: nowrap;
+}
+
+.cf-policy-category-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  text-align: left;
+  padding: 9px 11px;
+  border-radius: 9px;
+  cursor: pointer;
+  background: var(--cf-subtle-bg);
+  border: 1px solid var(--cf-divider);
+}
+
+.cf-policy-category-card-active {
+  background: color-mix(
+    in oklab,
+    var(--cf-policy-category-color) 12%,
+    transparent
+  );
+  border-color: color-mix(
+    in oklab,
+    var(--cf-policy-category-color) 55%,
+    transparent
+  );
+}
+
 :root[data-theme="light"] .cf-policy-modal-field {
   background-color: var(--cf-subtle-bg) !important;
   border-color: var(--cf-card-border) !important;
