@@ -1,10 +1,10 @@
 ---
 id: TASK-336.7
 title: 'Admin Server: classification banner config API (enable/level/custom text)'
-status: Done
+status: To Do
 assignee: []
 created_date: '2026-06-20 02:59'
-updated_date: '2026-06-20 20:58'
+updated_date: '2026-06-20 17:02'
 labels:
   - admin
   - server
@@ -16,20 +16,6 @@ dependencies:
   - TASK-336.2
 references:
   - TASK-336.2
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/284'
-modified_files:
-  - packages/default/migrations/0142_classification_banner_config.sql
-  - packages/default/src/api/models.rs
-  - packages/default/src/bin/server.rs
-  - packages/default/src/handlers/api/admin.rs
-  - packages/default/src/queries/admin.rs
-  - packages/web-ui/src/api/client.rs
-  - packages/web-ui/src/api/models.rs
-  - packages/web-ui/src/components/layout/app_shell.rs
-  - packages/web-ui/src/components/layout/dev_banner.rs
-  - packages/web-ui/src/components/layout/mod.rs
-  - packages/web-ui/src/state/app_state.rs
-  - packages/web-ui/src/views/admin.rs
 parent_task_id: TASK-336
 priority: medium
 ordinal: 313000
@@ -91,37 +77,14 @@ Medium. This touches global app rendering and persisted admin/server configurati
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 Backend exposes GET and PUT for classification config (enabled, level, custom text)
-- [x] #2 The Admin Server Classification banners card reads and saves configuration via the real API
-- [x] #3 Classification banner renders at top and bottom of the UI when enabled and remains visible after navigating away from the Server config view
-- [x] #4 Classification config is persisted in the database through a migration and SQLx metadata is refreshed
+- [ ] #1 Backend exposes GET and PUT for classification config (enabled, level, custom text)
+- [ ] #2 The Admin Server Classification banners card reads and saves configuration via the real API
+- [ ] #3 Classification banner renders at top and bottom of the UI when enabled and remains visible after navigating away from the Server config view
+- [ ] #4 Classification config is persisted in the database through a migration and SQLx metadata is refreshed
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR !284 verified merged via glab. Target branch: TASK-336.2-admin-server-parity. Merge commit: c7064160. Squash commit: 8c7e61fa. Marking TASK-336.7 Done and cleaning up its task worktree.
+Human selected TASK-336.7 for implementation and instructed the worktree to be based from TASK-336.2-admin-server-parity.
 <!-- SECTION:NOTES:END -->
-
-## Final Summary
-
-<!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Implemented persisted classification banner configuration end-to-end in MR !284.
-
-Summary:
-- Added database persistence for classification banner configuration with migration 0142.
-- Added backend GET/PUT API support for enabled, level, and custom text.
-- Added web-ui API DTO/client support and AppState wiring.
-- Wired the Admin Server Classification banners card to read/save through the real API.
-- Rendered global top and bottom classification banners when enabled.
-- Fixed re-review issues so failed loads wait for explicit Retry and classification banners do not overlap content when the dev banner is absent.
-
-Verification:
-- UI fmt/check via nix develop exited 0.
-- Targeted classification handler tests exited 0 with 5 passed.
-- MR pipeline passed before merge.
-
-Merge:
-- MR !284 merged into TASK-336.2-admin-server-parity on 2026-06-20.
-- GitLab reported merge commit c7064160 and squash commit 8c7e61fa.
-<!-- SECTION:FINAL_SUMMARY:END -->
