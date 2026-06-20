@@ -1345,7 +1345,14 @@ fn OidcMappingModal(
                             value: "{mapping_group.read()}",
                             placeholder: "e.g. cf-operators",
                             style: "font-size:12px;",
+                            disabled: is_edit,
+                            readonly: is_edit,
                             oninput: move |evt| mapping_group.set(evt.value())
+                        }
+                        if is_edit {
+                            div { class: "help",
+                                "Group names are read-only while editing because the current backend saves mappings by group name. To rename safely, remove this mapping and add a new one."
+                            }
                         }
                     }
                     div { class: "field", style: "margin:0;",
