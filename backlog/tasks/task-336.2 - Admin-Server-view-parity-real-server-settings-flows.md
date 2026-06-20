@@ -4,7 +4,7 @@ title: 'Admin Server: view parity + real server settings flows'
 status: Review
 assignee: []
 created_date: '2026-06-20 02:19'
-updated_date: '2026-06-20 15:34'
+updated_date: '2026-06-20 16:25'
 labels:
   - design-parity
   - admin
@@ -25,11 +25,15 @@ references:
   - TASK-336.6
   - TASK-336.7
   - TASK-336.8
+  - TASK-336.9
+  - TASK-336.10
 documentation:
   - design/doc-13 - Sidebar-surface-execution-map.md
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
 modified_files:
   - packages/web-ui/src/views/admin.rs
+  - packages/default/src/handlers/api/admin.rs
+  - packages/default/src/queries/admin.rs
 parent_task_id: TASK-336
 priority: high
 ordinal: 1671
@@ -105,5 +109,5 @@ Medium-high. The task touches an Admin/Server surface where incorrect placeholde
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Review blockers addressed in MR !282 commit 1ab5cb1a: restored real-backed user create/edit/delete controls, replaced OIDC edit accidental delete with modal edit plus confirmed remove action, removed fabricated operational/security values, and wired Server heartbeat environment rows to real EnvironmentSummary data including system_count. Verification passed: nix develop -c bash -lc 'cd packages/web-ui && cargo fmt -- --check && cargo check --target wasm32-unknown-unknown'.
+Additional review fixes in MR !282 commit 29093a1b: classification toggle now renders top and bottom Admin-view banners as a session-local preview while clearly noting persistence/global rendering is TASK-336.7; edit-user and OIDC mapping modals now use real environment chip selectors from fetch_environments instead of free-form text; OIDC mapping upsert SQL now casts auth_role/text[] parameters to address HTTP 500 save failures; admin user update now persists password reset requests. Existing follow-ups confirmed: TASK-336.3 server info/auth/build API, TASK-336.5 background jobs API, TASK-336.6 heartbeat persistence, TASK-336.7 classification persistence/global rendering, TASK-336.8 maintenance/export actions. New follow-ups created: TASK-336.9 real MFA status, TASK-336.10 real OIDC matched-user counts. Verification passed: UI Nix check, backend Nix check, and SQLx prepare against local process-compose DB.
 <!-- SECTION:FINAL_SUMMARY:END -->
