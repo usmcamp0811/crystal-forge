@@ -69,13 +69,6 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
         "All / wildcard".to_string()
     };
 
-    // TODO: Load actual load metric when backend provides it
-    let load: f64 = 0.0;
-
-    // TODO: Load actual completed/failed 24h when backend provides them
-    let completed24h = 0;
-    let failed24h = 0;
-
     rsx! {
         div {
             class: "sys-card",
@@ -159,28 +152,11 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                 div {
                     style: "display: flex; justify-content: space-between; font-size: 11px; color: var(--cf-text-muted); margin-bottom: 4px;",
                     span { "Load" }
-                    span {
-                        class: "mono",
-                        "{(load * 100.0).round() as i32}%"
-                    }
+                    span { class: "mono", "—" }
                 }
                 div {
                     style: "height: 5px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden;",
-                    {
-                        let load_bg = if load > 0.85 {
-                            "#f87171"
-                        } else if load > 0.6 {
-                            "#fbbf24"
-                        } else {
-                            "#60a5fa"
-                        };
-                        let load_pct = (load * 100.0).round() as i32;
-                        rsx! {
-                            div {
-                                style: "width: {load_pct}%; height: 100%; background: {load_bg};"
-                            }
-                        }
-                    }
+                    div { style: "width: 0%; height: 100%; background: #60a5fa;" }
                 }
             }
 
@@ -190,14 +166,8 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                 div {
                     class: "chips-row",
                     span {
-                        class: "chip chip-healthy",
-                        "{completed24h} built"
-                    }
-                    if failed24h > 0 {
-                        span {
-                            class: "chip chip-critical",
-                            "{failed24h} failed"
-                        }
+                        class: "chip chip-info",
+                        "24h metrics unavailable"
                     }
                 }
                 button {

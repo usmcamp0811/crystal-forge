@@ -119,9 +119,9 @@ pub fn AddBuilderModal(
                     div {
                         h2 {
                             Icon { name: IconName::Plus, size: 14 }
-                            " Add builder"
+                            " Register builder"
                         }
-                        p { "Register a new Nix build worker." }
+                        p { "Recognize a build worker by its public key." }
                     }
                     button {
                         class: "btn btn-ghost focus-ring",

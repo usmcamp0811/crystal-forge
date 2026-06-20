@@ -94,8 +94,7 @@ pub fn BuildersView() -> Element {
                                     let slots_total: i32 = builders_list.iter()
                                         .map(|b| b.max_concurrent_jobs)
                                         .sum();
-                                    // TODO: Add completed/failed 24h metrics when backend provides them
-                                    format!("{} of {} running · {}/{} slots used · builds in last 24h",
+                                    format!("{} of {} running · {}/{} slots used · 24h build metrics unavailable",
                                         running, total, slots_used, slots_total)
                                 },
                                 _ => "Loading...".to_string()
@@ -105,9 +104,10 @@ pub fn BuildersView() -> Element {
                 }
                 button {
                     class: "btn btn-primary focus-ring",
+                    "data-coach-target": "builder",
                     onclick: move |_| show_add_modal.set(true),
                     Icon { name: IconName::Plus, size: 14 }
-                    " Add builder"
+                    " Register builder"
                 }
             }
 
@@ -127,10 +127,6 @@ pub fn BuildersView() -> Element {
                         } else {
                             0
                         };
-                        // TODO: Add completed/failed 24h from backend
-                        let completed = 0;
-                        let failed = 0;
-
                         rsx! {
                             div {
                                 class: "stat-strip",
@@ -191,28 +187,20 @@ pub fn BuildersView() -> Element {
                                     div {
                                         class: "stat-value",
                                         style: "color: #34d399;",
-                                        "{completed}"
+                                        "—"
                                     }
                                 }
                                 div {
                                     class: "stat",
                                     span {
                                         class: "stat-accent",
-                                        style: if failed > 0 {
-                                            "--stat-color: #f87171;"
-                                        } else {
-                                            "--stat-color: #34d399;"
-                                        }
+                                        style: "--stat-color: #34d399;"
                                     }
                                     div { class: "stat-label", "Failed 24h" }
                                     div {
                                         class: "stat-value",
-                                        style: if failed > 0 {
-                                            "color: #f87171;"
-                                        } else {
-                                            "color: #34d399;"
-                                        },
-                                        "{failed}"
+                                        style: "color: #34d399;",
+                                        "—"
                                     }
                                 }
                             }
@@ -303,11 +291,6 @@ pub fn BuildersView() -> Element {
                                         class: if status_filter() == "offline" { "active" } else { "" },
                                         onclick: move |_| status_filter.set("offline".to_string()),
                                         "offline"
-                                    }
-                                    button {
-                                        class: if status_filter() == "draining" { "active" } else { "" },
-                                        onclick: move |_| status_filter.set("draining".to_string()),
-                                        "draining"
                                     }
                                 }
 

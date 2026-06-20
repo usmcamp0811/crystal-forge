@@ -63,10 +63,6 @@ pub fn BuilderRow(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element
         "All / wildcard".to_string()
     };
 
-    // TODO: Load actual completed/failed 24h when backend provides them
-    let completed24h = 0;
-    let failed24h = 0;
-
     rsx! {
         tr {
             style: "cursor: pointer;",
@@ -140,13 +136,7 @@ pub fn BuilderRow(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element
                     span {
                         class: "mono",
                         style: "font-size: 12px;",
-                        "{completed24h}"
-                    }
-                    if failed24h > 0 {
-                        span {
-                            style: "font-size: 11px; color: #f87171;",
-                            "{failed24h} failed"
-                        }
+                        "—"
                     }
                 }
             }

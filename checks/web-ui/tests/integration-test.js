@@ -393,16 +393,76 @@ function mockBuilders() {
     {
       id: "55555555-5555-4555-8555-555555555555",
       name: "builder-primary",
+      host: "build-x86.production.cf.internal",
+      arch: "x86_64-linux",
       status: "active",
       max_cpu_cores: 8,
       max_memory_mb: 16384,
       max_concurrent_jobs: 4,
+      enabled: true,
       last_heartbeat_at: timestamp,
       assigned_environment_count: 1,
       active_jobs: 1,
       queued_jobs: 1,
     },
+    {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      name: "builder-arm-edge",
+      host: "build-arm.staging.cf.internal",
+      arch: "aarch64-linux",
+      status: "inactive",
+      max_cpu_cores: 16,
+      max_memory_mb: 32768,
+      max_concurrent_jobs: 8,
+      enabled: false,
+      last_heartbeat_at: timestamp,
+      assigned_environment_count: 2,
+      active_jobs: 0,
+      queued_jobs: 0,
+    },
   ];
+}
+
+function mockBuilderDetail(id = "55555555-5555-4555-8555-555555555555") {
+  const builder = mockBuilders().find((item) => item.id === id) || mockBuilders()[0];
+  return {
+    ...builder,
+    public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICrystalForgeBuilderKeyExample crystal-forge@builder",
+    created_at: nowIso(),
+    updated_at: nowIso(),
+    assigned_environment_ids: ["11111111-1111-4111-8111-111111111111"],
+  };
+}
+
+function mockBuilderEnvironments() {
+  return [
+    {
+      id: "11111111-1111-4111-8111-111111111111",
+      name: "production",
+      description: "Production builders",
+      color_hex: "#34d399",
+      is_active: true,
+      system_count: 4,
+    },
+    {
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "staging",
+      description: "Staging builders",
+      color_hex: "#60a5fa",
+      is_active: true,
+      system_count: 2,
+    },
+  ];
+}
+
+async function fulfillBuildersRoute(route) {
+  const url = new URL(route.request().url());
+  const detailMatch = url.pathname.match(/^\/api\/v1\/builders\/([^/]+)\/?$/);
+  await route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(detailMatch ? mockBuilderDetail(detailMatch[1]) : mockBuilders()),
+  });
 }
 
 function mockRecentBuilds() {
@@ -468,11 +528,13 @@ async function routeBuildsData(page) {
     });
   });
 
-  await page.route("**/api/v1/builders*", async (route) => {
+  await page.route("**/api/v1/builders*", fulfillBuildersRoute);
+
+  await page.route("**/api/v1/environments*", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify(mockBuilders()),
+      body: JSON.stringify(mockBuilderEnvironments()),
     });
   });
 
@@ -498,6 +560,7 @@ async function routeBuildsData(page) {
 async function unrouteBuildsData(page) {
   await page.unroute("**/api/v1/dashboard/summary*");
   await page.unroute("**/api/v1/builders*");
+  await page.unroute("**/api/v1/environments*");
   await page.unroute("**/api/v1/build-jobs*");
 }
 
@@ -595,11 +658,13 @@ async function routeBuildsDataWithCancelStates(page) {
     });
   });
 
-  await page.route("**/api/v1/builders*", async (route) => {
+  await page.route("**/api/v1/builders*", fulfillBuildersRoute);
+
+  await page.route("**/api/v1/environments*", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify(mockBuilders()),
+      body: JSON.stringify(mockBuilderEnvironments()),
     });
   });
 
@@ -624,6 +689,7 @@ async function routeBuildsDataWithCancelStates(page) {
 async function unrouteBuildsDataWithCancelStates(page) {
   await page.unroute("**/api/v1/dashboard/summary*");
   await page.unroute("**/api/v1/builders*");
+  await page.unroute("**/api/v1/environments*");
   await page.unroute("**/api/v1/build-jobs*");
 }
 
@@ -2782,39 +2848,67 @@ const steps = [
   },
   {
     name: "11b-builders",
-    description: "Builders list",
+    description: "Builders list cards/table parity with real-shaped API data",
     action: async (page) => {
-      await page.goto(`${baseUrl}/builders`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2000);
-      await assertVisible(page.getByText("Builders").first(), "Expected Builders page heading");
+      await routeBuildsData(page);
+      try {
+        await page.goto(`${baseUrl}/builders`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(1500);
+
+        await assertVisible(page.getByRole("heading", { name: "Builders" }).first(), "Expected Builders page heading");
+        await assertVisible(page.getByText("1 of 2 running · 1/12 slots used").first(), "Expected API-backed builders subtitle");
+        await assertVisible(page.getByRole("button", { name: /Register builder/i }).first(), "Expected Register builder CTA");
+        await assertVisible(page.locator(".stat-strip .stat-label:has-text('Slot use')").first(), "Expected slot-use stat card");
+        await assertVisible(page.locator(".filter-count:has-text('2 builders')").first(), "Expected filtered builder count");
+        await assertVisible(page.locator(".sys-card:has-text('builder-primary')").first(), "Expected builder card from API data");
+        await assertVisible(page.locator(".sys-card:has-text('build-x86.production.cf.internal')").first(), "Expected builder host on card");
+        await assertVisible(page.locator(".chip:has-text('running')").first(), "Expected running status chip");
+        await assertVisible(page.locator(".chip:has-text('24h metrics unavailable')").first(), "Expected non-fabricated 24h metric notice");
+
+        await page.getByRole("button", { name: /Table/i }).first().click();
+        await assertVisible(page.locator("table.sys-table tbody tr:has-text('builder-primary')").first(), "Expected builder table row");
+        await assertVisible(page.locator("table.sys-table th:has-text('Arch · envs')").first(), "Expected reference table columns");
+
+        await page.getByRole("button", { name: /Cards/i }).first().click();
+        await assertVisible(page.locator(".sys-card:has-text('builder-primary')").first(), "Expected return to cards view for screenshot");
+      } finally {
+        await unrouteBuildsData(page);
+      }
     },
   },
   {
     name: "11c-builders-edit-modal",
     description: "Builders edit modal with keypair actions",
     action: async (page) => {
-      await page.goto(`${baseUrl}/builders`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2200);
+      await routeBuildsData(page);
+      try {
+        await page.goto(`${baseUrl}/builders`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(1500);
 
-      const firstBuilderRow = page.locator("table tbody tr").first();
-      await assertVisible(firstBuilderRow, "Expected at least one builder row", 15000);
-      await firstBuilderRow.click();
+        await page.getByRole("button", { name: /Table/i }).first().click();
 
-      await assertVisible(
-        page.getByText("Update builder registration.").first(),
-        "Expected edit builder modal subtitle",
-        15000,
-      );
-      await assertVisible(
-        page.getByRole("button", { name: "Generate Keypair" }).first(),
-        "Expected Generate Keypair action in builder edit modal",
-        15000,
-      );
-      await assertVisible(
-        page.getByRole("button", { name: "Apply Public Key Update" }).first(),
-        "Expected Apply Public Key Update action in builder edit modal",
-        15000,
-      );
+        const firstBuilderRow = page.locator("table tbody tr").first();
+        await assertVisible(firstBuilderRow, "Expected at least one builder row", 15000);
+        await firstBuilderRow.click();
+
+        await assertVisible(
+          page.getByText("Update builder registration.").first(),
+          "Expected edit builder modal subtitle",
+          15000,
+        );
+        await assertVisible(
+          page.getByRole("button", { name: "Generate Keypair" }).first(),
+          "Expected Generate Keypair action in builder edit modal",
+          15000,
+        );
+        await assertVisible(
+          page.getByRole("button", { name: "Apply Public Key Update" }).first(),
+          "Expected Apply Public Key Update action in builder edit modal",
+          15000,
+        );
+      } finally {
+        await unrouteBuildsData(page);
+      }
     },
   },
   {
