@@ -4,7 +4,7 @@ title: 'Admin Server: view parity + real server settings flows'
 status: Review
 assignee: []
 created_date: '2026-06-20 02:19'
-updated_date: '2026-06-20 21:16'
+updated_date: '2026-06-20 21:49'
 labels:
   - design-parity
   - admin
@@ -35,6 +35,12 @@ modified_files:
   - packages/web-ui/src/components/icon.rs
   - packages/default/src/handlers/api/admin.rs
   - packages/default/src/queries/admin.rs
+  - packages/default/src/api/models.rs
+  - packages/default/src/bin/server.rs
+  - packages/default/src/handlers/agent_request.rs
+  - packages/web-ui/src/api/client.rs
+  - packages/web-ui/src/api/models.rs
+  - packages/web-ui/src/components/layout/app_shell.rs
 parent_task_id: TASK-336
 priority: high
 ordinal: 1671
@@ -107,14 +113,8 @@ Medium-high. The task touches an Admin/Server surface where incorrect placeholde
 - [x] #7 No unsupported Server setting/action may appear to succeed unless it is actually persisted or executed by backend/API behavior
 <!-- AC:END -->
 
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-MR !282 review fix pushed: 583e5a3b fix: restore admin tab icons. Verification: nix develop -c bash -lc 'cd packages/web-ui && cargo fmt -- --check && cargo check --target wasm32-unknown-unknown' exited 0.
-<!-- SECTION:NOTES:END -->
-
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Review fix 583e5a3b pushed to MR !282. The Server Management tab strip now renders the same design-reference icons for Users, Roles, OIDC Mappings, Background Jobs, Audit Log, and Server, using the existing sd-tab theming. Added missing shared Server and Link SVG glyphs to the Rust icon component.
+Review fix a7e4bbdb pushed to MR !282. Admin → Server now uses a real admin-only server-info API for version, optional commit, uptime, and PostgreSQL database status/name/size/version instead of unavailable placeholders. Also added client-side OIDC mapping environment validation to prevent stale partial values such as `ata` from being submitted, and offset the bottom classification banner so it no longer overlaps the sidebar profile footer.
 <!-- SECTION:FINAL_SUMMARY:END -->
