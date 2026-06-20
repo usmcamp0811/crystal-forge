@@ -2852,7 +2852,12 @@ const steps = [
     action: async (page) => {
       await routeBuildsData(page);
       try {
-        const viewerPage = await page.context().newPage();
+        const browser = page.context().browser();
+        if (!browser) {
+          throw new Error("Expected browser instance for isolated viewer Builders check");
+        }
+        const viewerContext = await browser.newContext({ viewport: VIEWPORTS.desktop });
+        const viewerPage = await viewerContext.newPage();
         await routeBuildsData(viewerPage);
         try {
           await viewerPage.goto(`${baseUrl}/builders?ui_check_auth=1&ui_check_role=viewer`, { timeout: LOAD_TIMEOUT });
@@ -2860,7 +2865,7 @@ const steps = [
           await assertHidden(viewerPage.getByRole("button", { name: /Register builder/i }).first(), "Expected viewer role to hide builder registration CTA");
         } finally {
           await unrouteBuildsData(viewerPage);
-          await viewerPage.close();
+          await viewerContext.close();
         }
 
         await page.goto(`${baseUrl}/builders?ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
@@ -2902,7 +2907,7 @@ const steps = [
 
         const firstBuilderRow = page.locator("table tbody tr").first();
         await assertVisible(firstBuilderRow, "Expected at least one builder row", 15000);
-        await firstBuilderRow.click();
+        await firstBuilderRow.locator("button[title='Edit']").click();
 
         await assertVisible(
           page.getByText("Update builder registration.").first(),
