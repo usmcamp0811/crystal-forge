@@ -2180,3 +2180,19 @@ pub struct ConfigHealthResponse {
     /// Per-check details for all pipeline readiness checks.
     pub checks: Vec<ConfigHealthCheck>,
 }
+
+/// Persisted classification banner configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClassificationBannerConfig {
+    pub enabled: bool,
+    pub level: String,
+    pub custom_text: String,
+}
+
+/// Request payload for updating classification banner configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateClassificationBannerRequest {
+    pub enabled: bool,
+    pub level: String,
+    pub custom_text: String,
+}

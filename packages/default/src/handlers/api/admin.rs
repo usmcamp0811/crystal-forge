@@ -11,8 +11,8 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    AdminUserSummary, ApiError, AuditAction, AuditEvent, IdentitySource, OidcGroupMapping,
-    PaginatedResponse, Role,
+    AdminUserSummary, ApiError, AuditAction, AuditEvent, ClassificationBannerConfig,
+    IdentitySource, OidcGroupMapping, PaginatedResponse, Role, UpdateClassificationBannerRequest,
 };
 use crate::auth::password::hash_password;
 use crate::handlers::api::rbac::{extract_request_origin, require_admin as require_admin_user};
@@ -1392,5 +1392,145 @@ mod tests {
             Some(AuditAction::SystemRollbackRequested)
         );
         assert_eq!(parse_audit_action("unknown"), None);
+    }
+}
+
+// ── Classification banner config ──────────────────────────────────────────────
+
+pub async fn get_classification_config(
+    State(pool): State<PgPool>,
+    _headers: HeaderMap,
+) -> impl IntoResponse {
+    match admin::get_classification_banner_config(&pool).await {
+        Ok(row) => (
+            StatusCode::OK,
+            Json(ClassificationBannerConfig {
+                enabled: row.enabled,
+                level: row.level,
+                custom_text: row.custom_text,
+            }),
+        )
+            .into_response(),
+        Err(_) => internal_error("Failed to load classification banner config"),
+    }
+}
+
+pub async fn update_classification_config(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateClassificationBannerRequest>,
+) -> impl IntoResponse {
+    let Some(_admin_user) = require_admin_user(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let level = payload.level.trim();
+    if !valid_classification_level(level) {
+        return bad_request("Invalid classification level");
+    }
+
+    match admin::upsert_classification_banner_config(
+        &pool,
+        payload.enabled,
+        level,
+        payload.custom_text.trim(),
+    )
+    .await
+    {
+        Ok(row) => (
+            StatusCode::OK,
+            Json(ClassificationBannerConfig {
+                enabled: row.enabled,
+                level: row.level,
+                custom_text: row.custom_text,
+            }),
+        )
+            .into_response(),
+        Err(_) => internal_error("Failed to save classification banner config"),
+    }
+}
+
+// ── Classification config validation ─────────────────────────────────────────
+
+fn valid_classification_level(level: &str) -> bool {
+    matches!(
+        level,
+        "UNCLASSIFIED" | "CUI" | "CONFIDENTIAL" | "SECRET" | "TOP SECRET"
+    )
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+
+    #[test]
+    fn valid_classification_level_accepts_known_values() {
+        for lvl in &["UNCLASSIFIED", "CUI", "CONFIDENTIAL", "SECRET", "TOP SECRET"] {
+            assert!(valid_classification_level(lvl), "should accept {lvl}");
+        }
+    }
+
+    #[test]
+    fn valid_classification_level_rejects_unknown_values() {
+        for lvl in &["RESTRICTED", "", "unclassified", "top_secret"] {
+            assert!(!valid_classification_level(lvl), "should reject {lvl}");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_classification_config_does_not_require_auth() {
+        // GET is unauthenticated (public read), so it should attempt the DB
+        // query and return either 200 (connected DB) or 500 (no DB in test),
+        // but specifically not 403 FORBIDDEN.
+        let response = get_classification_config(
+            State(lazy_pool()),
+            HeaderMap::new(),
+        )
+        .await
+        .into_response();
+
+        assert_ne!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "GET classification config must not require auth"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_classification_config_requires_admin_session() {
+        let response = update_classification_config(
+            State(lazy_pool()),
+            HeaderMap::new(),
+            Json(UpdateClassificationBannerRequest {
+                enabled: true,
+                level: "SECRET".to_string(),
+                custom_text: String::new(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "PUT classification config must require admin"
+        );
+    }
+
+    /// Verifies that `valid_classification_level` rejects unknown strings.
+    /// NOTE: A full handler-level 400 test requires an authenticated integration
+    /// environment; see valid_classification_level_rejects_unknown_values above
+    /// for the unit coverage that backs the handler validation path.
+    #[test]
+    fn validation_fn_rejects_unknown_levels_used_by_handler() {
+        assert!(!valid_classification_level("RESTRICTED"));
+        assert!(!valid_classification_level(""));
+        assert!(!valid_classification_level("super secret"));
+    }
+
+    fn lazy_pool() -> sqlx::PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct")
     }
 }

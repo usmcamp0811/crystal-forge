@@ -1750,3 +1750,17 @@ fn decode_api_error_message(body: &str) -> String {
         .map(|error| error.message)
         .unwrap_or_else(|_| body.to_string())
 }
+
+/// Fetch the persisted classification banner configuration.
+pub async fn fetch_classification_config() -> Result<ClassificationBannerConfig, ApiClientError> {
+    let url = format!("{}/admin/classification-config", base_url());
+    fetch_json(&url).await
+}
+
+/// Persist classification banner configuration.
+pub async fn set_classification_config(
+    request: &UpdateClassificationBannerRequest,
+) -> Result<ClassificationBannerConfig, ApiClientError> {
+    let url = format!("{}/admin/classification-config", base_url());
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
