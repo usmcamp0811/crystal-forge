@@ -1,9 +1,10 @@
 ---
 id: TASK-336.2
 title: 'Admin Server: view parity + real server settings flows'
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-06-20 02:19'
+updated_date: '2026-06-20 02:21'
 labels:
   - design-parity
   - admin
@@ -71,9 +72,17 @@ Bring the Server view within the Admin surface to CrystalForgelatest design pari
 Medium-high. The task touches an Admin/Server surface where incorrect placeholder controls could mislead operators. Main risks are scope creep, fake controls, backend/API mismatch, and expensive UI checks.
 
 ## Dependencies
-- Parent umbrella: TASK-336.
+- Parent umbrella: TASK-336. This is contextual only and is not an execution-blocking dependency.
 - CrystalForgelatest reference files under `/home/mcamp/code/crystal-forge/CrystalForgelatest`.
 - Existing parity task conventions from recent surface work such as TASK-340.1.
+
+## Verification Plan
+- Inspect the CrystalForgelatest Server/Admin reference and current `packages/web-ui/src/views/admin.rs` before implementation.
+- Run targeted formatting for changed Rust files, preferably `nix develop -c rustfmt --edition 2024 --check <changed-files>` or the repo-equivalent targeted format command.
+- Run `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` for web-ui compile validation.
+- If backend/API code changes are made, run targeted compile/tests for the touched server/API crate(s).
+- If SQLx query shapes or migrations change, use the repository devshell and local process-compose database flow to refresh SQLx metadata.
+- Update `checks/web-ui/tests/integration-test.js` so the Server surface is asserted and screenshot-captured, and run the appropriate `web-ui` check before final review unless explicitly deferred by the owner.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -84,4 +93,11 @@ Medium-high. The task touches an Admin/Server surface where incorrect placeholde
 - [ ] #4 Simple directly scoped backend/API gaps required for real behavior are implemented when safe; non-trivial backend work is deferred to follow-up tasks
 - [ ] #5 Server view loading, empty, error, populated, and key dialog/action states are covered by web-ui assertions/screenshots following existing parity-check patterns
 - [ ] #6 UI remains separated from backend/API/domain logic and follows existing Admin/web-ui architecture patterns
+- [ ] #7 No unsupported Server setting/action may appear to succeed unless it is actually persisted or executed by backend/API behavior
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Sprint-ready grooming completed at owner request: added explicit verification plan, clarified parent umbrella is contextual rather than execution-blocking, removed dependency blocker, and moved task to To Do.
+<!-- SECTION:NOTES:END -->
