@@ -1662,6 +1662,32 @@ fn ServerTab(
         AuthMode::Oidc => "OIDC",
     };
     let server_info_error_text = server_info_error.clone();
+    let oidc_issuer = server_info
+        .as_ref()
+        .and_then(|info| info.oidc_issuer_url.as_ref())
+        .map(String::as_str);
+    let active_sessions = server_info
+        .as_ref()
+        .map(|info| info.active_sessions.to_string())
+        .unwrap_or(if server_info_loading {
+            "Loading…".to_string()
+        } else {
+            "Unavailable".to_string()
+        });
+    let tls_status = server_info
+        .as_ref()
+        .map(|info| info.tls_status.as_str())
+        .unwrap_or(if server_info_loading { "Loading…" } else { "Unavailable" });
+    let tls_detail = server_info
+        .as_ref()
+        .map(|info| info.tls_detail.as_str())
+        .unwrap_or(if server_info_error.is_some() {
+            "server info unavailable"
+        } else if server_info_loading {
+            "loading transport info"
+        } else {
+            "server info unavailable"
+        });
 
     rsx! {
         div { style: "padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:14px;",
@@ -1705,12 +1731,23 @@ fn ServerTab(
                     dt { "Mode" }
                     dd { "{auth_mode_label}" }
                     dt { "OIDC issuer" }
-                    dd { span { class: "chip chip-unknown", "unavailable" } span { style: "color:var(--cf-text-muted);", " · API not implemented yet" } }
-                    dt { "Sessions" }
-                    dd { span { class: "chip chip-unknown", "unavailable" } }
-                    dt { "TLS expiry" }
                     dd {
-                        span { class: "chip chip-unknown", "unavailable" }
+                        if let Some(issuer) = oidc_issuer {
+                            span { class: "mono", style: "font-size:11px;word-break:break-word;", "{issuer}" }
+                        } else if matches!(auth_mode, AuthMode::Oidc) {
+                            span { class: "chip chip-unknown", "unavailable" }
+                            span { style: "color:var(--cf-text-muted);", " · OIDC issuer env not set" }
+                        } else {
+                            span { style: "color:var(--cf-text-muted);", "not in use" }
+                        }
+                    }
+                    dt { "Sessions" }
+                    dd { "{active_sessions}" }
+                    dt { "Transport" }
+                    dd {
+                        span { class: "chip chip-unknown", "{tls_status}" }
+                        " "
+                        span { style: "color:var(--cf-text-muted);", "· {tls_detail}" }
                     }
                 }
             }

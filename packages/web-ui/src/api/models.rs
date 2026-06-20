@@ -2198,6 +2198,7 @@ pub struct ServerRuntimeInfoResponse {
     pub uptime_seconds: u64,
     pub database: DatabaseRuntimeInfo,
     pub active_sessions: i64,
+    pub oidc_issuer_url: Option<String>,
     pub tls_status: String,
     pub tls_detail: String,
 }

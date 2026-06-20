@@ -136,6 +136,7 @@ pub async fn server_runtime_info(
         uptime_seconds: state.started_at.elapsed().as_secs(),
         database,
         active_sessions,
+        oidc_issuer_url: std::env::var("CRYSTAL_FORGE_OIDC_ISSUER_URL").ok(),
         tls_status,
         tls_detail,
     })

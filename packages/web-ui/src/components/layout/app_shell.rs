@@ -279,9 +279,14 @@ pub fn AppShell() -> Element {
         .as_ref()
         .map(|c| c.enabled)
         .unwrap_or(false);
+    let dev_mode_enabled = use_dev_mode_enabled()();
+    let bottom_banner_space = if classification_enabled || dev_mode_enabled {
+        "24px"
+    } else {
+        "0px"
+    };
     let classification_top = classification_config.clone();
     let classification_bottom = classification_config;
-    let dev_mode_enabled = use_dev_mode_enabled()();
 
     rsx! {
         div {
@@ -299,7 +304,7 @@ pub fn AppShell() -> Element {
 
             div {
                 class: "app flex-1 min-h-0 relative",
-                style: "--sidebar-w: {sidebar_width};",
+                style: "--sidebar-w: {sidebar_width};--bottom-banner-space:{bottom_banner_space};",
 
                 SidebarNav {}
                 MobileDrawer {}
