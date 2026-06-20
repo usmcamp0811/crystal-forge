@@ -4929,38 +4929,48 @@ const steps = [
     description: "Policies view",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2500);
-      await page.locator("main h1:has-text('Deployment Policies')").first().waitFor({ timeout: 5000 });
+      await page.locator("main h1:has-text('Policies')").first().waitFor({ timeout: 5000 });
+      await assertVisible(page.getByText("Criteria a system must satisfy to deploy").first(), "Expected design subtitle on Policies page");
+      await assertVisible(page.getByText("Deployment gates").first(), "Expected policy category stat strip");
+      await assertVisible(page.getByPlaceholder("Search policies…").first(), "Expected policy search filter");
+      await assertVisible(page.getByRole("button", { name: /deploy/i }).first(), "Expected deployment category segment filter");
+      await assertVisible(page.getByText(/policies?$/).first(), "Expected policy count in filter bar");
     },
   },
   {
-    name: "19-policies-new-modal-basic",
-    description: "Policies new modal in basic mode",
+    name: "19-policies-new-modal-fields",
+    description: "Policies new modal shows the unified design-faithful form",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2500);
-      const newPolicyBtn = page.locator("button:has-text('New Policy')").first();
+      const newPolicyBtn = page.getByRole("button", { name: /New custom policy/i }).first();
       await newPolicyBtn.waitFor({ timeout: 5000 });
       await newPolicyBtn.click();
-      await page.waitForTimeout(1200);
-      await page.getByRole("heading", { name: "Create Policy" }).waitFor({ timeout: 5000 });
+      await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
+      // Unified design form sections (no Basic/Advanced toggle, no raw JSON editor).
+      await assertHidden(page.getByRole("button", { name: "Advanced" }), "Advanced toggle should not exist in unified modal");
+      await assertVisible(page.getByText("Category", { exact: false }).first(), "Expected Category section");
+      await assertVisible(page.getByText("Severity", { exact: false }).first(), "Expected Severity section");
+      await assertVisible(page.getByText("Rationale", { exact: false }).first(), "Expected Rationale section");
+      await assertVisible(page.getByText("Assertions & gate rules", { exact: false }).first(), "Expected assertions/gate rules builder");
+      await assertVisible(page.getByText("Evidence for ATO", { exact: false }).first(), "Expected evidence-for-ATO builder");
+      // UI-only / not-persisted markers are visible for unsupported fields.
+      await assertVisible(page.getByText("UI only — not persisted yet").first(), "Expected UI-only/not-persisted markers");
     },
   },
   {
-    name: "20-policies-new-modal-advanced",
-    description: "Policies new modal in advanced mode",
+    name: "20-policies-new-modal-rule-builder",
+    description: "Policies new modal can add an assertion rule via the builder",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2500);
-      const newPolicyBtn = page.locator("button:has-text('New Policy')").first();
+      const newPolicyBtn = page.getByRole("button", { name: /New custom policy/i }).first();
       await newPolicyBtn.waitFor({ timeout: 5000 });
       await newPolicyBtn.click();
-      await page.waitForTimeout(700);
-      const advancedBtn = page.getByRole("button", { name: "Advanced" });
-      await advancedBtn.waitFor({ timeout: 5000 });
-      await advancedBtn.click();
-      await page.waitForTimeout(1200);
-      await page.getByText("Policy Definition").first().waitFor({ timeout: 5000 });
+      await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
+      // Add a CVE gate rule through the design's rule dropdown.
+      const addRule = page.locator("select").filter({ hasText: "Add assertion / rule" }).first();
+      await addRule.waitFor({ timeout: 5000 });
+      await addRule.selectOption("cve_block");
+      await assertVisible(page.getByText("Block deploy when").first(), "Expected CVE gate rule editor row after adding rule");
     },
   },
   // ── CVE policy API round-trip checks ────────────────────────────────────
@@ -6119,6 +6129,14 @@ const CI_FAST_STEP_NAMES = new Set([
   "16b-cves-severity-filter",
   // TASK-326: Scanning view evidence
   "16c-scanning-view",
+  // TASK-340.1: Policies parity evidence
+  "18-policies",
+  "19-policies-new-modal-fields",
+  "20-policies-new-modal-rule-builder",
+  "20b-policies-cve-gate-create-roundtrip",
+  "20c-policies-multirule-create-roundtrip",
+  "20d-policies-cve-gate-invalid-rejected",
+  "20e-policies-multirule-rules-only-no-expression-required",
   // TASK-303: Caches view and modal evidence
   "21-caches",
   "22-caches-modal-nix",
