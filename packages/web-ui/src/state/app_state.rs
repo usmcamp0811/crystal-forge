@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::api::models::{AuthContext, ConfigHealthResponse};
+use crate::api::models::{AuthContext, ClassificationBannerConfig, ConfigHealthResponse};
 
 /// State of authentication fetch operation.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -41,6 +41,8 @@ pub struct AppState {
     pub config_health: Option<ConfigHealthResponse>,
     /// State of the shared config-health fetch.
     pub config_health_fetch_state: ConfigHealthFetchState,
+    /// Persisted classification banner configuration (None until loaded).
+    pub classification_config: Option<ClassificationBannerConfig>,
 }
 
 impl Default for AppState {
@@ -52,6 +54,7 @@ impl Default for AppState {
             auth_fetch_state: AuthFetchState::Loading,
             config_health: None,
             config_health_fetch_state: ConfigHealthFetchState::Idle,
+            classification_config: None,
         }
     }
 }

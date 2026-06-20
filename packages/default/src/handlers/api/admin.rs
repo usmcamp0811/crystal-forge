@@ -11,8 +11,8 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    AdminUserSummary, ApiError, AuditAction, AuditEvent, IdentitySource, OidcGroupMapping,
-    PaginatedResponse, Role,
+    AdminUserSummary, ApiError, AuditAction, AuditEvent, ClassificationBannerConfig,
+    IdentitySource, OidcGroupMapping, PaginatedResponse, Role, UpdateClassificationBannerRequest,
 };
 use crate::auth::password::hash_password;
 use crate::handlers::api::rbac::{extract_request_origin, require_admin as require_admin_user};
@@ -1392,5 +1392,61 @@ mod tests {
             Some(AuditAction::SystemRollbackRequested)
         );
         assert_eq!(parse_audit_action("unknown"), None);
+    }
+}
+
+// ── Classification banner config ──────────────────────────────────────────────
+
+pub async fn get_classification_config(
+    State(pool): State<PgPool>,
+    _headers: HeaderMap,
+) -> impl IntoResponse {
+    match admin::get_classification_banner_config(&pool).await {
+        Ok(row) => (
+            StatusCode::OK,
+            Json(ClassificationBannerConfig {
+                enabled: row.enabled,
+                level: row.level,
+                custom_text: row.custom_text,
+            }),
+        )
+            .into_response(),
+        Err(_) => internal_error("Failed to load classification banner config"),
+    }
+}
+
+pub async fn update_classification_config(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateClassificationBannerRequest>,
+) -> impl IntoResponse {
+    let Some(_admin_user) = require_admin_user(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let level = payload.level.trim();
+    let allowed_levels = ["UNCLASSIFIED", "CUI", "CONFIDENTIAL", "SECRET", "TOP SECRET"];
+    if !allowed_levels.contains(&level) {
+        return bad_request("Invalid classification level");
+    }
+
+    match admin::upsert_classification_banner_config(
+        &pool,
+        payload.enabled,
+        level,
+        payload.custom_text.trim(),
+    )
+    .await
+    {
+        Ok(row) => (
+            StatusCode::OK,
+            Json(ClassificationBannerConfig {
+                enabled: row.enabled,
+                level: row.level,
+                custom_text: row.custom_text,
+            }),
+        )
+            .into_response(),
+        Err(_) => internal_error("Failed to save classification banner config"),
     }
 }

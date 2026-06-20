@@ -2,8 +2,8 @@
 
 use dioxus::prelude::*;
 
-use crate::api::client::fetch_config_health;
-use crate::api::models::{AuthContext, AuthMode, AuthUser, Role};
+use crate::api::client::{fetch_classification_config, fetch_config_health};
+use crate::api::models::{AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role};
 use crate::components::layout::TopBar;
 use crate::components::layout::sidebar::{MobileDrawer, SidebarContext, SidebarNav};
 use crate::components::layout::{BannerPlacement, DevModeBanner};
@@ -175,6 +175,22 @@ pub fn AppShell() -> Element {
         }
     }
 
+    // Load classification banner config once on mount (any authenticated user).
+    use_effect(move || {
+        let already_loaded = app_state.read().classification_config.is_some();
+        if already_loaded {
+            return;
+        }
+        spawn(async move {
+            if let Ok(config) = fetch_classification_config().await {
+                app_state.write().classification_config = Some(config);
+            }
+        });
+    });
+
+    let classification_config: Option<ClassificationBannerConfig> =
+        app_state.read().classification_config.clone();
+
     // Shared config health state — fetched once for admin users and reused by views.
     let is_admin_user = auth::is_admin(&auth_context);
     let mut dismissed_key: Signal<Option<String>> = use_signal(|| None);
@@ -246,10 +262,18 @@ pub fn AppShell() -> Element {
         });
     });
 
+    let classification_top = classification_config.clone();
+    let classification_bottom = classification_config;
+
     rsx! {
         div {
             class: "min-h-screen {theme::surface::PAGE_BG} {theme::text::PRIMARY} flex flex-col overflow-x-hidden",
 
+            if let Some(ref cfg) = classification_top {
+                if cfg.enabled {
+                    ClassificationBar { config: cfg.clone(), top: true }
+                }
+            }
             DevModeBanner { placement: BannerPlacement::Top }
 
             div {
@@ -305,6 +329,35 @@ pub fn AppShell() -> Element {
             }
 
             DevModeBanner { placement: BannerPlacement::Bottom }
+            if let Some(ref cfg) = classification_bottom {
+                if cfg.enabled {
+                    ClassificationBar { config: cfg.clone(), top: false }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ClassificationBar(config: ClassificationBannerConfig, top: bool) -> Element {
+    let placement = if top { "top:0;" } else { "bottom:0;" };
+    let display_text = if config.custom_text.trim().is_empty() {
+        config.level.clone()
+    } else {
+        config.custom_text.trim().to_uppercase()
+    };
+    let (bg, fg) = match config.level.as_str() {
+        "CUI" => ("#a78bfa", "#fff"),
+        "CONFIDENTIAL" => ("#3b82f6", "#fff"),
+        "SECRET" => ("#ef4444", "#fff"),
+        "TOP SECRET" => ("#fbbf24", "#000"),
+        _ => ("#10b981", "#fff"),
+    };
+    rsx! {
+        div {
+            role: "note",
+            style: "position:fixed;{placement}left:0;right:0;z-index:10000;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};pointer-events:none;",
+            "{display_text}"
         }
     }
 }

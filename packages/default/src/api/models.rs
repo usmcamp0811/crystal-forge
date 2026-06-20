@@ -1576,6 +1576,22 @@ pub struct SetupWizardAcknowledgeAgentRequest {
     pub acknowledged: bool,
 }
 
+/// Persisted classification banner configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClassificationBannerConfig {
+    pub enabled: bool,
+    pub level: String,
+    pub custom_text: String,
+}
+
+/// Request payload for updating the classification banner configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateClassificationBannerRequest {
+    pub enabled: bool,
+    pub level: String,
+    pub custom_text: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Error Response
 // ─────────────────────────────────────────────────────────────────────────────

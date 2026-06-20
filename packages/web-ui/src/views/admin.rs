@@ -4,13 +4,14 @@ use std::collections::HashMap;
 
 use crate::api::client::{
     create_admin_user, delete_admin_oidc_mapping, delete_admin_user, fetch_admin_audit_events,
-    fetch_admin_oidc_mappings, fetch_admin_users, fetch_environments, set_setup_wizard_dismissed,
-    update_admin_user, upsert_admin_oidc_mapping,
+    fetch_admin_oidc_mappings, fetch_admin_users, fetch_environments, set_classification_config,
+    set_setup_wizard_dismissed, update_admin_user, upsert_admin_oidc_mapping,
 };
 use crate::api::models::{
     AdminAuditEventsParams, AdminCreateUserRequest, AdminUpdateUserRequest,
-    AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, AuthMode, EnvironmentSummary,
-    IdentitySource, OidcGroupMapping, Role,
+    AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, AuthMode,
+    ClassificationBannerConfig, EnvironmentSummary, IdentitySource, OidcGroupMapping, Role,
+    UpdateClassificationBannerRequest,
 };
 use crate::state::app_state::AppState;
 use crate::theme;
@@ -113,9 +114,20 @@ pub fn AdminView() -> Element {
     let mut to_filter = use_signal(String::new);
 
     let mut active_tab = use_signal(|| "users".to_string());
-    let mut classification_enabled = use_signal(|| false);
-    let mut classification_level = use_signal(|| "UNCLASSIFIED".to_string());
-    let mut classification_custom_text = use_signal(String::new);
+
+    // Seed classification state from AppState (set by AppShell on load).
+    let initial_cfg = app_state
+        .read()
+        .classification_config
+        .clone()
+        .unwrap_or_else(|| ClassificationBannerConfig {
+            enabled: false,
+            level: "UNCLASSIFIED".to_string(),
+            custom_text: String::new(),
+        });
+    let mut classification_enabled = use_signal(|| initial_cfg.enabled);
+    let mut classification_level = use_signal(|| initial_cfg.level.clone());
+    let mut classification_custom_text = use_signal(|| initial_cfg.custom_text.clone());
 
     // Load users and OIDC mappings
     {
@@ -201,24 +213,9 @@ pub fn AdminView() -> Element {
 
     let can_go_prev = *audit_page.read() > 1;
     let can_go_next = *audit_page.read() < total_pages;
-    let classification_text = classification_display_text(
-        &classification_level.read(),
-        &classification_custom_text.read(),
-    );
-    let (classification_bg, classification_fg) =
-        classification_colors(&classification_level.read());
-
     rsx! {
         div {
             style: "display:flex;flex-direction:column;gap:16px;",
-            if *classification_enabled.read() {
-                ClassificationBanner {
-                    text: classification_text.clone(),
-                    bg: classification_bg,
-                    fg: classification_fg,
-                    top: true,
-                }
-            }
 
             // ── Page head ───────────────────────────────────────────────────
             div { class: "page-head",
@@ -329,14 +326,6 @@ pub fn AdminView() -> Element {
                     }
                 }
             }
-            if *classification_enabled.read() {
-                ClassificationBanner {
-                    text: classification_text,
-                    bg: classification_bg,
-                    fg: classification_fg,
-                    top: false,
-                }
-            }
         }
     }
 }
@@ -344,19 +333,6 @@ pub fn AdminView() -> Element {
 // ============================================================================
 // SERVER INFO STRIP
 // ============================================================================
-
-#[component]
-fn ClassificationBanner(text: String, bg: &'static str, fg: &'static str, top: bool) -> Element {
-    let placement = if top { "top:0;" } else { "bottom:0;" };
-
-    rsx! {
-        div {
-            role: "note",
-            style: "position:fixed;{placement}left:0;right:0;z-index:10000;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};box-shadow:0 1px 0 rgba(255,255,255,0.08) inset;pointer-events:none;",
-            "{text}"
-        }
-    }
-}
 
 #[component]
 fn ServerInfoStrip(users: Vec<AdminUserSummary>, auth_mode: AuthMode) -> Element {
@@ -1636,6 +1612,10 @@ fn ClassificationBannerCard(
     level: Signal<String>,
     custom_text: Signal<String>,
 ) -> Element {
+    let mut saving = use_signal(|| false);
+    let mut save_error = use_signal(|| Option::<String>::None);
+    let mut app_state = use_context::<Signal<AppState>>();
+
     // Classification levels with colors
     let levels = [
         "UNCLASSIFIED",
@@ -1658,18 +1638,42 @@ fn ClassificationBannerCard(
                     p { style: "margin:0;font-size:12px;color:var(--cf-text-muted);max-width:60ch;",
                         "Display a CNSS/DoD classification marking at the top and bottom of every screen. Required on many DoD / IC information systems."
                     }
-                    p { style: "margin:6px 0 0;font-size:11px;color:var(--cf-text-muted);",
-                        "Session-local preview only · persistence and global app rendering are tracked by TASK-336.7."
-                    }
                 }
-                // Toggle switch
+                // Toggle switch — toggling immediately saves
                 button {
                     class: "focus-ring",
                     role: "switch",
                     "aria-checked": "{enabled}",
+                    disabled: *saving.read(),
                     onclick: move |_| {
-                        let current = *enabled.read();
-                        enabled.set(!current);
+                        let new_enabled = !*enabled.read();
+                        enabled.set(new_enabled);
+                        let req = UpdateClassificationBannerRequest {
+                            enabled: new_enabled,
+                            level: level.read().clone(),
+                            custom_text: custom_text.read().clone(),
+                        };
+                        saving.set(true);
+                        save_error.set(None);
+                        spawn(async move {
+                            match set_classification_config(&req).await {
+                                Ok(cfg) => {
+                                    app_state.write().classification_config = Some(ClassificationBannerConfig {
+                                        enabled: cfg.enabled,
+                                        level: cfg.level.clone(),
+                                        custom_text: cfg.custom_text.clone(),
+                                    });
+                                    enabled.set(cfg.enabled);
+                                    level.set(cfg.level);
+                                    custom_text.set(cfg.custom_text);
+                                }
+                                Err(e) => {
+                                    enabled.set(!new_enabled); // revert
+                                    save_error.set(Some(e.to_string()));
+                                }
+                            }
+                            saving.set(false);
+                        });
                     },
                     style: if *enabled.read() {
                         "flex-shrink:0;width:44px;height:24px;border-radius:999px;background:var(--cf-brand-purple);position:relative;cursor:pointer;border:none;padding:0;transition:background 140ms;"
@@ -1684,6 +1688,10 @@ fn ClassificationBannerCard(
                         }
                     }
                 }
+            }
+
+            if let Some(ref err) = *save_error.read() {
+                div { class: "sd-callout sd-callout-danger", style: "font-size:12px;margin-bottom:10px;", "{err}" }
             }
 
             // Configuration section (only show when enabled)
@@ -1721,6 +1729,38 @@ fn ClassificationBannerCard(
                                     "{display_text}"
                                 }
                             }
+                        }
+                    }
+                    div { style: "grid-column:1 / -1;display:flex;justify-content:flex-end;",
+                        button {
+                            class: "btn btn-primary focus-ring",
+                            disabled: *saving.read(),
+                            onclick: move |_| {
+                                let req = UpdateClassificationBannerRequest {
+                                    enabled: *enabled.read(),
+                                    level: level.read().clone(),
+                                    custom_text: custom_text.read().clone(),
+                                };
+                                saving.set(true);
+                                save_error.set(None);
+                                spawn(async move {
+                                    match set_classification_config(&req).await {
+                                        Ok(cfg) => {
+                                            app_state.write().classification_config = Some(ClassificationBannerConfig {
+                                                enabled: cfg.enabled,
+                                                level: cfg.level.clone(),
+                                                custom_text: cfg.custom_text.clone(),
+                                            });
+                                            enabled.set(cfg.enabled);
+                                            level.set(cfg.level);
+                                            custom_text.set(cfg.custom_text);
+                                        }
+                                        Err(e) => save_error.set(Some(e.to_string())),
+                                    }
+                                    saving.set(false);
+                                });
+                            },
+                            if *saving.read() { "Saving…" } else { "Save banner config" }
                         }
                     }
                 }
