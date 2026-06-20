@@ -4,7 +4,7 @@ title: 'Admin Server: view parity + real server settings flows'
 status: Review
 assignee: []
 created_date: '2026-06-20 02:19'
-updated_date: '2026-06-20 21:49'
+updated_date: '2026-06-20 23:09'
 labels:
   - design-parity
   - admin
@@ -41,6 +41,7 @@ modified_files:
   - packages/web-ui/src/api/client.rs
   - packages/web-ui/src/api/models.rs
   - packages/web-ui/src/components/layout/app_shell.rs
+  - packages/web-ui/src/components/onboarding/coach_panel.rs
 parent_task_id: TASK-336
 priority: high
 ordinal: 1671
@@ -116,5 +117,5 @@ Medium-high. The task touches an Admin/Server surface where incorrect placeholde
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Review fix a7e4bbdb pushed to MR !282. Admin → Server now uses a real admin-only server-info API for version, optional commit, uptime, and PostgreSQL database status/name/size/version instead of unavailable placeholders. Also added client-side OIDC mapping environment validation to prevent stale partial values such as `ata` from being submitted, and offset the bottom classification banner so it no longer overlaps the sidebar profile footer.
+Review fix e7527916 pushed to MR !282. Server Management strip cards now use real runtime data instead of unavailable placeholders where the backend has data, Build info no longer repeats DB name/version, the Background Jobs sync icon matches the design SVG, the bottom classification banner is full-width without covering the sidebar profile footer, and Relaunch Setup Coach force-shows the coach even after completed setup.
 <!-- SECTION:FINAL_SUMMARY:END -->
