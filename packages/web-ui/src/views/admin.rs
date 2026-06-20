@@ -4,13 +4,13 @@ use std::collections::HashMap;
 
 use crate::api::client::{
     create_admin_user, delete_admin_oidc_mapping, delete_admin_user, fetch_admin_audit_events,
-    fetch_admin_oidc_mappings, fetch_admin_users, set_setup_wizard_dismissed, update_admin_user,
-    upsert_admin_oidc_mapping,
+    fetch_admin_oidc_mappings, fetch_admin_users, fetch_environments, set_setup_wizard_dismissed,
+    update_admin_user, upsert_admin_oidc_mapping,
 };
 use crate::api::models::{
     AdminAuditEventsParams, AdminCreateUserRequest, AdminUpdateUserRequest,
-    AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, AuthMode, IdentitySource,
-    OidcGroupMapping, Role,
+    AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, AuthMode, EnvironmentSummary,
+    IdentitySource, OidcGroupMapping, Role,
 };
 use crate::state::app_state::AppState;
 use crate::theme;
@@ -269,6 +269,7 @@ pub fn AdminView() -> Element {
 
     let mut audit_events = use_signal(Vec::<AuditEvent>::new);
     let mut oidc_mappings = use_signal(Vec::<OidcGroupMapping>::new);
+    let mut environments = use_signal(Vec::<EnvironmentSummary>::new);
     let mut audit_total = use_signal(|| 0_i64);
     let mut audit_page = use_signal(|| 1_i64);
 
@@ -277,6 +278,7 @@ pub fn AdminView() -> Element {
     let mut users_error = use_signal(|| None::<String>);
     let mut audit_error = use_signal(|| None::<String>);
     let mut oidc_error = use_signal(|| None::<String>);
+    let mut environments_error = use_signal(|| None::<String>);
 
     let mut user_search = use_signal(String::new);
     let mut user_role_filter = use_signal(|| "all".to_string());
@@ -304,6 +306,16 @@ pub fn AdminView() -> Element {
                         oidc_error.set(None);
                     }
                     Err(e) => oidc_error.set(Some(format!("Failed to load OIDC mappings: {e}"))),
+                }
+
+                match fetch_environments().await {
+                    Ok(next) => {
+                        environments.set(next);
+                        environments_error.set(None);
+                    }
+                    Err(e) => {
+                        environments_error.set(Some(format!("Failed to load environments: {e}")))
+                    }
                 }
 
                 users_loading.set(false);
@@ -465,7 +477,11 @@ pub fn AdminView() -> Element {
 
                 // ── Server tab ──────────────────────────────────────────────
                 if active_tab.read().as_str() == "server" {
-                    ServerTab {}
+                    ServerTab {
+                        environments: environments.read().clone(),
+                        environments_error: environments_error.read().clone(),
+                        auth_mode: app_state.read().auth.as_ref().map(|a| a.auth_mode).unwrap_or(AuthMode::Local),
+                    }
                 }
             }
         }
@@ -478,7 +494,6 @@ pub fn AdminView() -> Element {
 
 #[component]
 fn ServerInfoStrip(users: Vec<AdminUserSummary>, auth_mode: AuthMode) -> Element {
-    let s = &SERVER_INFO_MOCK;
     let active_users = users.iter().filter(|u| u.enabled).count();
 
     let auth_mode_label = match auth_mode {
@@ -492,8 +507,8 @@ fn ServerInfoStrip(users: Vec<AdminUserSummary>, auth_mode: AuthMode) -> Element
             div { class: "stat",
                 span { class: "stat-accent", style: "--stat-color:#a78bfa;" }
                 div { class: "stat-label", "CF Version" }
-                div { class: "stat-value", style: "font-size:20px;", "{s.version}" }
-                div { class: "stat-meta mono", "{s.commit} · up {s.uptime}" }
+                div { class: "stat-value", style: "font-size:16px;", "Unavailable" }
+                div { class: "stat-meta", "API not implemented yet" }
             }
             div { class: "stat",
                 span { class: "stat-accent", style: "--stat-color:#34d399;" }
@@ -504,19 +519,20 @@ fn ServerInfoStrip(users: Vec<AdminUserSummary>, auth_mode: AuthMode) -> Element
             div { class: "stat",
                 span { class: "stat-accent", style: "--stat-color:#60a5fa;" }
                 div { class: "stat-label", "Database" }
-                div { class: "stat-value", style: "font-size:16px;color:#34d399;", "{s.db_status}" }
-                div { class: "stat-meta", "{s.db_size}" }
+                div { class: "stat-value", style: "font-size:16px;", "Unavailable" }
+                div { class: "stat-meta", "API not implemented yet" }
             }
             div { class: "stat",
                 span { class: "stat-accent", style: "--stat-color:#fbbf24;" }
                 div { class: "stat-label", "Active sessions" }
-                div { class: "stat-value", "{s.sessions}" }
+                div { class: "stat-value", style: "font-size:16px;", "Unavailable" }
+                div { class: "stat-meta", "API not implemented yet" }
             }
             div { class: "stat",
                 span { class: "stat-accent", style: "--stat-color:#f87171;" }
                 div { class: "stat-label", "TLS cert" }
-                div { class: "stat-value", style: "font-size:20px;", "{s.tls_expiry}" }
-                div { class: "stat-meta", "until expiry" }
+                div { class: "stat-value", style: "font-size:16px;", "Unavailable" }
+                div { class: "stat-meta", "API not implemented yet" }
             }
         }
     }
@@ -535,6 +551,9 @@ fn UsersTab(
     user_search: Signal<String>,
     user_role_filter: Signal<String>,
 ) -> Element {
+    let mut editing_user_id = use_signal(|| Option::<String>::None);
+    let mut adding_user = use_signal(|| false);
+
     let filtered_users = {
         let search = user_search.read().to_lowercase();
         let role_filter = user_role_filter.read().clone();
@@ -580,6 +599,12 @@ fn UsersTab(
                     }
                 }
                 span { class: "filter-count", "{filtered_users.len()} users" }
+                button {
+                    class: "btn btn-primary focus-ring",
+                    style: "margin-left:auto;",
+                    onclick: move |_| adding_user.set(true),
+                    "Add user"
+                }
             }
 
             // User table
@@ -607,7 +632,6 @@ fn UsersTab(
                         for user in filtered_users {
                             {
                                 let user_id = user.id.clone();
-                                let is_service = user.identifier.contains("bot") || user.identifier.contains("audit");
                                 let initials = get_user_initials(&user.identifier);
 
                                 rsx! {
@@ -616,27 +640,12 @@ fn UsersTab(
                                             div { style: "display:flex;align-items:center;gap:10px;",
                                                 // Avatar
                                                 div {
-                                                    style: if is_service {
-                                                        "width:28px;height:28px;border-radius:50%;background:var(--cf-subtle-bg);display:grid;place-items:center;font-size:11px;font-weight:600;color:var(--cf-text-muted);flex-shrink:0;"
-                                                    } else {
-                                                        "width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#a78bc4,#654a84);display:grid;place-items:center;font-size:11px;font-weight:600;color:#fff;flex-shrink:0;"
-                                                    },
-                                                    if is_service {
-                                                        svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                                                            rect { x: "4", y: "4", width: "16", height: "16", rx: "2" }
-                                                            rect { x: "9", y: "9", width: "6", height: "6" }
-                                                            path { d: "M15 2v2M15 20v2M2 15h2M20 15h2M2.88 2.88l1.42 1.42M19.7 19.7l1.42 1.42M2.88 21.12l1.42-1.42M19.7 4.3l1.42-1.42" }
-                                                        }
-                                                    } else {
-                                                        "{initials}"
-                                                    }
+                                                    style: "width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#a78bc4,#654a84);display:grid;place-items:center;font-size:11px;font-weight:600;color:#fff;flex-shrink:0;",
+                                                    "{initials}"
                                                 }
                                                 div {
                                                     div { style: "font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;",
                                                         "{user.identifier}"
-                                                        if is_service {
-                                                            span { class: "chip chip-unknown", style: "font-size:9px;", "service" }
-                                                        }
                                                     }
                                                 }
                                             }
@@ -662,32 +671,13 @@ fn UsersTab(
                                                     span { class: "chip chip-info", style: "font-size:10px;", "all" }
                                                 } else {
                                                     for env in &user.environments {
-                                                        {
-                                                            let env_def = ENVIRONMENTS_MOCK.iter().find(|e| e.name == env);
-                                                            if let Some(def) = env_def {
-                                                                rsx! {
-                                                                    span {
-                                                                        class: "chip",
-                                                                        style: "background:color-mix(in oklab, {def.color} 14%, var(--cf-card-bg));border:1px solid {def.color};color:{def.color};font-size:10px;gap:4px;",
-                                                                        span { style: "width:4px;height:4px;border-radius:50%;background:{def.color};" }
-                                                                        "{env}"
-                                                                    }
-                                                                }
-                                                            } else {
-                                                                rsx! { span { class: "chip chip-unknown", style: "font-size:10px;", "{env}" } }
-                                                            }
-                                                        }
+                                                        span { class: "chip chip-unknown", style: "font-size:10px;", "{env}" }
                                                     }
                                                 }
                                             }
                                         }
                                         td {
-                                            // Mock MFA status
-                                            if user.identifier.contains("mreyes") || user.identifier.contains("jpark") {
-                                                span { class: "chip chip-healthy", style: "font-size:10px;", "on" }
-                                            } else {
-                                                span { class: "chip chip-warning", style: "font-size:10px;", "off" }
-                                            }
+                                            span { class: "chip chip-unknown", style: "font-size:10px;", "unavailable" }
                                         }
                                         td {
                                             if user.enabled {
@@ -702,6 +692,10 @@ fn UsersTab(
                                                 button {
                                                     class: "btn-icon focus-ring",
                                                     title: "Edit",
+                                                    onclick: {
+                                                        let user_id = user_id.clone();
+                                                        move |_| editing_user_id.set(Some(user_id.clone()))
+                                                    },
                                                     svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                                                         path { d: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" }
                                                         circle { cx: "12", cy: "12", r: "3" }
@@ -713,6 +707,286 @@ fn UsersTab(
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            if let Some(selected_id) = editing_user_id.read().as_ref() {
+                if let Some(selected_user) = users.read().iter().find(|u| &u.id == selected_id).cloned() {
+                    EditUserModal {
+                        user: selected_user,
+                        users,
+                        user_drafts,
+                        users_error,
+                        on_close: move |_| editing_user_id.set(None),
+                    }
+                }
+            }
+            if *adding_user.read() {
+                CreateUserModal {
+                    users,
+                    user_drafts,
+                    users_error,
+                    on_close: move |_| adding_user.set(false),
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn CreateUserModal(
+    users: Signal<Vec<AdminUserSummary>>,
+    user_drafts: Signal<HashMap<String, UserEditDraft>>,
+    users_error: Signal<Option<String>>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let mut email = use_signal(String::new);
+    let mut display_name = use_signal(String::new);
+    let mut password = use_signal(String::new);
+    let mut role = use_signal(|| "Viewer".to_string());
+    let mut environments = use_signal(String::new);
+    let mut saving = use_signal(|| false);
+    let mut local_error = use_signal(|| Option::<String>::None);
+
+    rsx! {
+        div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
+            div { class: "modal", style: "width:min(560px,96vw);", onclick: move |evt| evt.stop_propagation(),
+                div { class: "modal-head",
+                    div {
+                        h3 { style: "margin:0;font-size:15px;", "Add user" }
+                        p { style: "margin:4px 0 0;font-size:12px;color:var(--cf-text-muted);", "Create a local managed account." }
+                    }
+                }
+                div { class: "modal-body", style: "display:grid;gap:14px;",
+                    if let Some(err) = local_error.read().as_ref() {
+                        div { class: "sd-callout sd-callout-danger", style: "font-size:12px;", "{err}" }
+                    }
+                    div { class: "field", style: "margin:0;", label { "Email" } input { class: "input focus-ring", value: "{email.read()}", oninput: move |evt| email.set(evt.value()) } }
+                    div { class: "field", style: "margin:0;", label { "Display name" } input { class: "input focus-ring", value: "{display_name.read()}", oninput: move |evt| display_name.set(evt.value()) } }
+                    div { class: "field", style: "margin:0;", label { "Temporary password" } input { class: "input focus-ring", r#type: "password", value: "{password.read()}", oninput: move |evt| password.set(evt.value()) } }
+                    div { class: "field", style: "margin:0;", label { "Role" } select { class: "input focus-ring", value: "{role.read()}", onchange: move |evt| role.set(evt.value()), option { "Admin" } option { "Operator" } option { "Viewer" } } }
+                    div { class: "field", style: "margin:0;", label { "Environment scope" } input { class: "input focus-ring", value: "{environments.read()}", placeholder: "prod, staging — blank for all", oninput: move |evt| environments.set(evt.value()) } }
+                }
+                div { class: "modal-foot",
+                    button { class: "btn btn-ghost focus-ring", onclick: move |_| on_close.call(()), "Cancel" }
+                    button { class: "btn btn-primary focus-ring", disabled: *saving.read(), onclick: move |_| {
+                        let request = AdminCreateUserRequest {
+                            email: email.read().trim().to_string(),
+                            display_name: optional_value(display_name.read().clone()),
+                            password: optional_value(password.read().clone()),
+                            role: parse_role(&role.read()),
+                            environments: parse_environments(&environments.read()),
+                        };
+                        saving.set(true);
+                        local_error.set(None);
+                        spawn(async move {
+                            match create_admin_user(&request).await {
+                                Ok(new_user) => {
+                                    users.with_mut(|items| items.push(new_user.clone()));
+                                    update_user_draft(user_drafts, &new_user.id, |draft| *draft = UserEditDraft::from_user(&new_user));
+                                    users_error.set(None);
+                                    saving.set(false);
+                                    on_close.call(());
+                                }
+                                Err(err) => {
+                                    local_error.set(Some(err.to_string()));
+                                    saving.set(false);
+                                }
+                            }
+                        });
+                    }, if *saving.read() { "Creating…" } else { "Create" } }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn EditUserModal(
+    user: AdminUserSummary,
+    users: Signal<Vec<AdminUserSummary>>,
+    user_drafts: Signal<HashMap<String, UserEditDraft>>,
+    users_error: Signal<Option<String>>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let mut saving = use_signal(|| false);
+    let mut local_error = use_signal(|| Option::<String>::None);
+
+    let draft = user_drafts
+        .read()
+        .get(&user.id)
+        .cloned()
+        .unwrap_or_else(|| UserEditDraft::from_user(&user));
+    let is_oidc_user = user.identity_source == IdentitySource::OidcDerived;
+
+    rsx! {
+        div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
+            div { class: "modal", style: "width:min(560px,96vw);", onclick: move |evt| evt.stop_propagation(),
+                div { class: "modal-head",
+                    div {
+                        h3 { style: "margin:0;font-size:15px;", "Edit user" }
+                        p { style: "margin:4px 0 0;font-size:12px;color:var(--cf-text-muted);", "{user.identifier}" }
+                    }
+                    button { class: "btn-icon focus-ring", title: "Close", onclick: move |_| on_close.call(()),
+                        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                            line { x1: "18", y1: "6", x2: "6", y2: "18" }
+                            line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                        }
+                    }
+                }
+                div { class: "modal-body", style: "display:grid;gap:14px;",
+                    if is_oidc_user {
+                        div { class: "sd-callout sd-callout-info", style: "font-size:12px;",
+                            "This user is OIDC-derived. Role and environment changes can be overwritten on the next login if group mappings still assign different access."
+                        }
+                    }
+                    if let Some(err) = local_error.read().as_ref() {
+                        div { class: "sd-callout sd-callout-danger", style: "font-size:12px;", "{err}" }
+                    }
+                    div { class: "field", style: "margin:0;",
+                        label { "Role" }
+                        select {
+                            class: "input focus-ring",
+                            value: "{draft.role}",
+                            onchange: {
+                                let user_id = user.id.clone();
+                                move |evt| {
+                                    update_user_draft(user_drafts, &user_id, |draft| draft.role = evt.value());
+                                }
+                            },
+                            option { value: "Admin", "Admin" }
+                            option { value: "Operator", "Operator" }
+                            option { value: "Viewer", "Viewer" }
+                        }
+                    }
+                    div { class: "field", style: "margin:0;",
+                        label { "Environment scope" }
+                        input {
+                            class: "input focus-ring",
+                            value: "{draft.environments}",
+                            placeholder: "prod, staging, lab — leave blank for all",
+                            oninput: {
+                                let user_id = user.id.clone();
+                                move |evt| {
+                                    update_user_draft(user_drafts, &user_id, |draft| draft.environments = evt.value());
+                                }
+                            }
+                        }
+                        div { class: "help", "Comma-separated environment names. Empty means all environments." }
+                    }
+                    div { class: "field", style: "margin:0;",
+                        label { "Password reset" }
+                        input {
+                            class: "input focus-ring",
+                            r#type: "password",
+                            placeholder: "Leave blank to keep current password",
+                            oninput: {
+                                let user_id = user.id.clone();
+                                move |evt| {
+                                    update_user_draft(user_drafts, &user_id, |draft| draft.password = evt.value());
+                                }
+                            }
+                        }
+                    }
+                    label { style: "display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--cf-divider);border-radius:10px;padding:10px 12px;cursor:pointer;",
+                        span {
+                            span { style: "display:block;font-size:13px;font-weight:600;", "Enabled" }
+                            span { style: "display:block;font-size:12px;color:var(--cf-text-muted);", "Disabled users cannot access Crystal Forge." }
+                        }
+                        input {
+                            r#type: "checkbox",
+                            checked: draft.enabled,
+                            onchange: {
+                                let user_id = user.id.clone();
+                                move |evt| {
+                                    update_user_draft(user_drafts, &user_id, |draft| draft.enabled = evt.checked());
+                                }
+                            }
+                        }
+                    }
+                }
+                div { class: "modal-foot",
+                    button { class: "btn focus-ring", onclick: move |_| on_close.call(()), "Cancel" }
+                    button {
+                        class: "btn btn-primary focus-ring",
+                        disabled: *saving.read(),
+                        onclick: {
+                            let user_id = user.id.clone();
+                            let user_for_default = user.clone();
+                            move |_| {
+                                let draft = user_drafts
+                                    .read()
+                                    .get(&user_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| UserEditDraft::from_user(&user_for_default));
+                                let request = AdminUpdateUserRequest {
+                                    role: Some(parse_role(&draft.role)),
+                                    enabled: Some(draft.enabled),
+                                    environments: Some(parse_environments(&draft.environments)),
+                                    password: optional_value(draft.password.clone()),
+                                };
+                                let user_id_for_request = user_id.clone();
+                                saving.set(true);
+                                local_error.set(None);
+                                spawn(async move {
+                                    match update_admin_user(&user_id_for_request, &request).await {
+                                        Ok(updated_user) => {
+                                            users.with_mut(|items| {
+                                                if let Some(existing) = items.iter_mut().find(|u| u.id == updated_user.id) {
+                                                    *existing = updated_user.clone();
+                                                }
+                                            });
+                                            update_user_draft(user_drafts, &updated_user.id, |draft| {
+                                                *draft = UserEditDraft::from_user(&updated_user);
+                                            });
+                                            users_error.set(None);
+                                            saving.set(false);
+                                            on_close.call(());
+                                        }
+                                        Err(err) => {
+                                            local_error.set(Some(err.to_string()));
+                                            saving.set(false);
+                                        }
+                                    }
+                                });
+                            }
+                        },
+                        if *saving.read() { "Saving…" } else { "Save changes" }
+                    }
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        style: "margin-left:auto;color:#f87171;border-color:rgba(248,113,113,0.3);",
+                        disabled: *saving.read(),
+                        onclick: {
+                            let user_id = user.id.clone();
+                            move |_| {
+                                let confirmed = web_sys::window()
+                                    .and_then(|window| window.confirm_with_message("Delete this user? This cannot be undone.").ok())
+                                    .unwrap_or(false);
+                                if !confirmed {
+                                    return;
+                                }
+                                let user_id_for_request = user_id.clone();
+                                saving.set(true);
+                                local_error.set(None);
+                                spawn(async move {
+                                    match delete_admin_user(&user_id_for_request).await {
+                                        Ok(()) => {
+                                            users.with_mut(|items| items.retain(|item| item.id != user_id_for_request));
+                                            users_error.set(None);
+                                            saving.set(false);
+                                            on_close.call(());
+                                        }
+                                        Err(err) => {
+                                            local_error.set(Some(err.to_string()));
+                                            saving.set(false);
+                                        }
+                                    }
+                                });
+                            }
+                        },
+                        "Delete user"
                     }
                 }
             }
@@ -777,6 +1051,16 @@ fn OidcTab(
     let mut mapping_role = use_signal(|| "Viewer".to_string());
     let mut mapping_environments = use_signal(String::new);
     let mut mapping_submitting = use_signal(|| false);
+    let mut mapping_modal_mode = use_signal(|| Option::<String>::None);
+    let mut editing_mapping_id = use_signal(|| Option::<String>::None);
+    let duplicate_group_counts = {
+        let mut counts = HashMap::<String, usize>::new();
+        for mapping in oidc_mappings.read().iter() {
+            let key = mapping.group_name.trim().to_lowercase();
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        counts
+    };
 
     rsx! {
         div { style: "padding:0;",
@@ -798,11 +1082,23 @@ fn OidcTab(
             // Add mapping button
             div { style: "padding:10px 16px;display:flex;justify-content:flex-end;",
                 button { class: "btn btn-primary focus-ring",
+                    onclick: move |_| {
+                        mapping_group.set(String::new());
+                        mapping_role.set("Viewer".to_string());
+                        mapping_environments.set(String::new());
+                        editing_mapping_id.set(None);
+                        mapping_modal_mode.set(Some("add".to_string()));
+                    },
                     svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:5px;vertical-align:text-bottom;",
                         line { x1: "12", y1: "5", x2: "12", y2: "19" }
                         line { x1: "5", y1: "12", x2: "19", y2: "12" }
                     }
                     "Add mapping"
+                }
+            }
+            if let Some(err) = oidc_error.read().as_ref() {
+                div { style: "padding:0 16px 10px;",
+                    div { class: "sd-callout sd-callout-danger", style: "font-size:12px;", "{err}" }
                 }
             }
 
@@ -822,19 +1118,22 @@ fn OidcTab(
                     for (idx, mapping) in oidc_mappings.read().iter().enumerate() {
                         {
                             let role_def = get_role_definition(mapping.role);
-                            // Mock matched users count
-                            let matched_users = if mapping.group_name.contains("admins") { 1 }
-                                else if mapping.group_name.contains("operators") { 2 }
-                                else if mapping.group_name.contains("sre") { 1 }
-                                else { 2 };
-
+                            let duplicate_count = duplicate_group_counts
+                                .get(&mapping.group_name.trim().to_lowercase())
+                                .copied()
+                                .unwrap_or(0);
                             rsx! {
                                 tr {
                                     td {
                                         span { class: "mono", style: "font-size:12px;color:var(--cf-text-muted);", "#{idx + 1}" }
                                     }
                                     td {
-                                        span { class: "mono", style: "font-weight:600;font-size:13px;", "{mapping.group_name}" }
+                                        div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                                            span { class: "mono", style: "font-weight:600;font-size:13px;", "{mapping.group_name}" }
+                                            if duplicate_count > 1 {
+                                                span { class: "chip chip-warning", style: "font-size:9px;", "duplicate ×{duplicate_count}" }
+                                            }
+                                        }
                                     }
                                     td {
                                         span {
@@ -849,44 +1148,33 @@ fn OidcTab(
                                                 span { style: "font-size:11px;color:var(--cf-text-muted);", "none" }
                                             } else {
                                                 for env in &mapping.environments {
-                                                    {
-                                                        let env_def = ENVIRONMENTS_MOCK.iter().find(|e| e.name == env);
-                                                        if let Some(def) = env_def {
-                                                            rsx! {
-                                                                span {
-                                                                    class: "chip",
-                                                                    style: "background:color-mix(in oklab, {def.color} 14%, var(--cf-card-bg));border:1px solid {def.color};color:{def.color};font-size:10px;gap:4px;",
-                                                                    span { style: "width:4px;height:4px;border-radius:50%;background:{def.color};" }
-                                                                    "{env}"
-                                                                }
-                                                            }
-                                                        } else {
-                                                            rsx! { span { class: "chip chip-unknown", style: "font-size:10px;", "{env}" } }
-                                                        }
-                                                    }
+                                                    span { class: "chip chip-unknown", style: "font-size:10px;", "{env}" }
                                                 }
                                             }
                                         }
                                     }
-                                    td { class: "mono", style: "font-size:12px;", "{matched_users}" }
+                                    td { span { class: "chip chip-unknown", style: "font-size:10px;", "unavailable" } }
                                     td {
                                         div { class: "row-actions",
                                             button {
-                                class: "btn-icon focus-ring",
-                                title: "Edit",
-                                onclick: {
-                                    let mapping_id = mapping.id.clone();
-                                    move |_| {
-                                        let id = mapping_id.clone();
-                                        // Handle delete
-                                        spawn(async move {
-                                            let _ = delete_admin_oidc_mapping(&id).await;
-                                        });
-                                    }
-                                },
+                                                class: "btn-icon focus-ring",
+                                                title: "Edit",
+                                                onclick: {
+                                                    let mapping_id = mapping.id.clone();
+                                                    let group_name = mapping.group_name.clone();
+                                                    let role = role_to_string(&mapping.role);
+                                                    let environments = mapping.environments.join(", ");
+                                                    move |_| {
+                                                        editing_mapping_id.set(Some(mapping_id.clone()));
+                                                        mapping_group.set(group_name.clone());
+                                                        mapping_role.set(role.clone());
+                                                        mapping_environments.set(environments.clone());
+                                                        mapping_modal_mode.set(Some("edit".to_string()));
+                                                    }
+                                                },
                                                 svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                                    path { d: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" }
                                                     circle { cx: "12", cy: "12", r: "3" }
-                                                    path { d: "M12 1v6M12 17v6M3.51 9h6M14.51 9h6M6 20.51l3-3M15 11.51l3-3M3.51 15h6M14.51 15h6M6 3.51l3 3M15 12.51l3 3" }
                                                 }
                                             }
                                         }
@@ -894,6 +1182,169 @@ fn OidcTab(
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            if let Some(mode) = mapping_modal_mode.read().clone() {
+                OidcMappingModal {
+                    mode,
+                    editing_mapping_id,
+                    mapping_group,
+                    mapping_role,
+                    mapping_environments,
+                    mapping_submitting,
+                    oidc_mappings,
+                    oidc_error,
+                    on_close: move |_| mapping_modal_mode.set(None),
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn OidcMappingModal(
+    mode: String,
+    editing_mapping_id: Signal<Option<String>>,
+    mapping_group: Signal<String>,
+    mapping_role: Signal<String>,
+    mapping_environments: Signal<String>,
+    mapping_submitting: Signal<bool>,
+    oidc_mappings: Signal<Vec<OidcGroupMapping>>,
+    oidc_error: Signal<Option<String>>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let is_edit = mode == "edit";
+    let title = if is_edit {
+        "Edit mapping"
+    } else {
+        "Add mapping"
+    };
+
+    rsx! {
+        div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
+            div { class: "modal", style: "width:min(520px,96vw);", onclick: move |evt| evt.stop_propagation(),
+                div { class: "modal-head",
+                    div {
+                        h3 { style: "margin:0;font-size:15px;display:flex;align-items:center;gap:6px;",
+                            if is_edit {
+                                svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                    path { d: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" }
+                                    circle { cx: "12", cy: "12", r: "3" }
+                                }
+                            } else {
+                                svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                    line { x1: "12", y1: "5", x2: "12", y2: "19" }
+                                    line { x1: "5", y1: "12", x2: "19", y2: "12" }
+                                }
+                            }
+                            "{title}"
+                        }
+                        p { style: "margin:4px 0 0;font-size:12px;color:var(--cf-text-muted);", "Map an IdP group to a Crystal Forge role and environment scope." }
+                    }
+                }
+                div { class: "modal-body", style: "display:grid;gap:14px;",
+                    div { class: "field", style: "margin:0;",
+                        label { "IdP group name" }
+                        input {
+                            class: "input focus-ring mono",
+                            value: "{mapping_group.read()}",
+                            placeholder: "e.g. cf-operators",
+                            style: "font-size:12px;",
+                            oninput: move |evt| mapping_group.set(evt.value())
+                        }
+                    }
+                    div { class: "field", style: "margin:0;",
+                        label { "CF role" }
+                        div { class: "seg", style: "width:fit-content;",
+                            for role in ["Admin", "Operator", "Viewer"] {
+                                button {
+                                    class: if *mapping_role.read() == role { "active" } else { "" },
+                                    onclick: move |_| mapping_role.set(role.to_string()),
+                                    "{role}"
+                                }
+                            }
+                        }
+                    }
+                    div { class: "field", style: "margin:0;",
+                        label { "Environments" }
+                        input {
+                            class: "input focus-ring",
+                            value: "{mapping_environments.read()}",
+                            placeholder: "prod, staging, lab — leave blank for all",
+                            oninput: move |evt| mapping_environments.set(evt.value())
+                        }
+                        div { class: "help", "Comma-separated environment names. Empty means all environments." }
+                    }
+                }
+                div { class: "modal-foot",
+                    if is_edit {
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            style: "margin-right:auto;color:#f87171;border-color:rgba(248,113,113,0.3);",
+                            disabled: *mapping_submitting.read(),
+                            onclick: move |_| {
+                                if let Some(id) = editing_mapping_id.read().clone() {
+                                    let confirmed = web_sys::window()
+                                        .and_then(|window| window.confirm_with_message("Remove this OIDC group mapping?").ok())
+                                        .unwrap_or(false);
+                                    if !confirmed {
+                                        return;
+                                    }
+                                    mapping_submitting.set(true);
+                                    spawn(async move {
+                                        match delete_admin_oidc_mapping(&id).await {
+                                            Ok(()) => {
+                                                oidc_mappings.with_mut(|items| items.retain(|mapping| mapping.id != id));
+                                                oidc_error.set(None);
+                                                mapping_submitting.set(false);
+                                                on_close.call(());
+                                            }
+                                            Err(err) => {
+                                                oidc_error.set(Some(err.to_string()));
+                                                mapping_submitting.set(false);
+                                            }
+                                        }
+                                    });
+                                }
+                            },
+                            "Remove"
+                        }
+                    }
+                    button { class: "btn btn-ghost focus-ring", onclick: move |_| on_close.call(()), "Cancel" }
+                    button {
+                        class: "btn btn-primary focus-ring",
+                        disabled: *mapping_submitting.read(),
+                        onclick: move |_| {
+                            let request = AdminUpsertOidcMappingRequest {
+                                group_name: mapping_group.read().trim().to_string(),
+                                role: Some(parse_role(&mapping_role.read())),
+                                environments: parse_environments(&mapping_environments.read()),
+                            };
+                            mapping_submitting.set(true);
+                            spawn(async move {
+                                match upsert_admin_oidc_mapping(&request).await {
+                                    Ok(updated_mapping) => {
+                                        oidc_mappings.with_mut(|items| {
+                                            if let Some(existing) = items.iter_mut().find(|mapping| mapping.id == updated_mapping.id || mapping.group_name == updated_mapping.group_name) {
+                                                *existing = updated_mapping.clone();
+                                            } else {
+                                                items.push(updated_mapping.clone());
+                                            }
+                                        });
+                                        oidc_error.set(None);
+                                        mapping_submitting.set(false);
+                                        on_close.call(());
+                                    }
+                                    Err(err) => {
+                                        oidc_error.set(Some(err.to_string()));
+                                        mapping_submitting.set(false);
+                                    }
+                                }
+                            });
+                        },
+                        if *mapping_submitting.read() { "Saving…" } else if is_edit { "Save" } else { "Add" }
                     }
                 }
             }
@@ -1152,9 +1603,17 @@ fn AuditTab(
 // ============================================================================
 
 #[component]
-fn ServerTab() -> Element {
+fn ServerTab(
+    environments: Vec<EnvironmentSummary>,
+    environments_error: Option<String>,
+    auth_mode: AuthMode,
+) -> Element {
     let nav = navigator();
-    let s = &SERVER_INFO_MOCK;
+    let auth_mode_label = match auth_mode {
+        AuthMode::Dev => "Dev",
+        AuthMode::Local => "Local",
+        AuthMode::Oidc => "OIDC",
+    };
 
     rsx! {
         div { style: "padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:14px;",
@@ -1163,16 +1622,16 @@ fn ServerTab() -> Element {
                 h3 { style: "margin:0 0 12px;font-size:13px;font-weight:600;", "Build info" }
                 dl { class: "kv-grid",
                     dt { "Version" }
-                    dd { class: "mono", "{s.version}" }
+                    dd { span { class: "chip chip-unknown", "unavailable" } }
                     dt { "Commit" }
-                    dd { class: "mono", "{s.commit}" }
+                    dd { span { class: "chip chip-unknown", "unavailable" } }
                     dt { "Uptime" }
-                    dd { "{s.uptime}" }
+                    dd { span { class: "chip chip-unknown", "unavailable" } }
                     dt { "Database" }
                     dd {
-                        span { class: "chip chip-healthy", "{s.db_status}" }
+                        span { class: "chip chip-unknown", "unavailable" }
                         " "
-                        span { style: "color:var(--cf-text-muted);", "· {s.db_size}" }
+                        span { style: "color:var(--cf-text-muted);", "· API not implemented yet" }
                     }
                 }
             }
@@ -1182,20 +1641,23 @@ fn ServerTab() -> Element {
                 h3 { style: "margin:0 0 12px;font-size:13px;font-weight:600;", "Authentication" }
                 dl { class: "kv-grid",
                     dt { "Mode" }
-                    dd { "{s.auth_mode}" }
+                    dd { "{auth_mode_label}" }
                     dt { "OIDC issuer" }
-                    dd { class: "mono", style: "font-size:11px;word-break:break-all;white-space:normal;", "{s.oidc_issuer}" }
+                    dd { span { class: "chip chip-unknown", "unavailable" } span { style: "color:var(--cf-text-muted);", " · API not implemented yet" } }
                     dt { "Sessions" }
-                    dd { "{s.sessions} active" }
+                    dd { span { class: "chip chip-unknown", "unavailable" } }
                     dt { "TLS expiry" }
                     dd {
-                        span { class: "chip chip-healthy", "{s.tls_expiry}" }
+                        span { class: "chip chip-unknown", "unavailable" }
                     }
                 }
             }
 
             // Agent heartbeat config card
-            HeartbeatConfigCard {}
+            HeartbeatConfigCard {
+                environments,
+                environments_error,
+            }
 
             // Classification banners card
             ClassificationBannerCard {}
@@ -1285,10 +1747,21 @@ fn ServerTab() -> Element {
 #[component]
 fn ClassificationBannerCard() -> Element {
     let mut enabled = use_signal(|| false);
+    let mut level = use_signal(|| "UNCLASSIFIED".to_string());
+    let mut custom_text = use_signal(String::new);
+
+    // Classification levels with colors
+    let levels = [
+        ("UNCLASSIFIED", "#10b981", "#fff"),
+        ("CUI", "#a78bfa", "#fff"),
+        ("CONFIDENTIAL", "#3b82f6", "#fff"),
+        ("SECRET", "#ef4444", "#fff"),
+        ("TOP SECRET", "#fbbf24", "#000"),
+    ];
 
     rsx! {
         div { class: "card", style: "padding:16px;grid-column:1 / -1;",
-            div { style: "display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;",
+            div { style: "display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px;",
                 div {
                     h3 { style: "margin:0 0 4px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:7px;",
                         svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
@@ -1323,6 +1796,53 @@ fn ClassificationBannerCard() -> Element {
                     }
                 }
             }
+
+            // Configuration section (only show when enabled)
+            if *enabled.read() {
+                div { style: "border-top:1px solid var(--cf-divider);padding-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:14px;",
+                    div { class: "field", style: "margin:0;",
+                        label { "Classification level" }
+                        select {
+                            class: "input focus-ring",
+                            value: "{level.read()}",
+                            onchange: move |evt| level.set(evt.value()),
+                            for (lvl, _, _) in &levels {
+                                option { value: "{lvl}", "{lvl}" }
+                            }
+                        }
+                    }
+                    div { class: "field", style: "margin:0;",
+                        label { "Custom marking " span { style: "color:var(--cf-text-muted);font-weight:400;", "· optional" } }
+                        input {
+                            class: "input focus-ring",
+                            value: "{custom_text.read()}",
+                            placeholder: "e.g. UNCLASSIFIED//FOUO",
+                            oninput: move |evt| custom_text.set(evt.value())
+                        }
+                    }
+                    div { style: "grid-column:1 / -1;",
+                        div { style: "font-size:11px;color:var(--cf-text-muted);margin-bottom:6px;", "Preview" }
+                        {
+                            let display_text = if custom_text.read().trim().is_empty() {
+                                level.read().clone()
+                            } else {
+                                custom_text.read().trim().to_uppercase()
+                            };
+                            let (bg, fg) = levels.iter()
+                                .find(|(l, _, _)| l == &level.read().as_str())
+                                .map(|(_, bg, fg)| (*bg, *fg))
+                                .unwrap_or(("#10b981", "#fff"));
+
+                            rsx! {
+                                div {
+                                    style: "height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};",
+                                    "{display_text}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1332,7 +1852,16 @@ fn ClassificationBannerCard() -> Element {
 // ============================================================================
 
 #[component]
-fn HeartbeatConfigCard() -> Element {
+fn HeartbeatConfigCard(
+    environments: Vec<EnvironmentSummary>,
+    environments_error: Option<String>,
+) -> Element {
+    let rows = environments
+        .iter()
+        .filter(|env| env.is_active)
+        .cloned()
+        .collect::<Vec<_>>();
+
     rsx! {
         div { class: "card", style: "padding:16px;grid-column:1 / -1;",
             div { style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;",
@@ -1373,22 +1902,33 @@ fn HeartbeatConfigCard() -> Element {
             // Per-environment overrides table
             div {
                 div { style: "font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--cf-text-muted);font-weight:600;margin-bottom:8px;", "Per-environment overrides" }
+                if let Some(err) = environments_error.as_ref() {
+                    div { class: "sd-callout sd-callout-warning", style: "font-size:11px;margin-bottom:8px;",
+                        "{err}. Showing no environment-specific overrides until environments load."
+                    }
+                }
                 div { style: "display:flex;flex-direction:column;gap:0;border:1px solid var(--cf-divider);border-radius:8px;overflow:hidden;",
-                    for (idx, env) in ENVIRONMENTS_MOCK.iter().enumerate() {
-                        div {
-                            style: if idx > 0 { "display:flex;align-items:center;gap:12px;padding:10px 12px;border-top:1px solid var(--cf-divider);" } else { "display:flex;align-items:center;gap:12px;padding:10px 12px;" },
-                            span { style: "width:8px;height:8px;border-radius:50%;background:{env.color};flex-shrink:0;" }
-                            div { style: "flex:1;min-width:0;",
-                                span { class: "mono", style: "font-size:13px;font-weight:600;", "{env.name}" }
-                                span { style: "font-size:11px;color:var(--cf-text-muted);margin-left:8px;", "5 systems" }
-                            }
-                            span { style: "font-size:11px;color:var(--cf-text-muted);", "inherits global · 1m" }
-                            select { class: "input focus-ring", style: "width:120px;",
-                                option { value: "", "(global)" }
-                                option { "30s" }
-                                option { "1m" }
-                                option { "2m" }
-                                option { "5m" }
+                    if rows.is_empty() {
+                        div { style: "padding:12px;color:var(--cf-text-muted);font-size:12px;",
+                            "No active environments found."
+                        }
+                    } else {
+                        for (idx, env) in rows.iter().enumerate() {
+                            div {
+                                style: if idx > 0 { "display:flex;align-items:center;gap:12px;padding:10px 12px;border-top:1px solid var(--cf-divider);" } else { "display:flex;align-items:center;gap:12px;padding:10px 12px;" },
+                                span { style: "width:8px;height:8px;border-radius:50%;background:{env.color_hex};flex-shrink:0;" }
+                                div { style: "flex:1;min-width:0;",
+                                    span { class: "mono", style: "font-size:13px;font-weight:600;", "{env.name}" }
+                                    span { style: "font-size:11px;color:var(--cf-text-muted);margin-left:8px;", "{env.system_count} systems" }
+                                }
+                                span { style: "font-size:11px;color:var(--cf-text-muted);", "inherits global · 1m" }
+                                select { class: "input focus-ring", style: "width:120px;",
+                                    option { value: "", "(global)" }
+                                    option { "30s" }
+                                    option { "1m" }
+                                    option { "2m" }
+                                    option { "5m" }
+                                }
                             }
                         }
                     }
@@ -1427,6 +1967,35 @@ fn role_to_string(role: &Option<Role>) -> String {
         Some(Role::Operator) => "Operator".to_string(),
         Some(Role::Viewer) | None => "Viewer".to_string(),
     }
+}
+
+fn parse_role(role: &str) -> Role {
+    match role {
+        "Admin" => Role::Admin,
+        "Operator" => Role::Operator,
+        _ => Role::Viewer,
+    }
+}
+
+fn parse_environments(environments: &str) -> Vec<String> {
+    environments
+        .split(',')
+        .map(str::trim)
+        .filter(|env| !env.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn update_user_draft(
+    mut user_drafts: Signal<HashMap<String, UserEditDraft>>,
+    user_id: &str,
+    update: impl FnOnce(&mut UserEditDraft),
+) {
+    user_drafts.with_mut(|drafts| {
+        if let Some(draft) = drafts.get_mut(user_id) {
+            update(draft);
+        }
+    });
 }
 
 fn identity_source_label(source: IdentitySource) -> &'static str {
@@ -1549,6 +2118,7 @@ struct UserEditDraft {
     role: String,
     enabled: bool,
     environments: String,
+    password: String,
 }
 
 impl UserEditDraft {
@@ -1557,6 +2127,7 @@ impl UserEditDraft {
             role: role_to_string(&user.role),
             enabled: user.enabled,
             environments: user.environments.join(", "),
+            password: String::new(),
         }
     }
 }
