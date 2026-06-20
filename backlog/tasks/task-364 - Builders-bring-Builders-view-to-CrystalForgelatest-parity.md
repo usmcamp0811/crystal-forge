@@ -1,9 +1,11 @@
 ---
 id: TASK-364
 title: 'Builders: bring Builders view to CrystalForgelatest parity'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - opencode-agent
 created_date: '2026-06-20 02:07'
+updated_date: '2026-06-20 02:09'
 labels:
   - design-parity
   - builders
@@ -83,3 +85,17 @@ This task is sprint-selected and ready for execution, but it is not implemented 
 - [ ] #6 Targeted formatting and web-ui compile checks pass
 - [ ] #7 `nix build .#checks.x86_64-linux.web-ui -L` passes or any unrelated existing failures are explicitly documented with the Builders steps passing
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Initial plan: create a dedicated TASK-364 worktree from fetched origin/dev head; compare CrystalForgelatest BuildersView.jsx against current Dioxus builders view/components; implement minimal parity updates scoped to Builders view/API DTOs if needed; update web-ui Builders screenshot assertions; run targeted fmt/check and web-ui Nix check.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-agent on reckless in /home/mcamp/code/crystal-forge/TASK-364-builders-view-parity
+
+Started from fetched origin/dev head ed66bcc8. Per worktree policy, did not run git pull/merge in the shared dev integration worktree.
+<!-- SECTION:NOTES:END -->
