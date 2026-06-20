@@ -4,13 +4,14 @@ use std::collections::HashMap;
 
 use crate::api::client::{
     create_admin_user, delete_admin_oidc_mapping, delete_admin_user, fetch_admin_audit_events,
-    fetch_admin_oidc_mappings, fetch_admin_users, fetch_environments, set_setup_wizard_dismissed,
-    update_admin_user, upsert_admin_oidc_mapping,
+    fetch_admin_oidc_mappings, fetch_admin_users, fetch_environments, set_classification_config,
+    set_setup_wizard_dismissed, update_admin_user, upsert_admin_oidc_mapping,
 };
 use crate::api::models::{
     AdminAuditEventsParams, AdminCreateUserRequest, AdminUpdateUserRequest,
-    AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, AuthMode, EnvironmentSummary,
-    IdentitySource, OidcGroupMapping, Role,
+    AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, AuthMode,
+    ClassificationBannerConfig, EnvironmentSummary, IdentitySource, OidcGroupMapping, Role,
+    UpdateClassificationBannerRequest,
 };
 use crate::state::app_state::AppState;
 use crate::theme;
@@ -88,7 +89,7 @@ const ROLE_DEFINITIONS: &[RoleDefinition] = &[
 #[component]
 pub fn AdminView() -> Element {
     let nav = navigator();
-    let app_state = use_context::<Signal<AppState>>();
+    let mut app_state = use_context::<Signal<AppState>>();
     let mut users = use_signal(Vec::<AdminUserSummary>::new);
     let mut user_drafts = use_signal(HashMap::<String, UserEditDraft>::new);
 
@@ -113,9 +114,67 @@ pub fn AdminView() -> Element {
     let mut to_filter = use_signal(String::new);
 
     let mut active_tab = use_signal(|| "users".to_string());
-    let mut classification_enabled = use_signal(|| false);
-    let mut classification_level = use_signal(|| "UNCLASSIFIED".to_string());
-    let mut classification_custom_text = use_signal(String::new);
+
+    // Seed classification state from AppState (set by AppShell on load).
+    // If AppState already has the config (fast path: navigated in after the
+    // async fetch completed), use it; otherwise fall back to safe defaults and
+    // let the sync effect below overwrite them when the fetch arrives.
+    let initial_cfg = app_state
+        .read()
+        .classification_config
+        .clone()
+        .unwrap_or_else(|| ClassificationBannerConfig {
+            enabled: false,
+            level: "UNCLASSIFIED".to_string(),
+            custom_text: String::new(),
+        });
+    // True when AppState already had a value on mount — no sync needed.
+    let already_loaded = app_state.read().classification_config.is_some();
+    let already_failed = app_state
+        .read()
+        .classification_fetch_state
+        .as_ref()
+        .is_some_and(|r| r.is_err());
+    let mut classification_enabled = use_signal(|| initial_cfg.enabled);
+    let mut classification_level = use_signal(|| initial_cfg.level.clone());
+    let mut classification_custom_text = use_signal(|| initial_cfg.custom_text.clone());
+    // Tracks whether the user has made edits so the sync effect skips overwriting them.
+    let mut classification_dirty = use_signal(|| false);
+    let mut classification_loaded = use_signal(|| already_loaded);
+    let mut classification_fetch_error = use_signal(|| {
+        if already_failed {
+            Some("Failed to load classification config from server.".to_string())
+        } else {
+            None
+        }
+    });
+
+    // Sync effect: fires whenever AppState.classification_config changes. Only
+    // writes to local signals if the user has not made unsaved edits AND the
+    // form has not yet been loaded from a real value.
+    use_effect(move || {
+        if *classification_loaded.read() {
+            return;
+        }
+        let (config, fetch_state) = {
+            let state = app_state.read();
+            (
+                state.classification_config.clone(),
+                state.classification_fetch_state.clone(),
+            )
+        };
+        if let Some(cfg) = config {
+            if !*classification_dirty.read() {
+                classification_enabled.set(cfg.enabled);
+                classification_level.set(cfg.level);
+                classification_custom_text.set(cfg.custom_text);
+            }
+            classification_loaded.set(true);
+            classification_fetch_error.set(None);
+        } else if let Some(Err(e)) = fetch_state {
+            classification_fetch_error.set(Some(e));
+        }
+    });
 
     // Load users and OIDC mappings
     {
@@ -201,24 +260,9 @@ pub fn AdminView() -> Element {
 
     let can_go_prev = *audit_page.read() > 1;
     let can_go_next = *audit_page.read() < total_pages;
-    let classification_text = classification_display_text(
-        &classification_level.read(),
-        &classification_custom_text.read(),
-    );
-    let (classification_bg, classification_fg) =
-        classification_colors(&classification_level.read());
-
     rsx! {
         div {
             style: "display:flex;flex-direction:column;gap:16px;",
-            if *classification_enabled.read() {
-                ClassificationBanner {
-                    text: classification_text.clone(),
-                    bg: classification_bg,
-                    fg: classification_fg,
-                    top: true,
-                }
-            }
 
             // ── Page head ───────────────────────────────────────────────────
             div { class: "page-head",
@@ -326,15 +370,15 @@ pub fn AdminView() -> Element {
                         classification_enabled,
                         classification_level,
                         classification_custom_text,
+                        classification_loaded,
+                        classification_fetch_error: classification_fetch_error.read().clone(),
+                        on_classification_dirty: move |_| classification_dirty.set(true),
+                        on_classification_retry: move |_| {
+                            // Reset fetch state so AppShell will retry on next render.
+                            app_state.write().classification_fetch_state = None;
+                            classification_fetch_error.set(None);
+                        },
                     }
-                }
-            }
-            if *classification_enabled.read() {
-                ClassificationBanner {
-                    text: classification_text,
-                    bg: classification_bg,
-                    fg: classification_fg,
-                    top: false,
                 }
             }
         }
@@ -344,19 +388,6 @@ pub fn AdminView() -> Element {
 // ============================================================================
 // SERVER INFO STRIP
 // ============================================================================
-
-#[component]
-fn ClassificationBanner(text: String, bg: &'static str, fg: &'static str, top: bool) -> Element {
-    let placement = if top { "top:0;" } else { "bottom:0;" };
-
-    rsx! {
-        div {
-            role: "note",
-            style: "position:fixed;{placement}left:0;right:0;z-index:10000;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};box-shadow:0 1px 0 rgba(255,255,255,0.08) inset;pointer-events:none;",
-            "{text}"
-        }
-    }
-}
 
 #[component]
 fn ServerInfoStrip(users: Vec<AdminUserSummary>, auth_mode: AuthMode) -> Element {
@@ -1489,6 +1520,10 @@ fn ServerTab(
     classification_enabled: Signal<bool>,
     classification_level: Signal<String>,
     classification_custom_text: Signal<String>,
+    classification_loaded: Signal<bool>,
+    classification_fetch_error: Option<String>,
+    on_classification_dirty: EventHandler<()>,
+    on_classification_retry: EventHandler<()>,
 ) -> Element {
     let nav = navigator();
     let auth_mode_label = match auth_mode {
@@ -1546,6 +1581,10 @@ fn ServerTab(
                 enabled: classification_enabled,
                 level: classification_level,
                 custom_text: classification_custom_text,
+                loaded: classification_loaded,
+                fetch_error: classification_fetch_error,
+                on_dirty: move |_| on_classification_dirty.call(()),
+                on_retry: move |_| on_classification_retry.call(()),
             }
 
             // Onboarding card
@@ -1635,7 +1674,20 @@ fn ClassificationBannerCard(
     enabled: Signal<bool>,
     level: Signal<String>,
     custom_text: Signal<String>,
+    /// True once a real persisted value has been loaded into the signals.
+    loaded: Signal<bool>,
+    /// Set if the initial config fetch failed; None while loading or after success.
+    fetch_error: Option<String>,
+    /// Called when the user makes any unsaved edit so the parent can guard syncs.
+    on_dirty: EventHandler<()>,
+    /// Called to request a retry of the initial fetch after a failure.
+    on_retry: EventHandler<()>,
 ) -> Element {
+    let mut saving = use_signal(|| false);
+    let mut save_error = use_signal(|| Option::<String>::None);
+    let mut app_state = use_context::<Signal<AppState>>();
+    let controls_disabled = *saving.read() || !*loaded.read();
+
     // Classification levels with colors
     let levels = [
         "UNCLASSIFIED",
@@ -1658,18 +1710,57 @@ fn ClassificationBannerCard(
                     p { style: "margin:0;font-size:12px;color:var(--cf-text-muted);max-width:60ch;",
                         "Display a CNSS/DoD classification marking at the top and bottom of every screen. Required on many DoD / IC information systems."
                     }
-                    p { style: "margin:6px 0 0;font-size:11px;color:var(--cf-text-muted);",
-                        "Session-local preview only · persistence and global app rendering are tracked by TASK-336.7."
-                    }
                 }
-                // Toggle switch
+                // State banner: loading / fetch error with retry / nothing when ready
+                if let Some(ref err) = fetch_error {
+                    div { class: "sd-callout sd-callout-danger", style: "font-size:12px;display:flex;align-items:center;gap:10px;",
+                        span { style: "flex:1;", "Failed to load configuration: {err}" }
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            style: "font-size:11px;padding:4px 10px;",
+                            onclick: move |_| on_retry.call(()),
+                            "Retry"
+                        }
+                    }
+                } else if !*loaded.read() {
+                    div { style: "font-size:11px;color:var(--cf-text-muted);", "Loading…" }
+                }
+                // Toggle switch — toggling immediately saves
                 button {
                     class: "focus-ring",
                     role: "switch",
                     "aria-checked": "{enabled}",
+                    disabled: controls_disabled,
                     onclick: move |_| {
-                        let current = *enabled.read();
-                        enabled.set(!current);
+                        on_dirty.call(());
+                        let new_enabled = !*enabled.read();
+                        enabled.set(new_enabled);
+                        let req = UpdateClassificationBannerRequest {
+                            enabled: new_enabled,
+                            level: level.read().clone(),
+                            custom_text: custom_text.read().clone(),
+                        };
+                        saving.set(true);
+                        save_error.set(None);
+                        spawn(async move {
+                            match set_classification_config(&req).await {
+                                Ok(cfg) => {
+                                    app_state.write().classification_config = Some(ClassificationBannerConfig {
+                                        enabled: cfg.enabled,
+                                        level: cfg.level.clone(),
+                                        custom_text: cfg.custom_text.clone(),
+                                    });
+                                    enabled.set(cfg.enabled);
+                                    level.set(cfg.level);
+                                    custom_text.set(cfg.custom_text);
+                                }
+                                Err(e) => {
+                                    enabled.set(!new_enabled); // revert
+                                    save_error.set(Some(e.to_string()));
+                                }
+                            }
+                            saving.set(false);
+                        });
                     },
                     style: if *enabled.read() {
                         "flex-shrink:0;width:44px;height:24px;border-radius:999px;background:var(--cf-brand-purple);position:relative;cursor:pointer;border:none;padding:0;transition:background 140ms;"
@@ -1686,6 +1777,10 @@ fn ClassificationBannerCard(
                 }
             }
 
+            if let Some(ref err) = *save_error.read() {
+                div { class: "sd-callout sd-callout-danger", style: "font-size:12px;margin-bottom:10px;", "{err}" }
+            }
+
             // Configuration section (only show when enabled)
             if *enabled.read() {
                 div { style: "border-top:1px solid var(--cf-divider);padding-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:14px;",
@@ -1694,7 +1789,7 @@ fn ClassificationBannerCard(
                         select {
                             class: "input focus-ring",
                             value: "{level.read()}",
-                            onchange: move |evt| level.set(evt.value()),
+                            onchange: move |evt| { on_dirty.call(()); level.set(evt.value()); },
                             for lvl in &levels {
                                 option { value: "{lvl}", "{lvl}" }
                             }
@@ -1706,7 +1801,7 @@ fn ClassificationBannerCard(
                             class: "input focus-ring",
                             value: "{custom_text.read()}",
                             placeholder: "e.g. UNCLASSIFIED//FOUO",
-                            oninput: move |evt| custom_text.set(evt.value())
+                            oninput: move |evt| { on_dirty.call(()); custom_text.set(evt.value()); }
                         }
                     }
                     div { style: "grid-column:1 / -1;",
@@ -1721,6 +1816,39 @@ fn ClassificationBannerCard(
                                     "{display_text}"
                                 }
                             }
+                        }
+                    }
+                    div { style: "grid-column:1 / -1;display:flex;justify-content:flex-end;",
+                        button {
+                            class: "btn btn-primary focus-ring",
+                            disabled: controls_disabled,
+                            onclick: move |_| {
+                                on_dirty.call(());
+                                let req = UpdateClassificationBannerRequest {
+                                    enabled: *enabled.read(),
+                                    level: level.read().clone(),
+                                    custom_text: custom_text.read().clone(),
+                                };
+                                saving.set(true);
+                                save_error.set(None);
+                                spawn(async move {
+                                    match set_classification_config(&req).await {
+                                        Ok(cfg) => {
+                                            app_state.write().classification_config = Some(ClassificationBannerConfig {
+                                                enabled: cfg.enabled,
+                                                level: cfg.level.clone(),
+                                                custom_text: cfg.custom_text.clone(),
+                                            });
+                                            enabled.set(cfg.enabled);
+                                            level.set(cfg.level);
+                                            custom_text.set(cfg.custom_text);
+                                        }
+                                        Err(e) => save_error.set(Some(e.to_string())),
+                                    }
+                                    saving.set(false);
+                                });
+                            },
+                            if *saving.read() { "Saving…" } else { "Save banner config" }
                         }
                     }
                 }

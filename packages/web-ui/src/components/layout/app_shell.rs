@@ -2,11 +2,13 @@
 
 use dioxus::prelude::*;
 
-use crate::api::client::fetch_config_health;
-use crate::api::models::{AuthContext, AuthMode, AuthUser, Role};
+use crate::api::client::{fetch_classification_config, fetch_config_health};
+use crate::api::models::{AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role};
 use crate::components::layout::TopBar;
 use crate::components::layout::sidebar::{MobileDrawer, SidebarContext, SidebarNav};
-use crate::components::layout::{BannerPlacement, DevModeBanner};
+use crate::components::layout::{
+    BannerPlacement, DEV_MODE_BANNER_HEIGHT_PX, DevModeBanner, use_dev_mode_enabled,
+};
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::onboarding::OnboardingCoachPanel;
 use crate::routes::Route;
@@ -175,6 +177,32 @@ pub fn AppShell() -> Element {
         }
     }
 
+    // Load classification banner config once on mount (any authenticated user).
+    // Stores result in AppState so the Admin card can show an error + retry.
+    use_effect(move || {
+        let fetch_state = app_state.read().classification_fetch_state.clone();
+        // Fetch only when no attempt has been made. A failure remains visible
+        // until the Admin card's Retry button resets this state to None.
+        if fetch_state.is_some() {
+            return;
+        }
+        spawn(async move {
+            match fetch_classification_config().await {
+                Ok(config) => {
+                    let mut state = app_state.write();
+                    state.classification_config = Some(config);
+                    state.classification_fetch_state = Some(Ok(()));
+                }
+                Err(e) => {
+                    app_state.write().classification_fetch_state = Some(Err(e.to_string()));
+                }
+            }
+        });
+    });
+
+    let classification_config: Option<ClassificationBannerConfig> =
+        app_state.read().classification_config.clone();
+
     // Shared config health state — fetched once for admin users and reused by views.
     let is_admin_user = auth::is_admin(&auth_context);
     let mut dismissed_key: Signal<Option<String>> = use_signal(|| None);
@@ -246,11 +274,28 @@ pub fn AppShell() -> Element {
         });
     });
 
+    // Classification is active when the config has been loaded and enabled.
+    let classification_enabled = classification_config
+        .as_ref()
+        .map(|c| c.enabled)
+        .unwrap_or(false);
+    let classification_top = classification_config.clone();
+    let classification_bottom = classification_config;
+    let dev_mode_enabled = use_dev_mode_enabled()();
+
     rsx! {
         div {
             class: "min-h-screen {theme::surface::PAGE_BG} {theme::text::PRIMARY} flex flex-col overflow-x-hidden",
 
-            DevModeBanner { placement: BannerPlacement::Top }
+            // Top banner stack: the classification banner offsets only when
+            // the dev banner is actually visible. Each active fixed banner has
+            // a matching in-flow spacer so page content is not obscured.
+            TopBannerStack {
+                classification: classification_top,
+                classification_enabled,
+                dev_mode_enabled,
+            }
+            // ── end top banners ──────────────────────────────────────────────
 
             div {
                 class: "app flex-1 min-h-0 relative",
@@ -304,7 +349,108 @@ pub fn AppShell() -> Element {
                 }
             }
 
-            DevModeBanner { placement: BannerPlacement::Bottom }
+            // ── bottom banner stack ───────────────────────────────────────────
+            BottomBannerStack {
+                classification: classification_bottom,
+                classification_enabled,
+                dev_mode_enabled,
+            }
+        }
+    }
+}
+
+fn classification_display(
+    config: &ClassificationBannerConfig,
+) -> (String, &'static str, &'static str) {
+    let text = if config.custom_text.trim().is_empty() {
+        config.level.clone()
+    } else {
+        config.custom_text.trim().to_uppercase()
+    };
+    let (bg, fg) = match config.level.as_str() {
+        "CUI" => ("#a78bfa", "#fff"),
+        "CONFIDENTIAL" => ("#3b82f6", "#fff"),
+        "SECRET" => ("#ef4444", "#fff"),
+        "TOP SECRET" => ("#fbbf24", "#000"),
+        _ => ("#10b981", "#fff"),
+    };
+    (text, bg, fg)
+}
+
+/// Renders top banners with offsets that match the banners that are actually
+/// visible. In-flow spacers matching the active banner count push content down.
+#[component]
+fn TopBannerStack(
+    classification: Option<ClassificationBannerConfig>,
+    classification_enabled: bool,
+    dev_mode_enabled: bool,
+) -> Element {
+    let show_classification = classification_enabled;
+    let classification_offset = if dev_mode_enabled {
+        DEV_MODE_BANNER_HEIGHT_PX
+    } else {
+        0
+    };
+
+    rsx! {
+        // DevModeBanner renders its own spacer when active.
+        DevModeBanner { placement: BannerPlacement::Top, enabled: dev_mode_enabled }
+        if show_classification {
+            div { style: "height:24px;flex-shrink:0;" }
+        }
+
+        if show_classification {
+            if let Some(ref cfg) = classification {
+                {
+                    let (text, bg, fg) = classification_display(cfg);
+                    rsx! {
+                        div {
+                            role: "note",
+                            "aria-label": "Classification banner",
+                            style: "position:fixed;top:{classification_offset}px;left:0;right:0;z-index:990;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};pointer-events:none;",
+                            "{text}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Mirrors `TopBannerStack` for the bottom edge.
+#[component]
+fn BottomBannerStack(
+    classification: Option<ClassificationBannerConfig>,
+    classification_enabled: bool,
+    dev_mode_enabled: bool,
+) -> Element {
+    let show_classification = classification_enabled;
+    let classification_offset = if dev_mode_enabled {
+        DEV_MODE_BANNER_HEIGHT_PX
+    } else {
+        0
+    };
+
+    rsx! {
+        DevModeBanner { placement: BannerPlacement::Bottom, enabled: dev_mode_enabled }
+        if show_classification {
+            div { style: "height:24px;flex-shrink:0;" }
+        }
+
+        if show_classification {
+            if let Some(ref cfg) = classification {
+                {
+                    let (text, bg, fg) = classification_display(cfg);
+                    rsx! {
+                        div {
+                            role: "note",
+                            "aria-label": "Classification banner",
+                            style: "position:fixed;bottom:{classification_offset}px;left:0;right:0;z-index:990;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};pointer-events:none;",
+                            "{text}"
+                        }
+                    }
+                }
+            }
         }
     }
 }

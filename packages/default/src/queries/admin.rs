@@ -542,3 +542,47 @@ pub async fn replace_user_environment_memberships(
         .map_err(|_| "Failed to commit environment memberships".to_string())?;
     Ok(())
 }
+
+// ── Classification banner config ──────────────────────────────────────────────
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct ClassificationBannerConfigRow {
+    pub enabled: bool,
+    pub level: String,
+    pub custom_text: String,
+}
+
+pub async fn get_classification_banner_config(
+    pool: &PgPool,
+) -> Result<ClassificationBannerConfigRow> {
+    let row = sqlx::query_as::<_, ClassificationBannerConfigRow>(
+        "SELECT enabled, level, custom_text FROM classification_banner_config WHERE id = 1",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn upsert_classification_banner_config(
+    pool: &PgPool,
+    enabled: bool,
+    level: &str,
+    custom_text: &str,
+) -> Result<ClassificationBannerConfigRow> {
+    let row = sqlx::query_as::<_, ClassificationBannerConfigRow>(
+        "INSERT INTO classification_banner_config (id, enabled, level, custom_text)
+         VALUES (1, $1, $2, $3)
+         ON CONFLICT (id) DO UPDATE
+             SET enabled = EXCLUDED.enabled,
+                 level = EXCLUDED.level,
+                 custom_text = EXCLUDED.custom_text,
+                 updated_at = NOW()
+         RETURNING enabled, level, custom_text",
+    )
+    .bind(enabled)
+    .bind(level)
+    .bind(custom_text)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}

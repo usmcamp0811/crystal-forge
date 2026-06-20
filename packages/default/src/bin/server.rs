@@ -534,6 +534,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/admin/audit-events", get(admin::list_audit_events))
         .route(
+            "/api/v1/admin/classification-config",
+            get(admin::get_classification_config).put(admin::update_classification_config),
+        )
+        .route(
             "/api/v1/admin/setup-progress",
             get(setup_wizard::get_setup_progress),
         )
