@@ -198,6 +198,10 @@ fn rule_label(kind: &str) -> &'static str {
 /// single CVE gate / packages policy when that is the only rule), matching the
 /// shapes the real API already round-trips.
 fn build_persisted_payload(rules: &[PolicyRule]) -> Option<(String, serde_json::Value)> {
+    if has_cve_combination(rules) {
+        return None;
+    }
+
     let persistable: Vec<&PolicyRule> = rules.iter().filter(|r| r.is_persisted()).collect();
     if persistable.is_empty() {
         return None;
@@ -273,16 +277,134 @@ fn rule_to_custom_check_entry(rule: &PolicyRule) -> Option<serde_json::Value> {
                 "strict": true,
             }))
         }
-        "cve_block" => {
-            // Encoded as a descriptive custom rule when combined with others.
-            Some(serde_json::json!({
-                "expression": "true",
-                "description": format!("CVE gate: {} CVEs must not exceed {}", rule.severity, rule.max_allowed.trim()),
-                "strict": false,
-            }))
-        }
+        "cve_block" => None,
         _ => None,
     }
+}
+
+fn unsupported_rule_labels(rules: &[PolicyRule]) -> Vec<&'static str> {
+    rules
+        .iter()
+        .filter(|rule| !rule.is_persisted())
+        .map(|rule| rule_label(&rule.kind))
+        .collect()
+}
+
+fn has_cve_combination(rules: &[PolicyRule]) -> bool {
+    let persistable = rules
+        .iter()
+        .filter(|rule| rule.is_persisted())
+        .collect::<Vec<_>>();
+    persistable.len() > 1 && persistable.iter().any(|rule| rule.kind == "cve_block")
+}
+
+fn cve_config_is_representable(config: &serde_json::Value) -> bool {
+    let max_critical = config.get("max_critical").and_then(|value| value.as_u64());
+    let max_high = config.get("max_high").and_then(|value| value.as_u64());
+    let has_critical_gate = max_critical.is_some_and(|value| value > 0) || max_high.is_none();
+    let has_high_gate = max_high.is_some();
+    let gate_count = u8::from(has_critical_gate) + u8::from(has_high_gate);
+
+    gate_count == 1
+        && config
+            .get("strict")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true)
+        && config
+            .get("when_no_scan")
+            .and_then(|value| value.as_str())
+            .unwrap_or("block")
+            == "block"
+        && !config
+            .get("require_high_justification")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+}
+
+fn custom_check_config_is_representable(config: &serde_json::Value) -> bool {
+    let mode_ok = config
+        .get("mode")
+        .and_then(|value| value.as_str())
+        .unwrap_or("all")
+        == "all";
+    let strict_ok = config
+        .get("strict")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+
+    if !mode_ok || !strict_ok {
+        return false;
+    }
+
+    if let Some(entries) = config.get("rules").and_then(|value| value.as_array()) {
+        return entries.iter().all(|entry| {
+            entry
+                .get("strict")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(true)
+                && entry
+                    .get("expression")
+                    .and_then(|value| value.as_str())
+                    .is_some()
+        });
+    }
+
+    config
+        .get("expression")
+        .and_then(|value| value.as_str())
+        .is_some()
+}
+
+fn save_blocker(
+    is_editing: bool,
+    format: PolicyFormat,
+    existing_type: &str,
+    existing_config: &serde_json::Value,
+    rules: &[PolicyRule],
+) -> Option<String> {
+    if is_editing && format == PolicyFormat::Toml {
+        return Some(
+            "TOML policies are read-only in this form to avoid rewriting them as JSON.".to_string(),
+        );
+    }
+
+    if existing_type == "require_cve_check" && !cve_config_is_representable(existing_config) {
+        return Some(
+            "This CVE policy uses backend fields this form cannot preserve yet; edit it in the raw policy editor after backend parity lands."
+                .to_string(),
+        );
+    }
+
+    if is_editing
+        && existing_type == "custom_check"
+        && !custom_check_config_is_representable(existing_config)
+    {
+        return Some(
+            "This custom policy uses JSON fields this form cannot preserve yet; edit it in the raw policy editor after backend parity lands."
+                .to_string(),
+        );
+    }
+
+    let unsupported = unsupported_rule_labels(rules);
+    if !unsupported.is_empty() {
+        return Some(format!(
+            "Remove UI-only rules before saving; not persisted yet: {}.",
+            unsupported.join(", ")
+        ));
+    }
+
+    if has_cve_combination(rules) {
+        return Some(
+            "CVE gates cannot be combined with other rules until backend multi-rule CVE support exists."
+                .to_string(),
+        );
+    }
+
+    if build_persisted_payload(rules).is_none() {
+        return Some("Add at least one backend-supported assertion before saving.".to_string());
+    }
+
+    None
 }
 
 fn split_packages(raw: &str) -> Vec<String> {
@@ -300,12 +422,12 @@ fn rules_from_policy(policy_type: &str, config: &serde_json::Value) -> Vec<Polic
     match policy_type {
         "require_cve_check" => {
             let mut rule = PolicyRule::new("cve_block");
-            if let Some(max_critical) = config.get("max_critical").and_then(|v| v.as_u64()) {
-                rule.severity = "critical".to_string();
-                rule.max_allowed = max_critical.to_string();
-            } else if let Some(max_high) = config.get("max_high").and_then(|v| v.as_u64()) {
+            if let Some(max_high) = config.get("max_high").and_then(|v| v.as_u64()) {
                 rule.severity = "high".to_string();
                 rule.max_allowed = max_high.to_string();
+            } else if let Some(max_critical) = config.get("max_critical").and_then(|v| v.as_u64()) {
+                rule.severity = "critical".to_string();
+                rule.max_allowed = max_critical.to_string();
             }
             rules.push(rule);
         }
@@ -430,7 +552,15 @@ pub fn PolicyEditorModal(
 
     let name_value = edit_name.read().clone();
     let name_missing = name_value.trim().is_empty();
-    let can_save = !name_missing && !*is_saving.read();
+    let current_rules = rules.read().clone();
+    let current_save_blocker = save_blocker(
+        is_editing,
+        *edit_format.read(),
+        &existing_type,
+        &existing_config,
+        &current_rules,
+    );
+    let can_save = !name_missing && current_save_blocker.is_none() && !*is_saving.read();
     let rule_count = rules.read().len();
     let evidence_count = evidence.read().len();
     let delete_matches = delete_typed.read().as_str() == name_value;
@@ -782,6 +912,10 @@ pub fn PolicyEditorModal(
                         if !save_error.read().is_empty() {
                             div { class: "text-xs rounded px-3 py-2 cf-policy-modal-error", style: "margin-top:10px;", "{save_error}" }
                         }
+
+                        if let Some(blocker) = current_save_blocker.as_ref() {
+                            div { class: "text-xs rounded px-3 py-2 cf-policy-modal-error", style: "margin-top:10px;", "{blocker}" }
+                        }
                     }
 
                     // ── Footer ──────────────────────────────────────────────────
@@ -803,22 +937,25 @@ pub fn PolicyEditorModal(
                                 let description = edit_description.read().clone();
                                 let editing_id = *editing_policy_id.read();
                                 let current_rules = rules.read().clone();
+                                if let Some(blocker) = save_blocker(
+                                    editing_id.is_some(),
+                                    *edit_format.read(),
+                                    &existing_type,
+                                    &existing_config,
+                                    &current_rules,
+                                ) {
+                                    save_error.set(blocker);
+                                    return;
+                                }
                                 let mut policy_library = policy_library;
                                 let mut save_error = save_error;
                                 let mut is_saving = is_saving;
                                 let on_close = on_close;
 
-                                let (policy_type, config) = build_persisted_payload(&current_rules)
-                                    .unwrap_or_else(|| {
-                                        (
-                                            "custom_check".to_string(),
-                                            serde_json::json!({
-                                                "expression": "true",
-                                                "description": "Operator-approved policy",
-                                                "strict": false,
-                                            }),
-                                        )
-                                    });
+                                let Some((policy_type, config)) = build_persisted_payload(&current_rules) else {
+                                    save_error.set("Add at least one backend-supported assertion before saving.".to_string());
+                                    return;
+                                };
 
                                 save_error.set(String::new());
                                 is_saving.set(true);
@@ -830,7 +967,7 @@ pub fn PolicyEditorModal(
                                             description: Some(description.clone()),
                                             policy_type: Some(policy_type),
                                             config: Some(config),
-                                            enabled: Some(true),
+                                            enabled: None,
                                         };
                                         update_deployment_policy(&policy_id, &request).await.map(|_| ())
                                     } else {
@@ -1107,5 +1244,117 @@ fn EvidenceEditorRow(
                 _ => rsx! { span { style: "font-style:italic;", "{kind}" } },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cve_rule_is_not_serialized_as_always_true_custom_check() {
+        let rules = vec![PolicyRule::new("cve_block"), PolicyRule::new("custom_eval")];
+
+        assert!(has_cve_combination(&rules));
+        assert!(build_persisted_payload(&rules).is_none());
+        assert!(
+            save_blocker(
+                false,
+                PolicyFormat::Json,
+                "custom_check",
+                &serde_json::Value::Null,
+                &rules
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn high_cve_policy_reconstructs_as_high_threshold() {
+        let config = serde_json::json!({
+            "max_critical": 0,
+            "max_high": 7,
+            "strict": true,
+            "when_no_scan": "block"
+        });
+
+        let rules = rules_from_policy("require_cve_check", &config);
+
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].severity, "high");
+        assert_eq!(rules[0].max_allowed, "7");
+        assert!(cve_config_is_representable(&config));
+    }
+
+    #[test]
+    fn complex_cve_policy_is_blocked_from_destructive_edit() {
+        let config = serde_json::json!({
+            "max_critical": 1,
+            "max_high": 5,
+            "strict": true,
+            "when_no_scan": "block"
+        });
+        let rules = rules_from_policy("require_cve_check", &config);
+
+        assert!(
+            save_blocker(
+                true,
+                PolicyFormat::Json,
+                "require_cve_check",
+                &config,
+                &rules
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn unsupported_rules_block_save_instead_of_creating_noop_policy() {
+        let rules = vec![
+            PolicyRule::new("eval_passed"),
+            PolicyRule::new("build_succeeded"),
+        ];
+
+        assert!(build_persisted_payload(&rules).is_none());
+        assert!(
+            save_blocker(
+                false,
+                PolicyFormat::Json,
+                "custom_check",
+                &serde_json::Value::Null,
+                &rules
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn toml_edit_is_read_only_in_design_form() {
+        let rules = vec![PolicyRule::new("custom_eval")];
+
+        assert!(
+            save_blocker(
+                true,
+                PolicyFormat::Toml,
+                "custom_check",
+                &serde_json::Value::Null,
+                &rules
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn custom_check_with_unrepresented_semantics_is_blocked() {
+        let config = serde_json::json!({
+            "rules": [
+                { "expression": "config.foo", "description": "foo", "strict": false }
+            ],
+            "mode": "any",
+            "strict": true
+        });
+        let rules = rules_from_policy("custom_check", &config);
+
+        assert!(save_blocker(true, PolicyFormat::Json, "custom_check", &config, &rules).is_some());
     }
 }
