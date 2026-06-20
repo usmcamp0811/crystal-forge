@@ -22,6 +22,22 @@ const AUDIT_PER_PAGE: i64 = 20;
 // ============================================================================
 
 #[derive(Clone, Debug)]
+struct BackgroundJob {
+    name: &'static str,
+    desc: &'static str,
+    interval: &'static str,
+    enabled: bool,
+    last_run: &'static str,
+    last_duration: &'static str,
+    next_run: &'static str,
+    status: &'static str,
+    impact: &'static str,
+    note: Option<&'static str>,
+}
+
+const BACKGROUND_JOBS_MOCK: &[BackgroundJob] = &[];
+
+#[derive(Clone, Debug)]
 struct RoleDefinition {
     role: &'static str,
     desc: &'static str,
@@ -65,197 +81,6 @@ const ROLE_DEFINITIONS: &[RoleDefinition] = &[
     },
 ];
 
-#[derive(Clone, Debug)]
-struct BackgroundJob {
-    id: &'static str,
-    name: &'static str,
-    desc: &'static str,
-    interval: &'static str,
-    enabled: bool,
-    last_run: &'static str,
-    last_duration: &'static str,
-    next_run: &'static str,
-    status: &'static str,
-    impact: &'static str,
-    note: Option<&'static str>,
-}
-
-const BACKGROUND_JOBS_MOCK: &[BackgroundJob] = &[
-    BackgroundJob {
-        id: "j1",
-        name: "Cache status poll",
-        desc: "Query binary caches to confirm tracked store paths still exist (detect GC eviction).",
-        interval: "15m",
-        enabled: true,
-        last_run: "3m ago",
-        last_duration: "4.2s",
-        next_run: "in 12m",
-        status: "healthy",
-        impact: "low",
-        note: None,
-    },
-    BackgroundJob {
-        id: "j2",
-        name: "GC-eviction reconcile",
-        desc: "Flag configs whose derivations were garbage-collected so Scanning marks them needs-build.",
-        interval: "1h",
-        enabled: true,
-        last_run: "24m ago",
-        last_duration: "11s",
-        next_run: "in 36m",
-        status: "healthy",
-        impact: "medium",
-        note: None,
-    },
-    BackgroundJob {
-        id: "j3",
-        name: "CVE DB refresh",
-        desc: "Pull latest NVD / advisory feeds into the local vulnerability database.",
-        interval: "6h",
-        enabled: true,
-        last_run: "1h ago",
-        last_duration: "38s",
-        next_run: "in 5h",
-        status: "healthy",
-        impact: "low",
-        note: None,
-    },
-    BackgroundJob {
-        id: "j4",
-        name: "Agent heartbeat sweep",
-        desc: "Mark systems offline if no heartbeat past their interval; recompute fleet health.",
-        interval: "1m",
-        enabled: true,
-        last_run: "32s ago",
-        last_duration: "0.6s",
-        next_run: "in 28s",
-        status: "healthy",
-        impact: "low",
-        note: None,
-    },
-    BackgroundJob {
-        id: "j5",
-        name: "Stale build-job reaper",
-        desc: "Re-queue or fail builds stuck past their timeout on dead builders.",
-        interval: "5m",
-        enabled: true,
-        last_run: "2m ago",
-        last_duration: "1.1s",
-        next_run: "in 3m",
-        status: "healthy",
-        impact: "low",
-        note: None,
-    },
-    BackgroundJob {
-        id: "j6",
-        name: "Flake poll & sync",
-        desc: "Fetch tracked flake repos and enqueue evals for new commits.",
-        interval: "5m",
-        enabled: true,
-        last_run: "4m ago",
-        last_duration: "6.8s",
-        next_run: "in 1m",
-        status: "healthy",
-        impact: "medium",
-        note: None,
-    },
-    BackgroundJob {
-        id: "j7",
-        name: "Session GC",
-        desc: "Expire idle sessions and purge revoked tokens.",
-        interval: "30m",
-        enabled: true,
-        last_run: "18m ago",
-        last_duration: "0.3s",
-        next_run: "in 12m",
-        status: "healthy",
-        impact: "low",
-        note: None,
-    },
-    BackgroundJob {
-        id: "j8",
-        name: "Audit log archival",
-        desc: "Roll audit events older than retention window to cold storage.",
-        interval: "24h",
-        enabled: false,
-        last_run: "never",
-        last_duration: "—",
-        next_run: "disabled",
-        status: "disabled",
-        impact: "medium",
-        note: None,
-    },
-    BackgroundJob {
-        id: "j9",
-        name: "Cache storage metrics",
-        desc: "Pull bucket size / object counts (CloudWatch, atticd) for the Caches view.",
-        interval: "1h",
-        enabled: true,
-        last_run: "41m ago",
-        last_duration: "9.4s",
-        next_run: "in 19m",
-        status: "degraded",
-        impact: "medium",
-        note: Some("edge-cache poll timed out last run"),
-    },
-];
-
-const JOB_INTERVALS: &[&str] = &["1m", "5m", "15m", "30m", "1h", "6h", "12h", "24h", "never"];
-
-#[derive(Clone, Debug)]
-struct ServerInfo {
-    version: &'static str,
-    commit: &'static str,
-    uptime: &'static str,
-    auth_mode: &'static str,
-    oidc_issuer: &'static str,
-    db_status: &'static str,
-    db_size: &'static str,
-    sessions: usize,
-    tls_expiry: &'static str,
-}
-
-const SERVER_INFO_MOCK: ServerInfo = ServerInfo {
-    version: "0.8.2",
-    commit: "f3a9c01",
-    uptime: "18d 4h",
-    auth_mode: "OIDC (Keycloak)",
-    oidc_issuer: "https://keycloak.acme.io/realms/crystal-forge",
-    db_status: "healthy",
-    db_size: "2.4 GB",
-    sessions: 6,
-    tls_expiry: "62d",
-};
-
-#[derive(Clone, Debug)]
-struct EnvironmentDef {
-    name: &'static str,
-    color: &'static str,
-}
-
-const ENVIRONMENTS_MOCK: &[EnvironmentDef] = &[
-    EnvironmentDef {
-        name: "production",
-        color: "#f87171",
-    },
-    EnvironmentDef {
-        name: "staging",
-        color: "#fbbf24",
-    },
-    EnvironmentDef {
-        name: "dev",
-        color: "#60a5fa",
-    },
-    EnvironmentDef {
-        name: "edge",
-        color: "#a78bfa",
-    },
-    EnvironmentDef {
-        name: "lab",
-        color: "#34d399",
-    },
-];
-
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
@@ -284,7 +109,6 @@ pub fn AdminView() -> Element {
     let mut user_role_filter = use_signal(|| "all".to_string());
 
     let mut actor_filter = use_signal(String::new);
-    let mut audit_category_filter = use_signal(|| "all".to_string());
     let mut from_filter = use_signal(String::new);
     let mut to_filter = use_signal(String::new);
 
@@ -484,7 +308,6 @@ pub fn AdminView() -> Element {
                         audit_events: audit_events.clone(),
                         audit_loading: *audit_loading.read(),
                         audit_error: audit_error.clone(),
-                        audit_category_filter: audit_category_filter.clone(),
                         actor_filter: actor_filter.clone(),
                         audit_page: audit_page.clone(),
                         can_go_prev: can_go_prev,
@@ -668,7 +491,7 @@ fn UsersTab(
                             th { "Environments" }
                             th { "MFA" }
                             th { "Status" }
-                            th { "Last login" }
+                            th { "Updated" }
                             th { style: "text-align:right;", " " }
                         }
                     }
@@ -871,6 +694,9 @@ fn EditUserModal(
         .cloned()
         .unwrap_or_else(|| UserEditDraft::from_user(&user));
     let is_oidc_user = user.identity_source == IdentitySource::OidcDerived;
+    let mut draft_role = use_signal(|| draft.role.clone());
+    let mut draft_enabled = use_signal(|| draft.enabled);
+    let mut draft_password = use_signal(String::new);
     let selected_environments = use_signal(|| draft.environments.clone());
 
     rsx! {
@@ -901,13 +727,8 @@ fn EditUserModal(
                         label { "Role" }
                         select {
                             class: "input focus-ring",
-                            value: "{draft.role}",
-                            onchange: {
-                                let user_id = user.id.clone();
-                                move |evt| {
-                                    update_user_draft(user_drafts, &user_id, |draft| draft.role = evt.value());
-                                }
-                            },
+                            value: "{draft_role.read()}",
+                            onchange: move |evt| draft_role.set(evt.value()),
                             option { value: "Admin", "Admin" }
                             option { value: "Operator", "Operator" }
                             option { value: "Viewer", "Viewer" }
@@ -926,12 +747,8 @@ fn EditUserModal(
                             class: "input focus-ring",
                             r#type: "password",
                             placeholder: "Leave blank to keep current password",
-                            oninput: {
-                                let user_id = user.id.clone();
-                                move |evt| {
-                                    update_user_draft(user_drafts, &user_id, |draft| draft.password = evt.value());
-                                }
-                            }
+                            value: "{draft_password.read()}",
+                            oninput: move |evt| draft_password.set(evt.value())
                         }
                     }
                     label { style: "display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--cf-divider);border-radius:10px;padding:10px 12px;cursor:pointer;",
@@ -941,13 +758,8 @@ fn EditUserModal(
                         }
                         input {
                             r#type: "checkbox",
-                            checked: draft.enabled,
-                            onchange: {
-                                let user_id = user.id.clone();
-                                move |evt| {
-                                    update_user_draft(user_drafts, &user_id, |draft| draft.enabled = evt.checked());
-                                }
-                            }
+                            checked: *draft_enabled.read(),
+                            onchange: move |evt| draft_enabled.set(evt.checked())
                         }
                     }
                 }
@@ -958,18 +770,12 @@ fn EditUserModal(
                         disabled: *saving.read(),
                         onclick: {
                             let user_id = user.id.clone();
-                            let user_for_default = user.clone();
                             move |_| {
-                                let draft = user_drafts
-                                    .read()
-                                    .get(&user_id)
-                                    .cloned()
-                                    .unwrap_or_else(|| UserEditDraft::from_user(&user_for_default));
                                 let request = AdminUpdateUserRequest {
-                                    role: Some(parse_role(&draft.role)),
-                                    enabled: Some(draft.enabled),
+                                    role: Some(parse_role(&draft_role.read())),
+                                    enabled: Some(*draft_enabled.read()),
                                     environments: Some(parse_environments(&selected_environments.read())),
-                                    password: optional_value(draft.password.clone()),
+                                    password: optional_value(draft_password.read().clone()),
                                 };
                                 let user_id_for_request = user_id.clone();
                                 saving.set(true);
@@ -1467,11 +1273,15 @@ fn JobsTab() -> Element {
                     svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                         path { d: "M20 12a8 8 0 0 1-14 5.3L3 14m1-4a8 8 0 0 1 14-5.3L21 8M21 3v5h-5M3 21v-5h5" }
                     }
-                    div { "Scheduled server-side tasks. Crank intervals down for freshness, up to save resources. Cache polling and GC reconciliation can be heavy on large fleets — schedule deliberately." }
+                    div {
+                        strong { "Background jobs unavailable" }
+                        div { style: "margin-top:4px;", "Live scheduler data and job actions are not implemented yet. Tracked by TASK-336.5." }
+                    }
                 }
             }
 
             // Jobs table
+            if false {
             table { class: "sys-table",
                 thead {
                     tr {
@@ -1487,16 +1297,8 @@ fn JobsTab() -> Element {
                 tbody {
                     for job in BACKGROUND_JOBS_MOCK {
                         {
-                            let (status_class, status_label) = match job.status {
-                                "healthy" => ("chip-healthy", "healthy"),
-                                "degraded" => ("chip-warning", "degraded"),
-                                _ => ("chip-unknown", "disabled"),
-                            };
-                            let (impact_class, impact_label) = match job.impact {
-                                "low" => ("chip-healthy", "low load"),
-                                "medium" => ("chip-warning", "medium load"),
-                                _ => ("chip-critical", "high load"),
-                            };
+                            let (status_class, status_label) = ("chip-unknown", "unavailable");
+                            let (impact_class, impact_label) = ("chip-unknown", "unavailable");
 
                             rsx! {
                                 tr {
@@ -1544,6 +1346,7 @@ fn JobsTab() -> Element {
                     }
                 }
             }
+            }
         }
     }
 }
@@ -1557,7 +1360,6 @@ fn AuditTab(
     audit_events: Signal<Vec<AuditEvent>>,
     audit_loading: bool,
     audit_error: Signal<Option<String>>,
-    audit_category_filter: Signal<String>,
     actor_filter: Signal<String>,
     audit_page: Signal<i64>,
     can_go_prev: bool,
@@ -1565,22 +1367,7 @@ fn AuditTab(
     total_pages: i64,
     audit_total: i64,
 ) -> Element {
-    let filtered_events = {
-        let cat_filter = audit_category_filter.read().clone();
-        audit_events
-            .read()
-            .iter()
-            .filter(|e| {
-                if cat_filter == "all" {
-                    true
-                } else {
-                    // Mock category filtering - in real implementation would check event.action
-                    true
-                }
-            })
-            .cloned()
-            .collect::<Vec<_>>()
-    };
+    let filtered_events = audit_events.read().clone();
 
     rsx! {
         div { style: "padding:0;",
@@ -1593,7 +1380,7 @@ fn AuditTab(
                     }
                     input {
                         class: "input focus-ring",
-                        placeholder: "Search actor / action / target…",
+                        placeholder: "Search actor…",
                         value: "{actor_filter.read()}",
                         oninput: move |evt| {
                             actor_filter.set(evt.value());
@@ -1601,24 +1388,15 @@ fn AuditTab(
                         }
                     }
                 }
-                div { class: "seg",
-                    for category in ["all", "security", "deploy", "build", "config", "auth"] {
-                        button {
-                            class: if *audit_category_filter.read() == category { "active" } else { "" },
-                            onclick: {
-                                let cat = category.to_string();
-                                move |_| audit_category_filter.set(cat.clone())
-                            },
-                            "{category}"
-                        }
-                    }
+                div { class: "sd-callout sd-callout-info", style: "font-size:11px;padding:7px 9px;",
+                    "Category filtering is not implemented yet; showing real audit results from the API."
                 }
                 span { class: "filter-count", "{filtered_events.len()} events" }
-                button { class: "btn btn-ghost focus-ring", style: "margin-left:auto;",
+                button { class: "btn btn-ghost focus-ring", style: "margin-left:auto;", disabled: true, title: "Audit export is tracked by TASK-336.8",
                     svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:5px;vertical-align:text-bottom;",
                         path { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" }
                     }
-                    "Export"
+                    "Export · unavailable"
                 }
             }
 
@@ -1658,7 +1436,7 @@ fn AuditTab(
                                         td {
                                             span { class: "chip {category_class}", style: "font-size:10px;", "{category_label}" }
                                         }
-                                        td { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "10.2.4.18" }
+                                        td { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "unavailable" }
                                     }
                                 }
                             }
@@ -1807,7 +1585,7 @@ fn ServerTab(
                             }
                             "Relaunch Setup Coach"
                         }
-                        button { class: "btn btn-ghost focus-ring", "Reset progress" }
+                        button { class: "btn btn-ghost focus-ring", disabled: true, title: "Reset progress is not implemented yet", "Reset progress · unavailable" }
                     }
                 }
             }
@@ -1816,31 +1594,31 @@ fn ServerTab(
             div { class: "card", style: "padding:16px;grid-column:1 / -1;",
                 h3 { style: "margin:0 0 12px;font-size:13px;font-weight:600;", "Maintenance" }
                 div { style: "display:flex;gap:8px;flex-wrap:wrap;",
-                    button { class: "btn btn-ghost focus-ring",
+                    button { class: "btn btn-ghost focus-ring", disabled: true, title: "Tracked by TASK-336.8",
                         svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:5px;vertical-align:text-bottom;",
                             path { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" }
                         }
-                        "Backup database"
+                        "Backup database · unavailable"
                     }
-                    button { class: "btn btn-ghost focus-ring",
+                    button { class: "btn btn-ghost focus-ring", disabled: true, title: "Tracked by TASK-336.8",
                         svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:5px;vertical-align:text-bottom;",
                             path { d: "M20 12a8 8 0 0 1-14 5.3L3 14m1-4a8 8 0 0 1 14-5.3L21 8M21 3v5h-5M3 21v-5h5" }
                         }
-                        "Reload config"
+                        "Reload config · unavailable"
                     }
-                    button { class: "btn btn-ghost focus-ring",
+                    button { class: "btn btn-ghost focus-ring", disabled: true, title: "Tracked by TASK-336.8",
                         svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:5px;vertical-align:text-bottom;",
                             path { d: "M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" }
                         }
-                        "Export audit log"
+                        "Export audit log · unavailable"
                     }
-                    button { class: "btn btn-ghost focus-ring", style: "color:#fbbf24;border-color:rgba(251,191,36,0.3);",
+                    button { class: "btn btn-ghost focus-ring", style: "color:#fbbf24;border-color:rgba(251,191,36,0.3);", disabled: true, title: "Tracked by TASK-336.8",
                         svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:5px;vertical-align:text-bottom;",
                             path { d: "M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" }
                             line { x1: "12", y1: "9", x2: "12", y2: "13" }
                             line { x1: "12", y1: "17", x2: "12.01", y2: "17" }
                         }
-                        "Invalidate all sessions"
+                        "Invalidate all sessions · unavailable"
                     }
                 }
             }
