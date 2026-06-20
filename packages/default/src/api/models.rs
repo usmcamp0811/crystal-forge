@@ -589,6 +589,15 @@ pub struct BuildQueueItem {
     /// Environment name (if system has an environment).
     #[serde(default)]
     pub environment: Option<String>,
+    /// Total derivations for this system config at this commit (for progress bar).
+    #[serde(default)]
+    pub total_derivs: i64,
+    /// Derivations that have completed a build (build-complete or complete status).
+    #[serde(default)]
+    pub built_derivs: i64,
+    /// Derivations that have been pushed to cache (cache-pushed status).
+    #[serde(default)]
+    pub cached_derivs: i64,
 }
 
 /// Query parameters for the paginated build queue endpoint.
@@ -753,6 +762,9 @@ pub struct EvalDependencyGraphResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalDependencyPackageRow {
     pub package_name: String,
+    /// True when ready/pending counts represent real closure package counts.
+    /// False means counts are only a temporary system-status fallback.
+    pub closure_counted: bool,
     /// Systems with a completed build (store_path present / BuildComplete).
     pub ready_count: i64,
     /// Systems evaluated but not yet built (DryRunComplete / pending build).

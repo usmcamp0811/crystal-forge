@@ -1,15 +1,13 @@
 //! Build queue pane component for the builds control center.
+//!
+//! Matches BuildsView.jsx: BuildQueueTable with q-queue-table CSS,
+//! dual-segment derivations bar, and multi-select bulk bar.
 
 use dioxus::prelude::*;
 
-use crate::theme;
+use super::helpers::{BuildAction, BuildItem, BuildStatus, extract_system_name, short_commit};
 
-use super::helpers::{
-    BuildAction, BuildItem, BuildStatus, build_status_badge_class, extract_system_name,
-    queue_row_style, short_commit,
-};
-
-/// Build queue pane showing all queued and active builds.
+/// Public entry point — wraps the inner table and bulk-cancel bar.
 #[component]
 pub fn BuildQueuePane(
     builds: Vec<BuildItem>,
@@ -18,349 +16,309 @@ pub fn BuildQueuePane(
     on_build_action: EventHandler<(i32, BuildAction)>,
     on_log: EventHandler<i32>,
 ) -> Element {
-    let filtered = builds;
+    // Multi-select state: set of selected build IDs (only operator-cancellable ones).
+    let mut selected_ids: Signal<Vec<i32>> = use_signal(Vec::new);
+    let reorderable = builds
+        .iter()
+        .any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building));
+    let queued_ids: Vec<i32> = builds
+        .iter()
+        .filter(|b| b.status == BuildStatus::Queued)
+        .map(|b| b.id)
+        .collect();
+
+    let bulk_count = selected_ids.read().len();
 
     rsx! {
-        BuildQueueTable {
-            builds: filtered,
-            selected_id: selected_id,
-            can_requeue,
-            on_build_action: on_build_action,
-            on_log: on_log,
-        }
-    }
-}
-
-/// Card view for build queue items.
-#[component]
-fn BuildQueueCards(
-    builds: Vec<BuildItem>,
-    selected_id: Signal<Option<i32>>,
-    can_requeue: bool,
-    on_build_action: EventHandler<(i32, BuildAction)>,
-) -> Element {
-    rsx! {
-        div {
-            class: "space-y-2 max-h-[56vh] overflow-y-auto pr-1",
-            "data-testid": "build-queue-list",
-            for build in builds {
-                button {
-                    key: "{build.id}",
-                    class: "w-full rounded-xl border px-4 py-4 text-left transition min-h-[44px] {queue_row_style(*selected_id.read() == Some(build.id), build.status)}",
-                    "data-testid": "build-queue-card",
-                    onclick: move |_| selected_id.set(Some(build.id)),
-                    div {
-                        class: "flex items-start justify-between gap-4 mb-3",
-                        div {
-                            class: "flex-1 min-w-0",
-                            div {
-                                class: "flex items-center gap-2 flex-wrap",
-                                p {
-                                    class: "text-sm {theme::text::PRIMARY} font-semibold truncate",
-                                    title: "{extract_system_name(&build.hostname)}",
-                                    "{extract_system_name(&build.hostname)}"
-                                }
-                                span {
-                                    class: "inline-flex px-2 py-0.5 text-[10px] rounded border cf-chip-blue shrink-0",
-                                    "{build.flake}"
-                                }
-                            }
-                            p {
-                                class: "text-xs {theme::text::MUTED} mt-1 truncate",
-                                title: "{build.branch} · {short_commit(&build.commit)}",
-                                "{build.branch} · {short_commit(&build.commit)}"
-                            }
-                        }
-                        div {
-                            class: "text-right shrink-0",
-                            span {
-                                class: "inline-flex px-2 py-1 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
-                                "{build.status_label()}"
-                            }
-                            p { class: "text-[10px] {theme::text::DISABLED} mt-1 whitespace-nowrap", "{build.queued_for}" }
-                        }
-                    }
-
-                    div {
-                        class: "mt-2 rounded-md border {theme::surface::CARD_BORDER} cf-subtle-bg px-3 py-2",
-                        p {
-                            class: "text-[11px] {theme::text::SECONDARY} leading-5 truncate",
-                            title: "Build target: {build.flake} · {extract_system_name(&build.hostname)}",
-                            span { class: "{theme::text::MUTED}", "Build target: " }
-                            span { class: "font-mono text-cyan-300", "{build.flake}" }
-                            span { class: "{theme::text::DISABLED} mx-1", "·" }
-                            span { class: "font-mono {theme::text::SECONDARY}", "{extract_system_name(&build.hostname)}" }
-                        }
-                        if !build.summary.is_empty() && build.summary != format!("job {}", build.job_id.map(|id| id.to_string()).unwrap_or_else(|| "unknown".to_string())) {
-                            p {
-                                class: "text-[11px] {theme::text::MUTED} mt-1 italic truncate",
-                                title: "{build.summary}",
-                                "{build.summary}"
-                            }
-                        }
-                    }
-
-                    div {
-                        class: "mt-3 flex flex-wrap items-center justify-between gap-3",
-                        div {
-                            class: "inline-flex items-center gap-2 text-[10px] flex-wrap",
-                            span {
-                                class: "inline-flex px-2 py-1 rounded border cf-chip-slate",
-                                "worker {build.worker_id}"
-                            }
-                            if let Some(runtime) = build.runtime {
-                                span {
-                                    class: "inline-flex px-2 py-1 rounded border cf-chip-teal",
-                                    "runtime {runtime}"
-                                }
-                            }
-                        }
-                        div {
-                            class: "inline-flex items-center gap-2 flex-wrap",
-                            if matches!(build.status, BuildStatus::Building) {
-                                button {
-                                    class: "text-xs text-red-400 hover:text-red-300 px-3 py-1.5 rounded hover:bg-red-500/10 transition-colors min-h-[44px]",
-                                    onclick: move |evt| {
-                                        evt.stop_propagation();
-                                        on_build_action.call((build.id, BuildAction::Stop));
-                                    },
-                                    "Stop"
-                                }
-                            }
-                            // Force Cancel for stuck builds in Stopping state
-                            if matches!(build.status, BuildStatus::Stopping) {
-                                button {
-                                    class: "text-xs text-orange-400 hover:text-orange-300 px-3 py-1.5 rounded hover:bg-orange-500/10 transition-colors min-h-[44px]",
-                                    onclick: move |evt| {
-                                        evt.stop_propagation();
-                                        on_build_action.call((build.id, BuildAction::ForceCancel));
-                                    },
-                                    "Force Cancel"
-                                }
-                            }
-                            // Restart only valid for terminal statuses
-                            if can_requeue
-                                && matches!(
-                                    build.status,
-                                    BuildStatus::Failed
-                                        | BuildStatus::Complete
-                                        | BuildStatus::Cancelled
-                                )
-                            {
-                                button {
-                                    class: "text-xs px-3 py-1.5 rounded transition-colors cf-action-link min-h-[44px]",
-                                    onclick: move |evt| {
-                                        evt.stop_propagation();
-                                        on_build_action.call((build.id, BuildAction::Restart));
-                                    },
-                                    "Requeue"
-                                }
-                            }
-                            if build.status == BuildStatus::Queued {
-                                button {
-                                    class: "text-xs text-cyan-300 hover:text-cyan-200 px-3 py-1.5 rounded hover:bg-cyan-500/10 transition-colors min-h-[44px]",
-                                    onclick: move |evt| {
-                                        evt.stop_propagation();
-                                        on_build_action.call((build.id, BuildAction::RunNext));
-                                    },
-                                    "Run Next"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Table view for build queue items - compact at-a-glance display.
-#[component]
-fn BuildQueueTable(
-    builds: Vec<BuildItem>,
-    selected_id: Signal<Option<i32>>,
-    can_requeue: bool,
-    on_build_action: EventHandler<(i32, BuildAction)>,
-    on_log: EventHandler<i32>,
-) -> Element {
-    rsx! {
-        div {
-            class: "min-h-[220px] max-h-[56vh] overflow-auto",
-            "data-testid": "build-queue-table",
-            // JSX: <table className="sys-table">
+        // JSX: <table className="sys-table q-queue-table">
+        div { style: "overflow-x: auto;",
             table {
-                class: "sys-table",
+                class: "sys-table q-queue-table",
+                "data-testid": "build-queue-table",
                 thead {
-                    class: "sticky top-0 {theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER}",
                     tr {
-                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Package / derivation" }
-                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Status" }
-                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Worker" }
-                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Progress" }
-                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Queued" }
-                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Duration" }
-                        th { class: "text-right px-3 py-2 {theme::text::MUTED} font-medium", " " }
+                        if reorderable { th { style: "width: 48px;", "#" } }
+                        th { "System configuration" }
+                        th { "Status" }
+                        th { "Worker" }
+                        th { "Derivations" }
+                        th { "Queued" }
+                        th { "Duration" }
+                        th { style: "text-align: right;",
+                            if reorderable { "Reorder · actions" } else { "Actions" }
+                        }
                     }
                 }
                 tbody {
-                    for build in builds {
+                    for (pos, build) in builds.iter().enumerate() {
                         {
+                            let build = build.clone();
                             let is_selected = *selected_id.read() == Some(build.id);
-                            // JSX: className={selected?.id===b.id?"selected":""}
-                            let row_class = if is_selected {
-                                "selected cursor-pointer"
-                            } else {
-                                "cursor-pointer hover:bg-white/5"
-                            };
+                            let is_checked = selected_ids.read().contains(&build.id);
+                            let can_cancel = can_requeue && is_cancellable(build.status);
+                            let queued_pos = queued_ids.iter().position(|id| *id == build.id);
+                            let queued_last_pos = queued_ids.len().saturating_sub(1);
+                            let mut row_class = "q-row".to_string();
+                            if is_selected { row_class.push_str(" selected"); }
+                            if is_checked  { row_class.push_str(" row-checked"); }
+                            if can_cancel  { row_class.push_str(" selectable"); }
+
                             rsx! {
                                 tr {
                                     key: "{build.id}",
-                                    class: "{row_class} border-b {theme::surface::CARD_BORDER}",
+                                    class: "{row_class}",
                                     "data-testid": "build-queue-row",
-                                    onclick: move |_| selected_id.set(Some(build.id)),
-                                    td {
-                                        class: "px-3 py-2",
-                                        div {
-                                            // JSX line 1: b.pkg (package name) - bold
-                                            p { class: "text-[13px] font-semibold leading-[1.15] {theme::text::PRIMARY}", "{build.pkg()}" }
-                                            // JSX line 2: b.drv.slice(0,40) + ellipsis (derivation path) - mono, muted
-                                            p { class: "text-[10px] leading-4 font-mono {theme::text::MUTED} truncate max-w-[18rem]",
-                                                "{truncate_with_ellipsis(&build.drv(), 40)}"
+                                    onclick: move |evt| {
+                                        // Shift-click: toggle multi-select on operator-cancellable rows
+                                        if evt.modifiers().shift() && can_cancel {
+                                            let mut ids = selected_ids.read().clone();
+                                            if is_checked {
+                                                ids.retain(|&id| id != build.id);
+                                            } else {
+                                                ids.push(build.id);
                                             }
-                                            // JSX line 3: flake · commit - muted
-                                            p { class: "text-[10px] leading-4 {theme::text::MUTED}",
-                                                "{build.flake} · "
-                                                span { class: "font-mono", "{build.commit}" }
+                                            selected_ids.set(ids);
+                                            return;
+                                        }
+                                        // Clear multi-select on normal click if nothing selected
+                                        if !selected_ids.read().is_empty()
+                                            && !evt.modifiers().shift()
+                                        {
+                                            selected_ids.set(Vec::new());
+                                        }
+                                        selected_id.set(Some(build.id));
+                                    },
+
+                                    if reorderable {
+                                        td { onclick: move |evt| evt.stop_propagation(),
+                                            div { style: "display: flex; align-items: center; gap: 6px;",
+                                                span {
+                                                    style: "color: var(--cf-text-muted); font-size: 12px; font-variant-numeric: tabular-nums;",
+                                                    "{pos + 1}"
+                                                }
                                             }
                                         }
                                     }
+
+                                    // System configuration column
                                     td {
-                                        class: "px-3 py-2",
-                                        // JSX: chip with chip-dot - no uppercase
+                                        div {
+                                            style: "font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px;",
+                                            // server icon
+                                            svg {
+                                                width: "12", height: "12",
+                                                view_box: "0 0 24 24",
+                                                fill: "none", stroke: "currentColor",
+                                                stroke_width: "2",
+                                                stroke_linecap: "round", stroke_linejoin: "round",
+                                                style: "color: var(--cf-text-muted);",
+                                                rect { x: "2", y: "2", width: "20", height: "8", rx: "2", ry: "2" }
+                                                rect { x: "2", y: "14", width: "20", height: "8", rx: "2", ry: "2" }
+                                                line { x1: "6", y1: "6", x2: "6.01", y2: "6" }
+                                                line { x1: "6", y1: "18", x2: "6.01", y2: "18" }
+                                            }
+                                            "{extract_system_name(&build.hostname)}"
+                                        }
+                                        div {
+                                            style: "font-size: 10px; color: var(--cf-text-muted);",
+                                            "{build.flake} · "
+                                            span { class: "mono", "{short_commit(&build.commit)}" }
+                                            " · "
+                                            span { class: "mono", "{build.arch}" }
+                                        }
+                                        if let Some(ref pkg) = build.current_pkg {
+                                            div {
+                                                class: "mono",
+                                                style: "font-size: 10px; color: #60a5fa; margin-top: 2px;",
+                                                "building {pkg}…"
+                                            }
+                                        }
+                                        if let Some(ref pkg) = build.failed_pkg {
+                                            div {
+                                                class: "mono",
+                                                style: "font-size: 10px; color: #f87171; margin-top: 2px;",
+                                                "failed on {pkg}"
+                                            }
+                                        }
+                                    }
+
+                                    // Status chip
+                                    td {
                                         span {
-                                            class: "inline-flex items-center gap-1.5 px-2 py-0.5 text-[10px] rounded border {build_status_badge_class(build.status)}",
+                                            class: "chip {status_chip_class(build.status)}",
                                             span {
-                                                class: "inline-block h-1.5 w-1.5 rounded-full",
-                                                style: "background-color: {status_dot_color(build.status)};"
+                                                class: "chip-dot",
+                                                style: "background: {status_color(build.status)};",
                                             }
                                             "{build.status_label()}"
                                         }
                                     }
+
+                                    // Worker
                                     td {
-                                        class: "px-3 py-2 font-mono text-xs {theme::text::SECONDARY} whitespace-nowrap",
-                                        // JSX: {b.worker || "—"}
-                                        if build.worker_id == "unassigned" {
-                                            "—"
-                                        } else {
-                                            "{build.worker_id}"
+                                        span {
+                                            class: "mono",
+                                            style: "font-size: 12px; color: var(--cf-text-secondary);",
+                                            if build.worker_id == "unassigned" { "—" } else { "{build.worker_id}" }
                                         }
                                     }
-                                    td {
-                                        class: "px-3 py-2 w-[100px]",
-                                        // JSX: only shows progress bar when b.progress > 0
-                                        // We don't have real progress data, show indeterminate for building
-                                        if matches!(build.status, BuildStatus::Building | BuildStatus::Stopping) {
-                                            div {
-                                                class: "h-[5px] bg-slate-800 rounded-full overflow-hidden",
-                                                // Indeterminate progress animation
-                                                div {
-                                                    class: "h-full rounded-full animate-pulse",
-                                                    style: "width: 60%; background-color: {status_dot_color(build.status)}; transition: width 1s;",
+
+                                    // Derivations dual-segment bar
+                                    td { style: "width: 140px;",
+                                        if build.total_derivs > 0 {
+                                            {
+                                                let total = build.total_derivs as f64;
+                                                let cached_pct = (build.cached_derivs as f64 / total * 100.0).min(100.0);
+                                                let built_pct = ((build.built_derivs.saturating_sub(build.cached_derivs)) as f64 / total * 100.0).min(100.0);
+                                                let status_col = status_color(build.status);
+                                                rsx! {
+                                                    div { style: "display: flex; align-items: center; gap: 8px;",
+                                                        div {
+                                                            style: "flex: 1; height: 5px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden; display: flex;",
+                                                            div {
+                                                                style: "width: {cached_pct}%; background: #34d399;",
+                                                                title: "{build.cached_derivs} from cache",
+                                                            }
+                                                            div {
+                                                                style: "width: {built_pct}%; background: {status_col}; transition: width 1s;",
+                                                                title: "{build.built_derivs.saturating_sub(build.cached_derivs)} built",
+                                                            }
+                                                        }
+                                                        span {
+                                                            class: "mono",
+                                                            style: "font-size: 11px; color: var(--cf-text-muted); white-space: nowrap;",
+                                                            "{build.built_derivs}/{build.total_derivs}"
+                                                        }
+                                                    }
                                                 }
                                             }
+                                        } else {
+                                            span { style: "color: var(--cf-text-muted); font-size: 12px;", "—" }
                                         }
                                     }
+
+                                    // Queued
                                     td {
-                                        class: "px-3 py-2 text-xs {theme::text::MUTED} whitespace-nowrap",
+                                        style: "font-size: 12px; color: var(--cf-text-muted);",
                                         "{build.queued_for}"
                                     }
+
+                                    // Duration
                                     td {
-                                        class: "px-3 py-2 font-mono text-xs {theme::text::SECONDARY} whitespace-nowrap",
-                                        if let Some(ref runtime) = build.runtime {
-                                            "{runtime}"
-                                        } else {
-                                            "—"
-                                        }
+                                        class: "mono",
+                                        style: "font-size: 12px; color: var(--cf-text-secondary);",
+                                        if let Some(ref rt) = build.runtime { "{rt}" } else { "—" }
                                     }
+
+                                    // Actions column
                                     td {
-                                        class: "px-3 py-2 text-right",
-                                        // JSX: <div className="row-actions">
+                                        onclick: move |evt| evt.stop_propagation(),
                                         div {
                                             class: "row-actions",
-                                            // JSX: <button title="Logs"><Icon name="terminal" size={14} /></button>
+                                            style: "opacity: 1; gap: 6px; justify-content: flex-end;",
+
+                                            if can_requeue && reorderable {
+                                                div { class: "q-move-group",
+                                                    button {
+                                                        class: "q-move-btn focus-ring",
+                                                        title: "Move up",
+                                                        disabled: queued_pos.is_none() || queued_pos == Some(0),
+                                                        onclick: move |_| on_build_action.call((build.id, BuildAction::MoveUp)),
+                                                        svg {
+                                                            width: "15", height: "15",
+                                                            view_box: "0 0 24 24",
+                                                            fill: "none", stroke: "currentColor",
+                                                            stroke_width: "2",
+                                                            polyline { points: "18 15 12 9 6 15" }
+                                                        }
+                                                    }
+                                                    button {
+                                                        class: "q-move-btn focus-ring",
+                                                        title: "Move down",
+                                                        disabled: queued_pos.is_none() || queued_pos == Some(queued_last_pos),
+                                                        onclick: move |_| on_build_action.call((build.id, BuildAction::MoveDown)),
+                                                        svg {
+                                                            width: "15", height: "15",
+                                                            view_box: "0 0 24 24",
+                                                            fill: "none", stroke: "currentColor",
+                                                            stroke_width: "2",
+                                                            polyline { points: "6 9 12 15 18 9" }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // Logs button
                                             button {
                                                 class: "btn-icon focus-ring",
                                                 title: "Logs",
-                                                onclick: move |evt| {
-                                                    evt.stop_propagation();
-                                                    // Select the build and open log modal immediately (JSX parity)
+                                                onclick: move |_| {
                                                     selected_id.set(Some(build.id));
                                                     on_log.call(build.id);
                                                 },
+                                                // terminal icon
                                                 svg {
-                                                    width: "14",
-                                                    height: "14",
+                                                    width: "14", height: "14",
                                                     view_box: "0 0 24 24",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
+                                                    fill: "none", stroke: "currentColor",
                                                     stroke_width: "2",
-                                                    stroke_linecap: "round",
-                                                    stroke_linejoin: "round",
+                                                    stroke_linecap: "round", stroke_linejoin: "round",
                                                     polyline { points: "4 17 10 11 4 5" }
                                                     line { x1: "12", y1: "19", x2: "20", y2: "19" }
                                                 }
                                             }
-                                            if let Some(cancel_action) = cancel_action_for_status(build.status) {
-                                                // JSX: <button title="Cancel"><Icon name="x" size={14} /></button>
+
+                                            // Cancel / force-kill
+                                            if can_requeue && matches!(build.status, BuildStatus::Building | BuildStatus::Queued) {
                                                 button {
                                                     class: "btn-icon focus-ring",
-                                                    title: "Cancel",
-                                                    onclick: move |evt| {
-                                                        evt.stop_propagation();
-                                                        on_build_action.call((build.id, cancel_action));
-                                                    },
+                                                    title: "Cancel build",
+                                                    onclick: move |_| on_build_action.call((build.id, BuildAction::Stop)),
                                                     svg {
-                                                        width: "14",
-                                                        height: "14",
+                                                        width: "14", height: "14",
                                                         view_box: "0 0 24 24",
-                                                        fill: "none",
-                                                        stroke: "currentColor",
+                                                        fill: "none", stroke: "currentColor",
                                                         stroke_width: "2",
-                                                        stroke_linecap: "round",
-                                                        stroke_linejoin: "round",
+                                                        stroke_linecap: "round", stroke_linejoin: "round",
                                                         line { x1: "18", y1: "6", x2: "6", y2: "18" }
                                                         line { x1: "6", y1: "6", x2: "18", y2: "18" }
                                                     }
                                                 }
                                             }
-                                            if can_requeue
-                                                && matches!(
-                                                    build.status,
-                                                    BuildStatus::Failed
-                                                        | BuildStatus::Complete
-                                                        | BuildStatus::Cancelled
-                                                )
-                                            {
+                                            if can_requeue && build.status == BuildStatus::Stopping {
                                                 button {
                                                     class: "btn-icon focus-ring",
-                                                    title: "Requeue",
-                                                    onclick: move |evt| {
-                                                        evt.stop_propagation();
-                                                        on_build_action.call((build.id, BuildAction::Restart));
-                                                    },
+                                                    title: "Force kill",
+                                                    style: "color: var(--cf-red, #f87171);",
+                                                    onclick: move |_| on_build_action.call((build.id, BuildAction::ForceCancel)),
                                                     svg {
-                                                        width: "14",
-                                                        height: "14",
+                                                        width: "14", height: "14",
                                                         view_box: "0 0 24 24",
-                                                        fill: "none",
-                                                        stroke: "currentColor",
+                                                        fill: "none", stroke: "currentColor",
                                                         stroke_width: "2",
-                                                        stroke_linecap: "round",
-                                                        stroke_linejoin: "round",
-                                                        path { d: "M3 12a9 9 0 0 0 9 9 9 9 0 0 0 6.2-2.5" }
-                                                        path { d: "M21 12a9 9 0 0 0-9-9 9 9 0 0 0-6.2 2.5" }
-                                                        polyline { points: "3 3 3 9 9 9" }
-                                                        polyline { points: "21 21 21 15 15 15" }
+                                                        stroke_linecap: "round", stroke_linejoin: "round",
+                                                        line { x1: "18", y1: "6", x2: "6", y2: "18" }
+                                                        line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                                                    }
+                                                }
+                                            }
+
+                                            // Retry for failed
+                                            if can_requeue && build.status == BuildStatus::Failed {
+                                                button {
+                                                    class: "btn-icon focus-ring",
+                                                    title: "Retry build",
+                                                    onclick: move |_| on_build_action.call((build.id, BuildAction::Restart)),
+                                                    // rollback icon
+                                                    svg {
+                                                        width: "14", height: "14",
+                                                        view_box: "0 0 24 24",
+                                                        fill: "none", stroke: "currentColor",
+                                                        stroke_width: "2",
+                                                        stroke_linecap: "round", stroke_linejoin: "round",
+                                                        path { d: "M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74" }
+                                                        path { d: "M21 3v9h-9" }
+                                                        path { d: "M21 12A9 9 0 0 0 3.26 9.26" }
                                                     }
                                                 }
                                             }
@@ -373,35 +331,93 @@ fn BuildQueueTable(
                 }
             }
         }
+
+        // Bulk cancel bar — appears when multi-select has items and caller may mutate queue
+        if can_requeue && bulk_count > 0 {
+            BulkBar {
+                count: bulk_count,
+                on_cancel: move |_| {
+                    let ids = selected_ids.read().clone();
+                    for id in &ids {
+                        on_build_action.call((*id, BuildAction::Stop));
+                    }
+                    selected_ids.set(Vec::new());
+                },
+                on_clear: move |_| selected_ids.set(Vec::new()),
+            }
+        }
+
     }
 }
 
-fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{truncated}…")
-    } else {
-        truncated
+/// Bulk action bar — sticky floating pill, shown when multi-select is active.
+/// JSX: <BulkBar count={sel.size} onClear={sel.clear}> ... </BulkBar>
+#[component]
+fn BulkBar(count: usize, on_cancel: EventHandler<()>, on_clear: EventHandler<()>) -> Element {
+    let s = if count == 1 { "" } else { "s" };
+    rsx! {
+        div {
+            class: "bulk-bar",
+            role: "toolbar",
+            "aria-label": "Bulk actions",
+            // JSX: <span className="bulk-count"><strong>{count}</strong> selected</span>
+            span { class: "bulk-count",
+                strong { "{count}" }
+                " selected"
+            }
+            // JSX: <span className="bulk-sep" />
+            span { class: "bulk-sep" }
+            // Cancel action
+            button {
+                class: "btn btn-danger xs focus-ring",
+                onclick: move |_| on_cancel.call(()),
+                svg {
+                    width: "12", height: "12",
+                    view_box: "0 0 24 24",
+                    fill: "none", stroke: "currentColor",
+                    stroke_width: "2",
+                    stroke_linecap: "round", stroke_linejoin: "round",
+                    style: "margin-right: 4px;",
+                    line { x1: "18", y1: "6", x2: "6", y2: "18" }
+                    line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                }
+                "Cancel {count} build{s}"
+            }
+            // JSX: <button className="btn btn-ghost xs focus-ring" onClick={onClear}>Clear</button>
+            button {
+                class: "btn btn-ghost xs focus-ring",
+                onclick: move |_| on_clear.call(()),
+                "Clear"
+            }
+        }
     }
 }
 
-fn cancel_action_for_status(status: BuildStatus) -> Option<BuildAction> {
-    match status {
-        BuildStatus::Building => Some(BuildAction::Stop),
-        BuildStatus::Stopping => Some(BuildAction::ForceCancel),
-        BuildStatus::Queued => Some(BuildAction::Stop),
-        _ => None,
-    }
+fn is_cancellable(status: BuildStatus) -> bool {
+    matches!(
+        status,
+        BuildStatus::Building | BuildStatus::Queued | BuildStatus::Stopping
+    )
 }
 
-fn status_dot_color(status: BuildStatus) -> &'static str {
+fn status_color(status: BuildStatus) -> &'static str {
     match status {
         BuildStatus::Queued => "#a78bfa",
-        BuildStatus::Building => "#34d399",
+        BuildStatus::Building => "#60a5fa",
         BuildStatus::Stopping => "#fbbf24",
         BuildStatus::Failed => "#f87171",
         BuildStatus::Complete => "#34d399",
         BuildStatus::Cancelled => "#94a3b8",
+    }
+}
+
+fn status_chip_class(status: BuildStatus) -> &'static str {
+    match status {
+        BuildStatus::Queued => "chip-info",
+        BuildStatus::Building => "chip-info",
+        BuildStatus::Stopping => "chip-warning",
+        BuildStatus::Failed => "chip-critical",
+        BuildStatus::Complete => "chip-success",
+        BuildStatus::Cancelled => "chip-unknown",
     }
 }

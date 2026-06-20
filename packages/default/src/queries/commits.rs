@@ -774,7 +774,10 @@ pub struct EvalPolicySystemRow {
     pub policy_status: String,
 }
 
-pub async fn fetch_eval_policy_matrix(pool: &PgPool, commit_id: i32) -> Result<Vec<EvalPolicySystemRow>> {
+pub async fn fetch_eval_policy_matrix(
+    pool: &PgPool,
+    commit_id: i32,
+) -> Result<Vec<EvalPolicySystemRow>> {
     let rows = sqlx::query_as::<_, EvalPolicySystemRow>(
         r#"
         SELECT
@@ -801,6 +804,7 @@ pub async fn fetch_eval_policy_matrix(pool: &PgPool, commit_id: i32) -> Result<V
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct EvalDependencyPackageRow {
     pub package_name: String,
+    pub closure_counted: bool,
     pub ready_count: i64,
     pub pending_count: i64,
     pub failed_count: i64,
@@ -811,10 +815,16 @@ pub async fn fetch_eval_dependency_breakdown(
     commit_id: i32,
 ) -> Result<Vec<EvalDependencyPackageRow>> {
     // Evaluation writes one nixos-type derivation per NixOS system config.
-    // We map each system to a row showing:
-    //   ready_count  = built (store_path populated, status BuildComplete)
-    //   pending_count = evaluated but not yet built (DryRunComplete, BuildPending/InProgress)
-    //   failed_count  = eval or build failed
+    // Closure counts are populated asynchronously after eval via
+    // `nix-store --query --requisites <system.drv>`.
+    //
+    // We map each system to a row showing package-closure counts when present:
+    //   ready_count   = packages already available in the local/cached store
+    //   pending_count = packages still requiring build/substitution
+    //   failed_count  = failed system marker when no package count is available
+    //
+    // If closure counts are not available yet, fall back to the historical
+    // one-row system status so the graph still renders while counts are pending.
     //
     // status_id reference:
     //   3 = DryRunPending, 4 = DryRunInProgress, 5 = DryRunComplete
@@ -824,22 +834,30 @@ pub async fn fetch_eval_dependency_breakdown(
         r#"
         SELECT
             COALESCE(NULLIF(BTRIM(d.derivation_name), ''), 'unknown') AS package_name,
-            -- ready = build complete or has a store_path
-            COUNT(*) FILTER (
-                WHERE d.status_id = 10
-                   OR (d.store_path IS NOT NULL AND d.store_path != '')
-            )::BIGINT AS ready_count,
-            -- pending = evaluated (drv known) but not yet built
-            COUNT(*) FILTER (
-                WHERE d.status_id IN (5, 7, 8)
+            (d.closure_total IS NOT NULL) AS closure_counted,
+            CASE
+                WHEN d.closure_total IS NOT NULL
+                    THEN COALESCE(d.closure_cached, 0)::BIGINT
+                WHEN d.status_id = 10 OR (d.store_path IS NOT NULL AND d.store_path != '')
+                    THEN 1::BIGINT
+                ELSE 0::BIGINT
+            END AS ready_count,
+            CASE
+                WHEN d.closure_total IS NOT NULL
+                    THEN GREATEST(d.closure_total - COALESCE(d.closure_cached, 0), 0)::BIGINT
+                WHEN d.status_id IN (5, 7, 8)
                   AND (d.store_path IS NULL OR d.store_path = '')
-            )::BIGINT AS pending_count,
-            -- failed = eval or build failed
-            COUNT(*) FILTER (WHERE d.status_id IN (6, 12))::BIGINT AS failed_count
+                    THEN 1::BIGINT
+                ELSE 0::BIGINT
+            END AS pending_count,
+            CASE
+                WHEN d.status_id IN (6, 12)
+                    THEN COALESCE(NULLIF(d.closure_total, 0), 1)::BIGINT
+                ELSE 0::BIGINT
+            END AS failed_count
         FROM derivations d
         WHERE d.commit_id = $1
           AND d.derivation_type = 'nixos'
-        GROUP BY COALESCE(NULLIF(BTRIM(d.derivation_name), ''), 'unknown')
         ORDER BY package_name ASC
         "#,
     )

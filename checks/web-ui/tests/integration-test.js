@@ -4320,19 +4320,9 @@ const steps = [
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      const queueCards = page.locator("[data-testid='build-queue-card']");
-      const queueCardCount = await queueCards.count();
-      if (queueCardCount === 0) {
-        throw new Error("Expected at least one build queue card in builds screenshot");
-      }
-      if (queueCardCount > 0) {
-        const overflowingCards = await queueCards.evaluateAll((cards) =>
-          cards.filter((card) => card.scrollWidth > card.clientWidth + 1).length,
-        );
-        if (overflowingCards > 0) {
-          throw new Error(`Build queue has ${overflowingCards} overflowing cards`);
-        }
-      }
+      await assertVisible(page.getByRole("heading", { name: "Builds" }).first(), "Expected Builds heading");
+      await assertVisible(page.locator("[data-testid='build-queue-table']"), "Expected build queue table");
+      await assertVisible(page.locator(".card").filter({ hasText: "builder" }).first(), "Expected worker cards section");
 
       await unrouteBuildsData(page);
     },
@@ -4345,8 +4335,9 @@ const steps = [
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      await assertVisible(page.locator("button:has-text('Refresh')"), "Expected Refresh action in Builds header");
-      await assertVisible(page.locator("button:has-text('Queue build')"), "Expected Queue build action in Builds header");
+      await assertVisible(page.getByText(/updated just now|updated \d+s ago/i).first(), "Expected LiveIndicator in Builds header");
+      await assertVisible(page.getByText(/click to select/i).first(), "Expected multi-select hint in Builds header");
+      await assertVisible(page.locator("button[title='Move up']").first(), "Expected Move up reorder action in Builds table");
 
       const pageText = await page.locator("body").textContent();
       for (const metric of ["Building", "Queued", "Failed 24h", "Workers", "Slot usage"]) {
@@ -4360,18 +4351,18 @@ const steps = [
   },
   {
     name: "11b-builds-queue-card-focus",
-    description: "Build queue card layout focus",
+    description: "Build queue row selection focus",
     action: async (page) => {
       await routeBuildsData(page);
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      const firstQueueCard = page.locator("[data-testid='build-queue-card']").first();
-      if (await firstQueueCard.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await firstQueueCard.click();
+      const firstQueueRow = page.locator("[data-testid='build-queue-row']").first();
+      if (await firstQueueRow.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await firstQueueRow.click();
         await page.waitForTimeout(700);
       } else {
-        throw new Error("Expected first build queue card to be visible for focused screenshot");
+        throw new Error("Expected first build queue row to be visible for focused screenshot");
       }
 
       await unrouteBuildsData(page);
@@ -4385,8 +4376,7 @@ const steps = [
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      // Click the Completed Builds tab
-      const completedTab = page.locator("button:has-text('Completed Builds')");
+      const completedTab = page.locator("button:has-text('Completed (')");
       await completedTab.click();
       await page.waitForTimeout(800);
 
@@ -4407,8 +4397,7 @@ const steps = [
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      // Switch to Completed Builds tab
-      const completedTab = page.locator("button:has-text('Completed Builds')");
+      const completedTab = page.locator("button:has-text('Completed (')");
       await completedTab.click();
       await page.waitForTimeout(800);
 
@@ -4462,14 +4451,12 @@ const steps = [
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      // Stay in card view (default) to show cancelling state badge
-      const queueCards = page.locator("[data-testid='build-queue-card']");
-      const cardCount = await queueCards.count();
-      if (cardCount === 0) {
-        throw new Error("Expected at least one build queue card");
+      const queueRows = page.locator("[data-testid='build-queue-row']");
+      const rowCount = await queueRows.count();
+      if (rowCount === 0) {
+        throw new Error("Expected at least one build queue row");
       }
 
-      // Verify we can see the stopping/cancelling status badge
       const stoppingBadge = page.getByText(/stopping|cancelling/i).first();
       const stoppingVisible = await stoppingBadge.isVisible({ timeout: 2000 }).catch(() => false);
       if (!stoppingVisible) {
@@ -4506,27 +4493,13 @@ const steps = [
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      // In card view, click on a cancelled build to select it
-      // Restart should be visible for cancelled builds
-      const cards = page.locator("[data-testid='build-queue-card']");
-      const cardCount = await cards.count();
-      
-      // Find the card with cancelled status and click it
-      for (let i = 0; i < cardCount; i++) {
-        const cardText = await cards.nth(i).textContent();
-        if (/cancelled|canceled/i.test(cardText)) {
-          await cards.nth(i).click();
-          await page.waitForTimeout(500);
-          break;
-        }
-      }
+      const stoppingRow = page.locator("[data-testid='build-queue-row']", { hasText: "system-stopping-build" });
+      await assertVisible(stoppingRow, "Expected stopping build row");
+      await assertVisible(stoppingRow.locator("button[title='Force kill']"), "Expected Force kill action for stopping build");
 
-      // Verify Restart button is visible for cancelled build
-      const restartBtn = page.locator("button:has-text('Restart')");
-      const restartVisible = await restartBtn.isVisible({ timeout: 2000 }).catch(() => false);
-      if (!restartVisible) {
-        throw new Error("Expected Restart button to be visible for cancelled build");
-      }
+      const queuedRow = page.locator("[data-testid='build-queue-row']", { hasText: "queued-system-01" });
+      await assertVisible(queuedRow, "Expected queued build row");
+      await assertVisible(queuedRow.locator("button[title='Cancel build']"), "Expected Cancel action for queued build");
 
       await unrouteBuildsDataWithCancelStates(page);
     },
@@ -4561,18 +4534,18 @@ const steps = [
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      const completedTab = page.locator("button:has-text('Completed Builds')");
-      await assertVisible(completedTab, "Completed Builds tab should be visible");
+      const completedTab = page.locator("button:has-text('Completed (')");
+      await assertVisible(completedTab, "Completed tab should be visible");
       await completedTab.click();
       await page.waitForTimeout(800);
 
       const cancelledRow = page.locator("tr", { hasText: "cancelled-history-system" });
       await assertVisible(cancelledRow, "Cancelled build row should be visible in Completed tab");
 
-      const restartBtn = cancelledRow.locator("button:has-text('Restart')");
-      await assertVisible(restartBtn, "Restart button should be visible for cancelled completed build");
+      const restartBtn = cancelledRow.locator("button[title='Retry build']");
+      await assertVisible(restartBtn, "Retry action should be visible for cancelled completed build");
       await restartBtn.click();
-      await page.getByRole("heading", { name: "Restart build?" }).waitFor({ timeout: 3000 });
+      await page.getByRole("heading", { name: /Restart build\?/i }).waitFor({ timeout: 3000 });
 
       const modalConfirm = page.locator(".cf-modal-panel-30 button:has-text('Restart')");
       await assertVisible(modalConfirm, "Restart confirmation button should be visible in modal");
@@ -4591,6 +4564,23 @@ const steps = [
 
       await page.unroute("**/api/v1/build-jobs/recent*");
       await page.unroute("**/api/v1/build-jobs/*/requeue");
+      await unrouteBuildsDataWithCancelStates(page);
+    },
+  },
+  {
+    name: "15i-builds-non-operator",
+    description: "Builds view hides retry and mutating controls for non-operators",
+    action: async (page) => {
+      await routeBuildsDataWithCancelStates(page);
+      await page.goto(`${baseUrl}/builds?ui_check_auth=1&ui_check_role=viewer`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      await assertHidden(page.locator("button[title='Retry build']").first(), "Retry build should be hidden for non-operators");
+      await assertHidden(page.locator("button[title='Cancel build']").first(), "Cancel build should be hidden for non-operators");
+      await assertHidden(page.locator("button[title='Force kill']").first(), "Force kill should be hidden for non-operators");
+      await assertHidden(page.locator("button[title='Move up']").first(), "Move up should be hidden for non-operators");
+      await assertHidden(page.locator("button[title='Move down']").first(), "Move down should be hidden for non-operators");
+
       await unrouteBuildsDataWithCancelStates(page);
     },
   },
@@ -4626,31 +4616,85 @@ const steps = [
           body: JSON.stringify(["openssl", "glibc"]),
         });
       });
-      await page.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
+      const cveRowFixture = {
+        cve_id: "CVE-2024-1234",
+        cvss_v3_score: 9.8,
+        title: "OpenSSL bounds check issue",
+        severity: "critical",
+        cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        published_date: "2024-02-01",
+        exploited: true,
+        package_name: "openssl",
+        installed_version: "3.0.1",
+        fixed_version: "3.0.2",
+        fix_status: "fix_available",
+        affected_count: 4,
+        affected_environments: ["prod", "staging"],
+        first_seen: new Date().toISOString(),
+        last_seen: new Date().toISOString(),
+        age_days: 12,
+        triage_status: "outstanding",
+      };
+      // Grouped (default) view fetches /cves/grouped — mock the package rollup so
+      // the default grouped surface renders real-shaped data (not a fallback).
+      await page.route(/\/api\/v1\/cves\/grouped(?:\?.*)?$/, async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify([
             {
-              cve_id: "CVE-2024-1234",
-              cvss_v3_score: 9.8,
-              title: "OpenSSL bounds check issue",
-              severity: "critical",
-              cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-              published_date: "2024-02-01",
-              exploited: true,
               package_name: "openssl",
-              installed_version: "3.0.1",
-              fixed_version: "3.0.2",
-              fix_status: "fix_available",
-              affected_count: 4,
-              affected_environments: ["prod", "staging"],
-              first_seen: new Date().toISOString(),
-              last_seen: new Date().toISOString(),
-              age_days: 12,
-              triage_status: "outstanding",
+              cve_count: 1,
+              critical_count: 1,
+              high_count: 0,
+              medium_count: 0,
+              low_count: 0,
+              environments_count: 2,
+              total_affected_systems: 4,
+              fixable_count: 1,
+              outstanding_count: 1,
+              exploited_count: 1,
+              max_cvss: 9.8,
+              severity_score: 1000,
+              cves: [cveRowFixture],
             },
           ]),
+        });
+      });
+      // Drawer detail endpoints for the selected CVE.
+      await page.route(/\/api\/v1\/cves\/CVE-2024-1234$/, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            cve_id: "CVE-2024-1234",
+            cvss_v3_score: 9.8,
+            severity: "critical",
+            title: "OpenSSL bounds check issue",
+            cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            cwe_id: "CWE-125",
+            published_date: "2024-02-01",
+            modified_date: "2024-02-03",
+            exploited: true,
+            package_name: "openssl",
+            installed_version: "3.0.1",
+            fixed_version: "3.0.2",
+            detection_method: "vulnix",
+            fix_status: "fix_available",
+          }),
+        });
+      });
+      await page.route(/\/api\/v1\/cves\/CVE-2024-1234\/systems$/, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      });
+      await page.route(/\/api\/v1\/cves\/CVE-2024-1234\/justifications$/, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      });
+      await page.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([cveRowFixture]),
         });
       });
 
@@ -4681,7 +4725,13 @@ const steps = [
       const severityFilterSeg = page.locator("main .seg button:has-text('Critical')");
       await assertVisible(severityFilterSeg, "Expected severity filter controls");
 
-      // Switch to flat view mode (default is grouped) to see individual CVE rows in a table.
+      // Grouped view is the default. Assert the package group card renders the
+      // real-shaped grouped data (package-first parity surface).
+      const groupCard = page.locator("main .mono:has-text('openssl')").first();
+      await assertVisible(groupCard, "Expected grouped package card to render");
+
+      // Verify flat view mode renders individual CVE rows in a table, then
+      // return to grouped mode so the drawer is opened from the design's default surface.
       const flatViewBtn = page.locator("button:has-text('Flat')");
       await flatViewBtn.waitFor({ timeout: 5000 });
       await flatViewBtn.click();
@@ -4690,9 +4740,44 @@ const steps = [
       const cveRow = page.locator("main td:has-text('CVE-2024-1234')");
       await assertVisible(cveRow, "Expected CVE row to render");
 
+      // Open the CVE detail drawer from the flat-view row and assert it renders.
+      await cveRow.click();
+      await page.waitForTimeout(1000);
+      const drawer = page.locator("aside[role='dialog']");
+      await assertVisible(drawer, "Expected CVE detail drawer to open");
+      const drawerCveId = drawer.locator(".mono:has-text('CVE-2024-1234')").first();
+      await assertVisible(drawerCveId, "Expected CVE id in drawer header");
+
+      const acceptRiskButton = drawer.locator("button:has-text('Accept risk')").first();
+      await acceptRiskButton.click();
+      await assertVisible(
+        drawer.locator("label:has-text('Review / expiry date (optional)')"),
+        "Expected review/expiry date field in accept-risk form",
+      );
+      await assertVisible(
+        drawer.locator("text=Date persistence is not yet implemented; tracked in TASK-348.1.1."),
+        "Expected date persistence deferral notice",
+      );
+
+      await drawer.locator("button:has-text('Schedule patch')").click();
+      await assertVisible(
+        drawer.locator("label:has-text('Target patch date')"),
+        "Expected target patch date field when scheduling a patch",
+      );
+      await assertDisabled(
+        drawer.locator(".field:has(label:has-text('Target patch date')) input[type='date']"),
+        "Target patch date input should be disabled until persistence is implemented",
+      );
+
+      // Leave the drawer open so the captured screenshot shows the detail surface and triage form.
+
       // Unroute after test.
       await page.unroute("**/api/v1/cves/stats*");
       await page.unroute("**/api/v1/cves/packages*");
+      await page.unroute(/\/api\/v1\/cves\/grouped(?:\?.*)?$/);
+      await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234$/);
+      await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/systems$/);
+      await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/justifications$/);
       await page.unroute(/\/api\/v1\/cves(?:\?.*)?$/);
     },
   },
@@ -4844,38 +4929,48 @@ const steps = [
     description: "Policies view",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2500);
-      await page.locator("main h1:has-text('Deployment Policies')").first().waitFor({ timeout: 5000 });
+      await page.locator("main h1:has-text('Policies')").first().waitFor({ timeout: 5000 });
+      await assertVisible(page.getByText("Criteria a system must satisfy to deploy").first(), "Expected design subtitle on Policies page");
+      await assertVisible(page.getByText("Deployment gates").first(), "Expected policy category stat strip");
+      await assertVisible(page.getByPlaceholder("Search policies…").first(), "Expected policy search filter");
+      await assertVisible(page.getByRole("button", { name: /deploy/i }).first(), "Expected deployment category segment filter");
+      await assertVisible(page.getByText(/policies?$/).first(), "Expected policy count in filter bar");
     },
   },
   {
-    name: "19-policies-new-modal-basic",
-    description: "Policies new modal in basic mode",
+    name: "19-policies-new-modal-fields",
+    description: "Policies new modal shows the unified design-faithful form",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2500);
-      const newPolicyBtn = page.locator("button:has-text('New Policy')").first();
+      const newPolicyBtn = page.getByRole("button", { name: /New custom policy/i }).first();
       await newPolicyBtn.waitFor({ timeout: 5000 });
       await newPolicyBtn.click();
-      await page.waitForTimeout(1200);
-      await page.getByRole("heading", { name: "Create Policy" }).waitFor({ timeout: 5000 });
+      await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
+      // Unified design form sections (no Basic/Advanced toggle, no raw JSON editor).
+      await assertHidden(page.getByRole("button", { name: "Advanced" }), "Advanced toggle should not exist in unified modal");
+      await assertVisible(page.getByText("Category", { exact: false }).first(), "Expected Category section");
+      await assertVisible(page.getByText("Severity", { exact: false }).first(), "Expected Severity section");
+      await assertVisible(page.getByText("Rationale", { exact: false }).first(), "Expected Rationale section");
+      await assertVisible(page.getByText("Assertions & gate rules", { exact: false }).first(), "Expected assertions/gate rules builder");
+      await assertVisible(page.getByText("Evidence for ATO", { exact: false }).first(), "Expected evidence-for-ATO builder");
+      // UI-only / not-persisted markers are visible for unsupported fields.
+      await assertVisible(page.getByText("UI only — not persisted yet").first(), "Expected UI-only/not-persisted markers");
     },
   },
   {
-    name: "20-policies-new-modal-advanced",
-    description: "Policies new modal in advanced mode",
+    name: "20-policies-new-modal-rule-builder",
+    description: "Policies new modal can add an assertion rule via the builder",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2500);
-      const newPolicyBtn = page.locator("button:has-text('New Policy')").first();
+      const newPolicyBtn = page.getByRole("button", { name: /New custom policy/i }).first();
       await newPolicyBtn.waitFor({ timeout: 5000 });
       await newPolicyBtn.click();
-      await page.waitForTimeout(700);
-      const advancedBtn = page.getByRole("button", { name: "Advanced" });
-      await advancedBtn.waitFor({ timeout: 5000 });
-      await advancedBtn.click();
-      await page.waitForTimeout(1200);
-      await page.getByText("Policy Definition").first().waitFor({ timeout: 5000 });
+      await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
+      // Add a CVE gate rule through the design's rule dropdown.
+      const addRule = page.locator("select").filter({ hasText: "Add assertion / rule" }).first();
+      await addRule.waitFor({ timeout: 5000 });
+      await addRule.selectOption("cve_block");
+      await assertVisible(page.getByText("Block deploy when").first(), "Expected CVE gate rule editor row after adding rule");
     },
   },
   // ── CVE policy API round-trip checks ────────────────────────────────────
@@ -6028,11 +6123,20 @@ const CI_FAST_STEP_NAMES = new Set([
   "15f-builds-human-duration",
   "15g-builds-action-visibility",
   "15h-builds-completed-restart-action",
+  "15i-builds-non-operator",
   // TASK-17: CVE dashboard evidence
   "16-cves",
   "16b-cves-severity-filter",
   // TASK-326: Scanning view evidence
   "16c-scanning-view",
+  // TASK-340.1: Policies parity evidence
+  "18-policies",
+  "19-policies-new-modal-fields",
+  "20-policies-new-modal-rule-builder",
+  "20b-policies-cve-gate-create-roundtrip",
+  "20c-policies-multirule-create-roundtrip",
+  "20d-policies-cve-gate-invalid-rejected",
+  "20e-policies-multirule-rules-only-no-expression-required",
   // TASK-303: Caches view and modal evidence
   "21-caches",
   "22-caches-modal-nix",

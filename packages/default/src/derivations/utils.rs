@@ -1,9 +1,14 @@
 use crate::config::{BuildConfig, CacheConfig};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 use tokio::process::Command;
+use tokio::time::timeout;
 use tracing::{debug, info, warn};
+
+const CLOSURE_COUNT_COMMAND_TIMEOUT_SECS: u64 = 120;
+const CLOSURE_COUNT_ARG_CHUNK_SIZE: usize = 500;
 
 /// Add/remove to taste; this set covers AWS + MinIO/common S3 endpoints.
 pub const CACHE_ENV_ALLOWLIST: &[&str] = &[
@@ -413,4 +418,140 @@ pub async fn get_store_path_and_build_status(drv_path: &str) -> Result<(String, 
         .unwrap_or(false);
 
     Ok((store_path, is_built))
+}
+
+/// Count the total packages in a system closure and how many are already cached.
+///
+/// Uses two nix calls:
+///   1. `nix-store --query --requisites <drv>` — list all .drv files in the closure (fast)
+///   2. `nix-store --query --outputs <drv>...` — map each .drv to its output path
+///   3. `nix path-info <paths>...` — batch check which outputs exist in the store
+///
+/// Returns `(total, cached)` where:
+///   total  = number of packages in the closure (excluding the nixos-system drv itself)
+///   cached = number already present in the local/substituter-accessible store
+pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
+    // Step 1: get all .drv requisites (the full closure as .drv paths)
+    info!("📦 Counting closure requisites for {}", drv_path);
+    let command_timeout = Duration::from_secs(CLOSURE_COUNT_COMMAND_TIMEOUT_SECS);
+    let req_out = timeout(
+        command_timeout,
+        Command::new("nix-store")
+            .args(["--query", "--requisites", drv_path])
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "nix-store --query --requisites timed out after {}s for {}",
+            CLOSURE_COUNT_COMMAND_TIMEOUT_SECS,
+            drv_path
+        )
+    })??;
+
+    if !req_out.status.success() {
+        anyhow::bail!(
+            "nix-store --query --requisites failed: {}",
+            String::from_utf8_lossy(&req_out.stderr)
+        );
+    }
+
+    let drv_paths: Vec<String> = String::from_utf8(req_out.stdout)?
+        .lines()
+        .filter(|l| !l.is_empty() && *l != drv_path)
+        .map(|s| s.to_string())
+        .collect();
+
+    let total = drv_paths.len() as i32;
+    if total == 0 {
+        return Ok((0, 0));
+    }
+
+    // Step 2: map .drv paths → output store paths. Large NixOS closures can
+    // contain tens of thousands of derivations, so chunk args to stay below
+    // Linux argv limits.
+    info!(
+        "📦 Resolving {} closure outputs for {} in chunks of {}",
+        drv_paths.len(),
+        drv_path,
+        CLOSURE_COUNT_ARG_CHUNK_SIZE
+    );
+    let mut store_paths = Vec::new();
+    for chunk in drv_paths.chunks(CLOSURE_COUNT_ARG_CHUNK_SIZE) {
+        let mut outputs_cmd = Command::new("nix-store");
+        outputs_cmd.arg("--query").arg("--outputs");
+        for p in chunk {
+            outputs_cmd.arg(p);
+        }
+
+        let outputs_out = timeout(command_timeout, outputs_cmd.output())
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "nix-store --query --outputs timed out after {}s for {}",
+                    CLOSURE_COUNT_COMMAND_TIMEOUT_SECS,
+                    drv_path
+                )
+            })??;
+
+        if outputs_out.status.success() {
+            store_paths.extend(
+                String::from_utf8(outputs_out.stdout)?
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|s| s.to_string()),
+            );
+        } else {
+            // Fall back to zero cached if we can't map outputs
+            warn!("nix-store --query --outputs failed; assuming 0 cached");
+            return Ok((total, 0));
+        }
+    }
+
+    if store_paths.is_empty() {
+        return Ok((total, 0));
+    }
+
+    // Step 3: batch check which outputs exist. Large closures are chunked for
+    // the same argv-limit reason as output resolution.
+    info!(
+        "📦 Checking {} closure outputs in local store for {} in chunks of {}",
+        store_paths.len(),
+        drv_path,
+        CLOSURE_COUNT_ARG_CHUNK_SIZE
+    );
+    let mut cached = 0i32;
+    for chunk in store_paths.chunks(CLOSURE_COUNT_ARG_CHUNK_SIZE) {
+        let mut pi_cmd = Command::new("nix");
+        pi_cmd.args(["path-info", "--json"]);
+        for p in chunk {
+            pi_cmd.arg(p);
+        }
+
+        let pi_out = timeout(command_timeout, pi_cmd.output())
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "nix path-info --json timed out after {}s for {}",
+                    CLOSURE_COUNT_COMMAND_TIMEOUT_SECS,
+                    drv_path
+                )
+            })??;
+
+        cached += if pi_out.status.success() {
+            // All chunk paths present — count equals chunk size.
+            chunk.len() as i32
+        } else {
+            // Some paths missing — parse JSON to count which are present.
+            // nix path-info --json returns an object keyed by store path.
+            // Paths that don't exist are omitted from the output.
+            match serde_json::from_slice::<serde_json::Value>(&pi_out.stdout) {
+                Ok(serde_json::Value::Object(map)) => map.len() as i32,
+                Ok(serde_json::Value::Array(arr)) => arr.len() as i32,
+                _ => 0,
+            }
+        };
+    }
+
+    Ok((total, cached))
 }

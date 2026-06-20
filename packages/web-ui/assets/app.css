@@ -742,6 +742,39 @@ body {
   box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.22) !important;
 }
 
+.cf-policy-ui-only-badge {
+  display: inline;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--cf-text-muted);
+  white-space: nowrap;
+}
+
+.cf-policy-category-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  text-align: left;
+  padding: 9px 11px;
+  border-radius: 9px;
+  cursor: pointer;
+  background: var(--cf-subtle-bg);
+  border: 1px solid var(--cf-divider);
+}
+
+.cf-policy-category-card-active {
+  background: color-mix(
+    in oklab,
+    var(--cf-policy-category-color) 12%,
+    transparent
+  );
+  border-color: color-mix(
+    in oklab,
+    var(--cf-policy-category-color) 55%,
+    transparent
+  );
+}
+
 :root[data-theme="light"] .cf-policy-modal-field {
   background-color: var(--cf-subtle-bg) !important;
   border-color: var(--cf-card-border) !important;
@@ -3054,6 +3087,96 @@ tr.kbd-focused > td {
   box-shadow: inset 2px 0 0 var(--cf-brand-purple);
 }
 
+/* Multi-select row highlight */
+.sys-table tr.row-checked > td {
+  background: color-mix(in oklab, var(--cf-brand-purple) 9%, transparent);
+}
+.sys-table tr.row-checked > td:first-child {
+  box-shadow: inset 2px 0 0 var(--cf-brand-purple);
+}
+.sys-table tr.selectable {
+  cursor: pointer;
+}
+
+/* Toast notification */
+.ed-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--cf-card-bg);
+  border: 1px solid var(--cf-card-border);
+  padding: 10px 14px;
+  border-radius: 8px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.3);
+  z-index: 100;
+  font-size: 13px;
+  animation: toastIn 200ms cubic-bezier(0.2,0.8,0.2,1);
+}
+@keyframes toastIn {
+  from { transform: translate(-50%, 30px); opacity: 0; }
+  to { transform: translate(-50%, 0); opacity: 1; }
+}
+
+/* Bulk action bar */
+.ed-bulkbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: color-mix(in oklab, var(--cf-brand-purple) 14%, var(--cf-card-bg));
+  padding: 10px 16px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  border-bottom: 1px solid var(--cf-card-border);
+}
+.ed-checkbox {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--cf-brand-purple);
+  cursor: pointer;
+}
+
+/* Queue reorder: drag handle + move controls */
+.q-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--cf-text-muted);
+  cursor: grab;
+  width: 18px;
+  height: 22px;
+  border-radius: 5px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.q-drag-handle:hover { color: var(--cf-text-primary); background: var(--cf-hover-bg); }
+.q-drag-handle:active { cursor: grabbing; }
+.q-row { transition: background 0.12s ease, opacity 0.12s ease; }
+.q-row:hover .q-drag-handle { color: var(--cf-text-secondary); }
+.q-dragging { opacity: 0.4; }
+.q-drop-before td { box-shadow: inset 0 2px 0 0 var(--cf-brand-purple); }
+.q-drop-after td  { box-shadow: inset 0 -2px 0 0 var(--cf-brand-purple); }
+
+.q-move-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 17px;
+  padding: 0;
+  background: var(--cf-subtle-bg);
+  border: none;
+  cursor: pointer;
+  color: var(--cf-text-secondary);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.q-move-btn + .q-move-btn { border-top: 1px solid var(--cf-card-border); }
+.q-move-btn:hover:not(:disabled) { background: var(--cf-brand-purple); color: #fff; }
+.q-move-btn:disabled { opacity: 0.3; cursor: default; }
+
 /* Policy matrix - Top issues */
 .pm-issues {
   display: flex;
@@ -4519,3 +4642,57 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
   background: var(--cf-card-bg); border: 1px solid var(--cf-brand-purple);
   color: var(--cf-text-primary); font-family: var(--font-mono);
 }
+
+/* ─── Build queue table (TASK-347.1 — matches BuildsView.jsx) ─────────────── */
+.q-queue-table { width: 100%; }
+.q-queue-table thead th { font-size: 12px; font-weight: 600; color: var(--cf-text-muted);
+  padding: 8px 12px; text-align: left; }
+.q-row { cursor: pointer; border-bottom: 1px solid var(--cf-card-border); transition: background 0.1s; }
+.q-row:hover { background: rgba(255,255,255,0.03); }
+.q-row.selected { background: color-mix(in oklab, var(--cf-brand-purple) 10%, var(--cf-card-bg)); }
+.q-row.row-checked { background: color-mix(in oklab, var(--cf-brand-purple) 9%, transparent); }
+.q-row td { padding: 8px 12px; vertical-align: middle; }
+/* Drag-and-drop visual indicators */
+.q-dragging { opacity: 0.4; }
+.q-drop-before { box-shadow: inset 0 2px 0 0 var(--cf-brand-purple); }
+.q-drop-after  { box-shadow: inset 0 -2px 0 0 var(--cf-brand-purple); }
+/* Drag handle */
+.q-drag-handle { cursor: grab; color: var(--cf-text-muted); display: inline-flex; align-items: center; }
+.q-drag-handle:active { cursor: grabbing; }
+/* Move up/down buttons */
+.q-move-group { display: inline-flex; flex-direction: column; gap: 1px; }
+.q-move-btn { background: none; border: none; color: var(--cf-text-muted); cursor: pointer;
+  padding: 1px 3px; border-radius: 3px; display: flex; align-items: center; }
+.q-move-btn:hover:not(:disabled) { color: var(--cf-text-primary); background: var(--cf-subtle-bg); }
+.q-move-btn:disabled { opacity: 0.3; cursor: default; }
+/* chip-dot inside status chips in the queue table */
+.chip-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; flex-shrink: 0; }
+
+/* ─── Multi-select hint (in sd-tabs bar) ──────────────────────────────────── */
+.ms-hint {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 3px;
+  font-size: 11px; color: var(--cf-text-muted); white-space: nowrap;
+  user-select: none;
+}
+.ms-hint kbd {
+  font-size: 10px; padding: 1px 4px; border-radius: 4px;
+  background: var(--cf-subtle-bg); border: 1px solid var(--cf-card-border);
+  color: var(--cf-text-secondary);
+}
+
+/* ─── Bulk action bar — sticky floating pill ─────────────────────────────── */
+.bulk-bar {
+  position: sticky; bottom: 16px; z-index: 40;
+  margin: 12px auto 0; width: fit-content; max-width: 100%;
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 10px 8px 16px;
+  background: color-mix(in oklab, var(--cf-card-bg) 92%, var(--cf-brand-purple));
+  border: 1px solid color-mix(in oklab, var(--cf-brand-purple) 40%, var(--cf-card-border));
+  border-radius: 12px;
+  box-shadow: 0 12px 36px rgba(0,0,0,0.4);
+  animation: bulkUp 160ms cubic-bezier(.2,.8,.2,1);
+}
+@keyframes bulkUp { from { opacity:0; transform: translateY(10px); } to { opacity:1; transform: translateY(0); } }
+.bulk-count { font-size: 12.5px; color: var(--cf-text-secondary); white-space: nowrap; }
+.bulk-count strong { color: var(--cf-text-primary); }
+.bulk-sep { width: 1px; height: 18px; background: var(--cf-divider); }

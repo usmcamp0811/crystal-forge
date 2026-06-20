@@ -44,8 +44,15 @@ fn EvaluationsPage() -> Element {
     let mut active_tab = use_signal(|| EvaluationsTab::ActiveQueue);
     let mut drawer_target = use_signal(|| None::<EvalDrawerTarget>);
     let mut history_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
-    // Keyboard navigation: index into the currently visible list (queue or history)
+    // Keyboard navigation: index into the currently visible list (queue or history).
+    // Start at 0 so the first row is auto-selected when the page loads (matching JSX).
     let mut focused_index: Signal<Option<usize>> = use_signal(|| None);
+
+    // Active queue multi-select (bulk cancel)
+    let mut active_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
+
+    // Toast state for soft-cancel undo
+    let mut toast_msg = use_signal(|| None::<String>);
 
     // History tab state
     let mut history_page = use_signal(|| 1_i64);
@@ -236,9 +243,13 @@ fn EvaluationsPage() -> Element {
                                         );
                                         if can_cancel {
                                             let mut refresh_sig = refresh;
+                                            let mut toast = toast_msg;
                                             spawn(async move {
-                                                let _ = cancel_commit_evaluation(commit_id).await;
-                                                refresh_sig.set(refresh_sig() + 1);
+                                                if let Err(e) = cancel_commit_evaluation(commit_id).await {
+                                                    toast.set(Some(format!("Cancel failed: {}", e)));
+                                                } else {
+                                                    refresh_sig.set(refresh_sig() + 1);
+                                                }
                                             });
                                         }
                                     }
@@ -252,7 +263,7 @@ fn EvaluationsPage() -> Element {
                     }
                 },
 
-                // Page head
+                // Page head (matching JSX: title, subtitle, LiveIndicator)
                 div {
                     class: "page-head",
                     div {
@@ -263,20 +274,8 @@ fn EvaluationsPage() -> Element {
                         }
                     }
                     div {
-                        style: "display: flex; gap: 8px;",
-                        button {
-                            class: "btn btn-ghost focus-ring",
-                            title: "Sync flakes",
-                            Icon { name: IconName::Sync, size: 14 }
-                            " Sync flakes"
-                        }
-                        button {
-                            class: "btn btn-primary focus-ring",
-                            onclick: move |_| refresh.set(refresh() + 1),
-                            title: "Queue eval",
-                            Icon { name: IconName::Plus, size: 14 }
-                            " Queue eval"
-                        }
+                        style: "display: flex; gap: 12px; align-items: center;",
+                        LiveIndicator {}
                     }
                 }
 
@@ -347,7 +346,7 @@ fn EvaluationsPage() -> Element {
                             } else {
                                 "sd-tab focus-ring"
                             },
-                            onclick: move |_| active_tab.set(EvaluationsTab::ActiveQueue),
+                            onclick: move |_| { active_tab.set(EvaluationsTab::ActiveQueue); focused_index.set(None); },
                             "Active Queue "
                             span { class: "sd-tab-badge", "{active_count}" }
                         }
@@ -357,7 +356,7 @@ fn EvaluationsPage() -> Element {
                             } else {
                                 "sd-tab focus-ring"
                             },
-                            onclick: move |_| active_tab.set(EvaluationsTab::History),
+                            onclick: move |_| { active_tab.set(EvaluationsTab::History); focused_index.set(None); },
                             "History"
                         }
                     }
@@ -369,6 +368,8 @@ fn EvaluationsPage() -> Element {
                             queue_items: queue_items,
                             drawer_target: drawer_target,
                             focused_index: focused_index,
+                            active_selected_ids: active_selected_ids,
+                            toast_msg: toast_msg,
                         }
                     }
 
@@ -380,17 +381,29 @@ fn EvaluationsPage() -> Element {
                                     style: "font-size: 13px; font-weight: 600;",
                                     "{selected_count} selected"
                                 }
+                                div { style: "flex: 1;" }
                                 button {
                                     class: "btn btn-ghost focus-ring xs",
                                     onclick: move |_| {
                                         let selected_ids: Vec<i32> = history_selected_ids.read().iter().copied().collect();
                                         let mut refresh_sig = refresh.clone();
                                         let mut selected_sig = history_selected_ids.clone();
+                                        let mut toast = toast_msg.clone();
                                         spawn(async move {
+                                            let mut success = 0u32;
+                                            let mut failed: Vec<i32> = Vec::new();
                                             for commit_id in selected_ids {
-                                                let _ = re_evaluate_commit(commit_id).await;
+                                                match re_evaluate_commit(commit_id).await {
+                                                    Ok(_) => success += 1,
+                                                    Err(_) => failed.push(commit_id),
+                                                }
                                             }
-                                            selected_sig.write().clear();
+                                            if success > 0 {
+                                                toast.set(Some(format!("Re-queued {} evaluation{}", success, if success == 1 { "" } else { "s" })));
+                                                selected_sig.set(failed.into_iter().collect());
+                                            } else {
+                                                toast.set(Some("Re-evaluate failed — see server logs".to_string()));
+                                            }
                                             refresh_sig.set(refresh_sig() + 1);
                                         });
                                     },
@@ -413,7 +426,6 @@ fn EvaluationsPage() -> Element {
                                     Icon { name: IconName::Download, size: 11 }
                                     " Download logs"
                                 }
-                                div { style: "flex: 1;" }
                                 button {
                                     class: "btn-icon focus-ring",
                                     onclick: move |_| {
@@ -443,6 +455,59 @@ fn EvaluationsPage() -> Element {
                         target: target,
                         refresh: refresh,
                         on_close: move |_| drawer_target.set(None),
+                        toast_msg: toast_msg,
+                    }
+                }
+
+                // Bulk cancel bar for active queue multi-select (matching JSX BulkBar)
+                if active_tab() == EvaluationsTab::ActiveQueue && !active_selected_ids.read().is_empty() {
+                    div {
+                        class: "ed-bulkbar",
+                        span {
+                            style: "font-size: 13px; font-weight: 600;",
+                            "{active_selected_ids.read().len()} selected"
+                        }
+                        div { style: "flex: 1;" }
+                        button {
+                            class: "btn btn-danger xs focus-ring",
+                            onclick: move |_| {
+                                let ids: Vec<i32> = active_selected_ids.read().iter().copied().collect();
+                                let mut refresh_sig = refresh.clone();
+                                let mut selected_sig = active_selected_ids.clone();
+                                let mut toast = toast_msg.clone();
+                                spawn(async move {
+                                    let mut success = 0u32;
+                                    let mut failed = Vec::new();
+                                    for commit_id in &ids {
+                                        match cancel_commit_evaluation(*commit_id).await {
+                                            Ok(_) => success += 1,
+                                            Err(e) => failed.push((*commit_id, e.to_string())),
+                                        }
+                                    }
+                                    if success > 0 {
+                                        toast.set(Some(format!("Cancelled {} evaluation{}", success, if success == 1 { "" } else { "s" })));
+                                        selected_sig.set(failed.iter().map(|(id, _)| *id).collect());
+                                    } else {
+                                        toast.set(Some("Failed to cancel evaluations — see server logs".to_string()));
+                                    }
+                                    refresh_sig.set(refresh_sig() + 1);
+                                });
+                            },
+                            Icon { name: IconName::X, size: 12 }
+                            {
+                                let n = active_selected_ids.read().len();
+                                format!(" Cancel {} eval{}", n, if n == 1 { "" } else { "s" })
+                            }
+                        }
+                    }
+                }
+
+                // Toast notification (matching JSX ed-toast)
+                if let Some(msg) = toast_msg.read().as_ref() {
+                    div {
+                        class: "ed-toast",
+                        span { style: "color: #34d399;", Icon { name: IconName::Check, size: 14 } }
+                        span { "{msg}" }
                     }
                 }
 
@@ -475,7 +540,13 @@ fn EvalActiveQueue(
     queue_items: Signal<Vec<EvalQueueItem>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
     focused_index: Signal<Option<usize>>,
+    mut active_selected_ids: Signal<std::collections::HashSet<i32>>,
+    mut toast_msg: Signal<Option<String>>,
 ) -> Element {
+    // Drag-and-drop reorder state (matching JSX dragId/overIdx)
+    let mut drag_id = use_signal(|| None::<i32>);
+    let mut over_idx = use_signal(|| None::<usize>);
+
     if evals.is_empty() {
         return rsx! {
             div {
@@ -489,17 +560,17 @@ fn EvalActiveQueue(
 
     rsx! {
         table {
-            class: "sys-table",
+            class: "sys-table q-queue-table",
             thead {
                 tr {
-                    th { style: "width: 40px;", "#" }
+                    th { style: "width: 64px;", "#" }
                     th { "Flake · commit" }
                     th { "Branch" }
                     th { "Status" }
                     th { "Systems" }
                     th { "Policy" }
                     th { "Started" }
-                    th { style: "text-align: right;", "Actions" }
+                    th { style: "text-align: right;", "Reorder · actions" }
                 }
             }
             tbody {
@@ -509,163 +580,194 @@ fn EvalActiveQueue(
                         let commit_id = ev.commit_id;
                         let status_meta = eval_status_meta(&ev.evaluation_status);
                         let can_cancel = matches!(ev.evaluation_status.as_str(), "pending" | "in_progress");
-                        let can_force_cancel = ev.evaluation_status == "cancelling";
                         let is_first = i == 0;
                         let is_last = i == evals.len() - 1;
                         let ev_for_row = ev_clone.clone();
                         let is_focused = focused_index() == Some(i);
+                        let checked = active_selected_ids.read().contains(&commit_id);
+                        let is_dragging = drag_id() == Some(commit_id);
+                        let drag_idx = drag_id().and_then(|id| evals.iter().position(|e| e.commit_id == id));
+                        let show_drop_before = drag_id().is_some() && over_idx() == Some(i) && drag_idx.map(|d| d > i).unwrap_or(false);
+                        let show_drop_after = drag_id().is_some() && over_idx() == Some(i) && drag_idx.map(|d| d < i).unwrap_or(false);
+
+                        let mut row_draw = drawer_target.clone();
+                        let row_ev = ev_for_row.clone();
+                        let row_onclick = move |_| {
+                            row_draw.set(Some(EvalDrawerTarget::Queue(row_ev.clone())));
+                        };
+
+                        let row_classes = format!(
+                            "selectable q-row{}{}{}{}{}",
+                            if is_focused { " selected" } else { "" },
+                            if checked { " row-checked" } else { "" },
+                            if is_dragging { " q-dragging" } else { "" },
+                            if show_drop_before { " q-drop-before" } else { "" },
+                            if show_drop_after { " q-drop-after" } else { "" },
+                        );
 
                         rsx! {
                             tr {
                                 key: "{commit_id}",
-                                class: if is_focused { "kbd-focused" } else { "" },
-                                style: "cursor: pointer;",
-                                onclick: move |_| drawer_target.set(Some(EvalDrawerTarget::Queue(ev_for_row.clone()))),
+                                class: "{row_classes}",
+                                draggable: "true",
+                                ondragstart: move |_| { drag_id.set(Some(commit_id)); },
+                                ondragover: move |evt| {
+                                    evt.prevent_default();
+                                    if over_idx() != Some(i) { over_idx.set(Some(i)); }
+                                },
+                                ondrop: move |evt| {
+                                    evt.prevent_default();
+                                    let src_id = drag_id();
+                                    if let Some(src_id) = src_id {
+                                        let target_cid = commit_id;
+                                        if src_id == target_cid { return; }
+                                        let items = queue_items.clone();
+                                        let mut refresh_sig = refresh.clone();
+                                        let mut drag_sig = drag_id.clone();
+                                        let mut over_sig = over_idx.clone();
+                                        let mut toast = toast_msg.clone();
+                                        spawn(async move {
+                                            let active: Vec<_> = items.read().iter()
+                                                .filter(|item| is_active_eval_status(&item.evaluation_status))
+                                                .cloned().collect();
+                                            let src_pos = active.iter().position(|e| e.commit_id == src_id);
+                                            let target_pos = active.iter().position(|e| e.commit_id == target_cid);
+                                            if let (Some(sp), Some(tp)) = (src_pos, target_pos) {
+                                                let mut reordered = active.clone();
+                                                let removed = reordered.remove(sp);
+                                                let adjusted_tp = if sp < tp { tp - 1 } else { tp };
+                                                reordered.insert(adjusted_tp, removed);
+                                                let ordered_ids: Vec<i32> = reordered.iter().map(|e| e.commit_id).collect();
+                                                if let Err(e) = reorder_eval_queue(&ordered_ids).await {
+                                                    toast.set(Some(format!("Reorder failed: {}", e)));
+                                                } else {
+                                                    refresh_sig.set(refresh_sig() + 1);
+                                                }
+                                            }
+                                        });
+                                        drag_sig.set(None);
+                                        over_sig.set(None);
+                                    }
+                                },
+                                onclick: row_onclick,
                                 td {
-                                    style: "color: var(--cf-text-muted); font-size: 12px;",
-                                    "{ev.queue_position}"
+                                    onclick: move |evt| evt.stop_propagation(),
+                                    div { style: "display: flex; align-items: center; gap: 6px;",
+                                        span {
+                                            class: "q-drag-handle",
+                                            title: "Drag to reorder",
+                                            Icon { name: IconName::Grip, size: 15 }
+                                        }
+                                        span {
+                                            style: "color: var(--cf-text-muted); font-size: 12px; font-variant-numeric: tabular-nums;",
+                                            "{ev.queue_position}"
+                                        }
+                                    }
                                 }
                                 td {
-                                    div {
-                                        style: "font-weight: 600; font-size: 13px;",
-                                        "{ev_clone.flake_name}"
-                                    }
-                                    div {
-                                        class: "mono",
-                                        style: "font-size: 11px; color: var(--cf-text-muted);",
+                                    div { style: "font-weight: 600; font-size: 13px;", "{ev_clone.flake_name}" }
+                                    div { class: "mono", style: "font-size: 11px; color: var(--cf-text-muted);",
                                         "{ev_clone.commit_hash.chars().take(12).collect::<String>()}"
                                     }
                                 }
-                                td {
-                                    span { class: "chip chip-unknown", "{ev_clone.branch}" }
-                                }
+                                td { span { class: "chip chip-unknown", "{ev_clone.branch}" } }
                                 td {
                                     span {
                                         class: "chip {status_meta.cls}",
-                                        span {
-                                            class: "chip-dot",
-                                            style: "background: {status_meta.color};"
-                                        }
+                                        span { class: "chip-dot", style: "background: {status_meta.color};" }
                                         "{status_meta.label}"
                                     }
                                 }
+                                td { style: "font-size: 12px; color: var(--cf-text-secondary);", "{ev_clone.system_count} hosts" }
                                 td {
-                                    style: "font-size: 12px; color: var(--cf-text-secondary);",
-                                    "{ev_clone.system_count} hosts"
-                                }
-                                td {
-                                    div {
-                                        style: "display: flex; gap: 6px;",
-                                        span {
-                                            class: "chip chip-healthy",
-                                            "{ev_clone.passed_count} ✓"
-                                        }
+                                    div { style: "display: flex; gap: 6px;",
+                                        span { class: "chip chip-healthy", "{ev_clone.passed_count} ✓" }
                                         if ev_clone.policy_failed_count > 0 {
-                                            span {
-                                                class: "chip chip-critical",
-                                                "{ev_clone.policy_failed_count} ✗"
-                                            }
+                                            span { class: "chip chip-critical", "{ev_clone.policy_failed_count} ✗" }
                                         }
                                     }
                                 }
-                                td {
-                                    style: "font-size: 12px; color: var(--cf-text-muted);",
-                                    "{format_relative_time(ev_clone.committed_at)}"
-                                }
+                                td { style: "font-size: 12px; color: var(--cf-text-muted);", "{format_relative_time(ev_clone.committed_at)}" }
                                 td {
                                     onclick: move |evt| evt.stop_propagation(),
                                     div {
-                                        // Keep row actions isolated from row-click drawer open.
-                                        // Any new nested controls here must preserve stop_propagation.
                                         class: "row-actions",
-                                        style: "opacity: 1; gap: 4px; justify-content: flex-end;",
-
-                                        button {
-                                            class: "btn-icon focus-ring",
-                                            title: "Move up",
-                                            disabled: is_first,
-                                            style: if is_first { "opacity: 0.3;" } else { "" },
-                                            onclick: move |_| {
-                                                if is_first { return; }
-                                                let items = queue_items.clone();
-                                                let mut refresh_sig = refresh.clone();
-
-                                                spawn(async move {
-                                                    let mut active: Vec<_> = items
-                                                        .read()
-                                                        .iter()
-                                                        .filter(|item| is_active_eval_status(&item.evaluation_status))
-                                                        .cloned()
-                                                        .collect();
-
-                                                    if let Some(idx) = active.iter().position(|e| e.commit_id == commit_id) {
-                                                        if idx > 0 {
-                                                            active.swap(idx - 1, idx);
-                                                            let ordered_ids: Vec<i32> = active.iter().map(|e| e.commit_id).collect();
-                                                            let _ = reorder_eval_queue(&ordered_ids).await;
-                                                            refresh_sig.set(refresh_sig() + 1);
-                                                        }
-                                                    }
-                                                });
-                                            },
-                                            "↑"
-                                        }
-
-                                        button {
-                                            class: "btn-icon focus-ring",
-                                            title: "Move down",
-                                            disabled: is_last,
-                                            style: if is_last { "opacity: 0.3;" } else { "" },
-                                            onclick: move |_| {
-                                                if is_last { return; }
-                                                let items = queue_items.clone();
-                                                let mut refresh_sig = refresh.clone();
-
-                                                spawn(async move {
-                                                    let mut active: Vec<_> = items
-                                                        .read()
-                                                        .iter()
-                                                        .filter(|item| is_active_eval_status(&item.evaluation_status))
-                                                        .cloned()
-                                                        .collect();
-
-                                                    if let Some(idx) = active.iter().position(|e| e.commit_id == commit_id) {
-                                                        if idx + 1 < active.len() {
-                                                            active.swap(idx, idx + 1);
-                                                            let ordered_ids: Vec<i32> = active.iter().map(|e| e.commit_id).collect();
-                                                            let _ = reorder_eval_queue(&ordered_ids).await;
-                                                            refresh_sig.set(refresh_sig() + 1);
-                                                        }
-                                                    }
-                                                });
-                                            },
-                                            "↓"
-                                        }
-
-                                        if can_force_cancel {
+                                        style: "opacity: 1; gap: 6px; justify-content: flex-end;",
+                                        div { class: "q-move-group",
                                             button {
-                                                class: "btn btn-danger focus-ring",
-                                                style: "padding: 3px 8px; font-size: 11px;",
+                                                class: "q-move-btn focus-ring",
+                                                title: "Move up",
+                                                disabled: is_first,
                                                 onclick: move |_| {
+                                                    if is_first { return; }
+                                                    let items = queue_items.clone();
                                                     let mut refresh_sig = refresh.clone();
+                                                    let mut toast = toast_msg.clone();
                                                     spawn(async move {
-                                                        let _ = force_cancel_commit_evaluation(commit_id).await;
-                                                        refresh_sig.set(refresh_sig() + 1);
+                                                        let active: Vec<_> = items.read().iter()
+                                                            .filter(|item| is_active_eval_status(&item.evaluation_status))
+                                                            .cloned().collect();
+                                                        if let Some(idx) = active.iter().position(|e| e.commit_id == commit_id) {
+                                                            if idx > 0 {
+                                                                let mut reordered = active;
+                                                                let removed = reordered.remove(idx);
+                                                                reordered.insert(idx - 1, removed);
+                                                                let ordered_ids: Vec<i32> = reordered.iter().map(|e| e.commit_id).collect();
+                                                                if let Err(e) = reorder_eval_queue(&ordered_ids).await {
+                                                                    toast.set(Some(format!("Reorder failed: {}", e)));
+                                                                } else {
+                                                                    refresh_sig.set(refresh_sig() + 1);
+                                                                }
+                                                            }
+                                                        }
                                                     });
                                                 },
-                                                "Force cancel"
+                                                Icon { name: IconName::ChevronUp, size: 15 }
+                                            }
+                                            button {
+                                                class: "q-move-btn focus-ring",
+                                                title: "Move down",
+                                                disabled: is_last,
+                                                onclick: move |_| {
+                                                    if is_last { return; }
+                                                    let items = queue_items.clone();
+                                                    let mut refresh_sig = refresh.clone();
+                                                    let mut toast = toast_msg.clone();
+                                                    spawn(async move {
+                                                        let active: Vec<_> = items.read().iter()
+                                                            .filter(|item| is_active_eval_status(&item.evaluation_status))
+                                                            .cloned().collect();
+                                                        if let Some(idx) = active.iter().position(|e| e.commit_id == commit_id) {
+                                                            if idx + 1 < active.len() {
+                                                                let mut reordered = active;
+                                                                let removed = reordered.remove(idx);
+                                                                reordered.insert(idx, removed);
+                                                                let ordered_ids: Vec<i32> = reordered.iter().map(|e| e.commit_id).collect();
+                                                                if let Err(e) = reorder_eval_queue(&ordered_ids).await {
+                                                                    toast.set(Some(format!("Reorder failed: {}", e)));
+                                                                } else {
+                                                                    refresh_sig.set(refresh_sig() + 1);
+                                                                }
+                                                            }
+                                                        }
+                                                    });
+                                                },
+                                                Icon { name: IconName::ChevronDown, size: 15 }
                                             }
                                         }
-
                                         if can_cancel {
                                             button {
                                                 class: "btn btn-ghost focus-ring",
                                                 style: "padding: 3px 8px; font-size: 11px;",
                                                 onclick: move |_| {
                                                     let mut refresh_sig = refresh.clone();
+                                                    let mut toast = toast_msg.clone();
                                                     spawn(async move {
-                                                        let _ = cancel_commit_evaluation(commit_id).await;
-                                                        refresh_sig.set(refresh_sig() + 1);
+                                                        if let Err(e) = cancel_commit_evaluation(commit_id).await {
+                                                            toast.set(Some(format!("Cancel failed: {}", e)));
+                                                        } else {
+                                                            refresh_sig.set(refresh_sig() + 1);
+                                                        }
                                                     });
                                                 },
                                                 "Cancel"
@@ -798,7 +900,6 @@ fn EvalHistory(
                                 th { "Policy" }
                                 th { "Duration" }
                                 th { "Completed" }
-                                th { style: "text-align: right;", " " }
                             }
                         }
                         tbody {
@@ -884,31 +985,9 @@ fn EvalHistory(
                                                 style: "font-size: 12px; color: var(--cf-text-secondary);",
                                                 "{format_eval_duration(&ev)}"
                                             }
-                                            td {
+                                             td {
                                                 style: "font-size: 12px; color: var(--cf-text-muted);",
                                                 "{format_eval_completed_at(&ev)}"
-                                            }
-                                             td {
-                                                div {
-                                                    class: "row-actions",
-                                                    // Keep row actions isolated from row-click drawer open.
-                                                    // Any new nested controls here must preserve stop_propagation.
-                                                    onclick: move |evt| evt.stop_propagation(),
-                                                    if ev.evaluation_status != "complete" {
-                                                        button {
-                                                            class: "btn-icon focus-ring",
-                                                            title: "Re-evaluate",
-                                                            onclick: move |_| {
-                                                                let mut refresh_sig = refresh.clone();
-                                                                spawn(async move {
-                                                                    let _ = re_evaluate_commit(commit_id).await;
-                                                                    refresh_sig.set(refresh_sig() + 1);
-                                                                });
-                                                            },
-                                                            Icon { name: IconName::Sync, size: 14 }
-                                                        }
-                                                    }
-                                                }
                                             }
                                         }
                                     }
@@ -941,6 +1020,7 @@ fn EvalDrawer(
     target: EvalDrawerTarget,
     mut refresh: Signal<u64>,
     on_close: EventHandler<MouseEvent>,
+    mut toast_msg: Signal<Option<String>>,
 ) -> Element {
     let mut drawer_tab = use_signal(|| String::from("log"));
 
@@ -990,10 +1070,14 @@ fn EvalDrawer(
                                     class: "btn btn-ghost focus-ring xs",
                                     onclick: move |_| {
                                         let mut refresh_sig = refresh.clone();
+                                        let mut toast = toast_msg.clone();
                                         let commit_id = ev.commit_id;
                                         spawn(async move {
-                                            let _ = cancel_commit_evaluation(commit_id).await;
-                                            refresh_sig.set(refresh_sig() + 1);
+                                            if let Err(e) = cancel_commit_evaluation(commit_id).await {
+                                                toast.set(Some(format!("Cancel failed: {}", e)));
+                                            } else {
+                                                refresh_sig.set(refresh_sig() + 1);
+                                            }
                                         });
                                     },
                                     "Cancel"
@@ -1005,10 +1089,14 @@ fn EvalDrawer(
                                     style: "color: #f87171;",
                                     onclick: move |_| {
                                         let mut refresh_sig = refresh.clone();
+                                        let mut toast = toast_msg.clone();
                                         let commit_id = ev.commit_id;
                                         spawn(async move {
-                                            let _ = force_cancel_commit_evaluation(commit_id).await;
-                                            refresh_sig.set(refresh_sig() + 1);
+                                            if let Err(e) = force_cancel_commit_evaluation(commit_id).await {
+                                                toast.set(Some(format!("Force cancel failed: {}", e)));
+                                            } else {
+                                                refresh_sig.set(refresh_sig() + 1);
+                                            }
                                         });
                                     },
                                     "Force-cancel"
@@ -1194,10 +1282,14 @@ fn EvalDrawer(
                                 class: "btn btn-ghost focus-ring",
                                 onclick: move |_| {
                                     let mut refresh_sig = refresh.clone();
+                                    let mut toast = toast_msg.clone();
                                     let commit_id = ev.commit_id;
                                     spawn(async move {
-                                        let _ = re_evaluate_commit(commit_id).await;
-                                        refresh_sig.set(refresh_sig() + 1);
+                                        if let Err(e) = re_evaluate_commit(commit_id).await {
+                                            toast.set(Some(format!("Re-evaluate failed: {}", e)));
+                                        } else {
+                                            refresh_sig.set(refresh_sig() + 1);
+                                        }
                                     });
                                 },
                                 Icon { name: IconName::Sync, size: 14 }
@@ -1443,48 +1535,375 @@ fn EvalDrawerPolicyTab(commit_id: i32) -> Element {
         use_resource(move || async move { fetch_eval_policy_matrix(commit_id).await });
     let policy_snapshot = policy_resource.read();
 
+    // Interactive state: filter, sort, expanded row, policy filter (matches JSX)
+    let mut filter_state = use_signal(|| "all".to_string());
+    let mut sort_state = use_signal(|| "health".to_string());
+    let mut expanded = use_signal(|| None::<String>);
+    let mut policy_filter = use_signal(|| None::<String>);
+
     rsx! {
-        div { style: "flex: 1; overflow: auto; padding: 14px;",
+        div {
+            style: "flex: 1; overflow: hidden; display: flex; flex-direction: column;",
             match &*policy_snapshot {
                 None => rsx! {
-                    div { style: "color: var(--cf-text-muted); font-size: 12px;", "Loading policy matrix..." }
+                    div { style: "color: var(--cf-text-muted); font-size: 12px; padding: 14px;", "Loading policy matrix..." }
                 },
                 Some(Err(_)) => rsx! {
-                    div { style: "color: #f87171; font-size: 12px;", "Failed to load policy matrix" }
+                    div { style: "color: #f87171; font-size: 12px; padding: 14px;", "Failed to load policy matrix" }
                 },
-                Some(Ok(data)) => rsx! {
-                    if data.systems.is_empty() {
-                        div { style: "color: var(--cf-text-muted); font-size: 12px;", "No policy matrix rows for this commit" }
-                    } else {
-                        table { class: "pm-table",
-                            thead {
-                                tr {
-                                    th { class: "pm-th-host", "System" }
-                                    for policy in data.policies.iter() {
-                                        th { class: "pm-th-health", "{policy}" }
+                Some(Ok(data)) => {
+                    let policies = &data.policies;
+                    let base_rows = &data.systems;
+
+                    // Annotate rows with counts (matching JSX annotated)
+                    struct AnnotatedRow {
+                        system_name: String,
+                        results: Vec<String>,
+                        fail: usize,
+                        warn: usize,
+                        pass: usize,
+                    }
+
+                    let annotated: Vec<AnnotatedRow> = base_rows.iter().map(|r| {
+                        let fail = r.results.iter().filter(|x| *x == "fail").count();
+                        let warn = r.results.iter().filter(|x| *x == "warn").count();
+                        let pass = r.results.iter().filter(|x| *x == "pass").count();
+                        AnnotatedRow {
+                            system_name: r.system_name.clone(),
+                            results: r.results.clone(),
+                            fail,
+                            warn,
+                            pass,
+                        }
+                    }).collect();
+
+                    // Apply filter (matching JSX)
+                    let filtered = {
+                        let f = filter_state.read().clone();
+                        let pf = policy_filter.read().clone();
+                        let mut result: Vec<&AnnotatedRow> = annotated.iter().collect();
+                        match f.as_str() {
+                            "fail" => result.retain(|r| r.fail > 0),
+                            "warn" => result.retain(|r| r.warn > 0 && r.fail == 0),
+                            "clean" => result.retain(|r| r.fail == 0 && r.warn == 0),
+                            _ => {}
+                        }
+                        if let Some(ref policy_name) = pf {
+                            if let Some(idx) = policies.iter().position(|p| p == policy_name) {
+                                result.retain(|r| r.results.get(idx).map_or(false, |res| res != "pass"));
+                            }
+                        }
+                        // Sort
+                        let sort = sort_state.read().clone();
+                        if sort == "health" {
+                            result.sort_by(|a, b| (b.fail * 10 + b.warn).cmp(&(a.fail * 10 + a.warn)));
+                        } else {
+                            result.sort_by(|a, b| a.system_name.cmp(&b.system_name));
+                        }
+                        result
+                    };
+
+                    // Per-policy summary (matching JSX policyStats)
+                    struct PolicyStat {
+                        name: String,
+                        fail: usize,
+                        warn: usize,
+                        pass: usize,
+                        total: usize,
+                    }
+                    let policy_stats: Vec<PolicyStat> = policies.iter().enumerate().map(|(i, name)| {
+                        let fail = annotated.iter().filter(|r| r.results.get(i).map_or(false, |x| x == "fail")).count();
+                        let warn = annotated.iter().filter(|r| r.results.get(i).map_or(false, |x| x == "warn")).count();
+                        let pass = annotated.iter().filter(|r| r.results.get(i).map_or(false, |x| x == "pass")).count();
+                        PolicyStat { name: name.clone(), fail, warn, pass, total: annotated.len() }
+                    }).collect();
+
+                    // Top issues — top 3 most-failed policies (matching JSX)
+                    let top_issues: Vec<&PolicyStat> = policy_stats.iter()
+                        .filter(|s| s.fail > 0)
+                        .collect::<Vec<_>>();
+
+                    let top_issues_sorted = {
+                        let mut v = top_issues.clone();
+                        v.sort_by(|a, b| b.fail.cmp(&a.fail));
+                        v.into_iter().take(3).collect::<Vec<_>>()
+                    };
+
+                    // Counts for filter badges
+                    let count_fail = annotated.iter().filter(|r| r.fail > 0).count();
+                    let count_warn = annotated.iter().filter(|r| r.fail == 0 && r.warn > 0).count();
+                    let count_clean = annotated.iter().filter(|r| r.fail == 0 && r.warn == 0).count();
+
+                    let cell_glyph = |res: &str| -> &'static str {
+                        match res { "pass" => "✓", "warn" => "!", _ => "✗" }
+                    };
+
+                    rsx! {
+                        // Top issues callout (matching JSX)
+                        if !top_issues_sorted.is_empty() {
+                            div {
+                                class: "pm-issues",
+                                div { class: "pm-issues-label", "Top issues" }
+                                {top_issues_sorted.iter().map(|iss| {
+                                    let is_active = policy_filter.read().as_ref().map(|f| f == &iss.name).unwrap_or(false);
+                                    let name = iss.name.clone();
+                                    let mut pf = policy_filter.clone();
+                                    let click_iss = move |_| {
+                                        if pf.read().as_ref().map(|f| f == &name).unwrap_or(false) {
+                                            pf.set(None);
+                                        } else {
+                                            pf.set(Some(name.clone()));
+                                        }
+                                    };
+                                    let counts = format!("{}+{}+{}", iss.fail, iss.warn, iss.pass);
+                                    rsx! {
+                                        button {
+                                            key: "{iss.name}",
+                                            class: if is_active { "pm-issue-chip active" } else { "pm-issue-chip" },
+                                            onclick: click_iss,
+                                            "{iss.name} ({counts})"
+                                        }
+                                    }
+                                })}
+                                {if policy_filter.read().is_some() {
+                                    Some(rsx! {
+                                        button {
+                                            class: "btn-icon focus-ring",
+                                            style: "margin-left: auto;",
+                                            title: "Clear policy filter",
+                                            onclick: move |_| policy_filter.set(None),
+                                            Icon { name: IconName::X, size: 12 }
+                                        }
+                                    })
+                                } else {
+                                    None
+                                }}
+                            }
+                        }
+
+                        // Controls: filter seg + sort seg (matching JSX)
+                        div {
+                            class: "pm-controls",
+                            div {
+                                class: "seg",
+                                {
+                                    let f_all = move |_| { filter_state.set("all".to_string()); };
+                                    let f_fail = move |_| { filter_state.set("fail".to_string()); };
+                                    let f_warn = move |_| { filter_state.set("warn".to_string()); };
+                                    let f_clean = move |_| { filter_state.set("clean".to_string()); };
+                                    let f_cur = filter_state.read().clone();
+                                    rsx! {
+                                        button { class: if f_cur == "all" { "active" } else { "" }, onclick: f_all, "All ", span { class: "pm-count", "{annotated.len()}" } }
+                                        button { class: if f_cur == "fail" { "active" } else { "" }, onclick: f_fail, "Failing ", span { class: "pm-count pm-count-fail", "{count_fail}" } }
+                                        button { class: if f_cur == "warn" { "active" } else { "" }, onclick: f_warn, "Warning ", span { class: "pm-count pm-count-warn", "{count_warn}" } }
+                                        button { class: if f_cur == "clean" { "active" } else { "" }, onclick: f_clean, "Clean ", span { class: "pm-count pm-count-pass", "{count_clean}" } }
                                     }
                                 }
                             }
-                            tbody {
-                                for row in data.systems.iter() {
+                            div { style: "flex: 1;" }
+                            span { style: "font-size: 11px; color: var(--cf-text-muted);", "Sort" }
+                            {
+                                let s_health = move |_| { sort_state.set("health".to_string()); };
+                                let s_name = move |_| { sort_state.set("name".to_string()); };
+                                let s_cur = sort_state.read().clone();
+                                rsx! {
+                                    div { class: "seg",
+                                        button { class: if s_cur == "health" { "active" } else { "" }, onclick: s_health, "Worst first" }
+                                        button { class: if s_cur == "name" { "active" } else { "" }, onclick: s_name, "Name" }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Scrollable matrix table (matching JSX pm-scroll > pm-table)
+                        div {
+                            class: "pm-scroll",
+                            table { class: "pm-table",
+                                thead {
                                     tr {
-                                        td { class: "pm-td-host", div { class: "pm-host-cell", span { class: "mono pm-host-name", "{row.system_name}" } } }
-                                        for result in row.results.iter() {
+                                        th { class: "pm-th-host", "System" }
+                                        th { class: "pm-th-health", "Health" }
+                                        for (p_idx, policy) in policies.iter().enumerate() {
                                             {
-                                                let cls = format!("pm-td-cell pm-{}", result);
-                                                let glyph = match result.as_str() {
-                                                    "pass" => "✓",
-                                                    "fail" => "✗",
-                                                    _ => "!",
+                                                let ps = &policy_stats[p_idx];
+                                                let is_filtered = policy_filter.read().as_ref() == Some(policy);
+                                                let click_header = {
+                                                    let mut pf = policy_filter.clone();
+                                                    let name = policy.clone();
+                                                    move |_| {
+                                                        if pf.read().as_ref() == Some(&name) {
+                                                            pf.set(None);
+                                                        } else {
+                                                            pf.set(Some(name.clone()));
+                                                        }
+                                                    }
                                                 };
+                                                let fail_pct = if ps.total > 0 { (ps.fail as f64 / ps.total as f64) * 100.0 } else { 0.0 };
+                                                let warn_pct = if ps.total > 0 { (ps.warn as f64 / ps.total as f64) * 100.0 } else { 0.0 };
+                                                let pass_pct = if ps.total > 0 { (ps.pass as f64 / ps.total as f64) * 100.0 } else { 0.0 };
                                                 rsx! {
-                                                    td { class: "{cls}", span { class: "pm-glyph", "{glyph}" } }
+                                                    th {
+                                                        key: "{policy}",
+                                                        class: if is_filtered { "pm-th-policy filtered" } else { "pm-th-policy" },
+                                                        title: "{policy} — {ps.fail} fail / {ps.warn} warn / {ps.pass} pass",
+                                                        onclick: click_header,
+                                                        div { class: "pm-th-policy-inner",
+                                                            span { class: "pm-th-policy-label", "{policy}" }
+                                                        }
+                                                        div { class: "pm-th-policy-bar",
+                                                            if ps.fail > 0 { div { style: "width: {fail_pct}%; background: #f87171;" } }
+                                                            if ps.warn > 0 { div { style: "width: {warn_pct}%; background: #f59e0b;" } }
+                                                            if ps.pass > 0 { div { style: "width: {pass_pct}%; background: #34d399;" } }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
+                                tbody {
+                                    for row in filtered.iter() {
+                                        {
+                                            let is_exp = expanded.read().as_ref() == Some(&row.system_name);
+                                            let health_color = if row.fail > 0 { "#f87171" } else if row.warn > 0 { "#f59e0b" } else { "#34d399" };
+                                            let host = row.system_name.clone();
+                                            let click_row = {
+                                                let mut exp = expanded.clone();
+                                                let h = host.clone();
+                                                move |_| {
+                                                    if exp.read().as_ref() == Some(&h) {
+                                                        exp.set(None);
+                                                    } else {
+                                                        exp.set(Some(h.clone()));
+                                                    }
+                                                }
+                                            };
+                                            let row_class = format!("pm-row{}", if is_exp { " expanded" } else { "" });
+                                            rsx! {
+                                                tr {
+                                                    key: "{host}",
+                                                    class: "{row_class}",
+                                                    onclick: click_row,
+                                                    style: "cursor: pointer;",
+                                                    td { class: "pm-td-host",
+                                                        div { class: "pm-host-cell",
+                                                            span { style: "color: var(--cf-text-muted); flex-shrink: 0; display: flex;",
+                                                                Icon {
+                                                                    name: if is_exp { IconName::ChevronDown } else { IconName::ChevronRight },
+                                                                    size: 11,
+                                                                }
+                                                            }
+                                                            span { class: "mono pm-host-name", "{row.system_name}" }
+                                                        }
+                                                    }
+                                                    td { class: "pm-td-health",
+                                                        div { class: "pm-health",
+                                                            div { class: "pm-health-bar",
+                                                                if row.fail > 0 {
+                                                                    div { style: "width: {(row.fail as f64 / policies.len() as f64) * 100.0}%; background: #f87171;" }
+                                                                }
+                                                                if row.warn > 0 {
+                                                                    div { style: "width: {(row.warn as f64 / policies.len() as f64) * 100.0}%; background: #f59e0b;" }
+                                                                }
+                                                                if row.pass > 0 {
+                                                                    div { style: "width: {(row.pass as f64 / policies.len() as f64) * 100.0}%; background: #34d399;" }
+                                                                }
+                                                            }
+                                                            span { class: "mono pm-health-num", style: "color: {health_color};",
+                                                                "{row.pass}/{policies.len()}"
+                                                            }
+                                                        }
+                                                    }
+                                                    {row.results.iter().enumerate().map(|(res_idx, result)| {
+                                                        let policy_name = &policies[res_idx];
+                                                        let col_filtered = policy_filter.read().as_ref() == Some(policy_name);
+                                                        let cls = format!("pm-td-cell pm-{}{}", result, if col_filtered { " col-filtered" } else { "" });
+                                                        let mut pf = policy_filter.clone();
+                                                        let name = policy_name.clone();
+                                                        let cell_click = move |e: MouseEvent| {
+                                                            e.stop_propagation();
+                                                            if pf.read().as_ref() == Some(&name) {
+                                                                pf.set(None);
+                                                            } else {
+                                                                pf.set(Some(name.clone()));
+                                                            }
+                                                        };
+                                                        rsx! {
+                                                            td {
+                                                                key: "{res_idx}",
+                                                                class: "{cls}",
+                                                                title: "{policy_name}: {result}",
+                                                                onclick: cell_click,
+                                                                span { class: "pm-glyph", "{cell_glyph(result)}" }
+                                                            }
+                                                        }
+                                                    })}
+                                                }
+                                                if is_exp {
+                                                    tr { class: "pm-expand-row",
+                                                        td {
+                                                            colspan: policies.len() + 2,
+                                                            div { class: "pm-expand",
+                                                                 div { style: "display: flex; gap: 14px; flex-wrap: wrap;",
+                                                                     {row.results.iter().enumerate()
+                                                                         .filter(|(_, result)| *result != "pass")
+                                                                         .map(|(res_idx, result)| {
+                                                                             let policy_name = &policies[res_idx];
+                                                                             let failcard_class = format!("pm-failcard pm-failcard-{}", result);
+                                                                             let glyph = cell_glyph(result);
+                                                                             let desc = if *result == "fail" {
+                                                                                 "Blocks deployment until resolved"
+                                                                             } else {
+                                                                                 "Soft warning — deploy will proceed"
+                                                                             };
+                                                                             rsx! {
+                                                                                 button {
+                                                                                     key: "{res_idx}",
+                                                                                     class: "{failcard_class} focus-ring",
+                                                                                     title: "Open policy: {policy_name}",
+                                                                                     span { class: "pm-failcard-glyph pm-{result}", "{glyph}" }
+                                                                                     div { style: "min-width: 0; text-align: left;",
+                                                                                         div { class: "mono", style: "font-weight: 600; font-size: 12px;", "{policy_name}" }
+                                                                                         div { style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 2px;", "{desc}" }
+                                                                                     }
+                                                                                     Icon { name: IconName::ArrowRight, size: 12 }
+                                                                                 }
+                                                                             }
+                                                                         })}
+                                                                        if row.fail == 0 && row.warn == 0 {
+                                                                            div { style: "font-size: 12px; color: #34d399; display: flex; align-items: center; gap: 8px;",
+                                                                                Icon { name: IconName::Check, size: 14 }
+                                                                                " All policies pass for this system."
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if filtered.is_empty() {
+                                        tr {
+                                            td {
+                                                colspan: policies.len() + 2,
+                                                style: "padding: 24px; text-align: center; color: var(--cf-text-muted); font-size: 13px;",
+                                                "No systems match this filter."
+                                            }
+                                        }
+                                    }
+                                }
                             }
+                        }
+
+                        // Legend (matching JSX)
+                        div {
+                            class: "pm-legend",
+                            span { span { class: "pm-legend-sw pm-pass", "✓" } " Pass" }
+                            span { span { class: "pm-legend-sw pm-warn", "!" } " Warning" }
+                            span { span { class: "pm-legend-sw pm-fail", "✗" } " Fail — blocks deploy" }
+                            span { style: "margin-left: auto; font-size: 11px; color: var(--cf-text-muted);", "Click any policy header to filter · Click a row to expand" }
                         }
                     }
                 }
@@ -1495,8 +1914,45 @@ fn EvalDrawerPolicyTab(commit_id: i32) -> Element {
 
 #[component]
 fn EvalDrawerGraphTab(commit_id: i32) -> Element {
-    let graph_resource =
-        use_resource(move || async move { fetch_eval_dependency_graph(commit_id).await });
+    const GRAPH_PENDING_POLL_MAX: u64 = 60;
+
+    let mut graph_refresh = use_signal(|| 0_u64);
+    let mut has_pending_counts = use_signal(|| true);
+    let mut graph_pending_polls = use_signal(|| 0_u64);
+    let graph_resource = use_resource(move || async move {
+        let _ = graph_refresh();
+        fetch_eval_dependency_graph(commit_id).await
+    });
+
+    use_effect(move || {
+        if let Some(Ok(data)) = &*graph_resource.read() {
+            let pending = data.packages.iter().any(|p| !p.closure_counted);
+            has_pending_counts.set(pending);
+            if !pending {
+                graph_pending_polls.set(GRAPH_PENDING_POLL_MAX);
+            }
+        }
+    });
+
+    {
+        let mut graph_refresh = graph_refresh.clone();
+        use_future(move || async move {
+            loop {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    gloo_timers::future::TimeoutFuture::new(2000).await;
+                    if has_pending_counts() && graph_pending_polls() < GRAPH_PENDING_POLL_MAX {
+                        graph_pending_polls.set(graph_pending_polls() + 1);
+                        graph_refresh.set(graph_refresh() + 1);
+                    }
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                break;
+            }
+        });
+    }
+
     let graph_snapshot = graph_resource.read();
 
     rsx! {
@@ -1510,32 +1966,13 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                 },
                 Some(Ok(data)) => {
                     let systems_total = data.packages.len() as i64;
-                    let systems_to_build = data
-                        .packages
-                        .iter()
-                        .filter(|p| p.pending_count > 0)
-                        .count() as i64;
-                    let systems_built = data
-                        .packages
-                        .iter()
-                        .filter(|p| p.pending_count == 0 && p.ready_count > 0)
-                        .count() as i64;
-                    let systems_failed = data
-                        .packages
-                        .iter()
-                        .filter(|p| p.failed_count > 0)
-                        .count() as i64;
-                    let systems_unknown = data
-                        .packages
-                        .iter()
-                        .filter(|p| p.ready_count == 0 && p.pending_count == 0 && p.failed_count == 0)
-                        .count() as i64;
-                    let commit_short: String = {
-                        // We don't have the hash here but we can use the commit_id
-                        format!("commit #{}", commit_id)
-                    };
+                    let total_packages: i64 = data.packages.iter().filter(|p| p.closure_counted).map(|p| p.ready_count + p.pending_count + p.failed_count).sum();
+                    let packages_cached: i64 = data.packages.iter().filter(|p| p.closure_counted).map(|p| p.ready_count).sum();
+                    let packages_to_build: i64 = data.packages.iter().filter(|p| p.closure_counted).map(|p| p.pending_count).sum();
+                    let packages_failed: i64 = data.packages.iter().filter(|p| p.closure_counted).map(|p| p.failed_count).sum();
+                    let commit_short: String = format!("commit #{}", commit_id);
                     rsx! {
-                        // Summary flow: source → eval → derivations → cached / to-build
+                        // Summary flow: source → eval → systems → package closure counts
                         div { class: "ed-graph-summary",
                             div { class: "ed-graph-node ed-graph-source",
                                 Icon { name: IconName::Git, size: 12 }
@@ -1551,25 +1988,21 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                 span { style: "font-weight: 700;", "{systems_total}" }
                                 span { style: "font-size: 10px; color: var(--cf-text-muted);", "systems" }
                             }
-                            span { style: "color: var(--cf-text-muted);", "→" }
-                            div { class: "ed-graph-node ed-graph-fan",
-                                span { style: "font-weight: 700; color: #34d399;", "{systems_built}" }
-                                span { style: "font-size: 10px; color: var(--cf-text-muted);", "built" }
-                            }
-                            div { class: "ed-graph-node ed-graph-fan",
-                                span { style: "font-weight: 700; color: #60a5fa;", "{systems_to_build}" }
-                                span { style: "font-size: 10px; color: var(--cf-text-muted);", "to build" }
-                            }
-                            if systems_failed > 0 {
+                            if total_packages > 0 {
+                                span { style: "color: var(--cf-text-muted);", "→" }
                                 div { class: "ed-graph-node ed-graph-fan",
-                                    span { style: "font-weight: 700; color: #f87171;", "{systems_failed}" }
-                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "failed" }
+                                    span { style: "font-weight: 700; color: #34d399;", "{packages_cached}" }
+                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "cached/local" }
                                 }
-                            }
-                            if systems_unknown > 0 {
                                 div { class: "ed-graph-node ed-graph-fan",
-                                    span { style: "font-weight: 700; color: #9ca3af;", "{systems_unknown}" }
-                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "unknown" }
+                                    span { style: "font-weight: 700; color: #60a5fa;", "{packages_to_build}" }
+                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "to build" }
+                                }
+                                if packages_failed > 0 {
+                                    div { class: "ed-graph-node ed-graph-fan",
+                                        span { style: "font-weight: 700; color: #f87171;", "{packages_failed}" }
+                                        span { style: "font-size: 10px; color: var(--cf-text-muted);", "failed" }
+                                    }
                                 }
                             }
                         }
@@ -1585,32 +2018,37 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                         }
 
                         if data.packages.is_empty() {
-                            div { style: "color: var(--cf-text-muted); font-size: 12px;", "No derivations recorded for this commit yet." }
+                            div { style: "color: var(--cf-text-muted); font-size: 12px;", "No systems recorded for this commit yet." }
                         } else {
                             div { class: "ed-graph-list",
                                 for pkg in data.packages.iter() {
                                     {
                                         let row_total = pkg.ready_count + pkg.pending_count + pkg.failed_count;
-                                        let has_counts = row_total > 0;
+                                        let has_counts = pkg.closure_counted && row_total > 0;
                                         let cached_pct = if has_counts { pkg.ready_count * 100 / row_total } else { 0 };
                                         let build_pct = if has_counts { pkg.pending_count * 100 / row_total } else { 0 };
+                                        let failed_pct = if has_counts { pkg.failed_count * 100 / row_total } else { 0 };
                                         rsx! {
                                             div { key: "{pkg.package_name}", class: "ed-graph-row",
                                                 div { class: "ed-graph-pkg",
                                                     span { class: "mono truncate", style: "font-size: 12px; font-weight: 600;", "{pkg.package_name}" }
                                                     if has_counts {
                                                         span { style: "font-size: 10px; color: var(--cf-text-muted);",
-                                                            "{pkg.pending_count} to build / {row_total} total"
+                                                            "{pkg.ready_count}/{row_total} cached/local · {pkg.pending_count} to build"
+                                                            if pkg.failed_count > 0 { " · {pkg.failed_count} failed" }
                                                         }
+                                                    } else if pkg.failed_count > 0 {
+                                                        span { style: "font-size: 10px; color: #f87171;", "failed before closure count" }
                                                     } else {
-                                                        span { style: "font-size: 10px; color: #9ca3af;",
-                                                            "pending classification"
-                                                        }
+                                                        span { style: "font-size: 10px; color: #9ca3af;", "pending closure count" }
                                                     }
                                                 }
                                                 div { class: "ed-graph-bar",
                                                     div { class: "ed-graph-bar-cached", style: "width: {cached_pct}%;" }
                                                     div { class: "ed-graph-bar-build", style: "width: {build_pct}%;" }
+                                                    if pkg.failed_count > 0 {
+                                                        div { style: "width: {failed_pct}%; background: #f87171;" }
+                                                    }
                                                 }
                                                 if has_counts {
                                                     div { style: "display: flex; gap: 6px; justify-content: flex-end; font-size: 11px;",
@@ -1622,10 +2060,10 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                                             span { style: "color: #f87171; font-weight: 600;", "{pkg.failed_count}" }
                                                         }
                                                     }
+                                                } else if pkg.failed_count > 0 {
+                                                    div { style: "display: flex; justify-content: flex-end; font-size: 11px; color: #f87171; font-weight: 600;", "failed" }
                                                 } else {
-                                                    div { style: "display: flex; justify-content: flex-end; font-size: 11px; color: #9ca3af;",
-                                                        "—"
-                                                    }
+                                                    div { style: "display: flex; justify-content: flex-end; font-size: 11px; color: #9ca3af;", "—" }
                                                 }
                                             }
                                         }
@@ -1633,13 +2071,57 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                 }
                             }
                             div { class: "ed-graph-legend",
-                                span { span { class: "ed-graph-sw", style: "background: #34d399;" } "Built (in store)" }
+                                span { span { class: "ed-graph-sw", style: "background: #34d399;" } "Cached/local" }
                                 span { span { class: "ed-graph-sw", style: "background: #60a5fa;" } "To build" }
+                                if packages_failed > 0 {
+                                    span { span { class: "ed-graph-sw", style: "background: #f87171;" } "Failed" }
+                                }
                             }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+// ============================================================================
+// LiveIndicator — pulsing dot + "updated Ns ago" (matching BuildsView.jsx)
+// ============================================================================
+
+#[component]
+fn LiveIndicator() -> Element {
+    let mut secs = use_signal(|| 0_u64);
+
+    {
+        use_future(move || async move {
+            loop {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    gloo_timers::future::TimeoutFuture::new(1000).await;
+                    secs.set((secs() + 1) % 6);
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                break;
+            }
+        });
+    }
+
+    let label = if secs() == 0 {
+        "just now".to_string()
+    } else {
+        format!("{}s ago", secs())
+    };
+
+    rsx! {
+        div {
+            style: "display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--cf-text-muted);",
+            span {
+                style: "display: inline-flex; align-items: center; gap: 6px;",
+                span { class: "ed-pulse", style: "position: static; margin: 0;" }
+                span { style: "color: #34d399; font-weight: 600;", "Live" }
+            }
+            span { "· updated {label}" }
         }
     }
 }
