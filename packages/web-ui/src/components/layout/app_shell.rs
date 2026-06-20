@@ -354,7 +354,6 @@ pub fn AppShell() -> Element {
                 classification: classification_bottom,
                 classification_enabled,
                 dev_mode_enabled,
-                sidebar_width: sidebar_width.to_string(),
             }
         }
     }
@@ -424,7 +423,6 @@ fn BottomBannerStack(
     classification: Option<ClassificationBannerConfig>,
     classification_enabled: bool,
     dev_mode_enabled: bool,
-    sidebar_width: String,
 ) -> Element {
     let show_classification = classification_enabled;
     let classification_offset = if dev_mode_enabled {
@@ -447,7 +445,7 @@ fn BottomBannerStack(
                         div {
                             role: "note",
                             "aria-label": "Classification banner",
-                            style: "position:fixed;bottom:{classification_offset}px;left:{sidebar_width};right:0;z-index:990;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};pointer-events:none;",
+                            style: "position:fixed;bottom:{classification_offset}px;left:0;right:0;z-index:10;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:{bg};color:{fg};pointer-events:none;",
                             "{text}"
                         }
                     }

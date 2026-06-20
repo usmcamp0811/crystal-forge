@@ -107,6 +107,19 @@ pub async fn database_runtime_info(pool: &PgPool) -> Result<DatabaseRuntimeInfoR
     Ok(row)
 }
 
+pub async fn active_session_count(pool: &PgPool) -> Result<i64> {
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint
+         FROM user_sessions
+         WHERE invalidated_at IS NULL
+           AND expires_at > NOW()",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count)
+}
+
 pub async fn find_admin_user(pool: &PgPool, user_id: Uuid) -> Result<Option<AdminUserRow>> {
     let row = sqlx::query_as::<_, AdminUserRow>(
         "SELECT u.id,

@@ -1887,4 +1887,7 @@ pub struct ServerRuntimeInfoResponse {
     pub commit: Option<String>,
     pub uptime_seconds: u64,
     pub database: DatabaseRuntimeInfo,
+    pub active_sessions: i64,
+    pub tls_status: String,
+    pub tls_detail: String,
 }

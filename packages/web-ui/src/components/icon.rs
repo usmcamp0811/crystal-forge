@@ -40,7 +40,7 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
     let svg_content = match name {
         IconName::Sync => rsx! {
             path {
-                d: "M20 12a8 8 0 0 1-14 5.3L3 14",
+                d: "M20 12a8 8 0 0 1-14 5.3L3 14m1-4a8 8 0 0 1 14-5.3L21 8",
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }

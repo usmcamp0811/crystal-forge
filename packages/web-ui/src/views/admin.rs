@@ -308,6 +308,9 @@ pub fn AdminView() -> Element {
             // ── Server info strip ──────────────────────────────────────────
             ServerInfoStrip {
                 users: users.read().clone(),
+                server_info: server_info.read().clone(),
+                server_info_loading: *server_info_loading.read(),
+                server_info_error: server_info_error.read().clone(),
                 auth_mode: app_state.read().auth.as_ref().map(|a| a.auth_mode).unwrap_or(AuthMode::Local)
             }
 
@@ -421,7 +424,13 @@ pub fn AdminView() -> Element {
 // ============================================================================
 
 #[component]
-fn ServerInfoStrip(users: Vec<AdminUserSummary>, auth_mode: AuthMode) -> Element {
+fn ServerInfoStrip(
+    users: Vec<AdminUserSummary>,
+    server_info: Option<ServerRuntimeInfoResponse>,
+    server_info_loading: bool,
+    server_info_error: Option<String>,
+    auth_mode: AuthMode,
+) -> Element {
     let active_users = users.iter().filter(|u| u.enabled).count();
 
     let auth_mode_label = match auth_mode {
@@ -430,13 +439,72 @@ fn ServerInfoStrip(users: Vec<AdminUserSummary>, auth_mode: AuthMode) -> Element
         AuthMode::Oidc => "OIDC",
     };
 
+    let version_value = server_info
+        .as_ref()
+        .map(|info| info.version.as_str())
+        .unwrap_or(if server_info_loading { "Loading…" } else { "Unavailable" });
+    let version_meta = if server_info_error.is_some() {
+        "server info unavailable".to_string()
+    } else if let Some(info) = server_info.as_ref() {
+        info.commit
+            .as_ref()
+            .map(|commit| format!("commit {}", short_commit(commit)))
+            .unwrap_or_else(|| "commit unavailable".to_string())
+    } else if server_info_loading {
+        "loading runtime info".to_string()
+    } else {
+        "server info unavailable".to_string()
+    };
+    let database_value = server_info
+        .as_ref()
+        .map(|info| info.database.status.as_str())
+        .unwrap_or(if server_info_loading { "Loading…" } else { "Unavailable" });
+    let database_meta = if server_info_error.is_some() {
+        "server info unavailable".to_string()
+    } else if let Some(info) = server_info.as_ref() {
+        format!("{} · {}", info.database.name, info.database.size)
+    } else if server_info_loading {
+        "loading database info".to_string()
+    } else {
+        "server info unavailable".to_string()
+    };
+    let active_sessions_value = server_info
+        .as_ref()
+        .map(|info| info.active_sessions.to_string())
+        .unwrap_or(if server_info_loading {
+            "Loading…".to_string()
+        } else {
+            "Unavailable".to_string()
+        });
+    let active_sessions_meta = if server_info_error.is_some() {
+        "server info unavailable"
+    } else if server_info_loading {
+        "loading session count"
+    } else {
+        "currently valid sessions"
+    };
+    let tls_value = server_info
+        .as_ref()
+        .map(|info| info.tls_status.as_str())
+        .unwrap_or(if server_info_loading { "Loading…" } else { "Unavailable" });
+    let tls_meta = server_info
+        .as_ref()
+        .map(|info| info.tls_detail.as_str())
+        .unwrap_or(if server_info_error.is_some() {
+            "server info unavailable"
+        } else if server_info_loading {
+            "loading transport info"
+        } else {
+            "server info unavailable"
+        });
+
     rsx! {
         div { class: "stat-strip",
             div { class: "stat",
                 span { class: "stat-accent", style: "--stat-color:#a78bfa;" }
                 div { class: "stat-label", "CF Version" }
-                div { class: "stat-value", style: "font-size:16px;", "Unavailable" }
-                div { class: "stat-meta", "API not implemented yet" }
+                div { class: "stat-value", style: "font-size:16px;", "{version_value}" }
+                div { class: "stat-meta", "{version_meta}" }
             }
             div { class: "stat",
                 span { class: "stat-accent", style: "--stat-color:#34d399;" }
@@ -447,20 +515,20 @@ fn ServerInfoStrip(users: Vec<AdminUserSummary>, auth_mode: AuthMode) -> Element
             div { class: "stat",
                 span { class: "stat-accent", style: "--stat-color:#60a5fa;" }
                 div { class: "stat-label", "Database" }
-                div { class: "stat-value", style: "font-size:16px;", "Unavailable" }
-                div { class: "stat-meta", "API not implemented yet" }
+                div { class: "stat-value", style: "font-size:16px;", "{database_value}" }
+                div { class: "stat-meta", "{database_meta}" }
             }
             div { class: "stat",
                 span { class: "stat-accent", style: "--stat-color:#fbbf24;" }
                 div { class: "stat-label", "Active sessions" }
-                div { class: "stat-value", style: "font-size:16px;", "Unavailable" }
-                div { class: "stat-meta", "API not implemented yet" }
+                div { class: "stat-value", style: "font-size:16px;", "{active_sessions_value}" }
+                div { class: "stat-meta", "{active_sessions_meta}" }
             }
             div { class: "stat",
                 span { class: "stat-accent", style: "--stat-color:#f87171;" }
                 div { class: "stat-label", "TLS cert" }
-                div { class: "stat-value", style: "font-size:16px;", "Unavailable" }
-                div { class: "stat-meta", "API not implemented yet" }
+                div { class: "stat-value", style: "font-size:16px;", "{tls_value}" }
+                div { class: "stat-meta", "{tls_meta}" }
             }
         }
     }
@@ -1624,10 +1692,6 @@ fn ServerTab(
                             " "
                             span { style: "color:var(--cf-text-muted);", "· {info.database.size}" }
                         }
-                        dt { "DB name" }
-                        dd { class: "mono", "{info.database.name}" }
-                        dt { "DB version" }
-                        dd { class: "mono", style: "font-size:11px;word-break:break-word;", "{info.database.server_version}" }
                     }
                 } else {
                     div { style: "font-size:12px;color:var(--cf-text-muted);", "Server info unavailable." }
@@ -1696,6 +1760,7 @@ fn ServerTab(
                                         .flatten()
                                     {
                                         let _ = storage.set_item("cf.coach.collapsed", "false");
+                                        let _ = storage.set_item("cf.coach.force_show", "true");
                                     }
                                     nav.push("/");
                                 });

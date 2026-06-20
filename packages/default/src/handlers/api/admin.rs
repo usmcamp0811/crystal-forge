@@ -110,6 +110,22 @@ pub async fn server_runtime_info(
         },
         Err(_) => return internal_error("Failed to load server runtime info"),
     };
+    let active_sessions = match admin::active_session_count(&pool).await {
+        Ok(count) => count,
+        Err(_) => return internal_error("Failed to load server runtime info"),
+    };
+    let request_scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("http");
+    let (tls_status, tls_detail) = if request_scheme.eq_ignore_ascii_case("https") {
+        ("HTTPS".to_string(), "TLS terminated upstream".to_string())
+    } else {
+        (
+            "HTTP".to_string(),
+            "TLS certificate not managed by app listener".to_string(),
+        )
+    };
 
     Json(ServerRuntimeInfoResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -119,6 +135,9 @@ pub async fn server_runtime_info(
             .map(ToString::to_string),
         uptime_seconds: state.started_at.elapsed().as_secs(),
         database,
+        active_sessions,
+        tls_status,
+        tls_detail,
     })
     .into_response()
 }
