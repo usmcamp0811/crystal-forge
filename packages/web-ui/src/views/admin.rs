@@ -438,6 +438,7 @@ pub fn AdminView() -> Element {
                     OidcTab {
                         oidc_mappings: oidc_mappings.clone(),
                         oidc_error: oidc_error.clone(),
+                        auth_mode: app_state.read().auth.as_ref().map(|a| a.auth_mode).unwrap_or(AuthMode::Local),
                     }
                 }
 
@@ -702,8 +703,8 @@ fn UsersTab(
                                                     class: "btn-icon focus-ring",
                                                     title: "Edit",
                                                     svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                                        path { d: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" }
                                                         circle { cx: "12", cy: "12", r: "3" }
-                                                        path { d: "M12 2v3m0 14v3m9-9h-3M6 12H3m15.66-6.66l-2.12 2.12M8.46 15.54l-2.12 2.12m12.02 0l-2.12-2.12M8.46 8.46L6.34 6.34" }
                                                     }
                                                 }
                                             }
@@ -770,6 +771,7 @@ fn RolesTab(users: Vec<AdminUserSummary>) -> Element {
 fn OidcTab(
     oidc_mappings: Signal<Vec<OidcGroupMapping>>,
     oidc_error: Signal<Option<String>>,
+    auth_mode: AuthMode,
 ) -> Element {
     let mut mapping_group = use_signal(String::new);
     let mut mapping_role = use_signal(|| "Viewer".to_string());
@@ -778,17 +780,17 @@ fn OidcTab(
 
     rsx! {
         div { style: "padding:0;",
-            // Connection status callout
-            div { style: "padding:14px 16px;border-bottom:1px solid var(--cf-divider);",
-                div { class: "sd-callout sd-callout-info", style: "font-size:12px;",
-                    svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                        path { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }
-                        path { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }
-                    }
-                    div {
-                        "Connected to "
-                        span { class: "mono", "{SERVER_INFO_MOCK.oidc_issuer}" }
-                        ". When a user logs in, their IdP groups are matched top-down; the first matching mapping sets their role and environment scope."
+            // Connection status callout (only show if OIDC)
+            if auth_mode == AuthMode::Oidc {
+                div { style: "padding:14px 16px;border-bottom:1px solid var(--cf-divider);",
+                    div { class: "sd-callout sd-callout-info", style: "font-size:12px;",
+                        svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                            path { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }
+                            path { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }
+                        }
+                        div {
+                            "When a user logs in, their IdP groups are matched top-down; the first matching mapping sets their role and environment scope."
+                        }
                     }
                 }
             }
@@ -1196,26 +1198,7 @@ fn ServerTab() -> Element {
             HeartbeatConfigCard {}
 
             // Classification banners card
-            div { class: "card", style: "padding:16px;grid-column:1 / -1;",
-                div { style: "display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;",
-                    div {
-                        h3 { style: "margin:0 0 4px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:7px;",
-                            svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                                path { d: "M12 3l8 3v6c0 4.5-3.3 8.5-8 9-4.7-.5-8-4.5-8-9V6l8-3z" }
-                            }
-                            "Classification banners"
-                        }
-                        p { style: "margin:0;font-size:12px;color:var(--cf-text-muted);max-width:60ch;",
-                            "Display a CNSS/DoD classification marking at the top and bottom of every screen. Required on many DoD / IC information systems."
-                        }
-                    }
-                    // Toggle switch (non-functional mock)
-                    div {
-                        style: "flex-shrink:0;width:44px;height:24px;border-radius:999px;background:var(--cf-subtle-bg);position:relative;cursor:pointer;",
-                        div { style: "position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.3);" }
-                    }
-                }
-            }
+            ClassificationBannerCard {}
 
             // Onboarding card
             div { class: "card", style: "padding:16px;grid-column:1 / -1;",
@@ -1288,6 +1271,55 @@ fn ServerTab() -> Element {
                             line { x1: "12", y1: "17", x2: "12.01", y2: "17" }
                         }
                         "Invalidate all sessions"
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// CLASSIFICATION BANNER CARD
+// ============================================================================
+
+#[component]
+fn ClassificationBannerCard() -> Element {
+    let mut enabled = use_signal(|| false);
+
+    rsx! {
+        div { class: "card", style: "padding:16px;grid-column:1 / -1;",
+            div { style: "display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;",
+                div {
+                    h3 { style: "margin:0 0 4px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:7px;",
+                        svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                            path { d: "M12 3l8 3v6c0 4.5-3.3 8.5-8 9-4.7-.5-8-4.5-8-9V6l8-3z" }
+                        }
+                        "Classification banners"
+                    }
+                    p { style: "margin:0;font-size:12px;color:var(--cf-text-muted);max-width:60ch;",
+                        "Display a CNSS/DoD classification marking at the top and bottom of every screen. Required on many DoD / IC information systems."
+                    }
+                }
+                // Toggle switch
+                button {
+                    class: "focus-ring",
+                    role: "switch",
+                    "aria-checked": "{enabled}",
+                    onclick: move |_| {
+                        let current = *enabled.read();
+                        enabled.set(!current);
+                    },
+                    style: if *enabled.read() {
+                        "flex-shrink:0;width:44px;height:24px;border-radius:999px;background:var(--cf-brand-purple);position:relative;cursor:pointer;border:none;padding:0;transition:background 140ms;"
+                    } else {
+                        "flex-shrink:0;width:44px;height:24px;border-radius:999px;background:var(--cf-subtle-bg);position:relative;cursor:pointer;border:none;padding:0;transition:background 140ms;"
+                    },
+                    div {
+                        style: if *enabled.read() {
+                            "position:absolute;top:2px;left:22px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.3);transition:left 140ms;"
+                        } else {
+                            "position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.3);transition:left 140ms;"
+                        }
                     }
                 }
             }
