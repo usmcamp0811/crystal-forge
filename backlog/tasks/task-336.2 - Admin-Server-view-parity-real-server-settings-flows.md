@@ -1,10 +1,10 @@
 ---
 id: TASK-336.2
 title: 'Admin Server: view parity + real server settings flows'
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-06-20 02:19'
-updated_date: '2026-06-20 02:33'
+updated_date: '2026-06-20 03:00'
 labels:
   - design-parity
   - admin
@@ -18,12 +18,18 @@ references:
   - TASK-336
   - /home/mcamp/code/crystal-forge/CrystalForgelatest
   - TASK-340.1
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/282'
+  - TASK-336.3
+  - TASK-336.4
+  - TASK-336.5
+  - TASK-336.6
+  - TASK-336.7
+  - TASK-336.8
 documentation:
   - design/doc-13 - Sidebar-surface-execution-map.md
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
 modified_files:
   - packages/web-ui/src/views/admin.rs
-  - checks/web-ui/tests/integration-test.js
 parent_task_id: TASK-336
 priority: high
 ordinal: 1671
@@ -87,13 +93,13 @@ Medium-high. The task touches an Admin/Server surface where incorrect placeholde
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Server/Admin server view visually matches the CrystalForgelatest reference for layout, spacing, typography, cards, controls, and states
-- [ ] #2 Supported server settings/status/actions are backed by real API data or real mutations with no fake production behavior
-- [ ] #3 Unsupported design fields/actions are still shown per design but clearly marked with subtle not-implemented text and have follow-up Backlog tasks created
-- [ ] #4 Simple directly scoped backend/API gaps required for real behavior are implemented when safe; non-trivial backend work is deferred to follow-up tasks
+- [x] #1 Server/Admin server view visually matches the CrystalForgelatest reference for layout, spacing, typography, cards, controls, and states
+- [x] #2 Supported server settings/status/actions are backed by real API data or real mutations with no fake production behavior
+- [x] #3 Unsupported design fields/actions are still shown per design but clearly marked with subtle not-implemented text and have follow-up Backlog tasks created
+- [x] #4 Simple directly scoped backend/API gaps required for real behavior are implemented when safe; non-trivial backend work is deferred to follow-up tasks
 - [ ] #5 Server view loading, empty, error, populated, and key dialog/action states are covered by web-ui assertions/screenshots following existing parity-check patterns
-- [ ] #6 UI remains separated from backend/API/domain logic and follows existing Admin/web-ui architecture patterns
-- [ ] #7 No unsupported Server setting/action may appear to succeed unless it is actually persisted or executed by backend/API behavior
+- [x] #6 UI remains separated from backend/API/domain logic and follows existing Admin/web-ui architecture patterns
+- [x] #7 No unsupported Server setting/action may appear to succeed unless it is actually persisted or executed by backend/API behavior
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -102,4 +108,6 @@ Medium-high. The task touches an Admin/Server surface where incorrect placeholde
 Sprint-ready grooming completed at owner request: added explicit verification plan, clarified parent umbrella is contextual rather than execution-blocking, removed dependency blocker, and moved task to To Do.
 
 LOCK: claude-sonnet-4-6 on reckless in /home/mcamp/code/crystal-forge/TASK-336.2-admin-server-parity
+
+MR 282 opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/282. Verification: rustfmt check passed, wasm cargo check exit 0, 66 unit tests passed. web-ui check skipped per owner request. Follow-up tasks created: TASK-336.3 (server info API), TASK-336.4 (roles API), TASK-336.5 (jobs API), TASK-336.6 (heartbeat config API), TASK-336.7 (classification banner API), TASK-336.8 (maintenance actions).
 <!-- SECTION:NOTES:END -->
