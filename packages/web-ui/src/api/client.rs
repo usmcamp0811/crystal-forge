@@ -1187,6 +1187,12 @@ pub async fn fetch_config_health() -> Result<ConfigHealthResponse, ApiClientErro
     fetch_json(&url).await
 }
 
+/// Fetch real server/build/database runtime info (admin only).
+pub async fn fetch_admin_server_info() -> Result<ServerRuntimeInfoResponse, ApiClientError> {
+    let url = format!("{}/admin/server-info", base_url());
+    fetch_json(&url).await
+}
+
 /// Fetch admin audit events.
 pub async fn fetch_admin_audit_events(
     params: &AdminAuditEventsParams,
@@ -1749,4 +1755,18 @@ fn decode_api_error_message(body: &str) -> String {
     serde_json::from_str::<ApiError>(body)
         .map(|error| error.message)
         .unwrap_or_else(|_| body.to_string())
+}
+
+/// Fetch the persisted classification banner configuration.
+pub async fn fetch_classification_config() -> Result<ClassificationBannerConfig, ApiClientError> {
+    let url = format!("{}/admin/classification-config", base_url());
+    fetch_json(&url).await
+}
+
+/// Persist classification banner configuration.
+pub async fn set_classification_config(
+    request: &UpdateClassificationBannerRequest,
+) -> Result<ClassificationBannerConfig, ApiClientError> {
+    let url = format!("{}/admin/classification-config", base_url());
+    send_json_with_csrf("PUT", &url, Some(request)).await
 }

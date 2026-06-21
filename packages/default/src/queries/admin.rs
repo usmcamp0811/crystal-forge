@@ -54,6 +54,13 @@ pub struct EnvironmentLookupRow {
     pub name: String,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+pub struct DatabaseRuntimeInfoRow {
+    pub database_name: String,
+    pub database_size: String,
+    pub server_version: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardedMutationOutcome {
     Applied,
@@ -86,6 +93,31 @@ pub async fn list_admin_users(pool: &PgPool) -> Result<Vec<AdminUserRow>> {
     .fetch_all(pool)
     .await?;
     Ok(rows)
+}
+
+pub async fn database_runtime_info(pool: &PgPool) -> Result<DatabaseRuntimeInfoRow> {
+    let row = sqlx::query_as::<_, DatabaseRuntimeInfoRow>(
+        "SELECT current_database() AS database_name,
+                pg_size_pretty(pg_database_size(current_database())) AS database_size,
+                current_setting('server_version') AS server_version",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row)
+}
+
+pub async fn active_session_count(pool: &PgPool) -> Result<i64> {
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint
+         FROM user_sessions
+         WHERE invalidated_at IS NULL
+           AND expires_at > NOW()",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count)
 }
 
 pub async fn find_admin_user(pool: &PgPool, user_id: Uuid) -> Result<Option<AdminUserRow>> {
@@ -158,7 +190,7 @@ pub async fn upsert_oidc_mapping(
 ) -> Result<OidcMappingRow> {
     let row = sqlx::query_as::<_, OidcMappingRow>(
         "INSERT INTO oidc_group_mappings (group_name, role, environments)
-         VALUES ($1, $2, $3)
+         VALUES ($1, $2::auth_role, $3::text[])
          ON CONFLICT (group_name)
          DO UPDATE SET role = EXCLUDED.role, environments = EXCLUDED.environments
          RETURNING id, group_name, role, environments, updated_at",
@@ -541,4 +573,48 @@ pub async fn replace_user_environment_memberships(
         .await
         .map_err(|_| "Failed to commit environment memberships".to_string())?;
     Ok(())
+}
+
+// ── Classification banner config ──────────────────────────────────────────────
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct ClassificationBannerConfigRow {
+    pub enabled: bool,
+    pub level: String,
+    pub custom_text: String,
+}
+
+pub async fn get_classification_banner_config(
+    pool: &PgPool,
+) -> Result<ClassificationBannerConfigRow> {
+    let row = sqlx::query_as::<_, ClassificationBannerConfigRow>(
+        "SELECT enabled, level, custom_text FROM classification_banner_config WHERE id = 1",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn upsert_classification_banner_config(
+    pool: &PgPool,
+    enabled: bool,
+    level: &str,
+    custom_text: &str,
+) -> Result<ClassificationBannerConfigRow> {
+    let row = sqlx::query_as::<_, ClassificationBannerConfigRow>(
+        "INSERT INTO classification_banner_config (id, enabled, level, custom_text)
+         VALUES (1, $1, $2, $3)
+         ON CONFLICT (id) DO UPDATE
+             SET enabled = EXCLUDED.enabled,
+                 level = EXCLUDED.level,
+                 custom_text = EXCLUDED.custom_text,
+                 updated_at = NOW()
+         RETURNING enabled, level, custom_text",
+    )
+    .bind(enabled)
+    .bind(level)
+    .bind(custom_text)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
 }

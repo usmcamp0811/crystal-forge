@@ -1985,6 +1985,7 @@ html[data-theme="light"] .sd-nix {
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
+  margin-bottom: var(--bottom-banner-space, 0px);
 }
 
 .sidebar.rail .sidebar-user {

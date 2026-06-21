@@ -1657,7 +1657,7 @@ pub enum IdentitySource {
 }
 
 /// Audit event action classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditAction {
     UserCreated,
@@ -1672,6 +1672,21 @@ pub enum AuditAction {
     SystemDeployRequested,
     SystemRollbackRequested,
     SessionInvalidated,
+    CveScanRequested,
+    BuilderRotateKey,
+    FlakeSync,
+    EvalCancel,
+    CacheCreate,
+    PolicyEdit,
+    UserCreate,
+    SystemRollback,
+    AuthLogin,
+    AuthLoginDenied,
+    BuildComplete,
+    CveAccept,
+    SystemDeploy,
+    #[serde(other)]
+    Unknown,
 }
 
 /// Admin audit log entry.
@@ -2164,4 +2179,42 @@ pub struct ConfigHealthResponse {
     pub total_issues: u32,
     /// Per-check details for all pipeline readiness checks.
     pub checks: Vec<ConfigHealthCheck>,
+}
+
+/// Runtime database information displayed in Admin → Server.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatabaseRuntimeInfo {
+    pub status: String,
+    pub name: String,
+    pub size: String,
+    pub server_version: String,
+}
+
+/// Runtime server/build information displayed in Admin → Server.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerRuntimeInfoResponse {
+    pub version: String,
+    pub commit: Option<String>,
+    pub uptime_seconds: u64,
+    pub database: DatabaseRuntimeInfo,
+    pub active_sessions: i64,
+    pub oidc_issuer_url: Option<String>,
+    pub tls_status: String,
+    pub tls_detail: String,
+}
+
+/// Persisted classification banner configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClassificationBannerConfig {
+    pub enabled: bool,
+    pub level: String,
+    pub custom_text: String,
+}
+
+/// Request payload for updating classification banner configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateClassificationBannerRequest {
+    pub enabled: bool,
+    pub level: String,
+    pub custom_text: String,
 }

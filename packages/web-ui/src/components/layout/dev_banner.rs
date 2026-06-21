@@ -4,6 +4,8 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 use wasm_bindgen::JsCast;
 
+pub const DEV_MODE_BANNER_HEIGHT_PX: u8 = 28;
+
 #[derive(Debug, Deserialize)]
 struct EvalQueueModeProbe {
     execution_mode: String,
@@ -90,11 +92,7 @@ fn EnvironmentBanner(
     }
 }
 
-/// Renders environment marker banners (top + bottom) when mock mode is active.
-///
-/// This is intentionally reusable for future environment markers beyond mock mode.
-#[component]
-pub fn DevModeBanner(placement: BannerPlacement) -> Element {
+pub fn use_dev_mode_enabled() -> Signal<bool> {
     let mut is_mock_mode = use_signal(|| false);
     let mut checked = use_signal(|| false);
 
@@ -143,7 +141,15 @@ pub fn DevModeBanner(placement: BannerPlacement) -> Element {
         });
     });
 
-    if !is_mock_mode() {
+    is_mock_mode
+}
+
+/// Renders environment marker banners (top + bottom) when mock mode is active.
+///
+/// This is intentionally reusable for future environment markers beyond mock mode.
+#[component]
+pub fn DevModeBanner(placement: BannerPlacement, enabled: bool) -> Element {
+    if !enabled {
         return rsx! {};
     }
 
