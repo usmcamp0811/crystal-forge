@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-21 02:39'
+updated_date: '2026-06-21 02:46'
 labels:
   - design-parity
   - builders
@@ -97,5 +97,5 @@ This task is sprint-selected and ready for execution, but it is not implemented 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Follow-up modal parity fix: added server-derived builder public key fingerprint (`SHA256:<base64-no-pad>`) to backend/API models and rendered it in the Builders edit modal. Reworked edit modal layout with explicit grid/flex styles for Name/Host, Architecture/Enabled, Cores/Memory GiB/Max concurrent slots, environments, key material, and danger zone. Verification run: `git diff --check` passed; `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed; `SQLX_OFFLINE=true nix develop -c cargo check --manifest-path packages/default/Cargo.toml` passed; focused fingerprint unit test passed; `nix develop -c node --check checks/web-ui/tests/integration-test.js` passed; changed-file `rustfmt --edition 2024 --check` passed. Full `cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check` is blocked by unrelated pre-existing formatting drift in `packages/web-ui/src/views/admin.rs`; full backend fmt check is blocked by unrelated pre-existing formatting drift across backend files.
+Follow-up modal parity verification update: `nix build .#checks.x86_64-linux.web-ui -L` passed after the edit-modal fingerprint/layout changes.
 <!-- SECTION:NOTES:END -->
