@@ -20,6 +20,7 @@ use crate::api::models::{
     ComplianceBundleSummary, ComplianceControlEvidence, ComplianceControlStatus,
     ComplianceEvidenceResponse, ComplianceRollupTotals, ComplianceSystemRollup,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use uuid::Uuid;
 
 // ─── Trigger browser download ─────────────────────────────────────────────────
@@ -418,7 +419,7 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
 
     let scoped_ev = p.scoped_evidence();
 
-    // Collect unique policies across all evidence for objective definitions + include-controls
+    // Collect unique policies across all evidence for objective definitions + include-objectives
     let unique_policies: Vec<&ComplianceControlEvidence> = {
         let mut seen = std::collections::HashSet::new();
         let mut policies = Vec::new();
@@ -459,6 +460,47 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
             })
         })
         .collect();
+
+    // Clone for embedding in the Assessment Plan (consumed by outer json! later)
+    let objectives_ap = objectives.clone();
+    let include_objectives_ap = include_objectives_list.clone();
+
+    // Build a minimal OSCAL Assessment Plan for embedding as base64 back-matter.
+    // This ensures import-ap resolves to a parseable Assessment Plan document.
+    let ap_json = json!({
+        "assessment-plan": {
+            "uuid": ap_uuid,
+            "metadata": {
+                "title": format!("Assessment Plan for {}", p.bundle.name),
+                "last-modified": now,
+                "version": "1.0",
+                "oscal-version": "1.1.2",
+                "props": [{
+                    "name": "classification",
+                    "ns": CF_NS,
+                    "value": "UNCLASSIFIED"
+                }],
+                "parties": [{
+                    "uuid": uuid::Uuid::new_v4().to_string(),
+                    "type": "organization",
+                    "name": "Crystal Forge",
+                }]
+            },
+            "local-definitions": {
+                "objectives-and-methods": {
+                    "objectives": objectives_ap,
+                }
+            },
+            "reviewed-controls": {
+                "control-objective-selections": [{
+                    "description": format!("Control objectives assessed for bundle '{}'", p.bundle.name),
+                    "include-objectives": include_objectives_ap,
+                }]
+            }
+        }
+    });
+    let ap_json_str = serde_json::to_string_pretty(&ap_json).unwrap_or_default();
+    let ap_base64 = BASE64.encode(ap_json_str.as_bytes());
 
     // Components = one per host
     let components: Vec<Value> = p
@@ -613,12 +655,16 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                 "resources": [{
                     "uuid": ap_uuid,
                     "title": format!("Assessment Plan for {}", p.bundle.name),
-                    "description": "Crystal Forge does not currently generate a standalone OSCAL Assessment Plan. This assessment-results document is self-contained for interoperability purposes. The assessed control objectives are defined inline in local-definitions.objectives-and-methods and referenced in reviewed-controls.control-objective-selections.",
-                    "props": [{
-                        "name": "ap-type",
-                        "ns": CF_NS,
-                        "value": "embedded-description"
-                    }]
+                    "description": "Embedded minimal OSCAL Assessment Plan governing this assessment. Contains the same control objectives and reviewed-controls as the assessment-results document.",
+                    "rlink": [{
+                        "href": format!("{}-assessment-plan.json", slugify_for_filename(&p.bundle.name)),
+                        "media-type": "application/oscal+json"
+                    }],
+                    "base64": {
+                        "filename": format!("{}-assessment-plan.json", slugify_for_filename(&p.bundle.name)),
+                        "media-type": "application/oscal+json",
+                        "value": ap_base64,
+                    }
                 }]
             },
             "results": [{
@@ -849,6 +895,23 @@ fn esc(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Slugify a name for safe use in filenames (lowercased, hyphens for spaces/special chars).
+fn slugify_for_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '.' {
+                c.to_ascii_lowercase()
+            } else if c.is_whitespace() {
+                '-'
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
 }
 
 /// Produce a stable, human-readable OSCAL objective ID from a Crystal Forge
