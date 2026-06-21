@@ -1,10 +1,10 @@
 ---
 id: TASK-336.2
 title: 'Admin Server: view parity + real server settings flows'
-status: Review
+status: Done
 assignee: []
 created_date: '2026-06-20 02:19'
-updated_date: '2026-06-20 23:31'
+updated_date: '2026-06-21 01:38'
 labels:
   - design-parity
   - admin
@@ -118,5 +118,5 @@ Medium-high. The task touches an Admin/Server surface where incorrect placeholde
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Review fix 3d9c9f73 pushed to MR !282. The Authentication card now renders real OIDC issuer and active session count from the runtime endpoint; unsupported TLS expiry was replaced with real request transport/TLS status. The sidebar profile now reserves bottom-banner space so classification/dev banners no longer overlap lower-left user details.
+MR !282 merged into dev: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/282
 <!-- SECTION:FINAL_SUMMARY:END -->
