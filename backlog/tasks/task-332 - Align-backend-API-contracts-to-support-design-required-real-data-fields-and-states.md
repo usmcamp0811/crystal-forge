@@ -1,12 +1,12 @@
 ---
 id: TASK-332
 title: >-
-  Align shared backend API contracts to support design-required real-data fields
-  and states
+  [SUPERSEDED by TASK-334] Align shared backend API contracts for
+  design-required real-data fields
 status: Backlog
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-10 02:57'
+updated_date: '2026-06-21 02:07'
 labels:
   - design-parity
   - backend-api
@@ -53,5 +53,5 @@ Scope details:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Use this task only for shared cross-view contract gaps. Keep surface-specific data changes inside the owning parity slice when possible.
+SUPERSEDED / merged (2026-06-21) per maintainer direction — superseded by TASK-334. This generic cross-view "align shared backend API contracts" task was open-ended, and its own replan note already pushed surface-specific API changes into each vertical parity slice. In practice the shipped vertical slices (Systems, Environments, Dashboard, Builds, CVEs, Flakes, etc.) each handled their own backend field/state needs. The remaining compliance-relevant backend work is now owned end-to-end by TASK-334, which builds the Compliance view together with the backend endpoints it requires. Archived to keep the active backlog clean. If a genuinely cross-cutting backend-contract gap surfaces later that no single slice owns, open a new focused task at that time.
 <!-- SECTION:NOTES:END -->
