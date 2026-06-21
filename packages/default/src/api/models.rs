@@ -1576,6 +1576,22 @@ pub struct SetupWizardAcknowledgeAgentRequest {
     pub acknowledged: bool,
 }
 
+/// Persisted classification banner configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClassificationBannerConfig {
+    pub enabled: bool,
+    pub level: String,
+    pub custom_text: String,
+}
+
+/// Request payload for updating the classification banner configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateClassificationBannerRequest {
+    pub enabled: bool,
+    pub level: String,
+    pub custom_text: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Error Response
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1849,4 +1865,30 @@ pub struct ConfigHealthResponse {
     pub total_issues: u32,
     /// Per-check details for all pipeline readiness checks.
     pub checks: Vec<ConfigHealthCheck>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin Server Info DTOs — GET /api/v1/admin/server-info
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Runtime database information displayed in Admin → Server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseRuntimeInfo {
+    pub status: String,
+    pub name: String,
+    pub size: String,
+    pub server_version: String,
+}
+
+/// Runtime server/build information displayed in Admin → Server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerRuntimeInfoResponse {
+    pub version: String,
+    pub commit: Option<String>,
+    pub uptime_seconds: u64,
+    pub database: DatabaseRuntimeInfo,
+    pub active_sessions: i64,
+    pub oidc_issuer_url: Option<String>,
+    pub tls_status: String,
+    pub tls_detail: String,
 }

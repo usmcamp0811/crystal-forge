@@ -11,6 +11,7 @@ use sqlx::PgPool;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -134,6 +135,7 @@ use crate::queue::QueueNotifier;
 pub struct CFState {
     pub pool: PgPool,
     pub server_config: ServerConfig,
+    pub started_at: Instant,
     pub queue_notifier: Arc<QueueNotifier>,
     pub eval_log_channels: Arc<
         tokio::sync::Mutex<std::collections::HashMap<i32, tokio::sync::broadcast::Sender<String>>>,
@@ -154,6 +156,7 @@ impl CFState {
         Self {
             pool,
             server_config,
+            started_at: Instant::now(),
             queue_notifier,
             eval_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             eval_log_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),

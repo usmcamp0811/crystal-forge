@@ -54,6 +54,25 @@ fn collapsed_from_storage() -> bool {
         .unwrap_or(false)
 }
 
+fn force_show_from_storage() -> bool {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+        .and_then(|storage| storage.get_item("cf.coach.force_show").ok())
+        .flatten()
+        .map(|value| value == "true")
+        .unwrap_or(false)
+}
+
+fn store_force_show(value: bool) {
+    if let Some(storage) = web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+    {
+        let _ = storage.set_item("cf.coach.force_show", if value { "true" } else { "false" });
+    }
+}
+
 fn store_collapsed(value: bool) {
     if let Some(storage) = web_sys::window()
         .and_then(|w| w.local_storage().ok())
@@ -98,6 +117,7 @@ fn step_status(step: CoachStep, progress: &SetupWizardProgressResponse) -> Setup
 pub fn OnboardingCoachPanel() -> Element {
     let mut refresh_tick = use_signal(|| 0_u64);
     let mut collapsed = use_signal(collapsed_from_storage);
+    let mut force_show = use_signal(force_show_from_storage);
     let mut action_error = use_signal(|| None::<String>);
 
     // Poll progress periodically so completion state is live while users
@@ -137,8 +157,11 @@ pub fn OnboardingCoachPanel() -> Element {
     };
 
     // Respect persisted dismissal and hide automatically once fully complete.
-    if progress_data.dismissed
-        || (progress_data.all_required_complete && progress_data.agent_acknowledged)
+    let is_force_show = force_show() || force_show_from_storage();
+
+    if !is_force_show
+        && (progress_data.dismissed
+            || (progress_data.all_required_complete && progress_data.agent_acknowledged))
     {
         return rsx! {};
     }
@@ -156,7 +179,7 @@ pub fn OnboardingCoachPanel() -> Element {
     .count();
 
     // Minimized: slim tab anchored top-right of the content column, just below the topbar
-    if collapsed() {
+    if !is_force_show && collapsed() {
         return rsx! {
             button {
                 class: "cf-coach-tab",
@@ -206,6 +229,8 @@ pub fn OnboardingCoachPanel() -> Element {
                                 match set_setup_wizard_dismissed(true).await {
                                     Ok(_) => {
                                         action_error.set(None);
+                                        force_show.set(false);
+                                        store_force_show(false);
                                         refresh_tick.set(refresh_tick() + 1);
                                     }
                                     Err(err) => action_error
