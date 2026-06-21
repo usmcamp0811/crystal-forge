@@ -1,10 +1,10 @@
 ---
 id: TASK-356
 title: Wire System Detail Compliance tab to real backend data and evidence drawer
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-06-13 20:28'
-updated_date: '2026-06-21 22:18'
+updated_date: '2026-06-21 22:24'
 labels:
   - compliance
   - system-detail
