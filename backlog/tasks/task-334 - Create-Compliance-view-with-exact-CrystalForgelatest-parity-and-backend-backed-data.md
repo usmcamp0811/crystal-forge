@@ -3,10 +3,10 @@ id: TASK-334
 title: >-
   Build full Compliance view (frontend + backend) faithful to CrystalForgelatest
   design
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-21 02:06'
+updated_date: '2026-06-21 02:09'
 labels:
   - design-parity
   - compliance
