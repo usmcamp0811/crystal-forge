@@ -11,10 +11,12 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    AdminUserSummary, ApiError, AuditAction, AuditEvent, IdentitySource, OidcGroupMapping,
-    PaginatedResponse, Role,
+    AdminUserSummary, ApiError, AuditAction, AuditEvent, ClassificationBannerConfig,
+    DatabaseRuntimeInfo, IdentitySource, OidcGroupMapping, PaginatedResponse, Role,
+    ServerRuntimeInfoResponse, UpdateClassificationBannerRequest,
 };
 use crate::auth::password::hash_password;
+use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{extract_request_origin, require_admin as require_admin_user};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::admin::{self, GuardedMutationOutcome, OidcMappingRow};
@@ -36,6 +38,7 @@ pub struct UpdateAdminUserRequest {
     pub role: Option<Role>,
     pub enabled: Option<bool>,
     pub environments: Option<Vec<String>>,
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +90,57 @@ pub async fn list_users(State(pool): State<PgPool>, headers: HeaderMap) -> impl 
     }
 
     (StatusCode::OK, Json(result)).into_response()
+}
+
+pub async fn server_runtime_info(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let pool = state.pool().clone();
+    let Some(_admin_user) = require_admin_user(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let database = match admin::database_runtime_info(&pool).await {
+        Ok(row) => DatabaseRuntimeInfo {
+            status: "healthy".to_string(),
+            name: row.database_name,
+            size: row.database_size,
+            server_version: row.server_version,
+        },
+        Err(_) => return internal_error("Failed to load server runtime info"),
+    };
+    let active_sessions = match admin::active_session_count(&pool).await {
+        Ok(count) => count,
+        Err(_) => return internal_error("Failed to load server runtime info"),
+    };
+    let request_scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("http");
+    let (tls_status, tls_detail) = if request_scheme.eq_ignore_ascii_case("https") {
+        ("HTTPS".to_string(), "TLS terminated upstream".to_string())
+    } else {
+        (
+            "HTTP".to_string(),
+            "TLS certificate not managed by app listener".to_string(),
+        )
+    };
+
+    Json(ServerRuntimeInfoResponse {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        commit: option_env!("SRC_HASH")
+            .or(option_env!("GIT_COMMIT"))
+            .or(option_env!("VERGEN_GIT_SHA"))
+            .map(ToString::to_string),
+        uptime_seconds: state.started_at.elapsed().as_secs(),
+        database,
+        active_sessions,
+        oidc_issuer_url: std::env::var("CRYSTAL_FORGE_OIDC_ISSUER_URL").ok(),
+        tls_status,
+        tls_detail,
+    })
+    .into_response()
 }
 
 pub async fn list_oidc_mappings(
@@ -421,6 +475,25 @@ pub async fn update_user(
                 serde_json::json!({ "from": prior_environments, "to": environments }),
             ));
         }
+    }
+
+    if let Some(password) = payload.password.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+        let password_hash = match hash_password(password) {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to hash password"),
+        };
+
+        if update_password_hash_by_user_id(&pool, target_user_id, &password_hash)
+            .await
+            .is_err()
+        {
+            return internal_error("Failed to update user password");
+        }
+
+        audit_events.push((
+            AuditAction::UserUpdated,
+            serde_json::json!({ "password_reset": true }),
+        ));
     }
 
     if !audit_events.is_empty() {
@@ -1315,6 +1388,7 @@ mod tests {
                 role: Some(Role::Operator),
                 enabled: Some(true),
                 environments: Some(vec![]),
+                password: None,
             }),
         )
         .await
@@ -1371,5 +1445,145 @@ mod tests {
             Some(AuditAction::SystemRollbackRequested)
         );
         assert_eq!(parse_audit_action("unknown"), None);
+    }
+}
+
+// ── Classification banner config ──────────────────────────────────────────────
+
+pub async fn get_classification_config(
+    State(pool): State<PgPool>,
+    _headers: HeaderMap,
+) -> impl IntoResponse {
+    match admin::get_classification_banner_config(&pool).await {
+        Ok(row) => (
+            StatusCode::OK,
+            Json(ClassificationBannerConfig {
+                enabled: row.enabled,
+                level: row.level,
+                custom_text: row.custom_text,
+            }),
+        )
+            .into_response(),
+        Err(_) => internal_error("Failed to load classification banner config"),
+    }
+}
+
+pub async fn update_classification_config(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateClassificationBannerRequest>,
+) -> impl IntoResponse {
+    let Some(_admin_user) = require_admin_user(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let level = payload.level.trim();
+    if !valid_classification_level(level) {
+        return bad_request("Invalid classification level");
+    }
+
+    match admin::upsert_classification_banner_config(
+        &pool,
+        payload.enabled,
+        level,
+        payload.custom_text.trim(),
+    )
+    .await
+    {
+        Ok(row) => (
+            StatusCode::OK,
+            Json(ClassificationBannerConfig {
+                enabled: row.enabled,
+                level: row.level,
+                custom_text: row.custom_text,
+            }),
+        )
+            .into_response(),
+        Err(_) => internal_error("Failed to save classification banner config"),
+    }
+}
+
+// ── Classification config validation ─────────────────────────────────────────
+
+fn valid_classification_level(level: &str) -> bool {
+    matches!(
+        level,
+        "UNCLASSIFIED" | "CUI" | "CONFIDENTIAL" | "SECRET" | "TOP SECRET"
+    )
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+
+    #[test]
+    fn valid_classification_level_accepts_known_values() {
+        for lvl in &["UNCLASSIFIED", "CUI", "CONFIDENTIAL", "SECRET", "TOP SECRET"] {
+            assert!(valid_classification_level(lvl), "should accept {lvl}");
+        }
+    }
+
+    #[test]
+    fn valid_classification_level_rejects_unknown_values() {
+        for lvl in &["RESTRICTED", "", "unclassified", "top_secret"] {
+            assert!(!valid_classification_level(lvl), "should reject {lvl}");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_classification_config_does_not_require_auth() {
+        // GET is unauthenticated (public read), so it should attempt the DB
+        // query and return either 200 (connected DB) or 500 (no DB in test),
+        // but specifically not 403 FORBIDDEN.
+        let response = get_classification_config(
+            State(lazy_pool()),
+            HeaderMap::new(),
+        )
+        .await
+        .into_response();
+
+        assert_ne!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "GET classification config must not require auth"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_classification_config_requires_admin_session() {
+        let response = update_classification_config(
+            State(lazy_pool()),
+            HeaderMap::new(),
+            Json(UpdateClassificationBannerRequest {
+                enabled: true,
+                level: "SECRET".to_string(),
+                custom_text: String::new(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "PUT classification config must require admin"
+        );
+    }
+
+    /// Verifies that `valid_classification_level` rejects unknown strings.
+    /// NOTE: A full handler-level 400 test requires an authenticated integration
+    /// environment; see valid_classification_level_rejects_unknown_values above
+    /// for the unit coverage that backs the handler validation path.
+    #[test]
+    fn validation_fn_rejects_unknown_levels_used_by_handler() {
+        assert!(!valid_classification_level("RESTRICTED"));
+        assert!(!valid_classification_level(""));
+        assert!(!valid_classification_level("super secret"));
+    }
+
+    fn lazy_pool() -> sqlx::PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct")
     }
 }

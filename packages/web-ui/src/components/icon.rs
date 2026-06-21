@@ -27,10 +27,12 @@ pub enum IconName {
     Rollback,
     /// System detail tab icons (match CrystalForgelatest Icon.jsx paths).
     Dashboard,
+    Server,
     Deploy,
     History,
     Key,
     File,
+    Link,
 }
 
 #[component]
@@ -38,7 +40,7 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
     let svg_content = match name {
         IconName::Sync => rsx! {
             path {
-                d: "M20 12a8 8 0 0 1-14 5.3L3 14",
+                d: "M20 12a8 8 0 0 1-14 5.3L3 14m1-4a8 8 0 0 1 14-5.3L21 8",
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }
@@ -209,6 +211,13 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
             rect { x: "14", y: "12", width: "7", height: "9", rx: "1" }
             rect { x: "3", y: "16", width: "7", height: "5", rx: "1" }
         },
+        // Server rack (design Icon.jsx "server").
+        IconName::Server => rsx! {
+            rect { x: "3", y: "4", width: "18", height: "7", rx: "1.5" }
+            rect { x: "3", y: "13", width: "18", height: "7", rx: "1.5" }
+            circle { cx: "7", cy: "7.5", r: "0.6", fill: "currentColor", stroke: "none" }
+            circle { cx: "7", cy: "16.5", r: "0.6", fill: "currentColor", stroke: "none" }
+        },
         // Deploy: upward arrow over a base tray (design Icon.jsx "deploy").
         IconName::Deploy => rsx! {
             path {
@@ -249,6 +258,19 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
             }
             path {
                 d: "M14 3v6h6",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        // Chain link (design Icon.jsx "link").
+        IconName::Link => rsx! {
+            path {
+                d: "M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            path {
+                d: "M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1",
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }
