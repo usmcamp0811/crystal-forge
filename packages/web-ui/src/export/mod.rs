@@ -132,14 +132,16 @@ pub fn build_cf_json(p: &ExportPayload<'_>) -> String {
                 .controls
                 .iter()
                 .filter(|c| {
-                    p.include_waivers
-                        || !matches!(c.status, ComplianceControlStatus::Waiver)
+                    p.include_waivers || !matches!(c.status, ComplianceControlStatus::Waiver)
                 })
                 .map(|c| {
                     let mut obj = Map::new();
                     obj.insert("policy_id".into(), json!(c.policy_id));
                     obj.insert("policy_name".into(), json!(c.policy_name));
-                    obj.insert("status".into(), json!(format!("{:?}", c.status).to_lowercase()));
+                    obj.insert(
+                        "status".into(),
+                        json!(format!("{:?}", c.status).to_lowercase()),
+                    );
                     obj.insert("severity".into(), json!(c.severity));
                     obj.insert("summary".into(), json!(c.summary));
                     obj.insert("framework_mapping".into(), json!(c.framework_mapping));
@@ -253,9 +255,7 @@ pub fn build_csv(p: &ExportPayload<'_>) -> String {
                     &p.bundle.framework,
                     &p.bundle.version,
                     &ev.hostname,
-                    rollup
-                        .and_then(|r| r.environment.as_deref())
-                        .unwrap_or(""),
+                    rollup.and_then(|r| r.environment.as_deref()).unwrap_or(""),
                     &ctrl.policy_name,
                     status_str,
                     &ctrl.severity,
@@ -294,7 +294,7 @@ fn csv_row(out: &mut String, fields: &[&str]) {
 /// SARIF 2.1.0 — one `run` per bundle, one `result` per (system × control).
 /// Maps: tool=Crystal Forge, rules=controls, results=findings.
 pub fn build_sarif(p: &ExportPayload<'_>) -> String {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     let scoped_ev = p.scoped_evidence();
 
@@ -404,16 +404,59 @@ pub fn build_sarif(p: &ExportPayload<'_>) -> String {
 /// OSCAL 1.1.2 Assessment Results (JSON).
 /// Produces a minimal but valid AR document from the rollup + evidence data.
 pub fn build_oscal(p: &ExportPayload<'_>) -> String {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     let now = js_sys::Date::new_0()
         .to_iso_string()
         .as_string()
         .unwrap_or_default();
     let ar_uuid = uuid::Uuid::new_v4().to_string();
-    let ssp_uuid = p.bundle.id.to_string();
+
+    const CF_NS: &str = "https://crystal-forge.example/ns/oscal";
 
     let scoped_ev = p.scoped_evidence();
+
+    // Collect unique policies across all evidence for objective definitions + include-controls
+    let unique_policies: Vec<&ComplianceControlEvidence> = {
+        let mut seen = std::collections::HashSet::new();
+        let mut policies = Vec::new();
+        for ev in &scoped_ev {
+            for ctrl in &ev.controls {
+                if !p.include_waivers && matches!(ctrl.status, ComplianceControlStatus::Waiver) {
+                    continue;
+                }
+                if seen.insert(ctrl.policy_id) {
+                    policies.push(ctrl);
+                }
+            }
+        }
+        policies
+    };
+
+    let include_controls_list: Vec<Value> = unique_policies
+        .iter()
+        .map(|ctrl| json!({"objective-id": objective_id_for(&ctrl.policy_name)}))
+        .collect();
+
+    let objectives: Vec<Value> = unique_policies
+        .iter()
+        .map(|ctrl| {
+            json!({
+                "id": objective_id_for(&ctrl.policy_name),
+                "title": ctrl.policy_name,
+                "description": ctrl.summary,
+                "props": [{
+                    "name": "policy-uuid",
+                    "ns": CF_NS,
+                    "value": ctrl.policy_id.to_string(),
+                }, {
+                    "name": "framework-mapping",
+                    "ns": CF_NS,
+                    "value": ctrl.framework_mapping,
+                }]
+            })
+        })
+        .collect();
 
     // Components = one per host
     let components: Vec<Value> = p
@@ -422,7 +465,7 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
         .map(|s| {
             json!({
                 "uuid": s.system_id.to_string(),
-                "type": "software",
+                "type": "hardware",
                 "title": s.hostname,
                 "description": format!("Host {} in environment {}", s.hostname, s.environment.as_deref().unwrap_or("unknown")),
                 "status": { "state": if s.fail == 0 { "operational" } else { "under-development" } }
@@ -464,11 +507,32 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                 vec![]
             };
 
+            let is_disabled = ctrl
+                .evidence_items
+                .iter()
+                .any(|item| item.body.contains("enabled=false"));
+
+            let mut obs_props = vec![
+                json!({"name": "framework-mapping", "ns": CF_NS, "value": ctrl.framework_mapping}),
+                json!({"name": "severity", "ns": CF_NS, "value": ctrl.severity}),
+                json!({"name": "execution-mode", "ns": CF_NS, "value": "automated"}),
+            ];
+            if is_disabled {
+                obs_props.push(
+                    json!({"name": "evaluation-status", "ns": CF_NS, "value": "not-evaluated"}),
+                );
+                obs_props.push(json!({"name": "policy-enabled", "ns": CF_NS, "value": "false"}));
+            } else {
+                obs_props
+                    .push(json!({"name": "evaluation-status", "ns": CF_NS, "value": "evaluated"}));
+                obs_props.push(json!({"name": "policy-enabled", "ns": CF_NS, "value": "true"}));
+            }
+
             observations.push(json!({
                 "uuid": obs_uuid,
                 "title": format!("{} — {}", ev.hostname, ctrl.policy_name),
                 "description": ctrl.summary,
-                "methods": ["AUTOMATED"],
+                "methods": ["TEST"],
                 "types": ["finding"],
                 "subjects": [{
                     "subject-uuid": ev.system_id.to_string(),
@@ -477,14 +541,10 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                 }],
                 "relevant-evidence": relevant_evidence,
                 "collected": now,
-                "props": [{
-                    "name": "framework-mapping",
-                    "value": ctrl.framework_mapping,
-                }, {
-                    "name": "severity",
-                    "value": ctrl.severity,
-                }]
+                "props": obs_props,
             }));
+
+            let objective_id = objective_id_for(&ctrl.policy_name);
 
             findings.push(json!({
                 "uuid": finding_uuid,
@@ -492,7 +552,7 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                 "description": ctrl.summary,
                 "target": {
                     "type": "objective-id",
-                    "target-id": ctrl.policy_id.to_string(),
+                    "target-id": objective_id,
                     "title": ctrl.policy_name,
                     "status": {
                         "state": oscal_state,
@@ -502,13 +562,24 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                 "related-observations": [{ "observation-uuid": obs_uuid }],
                 "props": [{
                     "name": "hostname",
+                    "ns": CF_NS,
                     "value": ev.hostname,
                 }, {
                     "name": "environment",
+                    "ns": CF_NS,
                     "value": rollup.and_then(|r| r.environment.as_deref()).unwrap_or("unknown"),
                 }, {
                     "name": "score",
+                    "ns": CF_NS,
                     "value": rollup.map(|r| r.score.to_string()).unwrap_or_default(),
+                }, {
+                    "name": "evaluation-status",
+                    "ns": CF_NS,
+                    "value": if is_disabled { "not-evaluated" } else { "evaluated" },
+                }, {
+                    "name": "policy-enabled",
+                    "ns": CF_NS,
+                    "value": if is_disabled { "false" } else { "true" },
                 }]
             }));
         }
@@ -524,19 +595,24 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                 "oscal-version": "1.1.2",
                 "props": [{
                     "name": "classification",
+                    "ns": CF_NS,
                     "value": "UNCLASSIFIED"
                 }],
                 "parties": [{
                     "uuid": uuid::Uuid::new_v4().to_string(),
-                    "type": "tool",
+                    "type": "organization",
                     "name": "Crystal Forge",
                 }]
             },
             "import-ap": {
-                "href": format!("#{}", ssp_uuid),
+                "href": "./crystal-forge-assessment-plan.json",
+                "remarks": "Crystal Forge does not currently generate a standalone OSCAL Assessment Plan. This AR document is self-contained for interoperability purposes."
             },
             "local-definitions": {
                 "components": components,
+                "objectives-and-methods": {
+                    "objectives": objectives,
+                }
             },
             "results": [{
                 "uuid": uuid::Uuid::new_v4().to_string(),
@@ -544,21 +620,24 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                 "description": p.bundle.description.as_deref().unwrap_or(""),
                 "start": now,
                 "end": now,
-                "prop": [{
+                "props": [{
                     "name": "overall-score",
+                    "ns": CF_NS,
                     "value": p.totals.overall_score.to_string(),
                 }, {
                     "name": "framework",
+                    "ns": CF_NS,
                     "value": p.bundle.framework.clone(),
                 }, {
                     "name": "compliant-hosts",
+                    "ns": CF_NS,
                     "value": format!("{} of {}", p.totals.fully_compliant_count, p.totals.system_count),
                 }],
                 "reviewed-controls": {
                     "description": format!("{} controls reviewed", p.totals.total_controls),
                     "control-selections": [{
-                        "description": "All controls in bundle",
-                        "include-all": {}
+                        "description": format!("Controls assessed for bundle '{}'", p.bundle.name),
+                        "include-controls": include_controls_list
                     }]
                 },
                 "observations": observations,
@@ -631,7 +710,11 @@ fn build_print_html(p: &ExportPayload<'_>) -> String {
         p.totals.overall_score,
         p.totals.system_count,
         p.totals.fully_compliant_count,
-        p.bundle.description.as_deref().map(|d| format!("<p class=\"desc\">{}</p>", esc(d))).unwrap_or_default(),
+        p.bundle
+            .description
+            .as_deref()
+            .map(|d| format!("<p class=\"desc\">{}</p>", esc(d)))
+            .unwrap_or_default(),
     ));
 
     // Summary table
@@ -642,7 +725,13 @@ fn build_print_html(p: &ExportPayload<'_>) -> String {
 <tbody>"#,
     );
     for s in p.scoped_systems() {
-        let row_class = if s.fail > 0 { " class=\"fail-row\"" } else if s.warn > 0 { " class=\"warn-row\"" } else { "" };
+        let row_class = if s.fail > 0 {
+            " class=\"fail-row\""
+        } else if s.warn > 0 {
+            " class=\"warn-row\""
+        } else {
+            ""
+        };
         body.push_str(&format!(
             "<tr{}><td class=\"mono\">{}</td><td>{}</td><td><b>{}%</b></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
             row_class,
@@ -656,7 +745,10 @@ fn build_print_html(p: &ExportPayload<'_>) -> String {
     // Per-system evidence detail
     let scoped_ev = p.scoped_evidence();
     for ev in &scoped_ev {
-        body.push_str(&format!("<h2 class=\"host-heading\">Evidence: {}</h2>\n", esc(&ev.hostname)));
+        body.push_str(&format!(
+            "<h2 class=\"host-heading\">Evidence: {}</h2>\n",
+            esc(&ev.hostname)
+        ));
         body.push_str("<table><thead><tr><th>Control</th><th>Status</th><th>Severity</th><th>Mapping</th><th>Summary</th></tr></thead><tbody>\n");
         for ctrl in &ev.controls {
             if !p.include_waivers && matches!(ctrl.status, ComplianceControlStatus::Waiver) {
@@ -750,4 +842,37 @@ fn esc(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Produce a stable, human-readable OSCAL objective ID from a Crystal Forge
+/// policy name by lowercasing and replacing non-alphanumeric characters with
+/// hyphens, prefixed with `cf-obj-`.
+fn objective_id_for(policy_name: &str) -> String {
+    let slug: String = policy_name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .filter(|c| *c != '\0')
+        .collect();
+    // Collapse consecutive hyphens
+    let mut collapsed = String::with_capacity(slug.len());
+    let mut prev_hyphen = false;
+    for c in slug.chars() {
+        if c == '-' {
+            if prev_hyphen {
+                continue;
+            }
+            prev_hyphen = true;
+        } else {
+            prev_hyphen = false;
+        }
+        collapsed.push(c);
+    }
+    let slug = collapsed.trim_matches('-').to_string();
+    format!("cf-obj-{}", slug)
 }

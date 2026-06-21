@@ -84,11 +84,7 @@ pub fn BundleHeader(props: BundleHeaderProps) -> Element {
         .last_review
         .map(|dt| dt.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "never".to_string());
-    let description = props
-        .bundle
-        .description
-        .clone()
-        .unwrap_or_default();
+    let description = props.bundle.description.clone().unwrap_or_default();
     let owner = props.bundle.owner.clone();
     let name = props.bundle.name.clone();
     let framework = props.bundle.framework.clone();
@@ -216,14 +212,16 @@ pub struct SystemsMatrixProps {
 
 #[component]
 pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
-    let visible: Vec<_> = props.systems.iter().filter(|row| {
-        match props.filter.as_str() {
-            "fail"  => row.fail > 0,
-            "warn"  => row.warn > 0 && row.fail == 0,
+    let visible: Vec<_> = props
+        .systems
+        .iter()
+        .filter(|row| match props.filter.as_str() {
+            "fail" => row.fail > 0,
+            "warn" => row.warn > 0 && row.fail == 0,
             "clean" => row.fail == 0 && row.warn == 0,
-            _       => true,
-        }
-    }).collect();
+            _ => true,
+        })
+        .collect();
 
     rsx! {
         div { class: "card", style: "overflow:hidden;",
@@ -365,11 +363,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
     let hostname = props.evidence.hostname.clone();
     let bundle_name = props.bundle_name.clone();
 
-    let active_control = props
-        .evidence
-        .controls
-        .get(*active_idx.read())
-        .cloned();
+    let active_control = props.evidence.controls.get(*active_idx.read()).cloned();
 
     rsx! {
         div { class: "fl-tray-backdrop", onclick: move |_| props.on_close.call(()) }
@@ -465,9 +459,9 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
 
 fn control_status_color(status: &ComplianceControlStatus) -> &'static str {
     match status {
-        ComplianceControlStatus::Pass   => "#34d399",
-        ComplianceControlStatus::Warn   => "#fbbf24",
-        ComplianceControlStatus::Fail   => "#f87171",
+        ComplianceControlStatus::Pass => "#34d399",
+        ComplianceControlStatus::Warn => "#fbbf24",
+        ComplianceControlStatus::Fail => "#f87171",
         ComplianceControlStatus::Waiver => "#a78bfa",
     }
 }
@@ -483,14 +477,14 @@ struct ControlEvidenceCardProps {
 fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
     let sc = control_status_color(&props.control.status);
     let sev_color = match props.control.severity.as_str() {
-        "high"   => "#f87171",
+        "high" => "#f87171",
         "medium" => "#fbbf24",
-        _        => "#60a5fa",
+        _ => "#60a5fa",
     };
     let status_label = match props.control.status {
-        ComplianceControlStatus::Pass   => "pass",
-        ComplianceControlStatus::Warn   => "warn",
-        ComplianceControlStatus::Fail   => "fail",
+        ComplianceControlStatus::Pass => "pass",
+        ComplianceControlStatus::Warn => "warn",
+        ComplianceControlStatus::Fail => "fail",
         ComplianceControlStatus::Waiver => "waiver",
     };
     let policy_name = props.control.policy_name.clone();

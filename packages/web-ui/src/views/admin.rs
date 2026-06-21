@@ -442,7 +442,11 @@ fn ServerInfoStrip(
     let version_value = server_info
         .as_ref()
         .map(|info| info.version.as_str())
-        .unwrap_or(if server_info_loading { "Loading…" } else { "Unavailable" });
+        .unwrap_or(if server_info_loading {
+            "Loading…"
+        } else {
+            "Unavailable"
+        });
     let version_meta = if server_info_error.is_some() {
         "server info unavailable".to_string()
     } else if let Some(info) = server_info.as_ref() {
@@ -458,7 +462,11 @@ fn ServerInfoStrip(
     let database_value = server_info
         .as_ref()
         .map(|info| info.database.status.as_str())
-        .unwrap_or(if server_info_loading { "Loading…" } else { "Unavailable" });
+        .unwrap_or(if server_info_loading {
+            "Loading…"
+        } else {
+            "Unavailable"
+        });
     let database_meta = if server_info_error.is_some() {
         "server info unavailable".to_string()
     } else if let Some(info) = server_info.as_ref() {
@@ -486,7 +494,11 @@ fn ServerInfoStrip(
     let tls_value = server_info
         .as_ref()
         .map(|info| info.tls_status.as_str())
-        .unwrap_or(if server_info_loading { "Loading…" } else { "Unavailable" });
+        .unwrap_or(if server_info_loading {
+            "Loading…"
+        } else {
+            "Unavailable"
+        });
     let tls_meta = server_info
         .as_ref()
         .map(|info| info.tls_detail.as_str())
@@ -1677,7 +1689,11 @@ fn ServerTab(
     let tls_status = server_info
         .as_ref()
         .map(|info| info.tls_status.as_str())
-        .unwrap_or(if server_info_loading { "Loading…" } else { "Unavailable" });
+        .unwrap_or(if server_info_loading {
+            "Loading…"
+        } else {
+            "Unavailable"
+        });
     let tls_detail = server_info
         .as_ref()
         .map(|info| info.tls_detail.as_str())

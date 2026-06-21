@@ -5,8 +5,6 @@ use crate::api::client::{
     fetch_compliance_bundles, fetch_compliance_system_evidence, fetch_environments, fetch_policies,
     update_compliance_bundle,
 };
-use crate::export::{ExportPayload, build_cf_json, build_csv, build_oscal, build_sarif,
-    open_print_window, trigger_download};
 use crate::api::models::{
     ComplianceBundleSummary, ComplianceBundleSystemsResponse, ComplianceEvidenceResponse,
     CreateComplianceBundleRequest, DeploymentPolicySummary, EnvironmentSummary,
@@ -17,6 +15,10 @@ use crate::components::compliance::{
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::loading::DashboardLoadingSpinner;
+use crate::export::{
+    ExportPayload, build_cf_json, build_csv, build_oscal, build_sarif, open_print_window,
+    trigger_download,
+};
 
 #[component]
 pub fn ComplianceView() -> Element {
@@ -42,6 +44,47 @@ pub fn ComplianceView() -> Element {
     let mut environments = use_signal(Vec::<EnvironmentSummary>::new);
     let mut sys_filter = use_signal(|| "all".to_string());
 
+    // Generation counters guard against stale async responses overwriting the
+    // state of a subsequently-selected bundle or system.  Each spawn captures
+    // the current generation before going async; on completion it only commits
+    // state if the captured generation still matches the live counter.
+    // This covers every spawn site uniformly: initial load, selection,
+    // Retry, create, update, and delete callbacks.
+    let mut systems_gen = use_signal(|| 0u32);
+    let mut evidence_gen = use_signal(|| 0u32);
+
+    // Helper closures (moved into the component body) that bump a generation,
+    // spawn the fetch, and only write state when the generation is current.
+    // We express them as plain closures captured by the rsx below.
+
+    // Spawn a systems fetch for `bundle_id`.  Increments `systems_gen` and
+    // clears existing systems/error state before returning the new generation
+    // so the caller can pass it into the async block.
+    let mut start_systems_fetch = move |bundle_id: uuid::Uuid| {
+        let gen_id = *systems_gen.read() + 1;
+        systems_gen.set(gen_id);
+        systems.set(None);
+        systems_error.set(None);
+        systems_loading.set(true);
+        spawn(async move {
+            match fetch_compliance_bundle_systems(&bundle_id).await {
+                Ok(resp) => {
+                    if *systems_gen.read() == gen_id {
+                        systems.set(Some(resp));
+                        systems_error.set(None);
+                        systems_loading.set(false);
+                    }
+                }
+                Err(err) => {
+                    if *systems_gen.read() == gen_id {
+                        systems_error.set(Some(err.to_string()));
+                        systems_loading.set(false);
+                    }
+                }
+            }
+        });
+    };
+
     use_effect(move || {
         if *fetch_started.read() {
             return;
@@ -57,12 +100,7 @@ pub fn ComplianceView() -> Element {
                     // renders immediately; systems has its own loading indicator.
                     loaded.set(true);
                     if let Some(bundle_id) = first_id {
-                        systems_loading.set(true);
-                        match fetch_compliance_bundle_systems(&bundle_id).await {
-                            Ok(resp) => systems.set(Some(resp)),
-                            Err(err) => systems_error.set(Some(err.to_string())),
-                        }
-                        systems_loading.set(false);
+                        start_systems_fetch(bundle_id);
                     }
                 }
                 Err(err) => {
@@ -87,32 +125,34 @@ pub fn ComplianceView() -> Element {
 
     let on_select_bundle = move |bundle_id: uuid::Uuid| {
         selected_bundle_id.set(Some(bundle_id));
-        systems.set(None);
-        systems_error.set(None);
         evidence.set(None);
         evidence_error.set(None);
+        // Bump evidence_gen so any in-flight evidence fetch for the old bundle
+        // is invalidated even though we already cleared `evidence`.
+        let eg = *evidence_gen.read() + 1;
+        evidence_gen.set(eg);
         sys_filter.set("all".to_string());
-        spawn(async move {
-            systems_loading.set(true);
-            match fetch_compliance_bundle_systems(&bundle_id).await {
-                Ok(resp) => {
-                    systems.set(Some(resp));
-                    systems_error.set(None);
-                }
-                Err(err) => systems_error.set(Some(err.to_string())),
-            }
-            systems_loading.set(false);
-        });
+        start_systems_fetch(bundle_id);
     };
 
     let on_evidence = move |system_id: uuid::Uuid| {
         if let Some(bundle_id) = *selected_bundle_id.read() {
             evidence.set(None);
             evidence_error.set(None);
+            let gen_id = *evidence_gen.read() + 1;
+            evidence_gen.set(gen_id);
             spawn(async move {
                 match fetch_compliance_system_evidence(&bundle_id, &system_id).await {
-                    Ok(resp) => evidence.set(Some(resp)),
-                    Err(err) => evidence_error.set(Some(err.to_string())),
+                    Ok(resp) => {
+                        if *evidence_gen.read() == gen_id {
+                            evidence.set(Some(resp));
+                        }
+                    }
+                    Err(err) => {
+                        if *evidence_gen.read() == gen_id {
+                            evidence_error.set(Some(err.to_string()));
+                        }
+                    }
                 }
             });
         }
@@ -178,19 +218,11 @@ pub fn ComplianceView() -> Element {
                                         button {
                                             class: "btn btn-ghost focus-ring xs",
                                             style: "width:fit-content;",
-                                            onclick: move |_| {
-                                                if let Some(bid) = *selected_bundle_id.read() {
-                                                    systems_error.set(None);
-                                                    systems_loading.set(true);
-                                                    spawn(async move {
-                                                        match fetch_compliance_bundle_systems(&bid).await {
-                                                            Ok(resp) => systems.set(Some(resp)),
-                                                            Err(e) => systems_error.set(Some(e.to_string())),
-                                                        }
-                                                        systems_loading.set(false);
-                                                    });
-                                                }
-                                            },
+                            onclick: move |_| {
+                                if let Some(bid) = *selected_bundle_id.read() {
+                                    start_systems_fetch(bid);
+                                }
+                            },
                                             Icon { name: IconName::Sync, size: 11 }
                                             " Retry"
                                         }
@@ -279,17 +311,12 @@ pub fn ComplianceView() -> Element {
                     next.push(bundle);
                     bundles.set(next);
                     selected_bundle_id.set(Some(id));
-                    systems.set(None);
-                    systems_error.set(None);
+                    evidence.set(None);
+                    evidence_error.set(None);
+                    let eg = *evidence_gen.read() + 1;
+                    evidence_gen.set(eg);
                     show_new_bundle.set(false);
-                    spawn(async move {
-                        systems_loading.set(true);
-                        match fetch_compliance_bundle_systems(&id).await {
-                            Ok(resp) => systems.set(Some(resp)),
-                            Err(e) => systems_error.set(Some(e.to_string())),
-                        }
-                        systems_loading.set(false);
-                    });
+                    start_systems_fetch(id);
                 },
             }
         }
@@ -311,17 +338,8 @@ pub fn ComplianceView() -> Element {
                             next[pos] = updated;
                         }
                         bundles.set(next);
-                        systems.set(None);
-                        systems_error.set(None);
                         show_edit_bundle.set(false);
-                        spawn(async move {
-                            systems_loading.set(true);
-                            match fetch_compliance_bundle_systems(&id).await {
-                                Ok(resp) => systems.set(Some(resp)),
-                                Err(e) => systems_error.set(Some(e.to_string())),
-                            }
-                            systems_loading.set(false);
-                        });
+                        start_systems_fetch(id);
                     },
                     on_deleted: move |deleted_id: uuid::Uuid| {
                         let mut next = bundles.read().clone();
@@ -329,20 +347,13 @@ pub fn ComplianceView() -> Element {
                         let next_id = next.first().map(|b| b.id);
                         bundles.set(next);
                         selected_bundle_id.set(next_id);
-                        systems.set(None);
-                        systems_error.set(None);
                         evidence.set(None);
                         evidence_error.set(None);
+                        let eg = *evidence_gen.read() + 1;
+                        evidence_gen.set(eg);
                         show_edit_bundle.set(false);
                         if let Some(nid) = next_id {
-                            spawn(async move {
-                                systems_loading.set(true);
-                                match fetch_compliance_bundle_systems(&nid).await {
-                                    Ok(resp) => systems.set(Some(resp)),
-                                    Err(e) => systems_error.set(Some(e.to_string())),
-                                }
-                                systems_loading.set(false);
-                            });
+                            start_systems_fetch(nid);
                         }
                     },
                 }
@@ -394,23 +405,75 @@ fn ExportModal(props: ExportModalProps) -> Element {
     let mut downloading = use_signal(|| false);
     let mut download_error = use_signal(|| None::<String>);
 
-    let bundle_name = props.bundle.as_ref().map(|b| b.name.as_str()).unwrap_or("—");
-    let total_hosts = props.systems_resp.as_ref().map(|r| r.totals.system_count).unwrap_or(0);
-    let total_controls = props.systems_resp.as_ref().map(|r| r.totals.total_controls).unwrap_or(0);
-    let fail_count = props.systems_resp.as_ref().map(|r| r.totals.fail).unwrap_or(0);
-    let bundle_id_str = props.bundle.as_ref().map(|b| b.id.to_string()).unwrap_or_default();
+    let bundle_name = props
+        .bundle
+        .as_ref()
+        .map(|b| b.name.as_str())
+        .unwrap_or("—");
+    let total_hosts = props
+        .systems_resp
+        .as_ref()
+        .map(|r| r.totals.system_count)
+        .unwrap_or(0);
+    let total_controls = props
+        .systems_resp
+        .as_ref()
+        .map(|r| r.totals.total_controls)
+        .unwrap_or(0);
+    let fail_count = props
+        .systems_resp
+        .as_ref()
+        .map(|r| r.totals.fail)
+        .unwrap_or(0);
+    let bundle_id_str = props
+        .bundle
+        .as_ref()
+        .map(|b| b.id.to_string())
+        .unwrap_or_default();
 
     let formats: &[(&str, &str, &str, &str)] = &[
-        ("oscal", "OSCAL 1.1.2 JSON",  "oscal.json", "NIST OSCAL System Security Plan + Assessment Results for ATO packages."),
-        ("json",  "Crystal Forge JSON", "cf-evidence.json", "Native CF schema — best for re-ingest or custom dashboards."),
-        ("csv",   "CSV summary",        "summary.csv", "Flat per-(host, control) table. Spreadsheet-friendly."),
-        ("pdf",   "PDF report",         "pdf",        "Cover page + per-host summary + evidence index. For auditors."),
-        ("sarif", "SARIF 2.1.0",        "sarif",      "Static analysis exchange format — works with most SAST/posture tools."),
+        (
+            "oscal",
+            "OSCAL 1.1.2 JSON",
+            "oscal.json",
+            "NIST OSCAL System Security Plan + Assessment Results for ATO packages.",
+        ),
+        (
+            "json",
+            "Crystal Forge JSON",
+            "cf-evidence.json",
+            "Native CF schema — best for re-ingest or custom dashboards.",
+        ),
+        (
+            "csv",
+            "CSV summary",
+            "summary.csv",
+            "Flat per-(host, control) table. Spreadsheet-friendly.",
+        ),
+        (
+            "pdf",
+            "PDF report",
+            "pdf",
+            "Cover page + per-host summary + evidence index. For auditors.",
+        ),
+        (
+            "sarif",
+            "SARIF 2.1.0",
+            "sarif",
+            "Static analysis exchange format — works with most SAST/posture tools.",
+        ),
     ];
 
-    let today = js_sys::Date::new_0().to_iso_string().as_string().unwrap_or_default();
+    let today = js_sys::Date::new_0()
+        .to_iso_string()
+        .as_string()
+        .unwrap_or_default();
     let today_slice = today.chars().take(10).collect::<String>();
-    let ext = formats.iter().find(|f| f.0 == *format.read()).map(|f| f.2).unwrap_or("json");
+    let ext = formats
+        .iter()
+        .find(|f| f.0 == *format.read())
+        .map(|f| f.2)
+        .unwrap_or("json");
     let filename = format!("cf-{bundle_id_str}-{today_slice}.{ext}");
 
     rsx! {
@@ -651,8 +714,7 @@ fn NewBundleModal(props: NewBundleModalProps) -> Element {
     let mut error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
 
-    let can_save =
-        !name.read().trim().is_empty() && !selected_policy_ids.read().is_empty();
+    let can_save = !name.read().trim().is_empty() && !selected_policy_ids.read().is_empty();
 
     let filtered_policies: Vec<_> = props
         .policies
@@ -918,8 +980,7 @@ fn EditBundleModal(props: EditBundleModalProps) -> Element {
     let mut saving = use_signal(|| false);
     let mut confirm_delete = use_signal(|| false);
 
-    let can_save =
-        !name.read().trim().is_empty() && !selected_policy_ids.read().is_empty();
+    let can_save = !name.read().trim().is_empty() && !selected_policy_ids.read().is_empty();
 
     let filtered_policies: Vec<_> = props
         .policies
@@ -1202,7 +1263,11 @@ fn DeleteBundleConfirm(props: DeleteBundleConfirmProps) -> Element {
     let bundle_name = props.bundle_name.clone();
     let matches = *typed.read() == bundle_name;
     let policy_count = props.policy_count;
-    let policy_word = if policy_count == 1 { "policy" } else { "policies" };
+    let policy_word = if policy_count == 1 {
+        "policy"
+    } else {
+        "policies"
+    };
 
     rsx! {
         div { class: "modal-head", style: "background:rgba(248,113,113,0.06);",
