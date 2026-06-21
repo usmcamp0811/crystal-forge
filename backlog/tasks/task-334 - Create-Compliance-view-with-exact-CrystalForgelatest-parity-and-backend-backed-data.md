@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-21 01:57'
+updated_date: '2026-06-21 01:58'
 labels:
   - design-parity
   - compliance
@@ -18,10 +18,14 @@ dependencies:
   - TASK-329
   - TASK-332
   - TASK-333
-references:
-  - /home/mcamp/code/crystal-forge/CrystalForgelatest
   - TASK-317
   - TASK-319
+  - TASK-318
+references:
+  - >-
+    /home/mcamp/code/crystal-forge/CrystalForgelatest/components/ComplianceView.jsx
+  - design/doc-8 - CrystalForgelatest-UI-Parity-Matrix-TASK-328.md
+  - TASK-320
 documentation:
   - design/doc-10 - CrystalForgelatest-parity-execution-plan.md
   - design/doc-11 - CrystalForgelatest-design-source-index.md
