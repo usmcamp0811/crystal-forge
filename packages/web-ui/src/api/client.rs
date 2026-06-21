@@ -923,6 +923,51 @@ pub async fn fetch_policies() -> Result<Vec<DeploymentPolicySummary>, ApiClientE
     fetch_json(&url).await
 }
 
+pub async fn fetch_compliance_bundles() -> Result<Vec<ComplianceBundleSummary>, ApiClientError> {
+    let url = format!("{}/compliance/bundles", base_url());
+    fetch_json(&url).await
+}
+
+pub async fn fetch_compliance_bundle_systems(
+    bundle_id: &Uuid,
+) -> Result<ComplianceBundleSystemsResponse, ApiClientError> {
+    let url = format!("{}/compliance/bundles/{}/systems", base_url(), bundle_id);
+    fetch_json(&url).await
+}
+
+pub async fn fetch_compliance_system_evidence(
+    bundle_id: &Uuid,
+    system_id: &Uuid,
+) -> Result<ComplianceEvidenceResponse, ApiClientError> {
+    let url = format!(
+        "{}/compliance/bundles/{}/systems/{}/evidence",
+        base_url(),
+        bundle_id,
+        system_id
+    );
+    fetch_json(&url).await
+}
+
+pub async fn create_compliance_bundle(
+    request: &CreateComplianceBundleRequest,
+) -> Result<ComplianceBundleSummary, ApiClientError> {
+    let url = format!("{}/compliance/bundles", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+pub async fn update_compliance_bundle(
+    bundle_id: &Uuid,
+    request: &UpdateComplianceBundleRequest,
+) -> Result<ComplianceBundleSummary, ApiClientError> {
+    let url = format!("{}/compliance/bundles/{}", base_url(), bundle_id);
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
+pub async fn delete_compliance_bundle(bundle_id: &Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/compliance/bundles/{}", base_url(), bundle_id);
+    send_empty_with_csrf::<()>("DELETE", &url, None).await
+}
+
 // =============================================================================
 // Deployment Policies CRUD API
 // =============================================================================

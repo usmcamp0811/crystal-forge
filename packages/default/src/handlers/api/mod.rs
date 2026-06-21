@@ -8,6 +8,7 @@ pub mod auth_whoami;
 pub mod builders;
 pub mod caches;
 pub mod commits;
+pub mod compliance;
 pub mod config_health;
 pub mod cves;
 pub mod dashboard;

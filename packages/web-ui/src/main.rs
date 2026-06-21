@@ -6,6 +6,7 @@
 mod api;
 mod bootstrap;
 mod components;
+mod export;
 mod dashboard;
 mod environments;
 mod hooks;

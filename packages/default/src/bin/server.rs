@@ -20,8 +20,9 @@ use crystal_forge::{
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            builders, caches, commits, config_health, cves, dashboard, deployment_policies, deployments,
-            environments, flakes, hardening, scanning, setup_wizard, systems,
+            builders, caches, commits, compliance, config_health, cves, dashboard,
+            deployment_policies, deployments, environments, flakes, hardening, scanning,
+            setup_wizard, systems,
         },
         status,
         webhook::webhook_handler,
@@ -187,12 +188,21 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/cves/grouped", get(cves::list_cves_grouped))
         .route("/api/v1/cves/stats", get(cves::get_fleet_stats))
         .route("/api/v1/cves/packages", get(cves::list_package_names))
-        .route("/api/v1/cves/rescan-fleet", post(cves::trigger_fleet_rescan))
+        .route(
+            "/api/v1/cves/rescan-fleet",
+            post(cves::trigger_fleet_rescan),
+        )
         .route("/api/v1/cves/export", get(cves::export_cves))
         .route("/api/v1/cves/:cve_id", get(cves::get_cve_detail))
         .route("/api/v1/cves/:cve_id/systems", get(cves::get_cve_systems))
-        .route("/api/v1/cves/:cve_id/justification", post(cves::save_justification).delete(cves::revoke_justification))
-        .route("/api/v1/cves/:cve_id/justifications", get(cves::list_justifications))
+        .route(
+            "/api/v1/cves/:cve_id/justification",
+            post(cves::save_justification).delete(cves::revoke_justification),
+        )
+        .route(
+            "/api/v1/cves/:cve_id/justifications",
+            get(cves::list_justifications),
+        )
         .route("/api/v1/scanning/stats", get(scanning::get_scanning_stats))
         .route("/api/v1/scanning/queue", get(scanning::get_scanning_queue))
         .route(
@@ -322,6 +332,24 @@ async fn main() -> anyhow::Result<()> {
                 .patch(environments::update_environment_policies_handler),
         )
         .route("/api/v1/policies", get(environments::list_policies_handler))
+        .route(
+            "/api/v1/compliance/bundles",
+            get(compliance::list_compliance_bundles).post(compliance::create_compliance_bundle),
+        )
+        .route(
+            "/api/v1/compliance/bundles/:id",
+            get(compliance::get_compliance_bundle_systems)
+                .put(compliance::update_compliance_bundle)
+                .delete(compliance::delete_compliance_bundle),
+        )
+        .route(
+            "/api/v1/compliance/bundles/:id/systems",
+            get(compliance::get_compliance_bundle_systems),
+        )
+        .route(
+            "/api/v1/compliance/bundles/:id/systems/:system_id/evidence",
+            get(compliance::get_compliance_system_evidence),
+        )
         // Deployment policies CRUD endpoints
         .route(
             "/api/v1/deployment-policies",

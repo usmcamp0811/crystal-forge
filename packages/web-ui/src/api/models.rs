@@ -768,6 +768,126 @@ pub struct EnvironmentPolicyMapEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceBundleSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub framework: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub layer: String,
+    pub owner: String,
+    pub last_review: Option<DateTime<Utc>>,
+    pub policy_ids: Vec<Uuid>,
+    pub required_envs: Vec<ComplianceEnvironmentRef>,
+    pub control_count: i64,
+    pub environment_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceEnvironmentRef {
+    pub id: Uuid,
+    pub name: String,
+    pub color_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceBundleSystemsResponse {
+    pub bundle_id: Uuid,
+    pub systems: Vec<ComplianceSystemRollup>,
+    pub totals: ComplianceRollupTotals,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ComplianceRollupTotals {
+    pub system_count: i64,
+    pub fully_compliant_count: i64,
+    pub pass: i64,
+    pub warn: i64,
+    pub fail: i64,
+    pub waiver: i64,
+    pub total_controls: i64,
+    pub overall_score: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceSystemRollup {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub applies: bool,
+    pub total: i64,
+    pub pass: i64,
+    pub warn: i64,
+    pub fail: i64,
+    pub waiver: i64,
+    pub score: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComplianceControlStatus {
+    Pass,
+    Warn,
+    Fail,
+    Waiver,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceEvidenceResponse {
+    pub bundle_id: Uuid,
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub controls: Vec<ComplianceControlEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceControlEvidence {
+    pub policy_id: Uuid,
+    pub policy_name: String,
+    pub status: ComplianceControlStatus,
+    pub severity: String,
+    pub summary: String,
+    pub evidence_items: Vec<ComplianceEvidenceItem>,
+    pub framework_mapping: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceEvidenceItem {
+    pub kind: String,
+    pub label: String,
+    pub body: String,
+    pub artifact: Option<ComplianceEvidenceArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceEvidenceArtifact {
+    pub artifact_type: String,
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateComplianceBundleRequest {
+    pub name: String,
+    pub framework: String,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub layer: Option<String>,
+    pub required_envs: Vec<Uuid>,
+    pub policy_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateComplianceBundleRequest {
+    pub name: String,
+    pub framework: String,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub required_envs: Vec<Uuid>,
+    pub policy_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateEnvironmentRequest {
     pub name: String,
     pub description: Option<String>,

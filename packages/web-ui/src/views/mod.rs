@@ -4,6 +4,7 @@ pub mod admin;
 pub mod builders;
 pub mod builds;
 pub mod caches;
+pub mod compliance;
 pub mod cves;
 pub mod dashboard;
 pub mod dev_login;

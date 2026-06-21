@@ -25,6 +25,10 @@ pub enum IconName {
     Warn,
     ArrowLeft,
     Rollback,
+    /// Pencil / edit icon.
+    Edit,
+    /// Trash / delete icon.
+    Trash,
     /// System detail tab icons (match CrystalForgelatest Icon.jsx paths).
     Dashboard,
     Server,
@@ -200,6 +204,42 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
             }
             path {
                 d: "m8 3-5 4 5 4",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        // Pencil / edit (design Icon.jsx "edit").
+        IconName::Edit => rsx! {
+            path {
+                d: "M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            path {
+                d: "M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        // Trash / delete (design Icon.jsx "trash").
+        IconName::Trash => rsx! {
+            polyline {
+                points: "3 6 5 6 21 6",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            path {
+                d: "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            path {
+                d: "M10 11v6M14 11v6",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            path {
+                d: "M9 6V4h6v2",
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }

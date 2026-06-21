@@ -9,6 +9,7 @@ use crate::views::admin::AdminView;
 use crate::views::builders::BuildersView;
 use crate::views::builds::BuildsView;
 use crate::views::caches::CachesView;
+use crate::views::compliance::ComplianceView;
 use crate::views::cves::CvesView;
 use crate::views::dashboard::DashboardView;
 use crate::views::dev_login::DevLoginView;
@@ -71,6 +72,9 @@ pub enum Route {
     #[route("/deployment-policies")]
     PoliciesView {},
 
+    #[route("/compliance")]
+    ComplianceView {},
+
     #[route("/admin")]
     AdminView {},
 
@@ -114,6 +118,7 @@ impl Route {
             Route::CvesView { .. } => "CVEs".to_string(),
             Route::ScanningView { .. } => "Scanning".to_string(),
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
+            Route::ComplianceView { .. } => "Compliance".to_string(),
             Route::AdminView { .. } => "Server Management".to_string(),
             Route::StyleGuideView { .. } => "Component Showcase".to_string(),
             Route::LoginView { .. } => "Sign In".to_string(),
