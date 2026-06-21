@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-20 04:25'
+updated_date: '2026-06-21 02:39'
 labels:
   - design-parity
   - builders
@@ -26,6 +26,12 @@ modified_files:
   - packages/web-ui/src/components/builders/builder_card.rs
   - packages/web-ui/src/components/builders/builder_row.rs
   - packages/web-ui/src/components/builders/builders_list.rs
+  - packages/web-ui/src/components/builders/edit_builder_modal.rs
+  - packages/web-ui/src/api/models.rs
+  - packages/default/src/models/public_key.rs
+  - packages/default/src/models/builders.rs
+  - packages/default/src/queries/builders.rs
+  - packages/default/src/handlers/builder_request.rs
   - checks/web-ui/tests/integration-test.js
 priority: high
 ordinal: 1785
@@ -91,24 +97,5 @@ This task is sprint-selected and ready for execution, but it is not implemented 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/283
+Follow-up modal parity fix: added server-derived builder public key fingerprint (`SHA256:<base64-no-pad>`) to backend/API models and rendered it in the Builders edit modal. Reworked edit modal layout with explicit grid/flex styles for Name/Host, Architecture/Enabled, Cores/Memory GiB/Max concurrent slots, environments, key material, and danger zone. Verification run: `git diff --check` passed; `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed; `SQLX_OFFLINE=true nix develop -c cargo check --manifest-path packages/default/Cargo.toml` passed; focused fingerprint unit test passed; `nix develop -c node --check checks/web-ui/tests/integration-test.js` passed; changed-file `rustfmt --edition 2024 --check` passed. Full `cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check` is blocked by unrelated pre-existing formatting drift in `packages/web-ui/src/views/admin.rs`; full backend fmt check is blocked by unrelated pre-existing formatting drift across backend files.
 <!-- SECTION:NOTES:END -->
-
-## Final Summary
-
-<!-- SECTION:FINAL_SUMMARY:BEGIN -->
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/283
-
-Summary:
-- Aligned Builders list/table/card surface with the CrystalForgelatest reference while preserving real API data flow.
-- Removed fabricated 24h/load metric values and displays unavailable state when BuilderSummary lacks those metrics.
-- Corrected builder registration public-key guidance to base64 Ed25519 format.
-- Hid builder mutation controls from non-admin users in both BuildersView and legacy BuildersList, matching backend admin-only builder management endpoints.
-- Updated web-ui fixtures/checks so Builders list and edit modal screenshots are captured deterministically.
-
-Verification:
-- `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check` passed.
-- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed with existing warnings.
-- `node --check checks/web-ui/tests/integration-test.js` passed.
-- `nix build .#checks.x86_64-linux.web-ui -L` passed with exit status 0; Builders steps `[OK] 11b-builders` and `[OK] 11c-builders-edit-modal` were captured.
-<!-- SECTION:FINAL_SUMMARY:END -->
