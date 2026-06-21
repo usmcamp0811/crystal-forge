@@ -20,6 +20,7 @@ use crate::api::models::{
     ComplianceBundleSummary, ComplianceControlEvidence, ComplianceControlStatus,
     ComplianceEvidenceResponse, ComplianceRollupTotals, ComplianceSystemRollup,
 };
+use uuid::Uuid;
 
 // ─── Trigger browser download ─────────────────────────────────────────────────
 
@@ -411,6 +412,7 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
         .as_string()
         .unwrap_or_default();
     let ar_uuid = uuid::Uuid::new_v4().to_string();
+    let ap_uuid = uuid::Uuid::new_v4().to_string();
 
     const CF_NS: &str = "https://crystal-forge.example/ns/oscal";
 
@@ -433,16 +435,16 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
         policies
     };
 
-    let include_controls_list: Vec<Value> = unique_policies
+    let include_objectives_list: Vec<Value> = unique_policies
         .iter()
-        .map(|ctrl| json!({"objective-id": objective_id_for(&ctrl.policy_name)}))
+        .map(|ctrl| json!({"objective-id": objective_id_for(ctrl.policy_id, &ctrl.policy_name)}))
         .collect();
 
     let objectives: Vec<Value> = unique_policies
         .iter()
         .map(|ctrl| {
             json!({
-                "id": objective_id_for(&ctrl.policy_name),
+                "id": objective_id_for(ctrl.policy_id, &ctrl.policy_name),
                 "title": ctrl.policy_name,
                 "description": ctrl.summary,
                 "props": [{
@@ -544,7 +546,7 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                 "props": obs_props,
             }));
 
-            let objective_id = objective_id_for(&ctrl.policy_name);
+            let objective_id = objective_id_for(ctrl.policy_id, &ctrl.policy_name);
 
             findings.push(json!({
                 "uuid": finding_uuid,
@@ -605,14 +607,25 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                 }]
             },
             "import-ap": {
-                "href": "./crystal-forge-assessment-plan.json",
-                "remarks": "Crystal Forge does not currently generate a standalone OSCAL Assessment Plan. This AR document is self-contained for interoperability purposes."
+                "href": format!("#{}", ap_uuid),
             },
             "local-definitions": {
                 "components": components,
                 "objectives-and-methods": {
                     "objectives": objectives,
                 }
+            },
+            "back-matter": {
+                "resources": [{
+                    "uuid": ap_uuid,
+                    "title": format!("Assessment Plan for {}", p.bundle.name),
+                    "description": "Crystal Forge does not currently generate a standalone OSCAL Assessment Plan. This assessment-results document is self-contained for interoperability purposes. The assessed control objectives are defined inline in local-definitions.objectives-and-methods and referenced in reviewed-controls.control-objective-selections.",
+                    "props": [{
+                        "name": "ap-type",
+                        "ns": CF_NS,
+                        "value": "embedded-description"
+                    }]
+                }]
             },
             "results": [{
                 "uuid": uuid::Uuid::new_v4().to_string(),
@@ -634,10 +647,10 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                     "value": format!("{} of {}", p.totals.fully_compliant_count, p.totals.system_count),
                 }],
                 "reviewed-controls": {
-                    "description": format!("{} controls reviewed", p.totals.total_controls),
-                    "control-selections": [{
-                        "description": format!("Controls assessed for bundle '{}'", p.bundle.name),
-                        "include-controls": include_controls_list
+                    "description": format!("{} control objectives reviewed", p.totals.total_controls),
+                    "control-objective-selections": [{
+                        "description": format!("Control objectives assessed for bundle '{}'", p.bundle.name),
+                        "include-objectives": include_objectives_list
                     }]
                 },
                 "observations": observations,
@@ -847,7 +860,7 @@ fn esc(s: &str) -> String {
 /// Produce a stable, human-readable OSCAL objective ID from a Crystal Forge
 /// policy name by lowercasing and replacing non-alphanumeric characters with
 /// hyphens, prefixed with `cf-obj-`.
-fn objective_id_for(policy_name: &str) -> String {
+fn objective_id_for(policy_id: Uuid, policy_name: &str) -> String {
     let slug: String = policy_name
         .chars()
         .map(|c| {
@@ -874,5 +887,7 @@ fn objective_id_for(policy_name: &str) -> String {
         collapsed.push(c);
     }
     let slug = collapsed.trim_matches('-').to_string();
-    format!("cf-obj-{}", slug)
+    let short_id = policy_id.simple().to_string();
+    // Keep the first 8 hex chars of the UUID for readability + collision resistance
+    format!("cf-obj-{}-{}", slug, &short_id[..8])
 }

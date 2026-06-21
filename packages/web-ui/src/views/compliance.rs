@@ -633,10 +633,31 @@ fn ExportModal(props: ExportModalProps) -> Element {
                                         .collect();
 
                                     let mut all_evidence = Vec::new();
+                                    let mut evidence_failures = Vec::new();
                                     for sys_id in &scoped_sys_ids {
-                                        if let Ok(ev) = fetch_compliance_system_evidence(&bundle.id, sys_id).await {
-                                            all_evidence.push(ev);
+                                        match fetch_compliance_system_evidence(&bundle.id, sys_id).await {
+                                            Ok(ev) => all_evidence.push(ev),
+                                            Err(err) => {
+                                                // Find hostname for error reporting
+                                                let hostname = systems
+                                                    .iter()
+                                                    .find(|s| s.system_id == *sys_id)
+                                                    .map(|s| s.hostname.as_str())
+                                                    .unwrap_or("unknown");
+                                                evidence_failures
+                                                    .push(format!("{}: {err}", hostname));
+                                            }
                                         }
+                                    }
+
+                                    if !evidence_failures.is_empty() {
+                                        download_error.set(Some(format!(
+                                            "Could not fetch evidence for {}; export aborted. Failed hosts: {}",
+                                            evidence_failures.len(),
+                                            evidence_failures.join("; "),
+                                        )));
+                                        downloading.set(false);
+                                        return;
                                     }
 
                                     let payload = ExportPayload {
