@@ -492,7 +492,7 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                 ComplianceControlStatus::Pass => ("satisfied", "pass"),
                 ComplianceControlStatus::Warn => ("not-satisfied", "other"),
                 ComplianceControlStatus::Fail => ("not-satisfied", "fail-adjusted"),
-                ComplianceControlStatus::Waiver => ("not-applicable", "accept-risk"),
+                ComplianceControlStatus::Waiver => ("not-satisfied", "accept-risk"),
             };
 
             // Collect evidence items as relevant evidence
@@ -529,6 +529,9 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                     .push(json!({"name": "evaluation-status", "ns": CF_NS, "value": "evaluated"}));
                 obs_props.push(json!({"name": "policy-enabled", "ns": CF_NS, "value": "true"}));
             }
+            if matches!(ctrl.status, ComplianceControlStatus::Waiver) {
+                obs_props.push(json!({"name": "disposition", "ns": CF_NS, "value": "waived"}));
+            }
 
             observations.push(json!({
                 "uuid": obs_uuid,
@@ -548,6 +551,17 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
 
             let objective_id = objective_id_for(ctrl.policy_id, &ctrl.policy_name);
 
+            let mut finding_props = vec![
+                json!({"name": "hostname", "ns": CF_NS, "value": ev.hostname}),
+                json!({"name": "environment", "ns": CF_NS, "value": rollup.and_then(|r| r.environment.as_deref()).unwrap_or("unknown")}),
+                json!({"name": "score", "ns": CF_NS, "value": rollup.map(|r| r.score.to_string()).unwrap_or_default()}),
+                json!({"name": "evaluation-status", "ns": CF_NS, "value": if is_disabled { "not-evaluated" } else { "evaluated" }}),
+                json!({"name": "policy-enabled", "ns": CF_NS, "value": if is_disabled { "false" } else { "true" }}),
+            ];
+            if matches!(ctrl.status, ComplianceControlStatus::Waiver) {
+                finding_props.push(json!({"name": "disposition", "ns": CF_NS, "value": "waived"}));
+            }
+
             findings.push(json!({
                 "uuid": finding_uuid,
                 "title": format!("{} on {}", ctrl.policy_name, ev.hostname),
@@ -562,27 +576,7 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                     }
                 },
                 "related-observations": [{ "observation-uuid": obs_uuid }],
-                "props": [{
-                    "name": "hostname",
-                    "ns": CF_NS,
-                    "value": ev.hostname,
-                }, {
-                    "name": "environment",
-                    "ns": CF_NS,
-                    "value": rollup.and_then(|r| r.environment.as_deref()).unwrap_or("unknown"),
-                }, {
-                    "name": "score",
-                    "ns": CF_NS,
-                    "value": rollup.map(|r| r.score.to_string()).unwrap_or_default(),
-                }, {
-                    "name": "evaluation-status",
-                    "ns": CF_NS,
-                    "value": if is_disabled { "not-evaluated" } else { "evaluated" },
-                }, {
-                    "name": "policy-enabled",
-                    "ns": CF_NS,
-                    "value": if is_disabled { "false" } else { "true" },
-                }]
+                "props": finding_props,
             }));
         }
     }
