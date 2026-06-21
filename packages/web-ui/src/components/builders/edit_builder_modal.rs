@@ -215,7 +215,7 @@ pub fn EditBuilderModal(
                                     " Edit {builder_data.name}"
                                 }
                                 p {
-                                    "Update builder registration, capacity, routing, and trust material."
+                                    "Update builder registration."
                                 }
                             }
                             button {
@@ -242,292 +242,278 @@ pub fn EditBuilderModal(
                             div {
                                 style: "display:flex; flex-direction:column; gap:16px;",
 
-                            div {
-                                style: "display:grid; grid-template-columns:1fr 1fr; gap:14px;",
-
-                                // Name
+                                // Row 1: Name + Environments served
                                 div {
-                                    class: "field",
-                                    label {
-                                        class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                        "Name"
+                                    style: "display:grid; grid-template-columns:1fr 1fr; gap:14px;",
+                                    div {
+                                        class: "field",
+                                        label { "Name" }
+                                        input {
+                                            class: "input focus-ring",
+                                            r#type: "text",
+                                            value: "{name}",
+                                            oninput: move |e| name.set(e.value()),
+                                            disabled: is_submitting(),
+                                        }
                                     }
-                                    input {
-                                        class: "input focus-ring mono",
-                                        r#type: "text",
-                                        value: "{name}",
-                                        oninput: move |e| name.set(e.value()),
-                                        disabled: is_submitting(),
-                                        placeholder: "e.g. hydra-03",
+                                    div {
+                                        class: "field",
+                                        label { "Environments served" }
+                                        {
+                                            let env_data = environments.read();
+                                            match &*env_data {
+                                                Some(Ok(env_list)) => rsx! {
+                                                    if env_list.is_empty() {
+                                                        p {
+                                                            class: "text-sm {theme::text::SECONDARY}",
+                                                            "No environments available"
+                                                        }
+                                                    } else {
+                                                        div {
+                                                            style: "display:flex; flex-wrap:wrap; gap:6px;",
+                                                            for env in env_list {
+                                                                {
+                                                                    let env_id = env.id;
+                                                                    let env_color = if env.color_hex.trim().is_empty() {
+                                                                        "#6b7280".to_string()
+                                                                    } else {
+                                                                        env.color_hex.clone()
+                                                                    };
+                                                                    let is_selected = selected_environments().contains(&env_id);
+                                                                    let border = if is_selected {
+                                                                        format!("1px solid {}", env_color)
+                                                                    } else {
+                                                                        "1px solid var(--cf-card-border)".to_string()
+                                                                    };
+                                                                    let background = if is_selected {
+                                                                        format!(
+                                                                            "color-mix(in oklab, {} 14%, var(--cf-card-bg))",
+                                                                            env_color
+                                                                        )
+                                                                    } else {
+                                                                        "transparent".to_string()
+                                                                    };
+                                                                    let color = if is_selected {
+                                                                        env_color.clone()
+                                                                    } else {
+                                                                        "var(--cf-text-secondary)".to_string()
+                                                                    };
+                                                                    rsx! {
+                                                                        button {
+                                                                            key: "{env.id}",
+                                                                            class: "focus-ring",
+                                                                            r#type: "button",
+                                                                            onclick: move |_| toggle_environment(env_id),
+                                                                            disabled: is_submitting(),
+                                                                            style: "padding:4px 10px; border-radius:99px; font-size:11px; border:{border}; background:{background}; color:{color}; cursor:pointer; display:inline-flex; align-items:center; gap:6px; font-family:inherit;",
+                                                                            span {
+                                                                                style: "width:6px; height:6px; border-radius:50%; background:{env_color};"
+                                                                            }
+                                                                            "{env.name}"
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    div {
+                                                        class: "help",
+                                                        "Builds for systems in any of these environments will be routed to this worker."
+                                                    }
+                                                },
+                                                Some(Err(e)) => rsx! {
+                                                    p {
+                                                        class: "text-sm text-red-400",
+                                                        "Failed to load environments: {e}"
+                                                    }
+                                                },
+                                                None => rsx! {
+                                                    p {
+                                                        class: "text-sm {theme::text::SECONDARY}",
+                                                        "Loading environments..."
+                                                    }
+                                                },
+                                            }
+                                        }
                                     }
                                 }
 
+                                // Host (full width)
                                 div {
                                     class: "field",
-                                    label {
-                                        class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                        "Host"
-                                    }
+                                    label { "Host (SSH endpoint)" }
                                     input {
-                                        class: "input focus-ring mono",
+                                        class: "input focus-ring",
                                         r#type: "text",
                                         value: "{host}",
                                         oninput: move |e| host.set(e.value()),
                                         disabled: is_submitting(),
                                         placeholder: "ssh://builder.example.internal",
-                                        style: "font-size:12px;",
                                     }
                                 }
-                            }
 
-                            // Resource Limits
-                            div {
-                                style: "display:grid; grid-template-columns:1.25fr 0.75fr; gap:14px;",
+                                // Row 2: Architecture + Cores + Memory
                                 div {
-                                    label {
-                                        class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                        "Architecture"
-                                    }
-                                    select {
-                                        class: "input focus-ring",
-                                        value: "{arch}",
-                                        onchange: move |e| arch.set(e.value()),
-                                        disabled: is_submitting(),
-                                        option { value: "x86_64-linux", "x86_64-linux" }
-                                        option { value: "aarch64-linux", "aarch64-linux" }
-                                        option { value: "aarch64-darwin", "aarch64-darwin" }
-                                        option { value: "x86_64-darwin", "x86_64-darwin" }
-                                    }
-                                }
-                                div {
-                                    class: "field",
-                                    label { "Enabled" }
-                                    label {
-                                        style: "height:38px; display:flex; gap:8px; align-items:center; font-size:13px; padding:0 12px; border:1px solid var(--cf-card-border); border-radius:10px; background:rgba(255,255,255,0.02);",
-                                        input {
-                                            r#type: "checkbox",
-                                            checked: enabled(),
-                                            onchange: move |e| enabled.set(e.checked()),
+                                    style: "display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px;",
+                                    div {
+                                        class: "field",
+                                        label { "Architecture" }
+                                        select {
+                                            class: "input focus-ring",
+                                            value: "{arch}",
+                                            onchange: move |e| arch.set(e.value()),
+                                            disabled: is_submitting(),
+                                            option { value: "x86_64-linux", "x86_64-linux" }
+                                            option { value: "aarch64-linux", "aarch64-linux" }
+                                            option { value: "aarch64-darwin", "aarch64-darwin" }
+                                            option { value: "x86_64-darwin", "x86_64-darwin" }
                                         }
-                                        span { "Accepts jobs" }
+                                    }
+                                    div {
+                                        class: "field",
+                                        label { "Cores" }
+                                        input {
+                                            class: "input focus-ring",
+                                            r#type: "number",
+                                            min: "1",
+                                            value: "{max_cpu_cores}",
+                                            oninput: move |e| max_cpu_cores.set(e.value()),
+                                            disabled: is_submitting(),
+                                        }
+                                    }
+                                    div {
+                                        class: "field",
+                                        label { "Memory (GiB)" }
+                                        input {
+                                            class: "input focus-ring",
+                                            r#type: "number",
+                                            min: "1",
+                                            step: "0.5",
+                                            value: "{max_memory_mb}",
+                                            oninput: move |e| max_memory_mb.set(e.value()),
+                                            disabled: is_submitting(),
+                                        }
                                     }
                                 }
-                            }
 
-                            div {
-                                style: "display:grid; grid-template-columns:repeat(3, 1fr); gap:14px;",
+                                // Row 3: Max concurrent slots + Status
                                 div {
-                                    label {
-                                        class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                        "Cores"
+                                    style: "display:grid; grid-template-columns:1fr 1fr; gap:14px;",
+                                    div {
+                                        class: "field",
+                                        label { "Max concurrent slots" }
+                                        input {
+                                            class: "input focus-ring",
+                                            r#type: "number",
+                                            min: "1",
+                                            value: "{max_concurrent_jobs}",
+                                            oninput: move |e| max_concurrent_jobs.set(e.value()),
+                                            disabled: is_submitting(),
+                                        }
+                                        div { class: "help", "How many builds this worker may run in parallel." }
                                     }
-                                    input {
-                                        class: "input focus-ring",
-                                        r#type: "number",
-                                        min: "1",
-                                        value: "{max_cpu_cores}",
-                                        oninput: move |e| max_cpu_cores.set(e.value()),
-                                        disabled: is_submitting(),
+                                    div {
+                                        class: "field",
+                                        label { "Status" }
+                                        label {
+                                            style: "height:38px; display:flex; gap:8px; align-items:center; font-size:13px; padding:0 12px; border:1px solid var(--cf-card-border); border-radius:10px; background:rgba(255,255,255,0.02);",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked: enabled(),
+                                                onchange: move |e| enabled.set(e.checked()),
+                                            }
+                                            span { "Enabled (accepts jobs)" }
+                                        }
                                     }
                                 }
-                                div {
-                                    label {
-                                        class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                        "Memory (GiB)"
-                                    }
-                                    input {
-                                        class: "input focus-ring",
-                                        r#type: "number",
-                                        min: "1",
-                                        step: "0.5",
-                                        value: "{max_memory_mb}",
-                                        oninput: move |e| max_memory_mb.set(e.value()),
-                                        disabled: is_submitting(),
-                                    }
-                                }
+
+                                // Builder public key
                                 div {
                                     class: "field",
-                                    label { "Max concurrent slots" }
-                                    input {
-                                        class: "input focus-ring",
-                                        r#type: "number",
-                                        min: "1",
-                                        value: "{max_concurrent_jobs}",
-                                        oninput: move |e| max_concurrent_jobs.set(e.value()),
-                                        disabled: is_submitting(),
+                                    label { "Builder public key" }
+                                    textarea {
+                                        class: "input focus-ring mono",
+                                        rows: "3",
+                                        value: "{rotated_public_key}",
+                                        oninput: move |e| rotated_public_key.set(e.value()),
+                                        style: "font-size:11px; resize:vertical; padding:10px;",
                                     }
-                                    div { class: "help", "How many builds this worker may run in parallel." }
-                                }
-                            }
-
-                            // Environment assignments
-                            div {
-                                class: "field",
-                                label { "Environments served" }
-
-                                {
-                                    let env_data = environments.read();
-                                    match &*env_data {
-                                        Some(Ok(env_list)) => rsx! {
-                                            if env_list.is_empty() {
-                                                p {
-                                                    class: "text-sm {theme::text::SECONDARY}",
-                                                    "No environments available"
+                                    div { class: "help", "The public half of the keypair the builder generated on first start. Crystal Forge uses it to authenticate the builder and verify build signatures \u{2014} the private key never leaves the builder host." }
+                                    div { style: "margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;",
+                                        button {
+                                            class: "btn btn-primary focus-ring",
+                                            onclick: handle_generate_keypair,
+                                            disabled: is_submitting(),
+                                            "Generate Keypair"
+                                        }
+                                        button {
+                                            class: "btn btn-ghost focus-ring",
+                                            onclick: move |e| {
+                                                spawn(handle_update_public_key(e));
+                                            },
+                                            disabled: is_submitting() || rotated_public_key().trim().is_empty(),
+                                            "Apply Public Key Update"
+                                        }
+                                    }
+                                    if !rotated_private_key().is_empty() {
+                                        div { style: "margin-top:10px;",
+                                            div { style: "display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;",
+                                                span { class: "help", style: "margin:0;", "Generated private key (save securely)" }
+                                                button {
+                                                    class: "btn btn-ghost focus-ring",
+                                                    onclick: handle_toggle_private_key,
+                                                    style: "padding:2px 8px; font-size:11px;",
+                                                    if show_rotated_private_key() { "Hide" } else { "Show" }
+                                                }
+                                            }
+                                            if show_rotated_private_key() {
+                                                textarea {
+                                                    class: "input focus-ring mono",
+                                                    rows: "3",
+                                                    readonly: true,
+                                                    value: "{rotated_private_key()}",
+                                                    style: "font-size:11px; resize:vertical; padding:10px;"
                                                 }
                                             } else {
                                                 div {
-                                                    style: "display:flex; flex-wrap:wrap; gap:6px;",
-                                                    for env in env_list {
-                                                        {
-                                                            let env_id = env.id;
-                                                            let env_color = if env.color_hex.trim().is_empty() {
-                                                                "#6b7280".to_string()
-                                                            } else {
-                                                                env.color_hex.clone()
-                                                            };
-                                                            let is_selected = selected_environments().contains(&env_id);
-                                                            let border = if is_selected {
-                                                                format!("1px solid {}", env_color)
-                                                            } else {
-                                                                "1px solid var(--cf-card-border)".to_string()
-                                                            };
-                                                            let background = if is_selected {
-                                                                format!(
-                                                                    "color-mix(in oklab, {} 14%, var(--cf-card-bg))",
-                                                                    env_color
-                                                                )
-                                                            } else {
-                                                                "transparent".to_string()
-                                                            };
-                                                            let color = if is_selected {
-                                                                env_color.clone()
-                                                            } else {
-                                                                "var(--cf-text-secondary)".to_string()
-                                                            };
-                                                            rsx! {
-                                                                button {
-                                                                    key: "{env.id}",
-                                                                    class: "focus-ring",
-                                                                    r#type: "button",
-                                                                    onclick: move |_| toggle_environment(env_id),
-                                                                    disabled: is_submitting(),
-                                                                    style: "padding:4px 10px; border-radius:99px; font-size:11px; border:{border}; background:{background}; color:{color}; cursor:pointer; display:inline-flex; align-items:center; gap:6px; font-family:inherit;",
-                                                                    span {
-                                                                        style: "width:6px; height:6px; border-radius:50%; background:{env_color};"
-                                                                    }
-                                                                    "{env.name}"
-                                                                }
-                                                            }
-                                                        }
-                                                    }
+                                                    class: "input mono",
+                                                    style: "font-size:11px; padding:10px; color:var(--cf-text-muted);",
+                                                    "••••••••••••••••••••••••••••••••"
                                                 }
                                             }
-                                            div {
-                                                class: "help",
-                                                "Builds for systems in any of these environments will be routed to this worker."
+                                        }
+                                    }
+                                    // Fingerprint (below key textarea)
+                                    if !builder_data.public_key_fingerprint.is_empty() {
+                                        div {
+                                            style: "margin-top:8px; padding:10px 12px; border:1px solid var(--cf-card-border); border-radius:10px; background:rgba(255,255,255,0.025); display:flex; align-items:center; gap:8px;",
+                                            Icon { name: IconName::Key, size: 12 }
+                                            span {
+                                                style: "font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:var(--cf-text-muted);",
+                                                "Fingerprint"
                                             }
-                                        },
-                                        Some(Err(e)) => rsx! {
-                                            p {
-                                                class: "text-sm text-red-400",
-                                                "Failed to load environments: {e}"
+                                            code {
+                                                class: "mono",
+                                                style: "font-size:11px; color:#10b981; overflow-wrap:anywhere;",
+                                                "{builder_data.public_key_fingerprint}"
                                             }
-                                        },
-                                        None => rsx! {
-                                            p {
-                                                class: "text-sm {theme::text::SECONDARY}",
-                                                "Loading environments..."
-                                            }
-                                        },
+                                        }
                                     }
                                 }
-                            }
 
-                            div {
-                                class: "field",
-                                label { "Builder public key" }
-                                if !builder_data.public_key_fingerprint.is_empty() {
-                                    div {
-                                        style: "margin-bottom:8px; padding:10px 12px; border:1px solid var(--cf-card-border); border-radius:10px; background:rgba(255,255,255,0.025); display:flex; align-items:center; justify-content:space-between; gap:12px;",
-                                        span {
-                                            class: "help",
-                                            style: "margin:0;",
-                                            "Fingerprint"
-                                        }
-                                        code {
-                                            class: "mono",
-                                            style: "font-size:11px; color:var(--cf-text-primary); overflow-wrap:anywhere; text-align:right;",
-                                            "{builder_data.public_key_fingerprint}"
-                                        }
-                                    }
-                                }
-                                textarea {
-                                    class: "input focus-ring mono",
-                                    rows: "3",
-                                    value: "{rotated_public_key}",
-                                    oninput: move |e| rotated_public_key.set(e.value()),
-                                    style: "font-size:11px; resize:vertical; padding:10px;",
-                                }
-                                div { class: "help", "Crystal Forge uses this key to verify build result signatures." }
-                                div { style: "margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;",
-                                    button {
-                                        class: "btn btn-primary focus-ring",
-                                        onclick: handle_generate_keypair,
-                                        disabled: is_submitting(),
-                                        "Generate Keypair"
-                                    }
+                                // Danger zone
+                                div { style: "padding-top:14px; border-top:1px solid var(--cf-divider);",
+                                    div { style: "font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:var(--cf-text-muted); margin-bottom:8px;", "Danger zone" }
                                     button {
                                         class: "btn btn-ghost focus-ring",
-                                        onclick: move |e| {
-                                            spawn(handle_update_public_key(e));
-                                        },
-                                        disabled: is_submitting() || rotated_public_key().trim().is_empty(),
-                                        "Apply Public Key Update"
-                                    }
-                                }
-                                if !rotated_private_key().is_empty() {
-                                    div { style: "margin-top:10px;",
-                                        div { style: "display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;",
-                                            span { class: "help", style: "margin:0;", "Generated private key (save securely)" }
-                                            button {
-                                                class: "btn btn-ghost focus-ring",
-                                                onclick: handle_toggle_private_key,
-                                                style: "padding:2px 8px; font-size:11px;",
-                                                if show_rotated_private_key() { "Hide" } else { "Show" }
-                                            }
-                                        }
-                                        if show_rotated_private_key() {
-                                            textarea {
-                                                class: "input focus-ring mono",
-                                                rows: "3",
-                                                readonly: true,
-                                                value: "{rotated_private_key()}",
-                                                style: "font-size:11px; resize:vertical; padding:10px;"
-                                            }
-                                        } else {
-                                            div {
-                                                class: "input mono",
-                                                style: "font-size:11px; padding:10px; color:var(--cf-text-muted);",
-                                                "••••••••••••••••••••••••••••••••"
-                                            }
-                                        }
+                                        onclick: handle_delete,
+                                        disabled: is_submitting(),
+                                        style: "color:#f87171; border-color: rgba(248,113,113,0.3);",
+                                        Icon { name: IconName::X, size: 12 }
+                                        " Remove builder"
                                     }
                                 }
                             }
-
-                            div { style: "margin-top:10px; padding-top:14px; border-top:1px solid var(--cf-divider);",
-                                div { style: "font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:var(--cf-text-muted); margin-bottom:8px;", "Danger zone" }
-                                button {
-                                    class: "btn btn-ghost focus-ring",
-                                    onclick: handle_delete,
-                                    disabled: is_submitting(),
-                                    style: "color:#f87171; border-color: rgba(248,113,113,0.3);",
-                                    Icon { name: IconName::X, size: 12 }
-                                    " Remove builder"
-                                }
-                            }
-                        }
-
                         }
 
                         // Footer buttons
