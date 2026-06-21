@@ -251,7 +251,7 @@ pub async fn update_builder(
         .await
         .context("Failed to update builder")?;
 
-    Ok(builder)
+    Ok(builder.with_public_key_fingerprint())
 }
 
 /// Update builder public key
@@ -269,17 +269,7 @@ pub async fn update_builder_public_key(
         UPDATE builders
         SET public_key = $2, updated_at = now()
         WHERE id = $1
-        RETURNING
-            id,
-            name,
-            public_key,
-            status,
-            max_cpu_cores,
-            max_memory_mb,
-            max_concurrent_jobs,
-            last_heartbeat_at,
-            created_at,
-            updated_at
+        RETURNING *
         "#,
     )
     .bind(builder_id)
@@ -288,7 +278,7 @@ pub async fn update_builder_public_key(
     .await
     .context("Failed to update builder public key")?;
 
-    Ok(builder)
+    Ok(builder.with_public_key_fingerprint())
 }
 
 /// Deactivate a builder (soft delete)
@@ -298,17 +288,7 @@ pub async fn deactivate_builder(pool: &PgPool, builder_id: &Uuid) -> Result<Buil
         UPDATE builders
         SET status = 'inactive', updated_at = now()
         WHERE id = $1
-        RETURNING
-            id,
-            name,
-            public_key,
-            status,
-            max_cpu_cores,
-            max_memory_mb,
-            max_concurrent_jobs,
-            last_heartbeat_at,
-            created_at,
-            updated_at
+        RETURNING *
         "#,
     )
     .bind(builder_id)
@@ -316,7 +296,7 @@ pub async fn deactivate_builder(pool: &PgPool, builder_id: &Uuid) -> Result<Buil
     .await
     .context("Failed to deactivate builder")?;
 
-    Ok(builder)
+    Ok(builder.with_public_key_fingerprint())
 }
 
 /// Permanently delete a builder (hard delete)
@@ -2081,6 +2061,60 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("Public key cannot be empty")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_update_public_key_response_contains_fingerprint_of_new_key() {
+        let pool = test_pool().await;
+
+        // Create builder with an initial keypair
+        let initial_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let initial_pub_b64 = base64::engine::general_purpose::STANDARD
+            .encode(initial_key.verifying_key().to_bytes());
+
+        let request = CreateBuilderRequest {
+            name: "fingerprint-rotation-test".to_string(),
+            host: Some("fingerprint-rotation.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
+            public_key: Some(initial_pub_b64),
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: None,
+            enabled: Some(true),
+            environment_ids: vec![],
+        };
+
+        let (builder, _) = create_builder(&pool, &request)
+            .await
+            .expect("Failed to create builder");
+        assert!(!builder.public_key_fingerprint.is_empty(), "create fingerprint must be set");
+
+        // Rotate to a new keypair
+        let new_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let new_pub_b64 =
+            base64::engine::general_purpose::STANDARD.encode(new_key.verifying_key().to_bytes());
+
+        let updated = update_builder_public_key(&pool, &builder.id, &new_pub_b64, &builder.name)
+            .await
+            .expect("Failed to rotate public key");
+
+        assert!(!updated.public_key_fingerprint.is_empty(), "rotation response fingerprint must be set");
+        assert_ne!(
+            builder.public_key_fingerprint, updated.public_key_fingerprint,
+            "fingerprint must change after key rotation"
+        );
+
+        // Verify GET returns the same fingerprint as the mutation response
+        let fetched = get_builder_by_id(&pool, &builder.id)
+            .await
+            .expect("Failed to fetch builder")
+            .expect("Builder not found");
+
+        assert_eq!(
+            fetched.public_key_fingerprint, updated.public_key_fingerprint,
+            "GET fingerprint must match key-rotation response fingerprint"
         );
     }
 
