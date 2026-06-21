@@ -106,18 +106,20 @@ Medium — primarily UI component work building on the established TASK-319 comp
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 #1 Bundle catalog sidebar lists compliance bundles with selection state matching CrystalForgelatest reference on desktop
-- [ ] #2 #2 Bundle header displays name, description, metadata, and overall compliance score per the reference
-- [ ] #3 #3 Score/stat strip renders pass/warn/fail/waiver counts, compliant hosts, and overall score percentage
-- [ ] #4 #4 System-level per-bundle view renders applicable systems with per-system control rollup, filterable by all/fail/warn/clean
-- [ ] #5 #5 Drill-in system control detail shows individual control status, mapped policies, evidence actions, and waiver state
-- [ ] #6 #6 Export evidence button is wired to compliance export endpoints (TASK-318) or marked as placeholder if endpoint unavailable
-- [ ] #7 #7 New bundle creation flow matches the reference interaction
-- [ ] #8 #8 Loading, empty, error, and populated states are styled and behaved per the reference with no production-path mock fallback (except authorized temporary placeholders with follow-up tracking)
-- [ ] #9 #9 All primary displayed values are sourced from authoritative backend APIs in production paths
-- [ ] #10 #10 checks/web-ui captures screenshot evidence and behavior assertions for the full Compliance surface (bundle catalog, score strip, system table, drill-in detail, export modal, states)
-- [ ] #11 #11 A human reviewer can compare the implemented Compliance surface against the CrystalForgelatest reference and find no remaining material parity gaps
+- [ ] #1 Bundle catalog sidebar lists compliance bundles with selection state matching CrystalForgelatest reference on desktop
+- [ ] #2 Bundle header displays name, description, metadata, and overall compliance score per the reference
+- [ ] #3 Score/stat strip renders pass/warn/fail/waiver counts, compliant hosts, and overall score percentage
+- [ ] #4 System-level per-bundle view renders applicable systems with per-system control rollup, filterable by all/fail/warn/clean
+- [ ] #5 Drill-in system control detail shows individual control status, mapped policies, evidence actions, and waiver state
+- [ ] #6 Export evidence button is wired to compliance export endpoints (TASK-318) or marked as placeholder if endpoint unavailable
+- [ ] #7 New bundle creation flow matches the reference interaction
+- [ ] #8 Loading, empty, error, and populated states are styled and behaved per the reference with no production-path mock fallback (except authorized temporary placeholders with follow-up tracking)
+- [ ] #9 All primary displayed values are sourced from authoritative backend APIs in production paths
+- [ ] #10 checks/web-ui captures screenshot evidence and behavior assertions for the full Compliance surface (bundle catalog, score strip, system table, drill-in detail, export modal, states)
+- [ ] #11 A human reviewer can compare the implemented Compliance surface against the CrystalForgelatest reference and find no remaining material parity gaps
 <!-- AC:END -->
+
+
 
 
 
