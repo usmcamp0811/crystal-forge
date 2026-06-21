@@ -3,10 +3,10 @@ id: TASK-334
 title: >-
   Build full Compliance view (frontend + backend) faithful to CrystalForgelatest
   design
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-21 02:09'
+updated_date: '2026-06-21 02:18'
 labels:
   - design-parity
   - compliance
@@ -147,4 +147,6 @@ Medium-High — large vertical slice spanning new backend endpoints, possible sc
 
 <!-- SECTION:NOTES:BEGIN -->
 Refined (2026-06-21) into a single self-contained vertical slice covering BOTH the Compliance frontend and the backend endpoints it needs. Absorbs the compliance-relevant intent of TASK-332 (shared backend API contracts). No longer blocked on the TASK-320 compliance evaluator epic — rollups/evidence are derived from existing system/policy/eval/CVE data, with deeper evaluator/export work tracked as follow-ups.
+
+LOCK: opencode-agent on reckless in ~/code/crystal-forge/TASK-334-compliance-view
 <!-- SECTION:NOTES:END -->
