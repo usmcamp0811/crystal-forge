@@ -4,9 +4,10 @@ title: >-
   Build full Compliance view (frontend + backend) faithful to CrystalForgelatest
   design
 status: In Progress
-assignee: []
+assignee:
+  - opencode-agent
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-21 02:18'
+updated_date: '2026-06-21 03:21'
 labels:
   - design-parity
   - compliance
@@ -25,8 +26,22 @@ documentation:
   - design/doc-10 - CrystalForgelatest-parity-execution-plan.md
   - design/doc-11 - CrystalForgelatest-design-source-index.md
 modified_files:
+  - packages/default/migrations/0143_create_compliance_bundles.sql
+  - packages/default/src/api/models.rs
+  - packages/default/src/bin/server.rs
+  - packages/default/src/handlers/api/compliance.rs
+  - packages/default/src/handlers/api/mod.rs
+  - packages/default/src/queries/compliance.rs
+  - packages/default/src/queries/mod.rs
+  - packages/web-ui/assets/app.css
+  - packages/web-ui/src/api/client.rs
+  - packages/web-ui/src/api/models.rs
+  - packages/web-ui/src/components/compliance/mod.rs
+  - packages/web-ui/src/components/layout/sidebar.rs
+  - packages/web-ui/src/components/mod.rs
+  - packages/web-ui/src/routes.rs
   - packages/web-ui/src/views/compliance.rs
-  - checks/web-ui
+  - packages/web-ui/src/views/mod.rs
 priority: high
 ordinal: 1660
 ---
@@ -146,7 +161,5 @@ Medium-High — large vertical slice spanning new backend endpoints, possible sc
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Refined (2026-06-21) into a single self-contained vertical slice covering BOTH the Compliance frontend and the backend endpoints it needs. Absorbs the compliance-relevant intent of TASK-332 (shared backend API contracts). No longer blocked on the TASK-320 compliance evaluator epic — rollups/evidence are derived from existing system/policy/eval/CVE data, with deeper evaluator/export work tracked as follow-ups.
-
-LOCK: opencode-agent on reckless in ~/code/crystal-forge/TASK-334-compliance-view
+Progress: added compliance bundle persistence migration, server DTOs, query/service logic, authenticated API handlers/routes, web-ui client DTOs/methods, /compliance route/sidebar link, initial compliance components/view, and scoped CSS. Verified raw Nix package builds for server and web-ui with `nix build .#packages.x86_64-linux.server --no-link` and `nix build .#packages.x86_64-linux.web-ui --no-link` (both exited with no output). `nix develop -c cargo check --manifest-path packages/default/Cargo.toml --all-targets` timed out at 300s. Targeted default crate tests currently fail before running because SQLx compile-time macros cannot connect to a database (`Connection refused`); db-only/sqlx prepare still needed.
 <!-- SECTION:NOTES:END -->
