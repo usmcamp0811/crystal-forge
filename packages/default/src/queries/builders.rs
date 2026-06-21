@@ -17,9 +17,7 @@ use crate::models::public_key::PublicKey;
 /// Advisory lock used to serialize all queue priority_weight mutations.
 const BUILD_QUEUE_PRIORITY_LOCK_ID: i64 = 0x4346_4251; // 'CFBQ'
 
-async fn lock_build_queue_priority(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<()> {
+async fn lock_build_queue_priority(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(BUILD_QUEUE_PRIORITY_LOCK_ID)
         .execute(&mut **tx)
@@ -103,7 +101,7 @@ pub async fn create_builder(
         }
     }
 
-    Ok((builder, private_key_option))
+    Ok((builder.with_public_key_fingerprint(), private_key_option))
 }
 
 /// Get a builder by ID
@@ -114,7 +112,7 @@ pub async fn get_builder_by_id(pool: &PgPool, builder_id: &Uuid) -> Result<Optio
         .await
         .context("Failed to fetch builder by ID")?;
 
-    Ok(builder)
+    Ok(builder.map(Builder::with_public_key_fingerprint))
 }
 
 /// Get a builder with its environment assignments
@@ -1027,7 +1025,10 @@ pub async fn move_build_job_down(pool: &PgPool, job_id: &Uuid) -> Result<()> {
 }
 
 async fn reorder_queued_build_job(pool: &PgPool, job_id: &Uuid, move_up: bool) -> Result<()> {
-    let mut tx = pool.begin().await.context("Failed to open queue reorder transaction")?;
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to open queue reorder transaction")?;
 
     lock_build_queue_priority(&mut tx).await?;
 
@@ -1078,7 +1079,9 @@ async fn reorder_queued_build_job(pool: &PgPool, job_id: &Uuid, move_up: bool) -
         .context("Failed updating reordered build priorities")?;
     }
 
-    tx.commit().await.context("Failed to commit queue reorder")?;
+    tx.commit()
+        .await
+        .context("Failed to commit queue reorder")?;
     Ok(())
 }
 

@@ -62,6 +62,9 @@ pub struct Builder {
     pub host: Option<String>,
     pub arch: String,
     pub public_key: PublicKey,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub public_key_fingerprint: String,
     pub status: BuilderStatus,
     pub max_cpu_cores: Option<i32>,
     pub max_memory_mb: Option<i32>,
@@ -90,6 +93,13 @@ pub struct BuilderSummary {
     pub active_jobs: i32,
     #[sqlx(default)]
     pub queued_jobs: i32,
+}
+
+impl Builder {
+    pub fn with_public_key_fingerprint(mut self) -> Self {
+        self.public_key_fingerprint = self.public_key.fingerprint();
+        self
+    }
 }
 
 /// Builder with environment assignments
