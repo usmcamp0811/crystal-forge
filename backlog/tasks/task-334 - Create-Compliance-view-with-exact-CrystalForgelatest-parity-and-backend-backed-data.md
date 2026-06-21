@@ -143,10 +143,8 @@ Medium-High — large vertical slice spanning new backend endpoints, possible sc
 - [ ] #13 A human reviewer can compare the implemented /compliance surface against ComplianceView.jsx and find no remaining material parity gaps for in-scope items
 <!-- AC:END -->
 
-
-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Final compliance surface polish task; do not start until compliance evaluator outputs and baseline backend-backed compliance flow exist.
+Refined (2026-06-21) into a single self-contained vertical slice covering BOTH the Compliance frontend and the backend endpoints it needs. Absorbs the compliance-relevant intent of TASK-332 (shared backend API contracts). No longer blocked on the TASK-320 compliance evaluator epic — rollups/evidence are derived from existing system/policy/eval/CVE data, with deeper evaluator/export work tracked as follow-ups.
 <!-- SECTION:NOTES:END -->
