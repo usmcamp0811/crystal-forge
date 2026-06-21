@@ -1,11 +1,10 @@
 ---
 id: TASK-356
-title: >-
-  Wire System Detail Compliance evidence action to real per-control evidence
-  drawer
+title: Wire System Detail Compliance tab to real backend data and evidence drawer
 status: Backlog
 assignee: []
 created_date: '2026-06-13 20:28'
+updated_date: '2026-06-21 22:18'
 labels:
   - compliance
   - system-detail
@@ -13,15 +12,17 @@ labels:
   - api-integration
 milestone: 'm-19: Design Parity Existing Surfaces'
 dependencies:
-  - TASK-355
+  - TASK-334
 references:
   - TASK-353
   - TASK-355
   - packages/web-ui/src/views/system_detail.rs
+  - packages/web-ui/src/views/compliance.rs
+  - packages/web-ui/src/components/compliance/mod.rs
 documentation:
   - >-
     /home/mcamp/code/crystal-forge/CrystalForgelatest/components/SystemDetail.jsx
-priority: medium
+priority: high
 ordinal: 299000
 ---
 
@@ -30,23 +31,38 @@ ordinal: 299000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem
 
-TASK-353 renders a System Detail Compliance tab using maintainer-authorized temporary mock data. The design reference includes a `View evidence` action that opens a per-control evidence drawer. In TASK-353, the `View evidence` button is intentionally a placeholder with a title noting it is temporary.
+The System Detail Compliance tab (`ComplianceTab` in `system_detail.rs`) currently renders entirely from `mocked_compliance_bundles()` — hardcoded data authorized as a temporary placeholder in TASK-353. The evidence drawer (`ComplianceEvidenceDrawer`) likewise uses four hardcoded sample controls.
 
-## Desired Outcome
+TASK-334 has now delivered real compliance bundle APIs (`GET /api/v1/compliance/bundles`, `/systems`, `/evidence`) and a full evidence data model. The System Detail Compliance tab should use these APIs rather than mock data.
 
-Implement real evidence navigation/drawer behavior for System Detail Compliance bundles. Opening a bundle should show per-control evidence for the selected system, including collected proof such as config output, systemd unit state, audit results, and waivers when available.
+This task absorbs TASK-355 (replace mock rollups) and TASK-356 (wire real evidence drawer) since they are tightly coupled and the blocker (TASK-334 backend) is now resolved.
 
-## Notes
+## Goal
 
-- Follow-up from TASK-353.
-- Related to TASK-355, which replaces mock Compliance bundle rollups with real backend data.
-- Keep the current design-parity layout and replace only the placeholder behavior/data path.
-<!-- SECTION:DESCRIPTION:END -->
+Replace every mock/placeholder in `ComplianceTab` and `ComplianceEvidenceDrawer` with real API-backed data, reusing the components already built for the Compliance view (`EvidenceDrawer`, `ControlEvidenceCard`) so there is no duplicated evidence-rendering logic.
+
+## Non-Goals
+
+- Redesigning the system detail page layout or other tabs
+- Adding new compliance bundle management from this tab (create/edit/delete belongs on the Compliance view)
+- Changing the Compliance view itself
+
+## Architectural Constraints
+
+- `ComplianceTab` lives in `packages/web-ui/src/views/system_detail.rs`
+- Reuse `EvidenceDrawer` and `ControlEvidenceCard` from `packages/web-ui/src/components/compliance/mod.rs` — do not duplicate them
+- API client calls already exist: `fetch_compliance_bundles`, `fetch_compliance_bundle_systems`, `fetch_compliance_system_evidence`
+- The "View bundle" button in the drawer header should deep-link to `/compliance` with the bundle pre-selected (pass via router state or query param); if the router cannot carry state today, navigate to `/compliance` and let the user select the bundle — do not block this task on that
+- Remove `mocked_compliance_bundles`, `ComplianceMockBundle`, and `ComplianceEvidenceDrawer` (the placeholder) once replaced
+- No new migrations or backend changes are required — TASK-334 delivered the full backend
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 View evidence opens real evidence UI for the selected bundle and system
-- [ ] #2 Evidence content is API-backed and no mock evidence remains in production render path
-- [ ] #3 Drawer/action handles loading, empty, and error states
-- [ ] #4 web-ui check covers opening evidence from System Detail Compliance
+- [ ] #1 ComplianceTab fetches applicable compliance bundles for the current system via fetch_compliance_bundle_systems, and renders real bundle name, framework, version, owner, control counts, and score
+- [ ] #2 Pass/warn/fail/waiver counts and score bar are driven by ComplianceSystemRollup from the API — no mock values
+- [ ] #3 "View evidence" opens the real EvidenceDrawer component (components/compliance/mod.rs) loaded with fetch_compliance_system_evidence for the selected bundle + system
+- [ ] #4 The evidence drawer "View bundle" button navigates to /compliance, deep-linking to the bundle if feasible via router query param
+- [ ] #5 Loading, empty (no applicable bundles), and error states are handled and rendered
+- [ ] #6 The sd-callout-info preview banner, mocked_compliance_bundles, ComplianceMockBundle, and the placeholder ComplianceEvidenceDrawer are fully removed from the production render path
+- [ ] #7 nix build .#packages.x86_64-linux.web-ui passes with no new warnings introduced by this task
 <!-- AC:END -->
