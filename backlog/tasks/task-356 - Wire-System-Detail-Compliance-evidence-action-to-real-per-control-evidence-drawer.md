@@ -72,5 +72,5 @@ Replace every mock/placeholder in `ComplianceTab` and `ComplianceEvidenceDrawer`
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: opencode-agent on $(hostname) in ~/code/crystal-forge/TASK-356-wire-system-detail-compliance
+LOCK: opencode-agent on reckless in ~/code/crystal-forge/TASK-356-wire-system-detail-compliance
 <!-- SECTION:NOTES:END -->
