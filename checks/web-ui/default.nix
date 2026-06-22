@@ -402,8 +402,8 @@ in pkgs.testers.runNixOSTest {
     # bundle — the file a user would download is what gets validated.
     machine.succeed(
         f"${pkgs.nodejs}/bin/node /tmp/web-ui-tests/oscal-export-test.js"
-        f" http://127.0.0.1:{toString CF_TEST_SERVER_PORT}"
-        f" /tmp/screenshots {pkgs.crystal-forge.oscal-1-1-2-schemas}"
+        f" http://127.0.0.1:${toString CF_TEST_SERVER_PORT}"
+        f" /tmp/screenshots ${pkgs.crystal-forge.oscal-1-1-2-schemas}"
         f" > /tmp/web-ui-tests/oscal-export.log 2>&1"
     )
 
