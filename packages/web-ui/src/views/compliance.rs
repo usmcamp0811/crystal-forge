@@ -16,8 +16,7 @@ use crate::components::compliance::{
 use crate::components::icon::{Icon, IconName};
 use crate::components::loading::DashboardLoadingSpinner;
 use crate::export::{
-    ExportPayload, build_cf_json, build_csv, build_oscal, build_sarif,
-    open_blank_print_tab, write_print_html,
+    ExportPayload, build_cf_json, build_csv, build_oscal, build_sarif, download_print_html,
     trigger_download,
 };
 
@@ -465,7 +464,7 @@ fn ExportModal(props: ExportModalProps) -> Element {
         ("oscal", "OSCAL 1.1.2 JSON", "oscal.json", "NIST OSCAL System Security Plan + Assessment Results for ATO packages."),
         ("json",  "Crystal Forge JSON", "cf-evidence.json", "Native CF schema — best for re-ingest or custom dashboards."),
         ("csv",   "CSV summary",        "summary.csv", "Flat per-(host, control) table. Spreadsheet-friendly."),
-        ("pdf",   "PDF report",         "pdf",        "Cover page + per-host summary + evidence index. For auditors."),
+        ("pdf",   "Print report (HTML)", "html",       "Styled HTML report — open in browser and Ctrl-P to save as PDF."),
         ("sarif", "SARIF 2.1.0",        "sarif",      "Static analysis exchange format — works with most SAST/posture tools."),
     ];
 
@@ -903,22 +902,6 @@ fn ExportModal(props: ExportModalProps) -> Element {
                                     .unwrap_or("json");
                                 let fname = format!("cf-{bundle_part}-{env_part}-{today_slice}.{ext}");
 
-                                // PDF: open the blank tab NOW while we still have
-                                // the user-gesture context so the browser allows
-                                // the popup.  All other formats use trigger_download
-                                // which doesn't need a popup.
-                                let pdf_tab: Option<web_sys::Window> = if fmt == "pdf" {
-                                    match open_blank_print_tab() {
-                                        Ok(win) => Some(win),
-                                        Err(e) => {
-                                            download_error.set(Some(e));
-                                            return;
-                                        }
-                                    }
-                                } else {
-                                    None
-                                };
-
                                 downloading.set(true);
                                 download_error.set(None);
                                 spawn(async move {
@@ -973,10 +956,6 @@ fn ExportModal(props: ExportModalProps) -> Element {
                                     }
 
                                     if !evidence_failures.is_empty() {
-                                        // Close the pre-opened PDF tab if evidence fetch failed
-                                        if let Some(ref win) = pdf_tab {
-                                            win.close().ok();
-                                        }
                                         download_error.set(Some(format!(
                                             "Could not fetch evidence for {}; export aborted. Failed hosts: {}",
                                             evidence_failures.len(),
@@ -1015,14 +994,7 @@ fn ExportModal(props: ExportModalProps) -> Element {
                                             let content = build_oscal(&payload);
                                             trigger_download(&fname, "application/json", &content)
                                         }
-                                        "pdf" => {
-                                            // Window was pre-opened synchronously; write HTML
-                                            // into it now that we have the evidence data.
-                                            match pdf_tab.as_ref() {
-                                                Some(win) => write_print_html(win, &payload),
-                                                None => Err("no PDF tab handle".to_string()),
-                                            }
-                                        }
+                                        "pdf" => download_print_html(&fname, &payload),
                                         _ => Err(format!("Unknown format: {fmt}")),
                                     };
 

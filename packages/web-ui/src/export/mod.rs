@@ -760,53 +760,12 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
 /// Opens the HTML report as a Blob URL in a new tab and prints it.
 /// Avoids `document.write` (requires feature-gated web-sys APIs) by instead
 /// constructing a Blob URL and opening that directly.
-/// Open a blank tab synchronously **inside a user-gesture handler** so the
-/// browser grants it popup permission.  Returns the new window handle to be
-/// passed into `write_print_html` later (after async evidence fetches).
-pub fn open_blank_print_tab() -> Result<web_sys::Window, String> {
-    let window = web_sys::window().ok_or("no window")?;
-    window
-        .open_with_url_and_target_and_features("about:blank", "_blank", "")
-        .map_err(|_| "window.open failed")?
-        .ok_or(
-            "PDF tab blocked — please allow popups for this site, then try again".to_string(),
-        )
-}
-
-/// Write the print HTML into an already-opened window (obtained from
-/// `open_blank_print_tab`) and trigger the print dialog.  Safe to call from
-/// an async context because the window handle was obtained synchronously.
-pub fn write_print_html(win: &web_sys::Window, p: &ExportPayload<'_>) -> Result<(), String> {
-    use js_sys::Array;
-    use web_sys::{BlobPropertyBag, Url};
-
+/// Build and download a print-ready HTML report as a `.html` file.
+/// The user can open it in any browser and use Ctrl-P / "Save as PDF".
+/// This is a plain file download — no popups required.
+pub fn download_print_html(filename: &str, p: &ExportPayload<'_>) -> Result<(), String> {
     let html = build_print_html(p);
-
-    // Build a blob URL for the HTML content.
-    let parts = Array::new();
-    parts.push(&wasm_bindgen::JsValue::from_str(&html));
-    let mut opts = BlobPropertyBag::new();
-    opts.type_("text/html");
-    let blob = web_sys::Blob::new_with_str_sequence_and_options(&parts, &opts)
-        .map_err(|_| "blob creation failed")?;
-    let url = Url::create_object_url_with_blob(&blob).map_err(|_| "createObjectURL failed")?;
-
-    // Navigate the pre-opened window to the blob URL.
-    // This does NOT require popup permission — the window is already open.
-    // The inline onload in the HTML triggers window.print() automatically.
-    win.location()
-        .set_href(&url)
-        .map_err(|_| "location.set_href failed")?;
-
-    Ok(())
-}
-
-/// Kept for backward compatibility — opens and writes in one call.  Only safe
-/// to call directly from a synchronous user-gesture handler (no prior awaits).
-#[allow(dead_code)]
-pub fn open_print_window(p: &ExportPayload<'_>) -> Result<(), String> {
-    let win = open_blank_print_tab()?;
-    write_print_html(&win, p)
+    trigger_download(filename, "text/html", &html)
 }
 
 fn build_print_html(p: &ExportPayload<'_>) -> String {
