@@ -11,16 +11,34 @@ Decodes and validates:
 import argparse
 import base64
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft7Validator
+import jsonschema
+import regex as _regex  # For \p{L} Unicode property escapes
+from jsonschema.validators import create, extend
 
 
 def load_json(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as f:
         return json.load(f)
+
+
+def _regex_pattern(validator, patrn, instance, schema):
+    """Custom pattern validator that uses `regex` (with \\p{L} support)."""
+    if not patrn or not isinstance(instance, str):
+        return
+    if not _regex.search(patrn, instance):
+        yield jsonschema.ValidationError(f"{instance!r} does not match {patrn!r}")
+
+
+# Extend Draft-7 to use regex for pattern matching
+RegexValidator = extend(
+    jsonschema.Draft7Validator,
+    {"pattern": _regex_pattern},
+)
 
 
 def validate_document(
@@ -29,7 +47,7 @@ def validate_document(
     label: str,
 ) -> None:
     schema = load_json(schema_path)
-    validator = Draft7Validator(schema)
+    validator = RegexValidator(schema)
     errors = sorted(
         validator.iter_errors(document),
         key=lambda e: list(e.absolute_path),

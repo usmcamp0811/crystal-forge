@@ -6357,12 +6357,19 @@ const steps = [
       await page.waitForTimeout(800);
 
       await assertVisible(page.getByRole("heading", { name: /Export evidence/i }).first(), "Expected export modal heading");
+      await assertVisible(page.getByText(/Each environment typically has its own ATO package/i).first(), "Expected export modal description");
+      // Bundle multi-select section
+      await assertVisible(page.getByText(/Compliance bundles/i).first(), "Expected bundle multi-select section");
+      await assertVisible(page.getByText(/Select all/i).first(), "Expected Select all button");
+      await assertVisible(page.getByText(/Reset/i).first(), "Expected Reset button");
+      // Environment selection section
+      await assertVisible(page.getByText(/Environments/i).first(), "Expected environments section");
       await assertVisible(page.getByText(/OSCAL/i).first(), "Expected OSCAL format option");
       await assertVisible(page.getByText(/SARIF/i).first(), "Expected SARIF format option");
       await assertVisible(page.getByText(/Include waivers/i).first(), "Expected include-waivers toggle");
-      await assertVisible(page.getByText(/Include source artifacts/i).first(), "Expected include-source-artifacts toggle");
-      await assertVisible(page.getByText(/nist-800-53-nist-800-53-high-evidence\.json/i).first(), "Expected computed export filename");
-      await assertVisible(page.getByText(/TASK-318/i).first(), "Expected TASK-318 gating notice in export modal");
+      await assertVisible(page.getByText(/Include rendered NixOS module source/i).first(), "Expected include-source toggle");
+      // Filename follows new pattern: cf-<bundleId>-<envPart>-<date>.<ext>
+      await assertVisible(page.getByText(/cf-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-no-envs-/i).first(), "Expected computed export filename");
 
       await page.getByRole("button", { name: /Close/i }).first().click({ force: true });
       await page.unroute("**/api/v1/compliance/bundles*");

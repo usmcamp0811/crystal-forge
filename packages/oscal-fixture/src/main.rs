@@ -20,8 +20,14 @@ const CF_NS: &str = "https://crystal-forge.example/ns/oscal";
 const NOW_ISO: &str = "2026-06-21T12:00:00Z";
 
 /// Deterministic UUIDs derived from incrementing seeds.
+/// Produces RFC 4122-compliant UUID v4 values so they pass the NIST OSCAL schema
+/// pattern which requires version nibble = 4 and variant top bits = 10.
 const fn det_uuid(seed: u128) -> Uuid {
-    Uuid::from_u128(seed)
+    // Version nibble is at bits 76-79 (high nibble of byte 6 in big-endian layout).
+    // Variant nibble is at bits 60-63 (high nibble of byte 8).
+    let with_version = (seed & !(0xFu128 << 76)) | (4u128 << 76);
+    let with_variant = (with_version & !(0x3u128 << 62)) | (1u128 << 63);
+    Uuid::from_u128(with_variant)
 }
 
 // ─── Data types (mirrors web-ui `ExportPayload` and friends) ──────────────────
@@ -106,6 +112,7 @@ struct ComplianceEvidenceArtifact {
     body: String,
 }
 
+#[allow(dead_code)]
 struct ExportPayload<'a> {
     bundle: &'a ComplianceBundleSummary,
     totals: &'a ComplianceRollupTotals,
@@ -179,8 +186,8 @@ fn objective_id_for(policy_id: Uuid, policy_name: &str) -> String {
 // ─── OSCAL builder (mirrors web-ui build_oscal) ───────────────────────────────
 
 fn build_oscal(p: &ExportPayload<'_>) -> String {
-    let ar_uuid = Uuid::from_u128(100).to_string();
-    let ap_uuid = Uuid::from_u128(200).to_string();
+    let ar_uuid = det_uuid(100).to_string();
+    let ap_uuid = det_uuid(200).to_string();
 
     let scoped_ev = p.scoped_evidence();
 
@@ -201,17 +208,22 @@ fn build_oscal(p: &ExportPayload<'_>) -> String {
         policies
     };
 
-    let include_objectives_list: Vec<Value> = unique_policies
+    let control_ids: Vec<String> = unique_policies
         .iter()
-        .map(|ctrl| json!({"objective-id": objective_id_for(ctrl.policy_id, &ctrl.policy_name)}))
+        .map(|ctrl| slugify_for_filename(&ctrl.policy_name))
+        .collect();
+
+    let include_controls_list: Vec<Value> = control_ids
+        .iter()
+        .map(|cid| json!({"control-id": cid}))
         .collect();
 
     let objectives: Vec<Value> = unique_policies
         .iter()
-        .map(|ctrl| {
+        .enumerate()
+        .map(|(i, ctrl)| {
             json!({
-                "id": objective_id_for(ctrl.policy_id, &ctrl.policy_name),
-                "title": ctrl.policy_name,
+                "control-id": control_ids[i],
                 "description": ctrl.summary,
                 "props": [{
                     "name": "policy-uuid",
@@ -221,6 +233,15 @@ fn build_oscal(p: &ExportPayload<'_>) -> String {
                     "name": "framework-mapping",
                     "ns": CF_NS,
                     "value": ctrl.framework_mapping,
+                }],
+                "parts": [{
+                    "id": format!("p-{:03x}", det_uuid(i as u128 + 500).as_u128() % 0x1000),
+                    "name": "assessment",
+                    "props": [{
+                        "name": "method",
+                        "ns": CF_NS,
+                        "value": "automated",
+                    }]
                 }]
             })
         })
@@ -244,11 +265,11 @@ fn build_oscal(p: &ExportPayload<'_>) -> String {
 
     // Clone for embedded documents
     let objectives_ap = objectives.clone();
-    let include_objectives_ap = include_objectives_list.clone();
+    let include_controls_ap = include_controls_list.clone();
     let components_ssp = components.clone();
 
     // SSP
-    let ssp_uuid = Uuid::from_u128(300).to_string();
+    let ssp_uuid = det_uuid(300).to_string();
     let ssp_json = json!({
         "system-security-plan": {
             "uuid": ssp_uuid,
@@ -263,7 +284,7 @@ fn build_oscal(p: &ExportPayload<'_>) -> String {
                     "value": "UNCLASSIFIED"
                 }],
                 "parties": [{
-                    "uuid": Uuid::from_u128(301).to_string(),
+                    "uuid": det_uuid(301).to_string(),
                     "type": "organization",
                     "name": "Crystal Forge",
                 }]
@@ -274,13 +295,48 @@ fn build_oscal(p: &ExportPayload<'_>) -> String {
             },
             "system-characteristics": {
                 "system-name": p.bundle.name.clone(),
-                "system-id": p.bundle.id.to_string(),
+                "system-ids": [{
+                    "id": p.bundle.id.to_string(),
+                }],
                 "security-sensitivity-level": "low",
                 "description": p.bundle.description.clone().unwrap_or_default(),
+                "status": {
+                    "state": "operational",
+                },
+                "authorization-boundary": {
+                    "description": "Authorization boundary for the test bundle",
+                },
+                "system-information": {
+                    "information-types": [{
+                        "title": "Test Information Type",
+                        "description": "Confidentiality level for test bundle",
+                        "categorizations": [{
+                            "system": "http://example.com/categorization",
+                            "information-type-ids": ["test-info-type"],
+                        }],
+                    }],
+                },
             },
             "system-implementation": {
                 "components": components_ssp,
-            }
+                "users": [{
+                    "uuid": det_uuid(400).to_string(),
+                    "title": "Test User",
+                    "description": "Test user for SSP validation.",
+                }],
+            },
+            "control-implementation": {
+                "description": "Control implementation for test bundle.",
+                "implemented-requirements": [{
+                    "uuid": det_uuid(500).to_string(),
+                    "control-id": "ac-1",
+                    "props": [{
+                        "name": "implementation-status",
+                        "ns": CF_NS,
+                        "value": "implemented",
+                    }],
+                }],
+            },
         }
     });
     let ssp_base64 = BASE64.encode(
@@ -302,7 +358,7 @@ fn build_oscal(p: &ExportPayload<'_>) -> String {
                     "value": "UNCLASSIFIED"
                 }],
                 "parties": [{
-                    "uuid": Uuid::from_u128(201).to_string(),
+                    "uuid": det_uuid(201).to_string(),
                     "type": "organization",
                     "name": "Crystal Forge",
                 }]
@@ -311,14 +367,12 @@ fn build_oscal(p: &ExportPayload<'_>) -> String {
                 "href": format!("#{}", ssp_uuid),
             },
             "local-definitions": {
-                "objectives-and-methods": {
-                    "objectives": objectives_ap,
-                }
+                "objectives-and-methods": objectives_ap,
             },
             "reviewed-controls": {
-                "control-objective-selections": [{
-                    "description": format!("Control objectives assessed for bundle '{}'", p.bundle.name),
-                    "include-objectives": include_objectives_ap,
+                "control-selections": [{
+                    "description": format!("Controls assessed for bundle '{}'", p.bundle.name),
+                    "include-controls": include_controls_ap,
                 }]
             }
         }
@@ -343,8 +397,8 @@ fn build_oscal(p: &ExportPayload<'_>) -> String {
             let finding_seed: u128 = 2000
                 + (ev.system_id.as_u128() % 100) * 10
                 + (ctrl.policy_id.as_u128() % 10);
-            let obs_uuid = Uuid::from_u128(obs_seed).to_string();
-            let finding_uuid = Uuid::from_u128(finding_seed).to_string();
+            let obs_uuid = det_uuid(obs_seed).to_string();
+            let finding_uuid = det_uuid(finding_seed).to_string();
 
             let (oscal_state, oscal_reason) = match ctrl.status {
                 ComplianceControlStatus::Pass => ("satisfied", "pass"),
@@ -353,13 +407,13 @@ fn build_oscal(p: &ExportPayload<'_>) -> String {
                 ComplianceControlStatus::Waiver => ("not-satisfied", "accept-risk"),
             };
 
-            let relevant_evidence: Vec<Value> = if p.include_source {
-                ctrl.evidence_items.iter().map(|item| {
-                    json!({"description": format!("{}: {}", item.label, item.body)})
-                }).collect()
-            } else {
-                vec![]
-            };
+            // relevant-evidence must be non-empty per OSCAL schema
+            let mut relevant_evidence: Vec<Value> = ctrl.evidence_items.iter().map(|item| {
+                json!({"description": format!("{}: {}", item.label, item.body)})
+            }).collect();
+            if relevant_evidence.is_empty() {
+                relevant_evidence.push(json!({"description": ctrl.summary}));
+            }
 
             let is_disabled = ctrl.evidence_items
                 .iter()
@@ -443,7 +497,7 @@ fn build_oscal(p: &ExportPayload<'_>) -> String {
                     "value": "UNCLASSIFIED"
                 }],
                 "parties": [{
-                    "uuid": Uuid::from_u128(101).to_string(),
+                    "uuid": det_uuid(101).to_string(),
                     "type": "organization",
                     "name": "Crystal Forge",
                 }]
@@ -452,10 +506,7 @@ fn build_oscal(p: &ExportPayload<'_>) -> String {
                 "href": format!("#{}", ap_uuid),
             },
             "local-definitions": {
-                "components": components,
-                "objectives-and-methods": {
-                    "objectives": objectives,
-                }
+                "objectives-and-methods": objectives,
             },
             "back-matter": {
                 "resources": [
@@ -484,7 +535,10 @@ fn build_oscal(p: &ExportPayload<'_>) -> String {
                 ]
             },
             "results": [{
-                "uuid": Uuid::from_u128(102).to_string(),
+                "uuid": det_uuid(102).to_string(),
+                "local-definitions": {
+                    "components": components,
+                },
                 "title": format!("{} v{} Assessment", p.bundle.name, p.bundle.version),
                 "description": p.bundle.description.as_deref().unwrap_or(""),
                 "start": NOW_ISO,
@@ -499,9 +553,9 @@ fn build_oscal(p: &ExportPayload<'_>) -> String {
                 }],
                 "reviewed-controls": {
                     "description": format!("{} control objectives reviewed", p.totals.total_controls),
-                    "control-objective-selections": [{
-                        "description": format!("Control objectives assessed for bundle '{}'", p.bundle.name),
-                        "include-objectives": include_objectives_list,
+                    "control-selections": [{
+                        "description": format!("Controls assessed for bundle '{}'", p.bundle.name),
+                        "include-controls": include_controls_list,
                     }]
                 },
                 "observations": observations,

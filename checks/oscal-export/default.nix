@@ -7,7 +7,7 @@ in
 pkgs.runCommand "oscal-export-validation" {
   nativeBuildInputs = [
     oscalFixture
-    (python3.withPackages (p: [ p.jsonschema ]))
+    (python3.withPackages (p: [ p.jsonschema p.regex ]))
   ];
   meta = {
     description = "Validate Crystal Forge OSCAL 1.1.2 export against NIST schemas";

@@ -292,9 +292,11 @@ pub fn ComplianceView() -> Element {
         // ── Export modal ────────────────────────────────────────────────────
         if *show_export.read() {
             ExportModal {
-                bundle: selected_bundle_id.read()
+                bundles: bundles.read().clone(),
+                selected_bundle: selected_bundle_id.read()
                     .and_then(|id| bundles.read().iter().find(|b| b.id == id).cloned()),
                 systems_resp: systems.read().clone(),
+                environments: environments.read().clone(),
                 on_close: move |_| show_export.set(false),
             }
         }
@@ -391,13 +393,36 @@ fn EmptyComplianceState(props: EmptyComplianceStateProps) -> Element {
 
 #[derive(Props, Clone, PartialEq)]
 struct ExportModalProps {
-    bundle: Option<ComplianceBundleSummary>,
+    /// All compliance bundles (for multi-select).
+    bundles: Vec<ComplianceBundleSummary>,
+    /// The currently selected bundle in the catalog (initial default).
+    selected_bundle: Option<ComplianceBundleSummary>,
+    /// Systems/totals response for the primary (selected) bundle.
     systems_resp: Option<ComplianceBundleSystemsResponse>,
+    /// All environments (for colored badges).
+    environments: Vec<EnvironmentSummary>,
     on_close: EventHandler<()>,
 }
 
 #[component]
 fn ExportModal(props: ExportModalProps) -> Element {
+    let all_bundles = props.bundles.clone();
+    let all_envs = props.environments.clone();
+
+    let initial_bundle_ids: Vec<uuid::Uuid> = props
+        .selected_bundle
+        .as_ref()
+        .map(|b| vec![b.id])
+        .unwrap_or_default();
+    let initial_env_names: Vec<String> = props
+        .selected_bundle
+        .as_ref()
+        .map(|b| b.required_envs.iter().map(|e| e.name.clone()).collect())
+        .unwrap_or_default();
+
+    let mut selected_bundle_ids = use_signal(|| initial_bundle_ids);
+    let mut selected_env_names = use_signal(|| initial_env_names);
+    let mut bundle_query = use_signal(String::new);
     let mut format = use_signal(|| "oscal".to_string());
     let mut scope = use_signal(|| "all".to_string());
     let mut include_waivers = use_signal(|| true);
@@ -405,11 +430,6 @@ fn ExportModal(props: ExportModalProps) -> Element {
     let mut downloading = use_signal(|| false);
     let mut download_error = use_signal(|| None::<String>);
 
-    let bundle_name = props
-        .bundle
-        .as_ref()
-        .map(|b| b.name.as_str())
-        .unwrap_or("—");
     let total_hosts = props
         .systems_resp
         .as_ref()
@@ -425,56 +445,88 @@ fn ExportModal(props: ExportModalProps) -> Element {
         .as_ref()
         .map(|r| r.totals.fail)
         .unwrap_or(0);
-    let bundle_id_str = props
-        .bundle
-        .as_ref()
-        .map(|b| b.id.to_string())
-        .unwrap_or_default();
 
     let formats: &[(&str, &str, &str, &str)] = &[
-        (
-            "oscal",
-            "OSCAL 1.1.2 JSON",
-            "oscal.json",
-            "NIST OSCAL System Security Plan + Assessment Results for ATO packages.",
-        ),
-        (
-            "json",
-            "Crystal Forge JSON",
-            "cf-evidence.json",
-            "Native CF schema — best for re-ingest or custom dashboards.",
-        ),
-        (
-            "csv",
-            "CSV summary",
-            "summary.csv",
-            "Flat per-(host, control) table. Spreadsheet-friendly.",
-        ),
-        (
-            "pdf",
-            "PDF report",
-            "pdf",
-            "Cover page + per-host summary + evidence index. For auditors.",
-        ),
-        (
-            "sarif",
-            "SARIF 2.1.0",
-            "sarif",
-            "Static analysis exchange format — works with most SAST/posture tools.",
-        ),
+        ("oscal", "OSCAL 1.1.2 JSON", "oscal.json", "NIST OSCAL System Security Plan + Assessment Results for ATO packages."),
+        ("json",  "Crystal Forge JSON", "cf-evidence.json", "Native CF schema — best for re-ingest or custom dashboards."),
+        ("csv",   "CSV summary",        "summary.csv", "Flat per-(host, control) table. Spreadsheet-friendly."),
+        ("pdf",   "PDF report",         "pdf",        "Cover page + per-host summary + evidence index. For auditors."),
+        ("sarif", "SARIF 2.1.0",        "sarif",      "Static analysis exchange format — works with most SAST/posture tools."),
     ];
 
-    let today = js_sys::Date::new_0()
-        .to_iso_string()
-        .as_string()
-        .unwrap_or_default();
-    let today_slice = today.chars().take(10).collect::<String>();
+    let fmt_name = formats
+        .iter()
+        .find(|f| f.0 == *format.read())
+        .map(|f| f.1)
+        .unwrap_or("Export");
     let ext = formats
         .iter()
         .find(|f| f.0 == *format.read())
         .map(|f| f.2)
         .unwrap_or("json");
-    let filename = format!("cf-{bundle_id_str}-{today_slice}.{ext}");
+
+    // ── Filtered bundles (search) ──────────────────────────────────────────
+    let filtered_bundles: Vec<ComplianceBundleSummary> = all_bundles
+        .iter()
+        .filter(|b| {
+            let q = bundle_query.read();
+            q.is_empty()
+                || b.name.to_lowercase().contains(&q.to_lowercase())
+                || b.framework.to_lowercase().contains(&q.to_lowercase())
+        })
+        .cloned()
+        .collect();
+
+    // ── Available environments from selected bundles ───────────────────────
+    let available_env_names: Vec<String> = {
+        let ids = selected_bundle_ids.read().clone();
+        let mut set = std::collections::BTreeSet::new();
+        for b in &all_bundles {
+            if ids.contains(&b.id) {
+                for e in &b.required_envs {
+                    set.insert(e.name.clone());
+                }
+            }
+        }
+        set.into_iter().collect()
+    };
+
+    // ── Filename (cf-<bundlePart>-<envPart>-<date>.<ext>) ──────────────────
+    let today = js_sys::Date::new_0()
+        .to_iso_string()
+        .as_string()
+        .unwrap_or_default();
+    let today_slice: String = today.chars().take(10).collect();
+
+    let bundle_part = {
+        let ids = selected_bundle_ids.read();
+        if ids.len() == 1 {
+            ids[0].to_string()
+        } else {
+            format!("{}bundles", ids.len())
+        }
+    };
+    let env_part = {
+        let envs = selected_env_names.read();
+        if envs.is_empty() {
+            "no-envs".to_string()
+        } else if envs.len() == 1 {
+            envs[0].clone()
+        } else if envs.len() >= available_env_names.len() && !available_env_names.is_empty() {
+            "all-envs".to_string()
+        } else {
+            format!("{}envs", envs.len())
+        }
+    };
+    let filename = format!("cf-{bundle_part}-{env_part}-{today_slice}.{ext}");
+
+    let can_export = selected_bundle_ids.read().len() > 0
+        && selected_env_names.read().len() > 0
+        && total_hosts > 0;
+
+    // Rc-shared references for use in multiple move closures.
+    let selected_bundle_opt = props.selected_bundle.clone();
+    let all_bundles_rc = std::rc::Rc::new(all_bundles.clone());
 
     rsx! {
         div {
@@ -482,7 +534,7 @@ fn ExportModal(props: ExportModalProps) -> Element {
             onclick: move |_| props.on_close.call(()),
             div {
                 class: "modal",
-                style: "width:min(640px,96vw);max-height:92vh;",
+                style: "width:min(680px,96vw);max-height:92vh;",
                 onclick: move |e| e.stop_propagation(),
 
                 div { class: "modal-head",
@@ -490,14 +542,194 @@ fn ExportModal(props: ExportModalProps) -> Element {
                         Icon { name: IconName::Download, size: 14 }
                         "Export evidence"
                     }
-                    p {
-                        "Bundle: "
-                        span { class: "mono", style: "font-weight:600;", "{bundle_name}" }
-                        " · {total_hosts} hosts · {total_controls} control evaluations."
-                    }
+                    p { "Each environment typically has its own ATO package — select the bundles and environments to scope this export." }
                 }
 
                 div { class: "modal-body", style: "overflow-y:auto;",
+
+                    // ── Bundle multi-select ─────────────────────────────────
+                    div { class: "field",
+                        div {
+                            style: "display:flex;align-items:center;justify-content:space-between;gap:8px;",
+                            label { style: "margin:0;",
+                                "Compliance bundles "
+                                span { style: "color:var(--cf-text-muted);font-weight:400;", "· {selected_bundle_ids.read().len()} of {all_bundles.len()}" }
+                            }
+                            div { style: "display:flex;gap:4px;",
+                                button {
+                                    class: "focus-ring",
+                                    style: "all:unset;cursor:pointer;font-size:11px;color:var(--cf-brand-purple);padding:2px 6px;",
+                                    onclick: {
+                                        let bundles = all_bundles_rc.clone();
+                                        move |_| {
+                                            let all_ids: Vec<uuid::Uuid> = bundles.iter().map(|b| b.id).collect();
+                                            selected_bundle_ids.set(all_ids);
+                                            // Recompute available envs
+                                            let avail: Vec<String> = bundles.iter()
+                                                .flat_map(|b| b.required_envs.iter().map(|e| e.name.clone()))
+                                                .collect::<std::collections::BTreeSet<_>>()
+                                                .into_iter()
+                                                .collect();
+                                            let mut envs = selected_env_names.write();
+                                            envs.clear();
+                                            envs.extend(avail);
+                                        }
+                                    },
+                                    "Select all"
+                                }
+                                button {
+                                    class: "focus-ring",
+                                    style: "all:unset;cursor:pointer;font-size:11px;color:var(--cf-text-muted);padding:2px 6px;",
+                                    onclick: move |_| {
+                                        if let Some(b) = selected_bundle_opt.as_ref() {
+                                            let id = b.id;
+                                            selected_bundle_ids.set(vec![id]);
+                                            let envs: Vec<String> = b.required_envs.iter().map(|e| e.name.clone()).collect();
+                                            selected_env_names.set(envs);
+                                        }
+                                    },
+                                    "Reset"
+                                }
+                            }
+                        }
+                        if all_bundles.len() > 4 {
+                            input {
+                                class: "input focus-ring",
+                                placeholder: "Search bundles…",
+                                value: "{bundle_query.read()}",
+                                style: "margin-bottom:8px;",
+                                oninput: move |e| bundle_query.set(e.value()),
+                            }
+                        }
+                        div { style: "display:flex;flex-direction:column;gap:6px;max-height:208px;overflow-y:auto;padding-right:2px;",
+                            if filtered_bundles.is_empty() {
+                                div { style: "font-size:12px;color:var(--cf-text-muted);padding:8px 2px;",
+                                    "No bundles match your search."
+                                }
+                            }
+                            for bundle in filtered_bundles.iter() {
+                                {
+                                    let b = bundle.clone();
+                                    let b_id = b.id;
+                                    let is_selected = selected_bundle_ids.read().contains(&b_id);
+                                    rsx! {
+                                        button {
+                                            class: "focus-ring",
+                                            onclick: {
+                                                let bundles = all_bundles_rc.clone();
+                                                move |_| {
+                                                    let mut ids = selected_bundle_ids.write();
+                                                    if ids.contains(&b_id) {
+                                                        ids.retain(|i| *i != b_id);
+                                                    } else {
+                                                        ids.push(b_id);
+                                                    }
+                                                    // Keep envs valid after selection change
+                                                    let ids_snapshot = ids.clone();
+                                                    std::mem::drop(ids);
+                                                    let avail: Vec<String> = bundles.iter()
+                                                        .filter(|bx| ids_snapshot.contains(&bx.id))
+                                                        .flat_map(|bx| bx.required_envs.iter().map(|e| e.name.clone()))
+                                                        .collect::<std::collections::BTreeSet<_>>()
+                                                        .into_iter()
+                                                        .collect();
+                                                    let mut envs = selected_env_names.write();
+                                                    envs.retain(|e| avail.contains(e));
+                                                }
+                                            },
+                                            style: {
+                                                let on = is_selected;
+                                                format!(
+                                                    "all:unset;cursor:pointer;padding:9px 11px;border-radius:8px;\
+                                                    border:1px solid {};\
+                                                    background:{};\
+                                                    display:flex;align-items:center;gap:10px;",
+                                                    if on { "var(--cf-brand-purple)" } else { "var(--cf-divider)" },
+                                                    if on { "color-mix(in oklab, var(--cf-brand-purple) 8%, var(--cf-card-bg))" } else { "var(--cf-card-bg)" },
+                                                )
+                                            },
+                                            span {
+                                                style: format!(
+                                                    "width:16px;height:16px;border-radius:4px;flex-shrink:0;\
+                                                    border:1.5px solid {};\
+                                                    background:{};\
+                                                    display:flex;align-items:center;justify-content:center;",
+                                                    if is_selected { "var(--cf-brand-purple)" } else { "var(--cf-text-muted)" },
+                                                    if is_selected { "var(--cf-brand-purple)" } else { "transparent" },
+                                                ),
+                                                if is_selected {
+                                                    Icon { name: IconName::Check, size: 11 }
+                                                }
+                                            }
+                                            div { style: "min-width:0;flex:1;",
+                                                div { style: "font-size:12px;font-weight:600;", "{b.name}" }
+                                                div { style: "font-size:11px;color:var(--cf-text-muted);",
+                                                    "{b.framework} · {b.version} · {b.policy_ids.len()} policies"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Environment selection ────────────────────────────────
+                    div { class: "field",
+                        label {
+                            "Environments "
+                            if selected_env_names.read().len() < available_env_names.len() {
+                                span { style: "color:var(--cf-brand-purple);font-weight:600;", "· scoped" }
+                            }
+                        }
+                        div { style: "display:flex;flex-wrap:wrap;gap:6px;",
+                            for env_name in available_env_names.iter() {
+                                {
+                                    let e_name = env_name.clone();
+                                    let on = selected_env_names.read().contains(&e_name);
+                                    let env_color = all_envs
+                                        .iter()
+                                        .find(|e| e.name == e_name)
+                                        .map(|e| e.color_hex.as_str())
+                                        .unwrap_or("#888")
+                                        .to_string();
+                                    rsx! {
+                                        button {
+                                            class: "focus-ring",
+                                            onclick: move |_| {
+                                                let mut envs = selected_env_names.write();
+                                                if envs.contains(&e_name) {
+                                                    envs.retain(|e| *e != e_name);
+                                                } else {
+                                                    envs.push(e_name.clone());
+                                                }
+                                            },
+                                            style: format!(
+                                                "all:unset;cursor:pointer;padding:6px 12px;border-radius:99px;\
+                                                border:1px solid {};\
+                                                background:{};\
+                                                display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;\
+                                                color:{};",
+                                                if on { &env_color } else { "var(--cf-divider)" },
+                                                if on { format!("color-mix(in oklab, {} 14%, var(--cf-card-bg))", &env_color) } else { "var(--cf-card-bg)".to_string() },
+                                                if on { "var(--cf-text-primary)" } else { "var(--cf-text-muted)" },
+                                            ),
+                                            span { style: "width:8px;height:8px;border-radius:99px;background:{env_color};" }
+                                            "{e_name}"
+                                            if on {
+                                                Icon { name: IconName::Check, size: 11 }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "help", style: "margin-top:6px;",
+                            "Export one environment at a time for a focused ATO, or combine several. Only hosts in the selected environments are included."
+                        }
+                    }
+
+                    // ── Output format ────────────────────────────────────────
                     div { class: "field",
                         label { "Output format" }
                         div { style: "display:grid;grid-template-columns:1fr 1fr;gap:8px;",
@@ -529,13 +761,14 @@ fn ExportModal(props: ExportModalProps) -> Element {
                         }
                     }
 
+                    // ── Host scope ────────────────────────────────────────────
                     div { class: "field",
-                        label { "Scope" }
+                        label { "Host scope" }
                         div { class: "seg", style: "width:fit-content;",
                             button {
                                 class: if *scope.read() == "all" { "active" } else { "" },
                                 onclick: move |_| scope.set("all".to_string()),
-                                "All {total_hosts} hosts"
+                                "All {total_hosts} host evals"
                             }
                             button {
                                 class: if *scope.read() == "fail" { "active" } else { "" },
@@ -550,6 +783,7 @@ fn ExportModal(props: ExportModalProps) -> Element {
                         }
                     }
 
+                    // ── Include toggles ───────────────────────────────────────
                     div { style: "display:flex;flex-direction:column;gap:8px;",
                         label {
                             style: "display:flex;gap:8px;align-items:center;font-size:13px;cursor:pointer;",
@@ -573,14 +807,27 @@ fn ExportModal(props: ExportModalProps) -> Element {
                         }
                     }
 
+                    // ── Summary callout ───────────────────────────────────────
                     div { class: "sd-callout sd-callout-info", style: "margin-top:10px;",
                         Icon { name: IconName::Check, size: 13 }
                         div { style: "font-size:12px;",
-                            "Output filename: "
-                            span { class: "mono", style: "font-weight:600;", "{filename}" }
+                            div {
+                                strong { "{selected_bundle_ids.read().len()}" } " bundle" span { if selected_bundle_ids.read().len() == 1 { " " } else { "s " } }
+                                "· "
+                                strong { "{selected_env_names.read().len()}" } " environment" span { if selected_env_names.read().len() == 1 { " " } else { "s " } }
+                                "· "
+                                strong { "{total_hosts}" } " host" span { if total_hosts == 1 { " " } else { "s " } }
+                                "· "
+                                strong { "{total_controls}" } " control evaluation" span { if total_controls == 1 { " " } else { "s " } }
+                            }
+                            div { style: "margin-top:4px;",
+                                "Filename: "
+                                span { class: "mono", style: "font-weight:600;", "{filename}" }
+                            }
                         }
                     }
 
+                    // ── Error display ──
                     if let Some(err) = download_error.read().as_ref() {
                         div { class: "sd-callout sd-callout-danger", style: "margin-top:10px;",
                             Icon { name: IconName::X, size: 13 }
@@ -589,6 +836,7 @@ fn ExportModal(props: ExportModalProps) -> Element {
                     }
                 }
 
+                // ── Footer ──────────────────────────────────────────────────
                 div { class: "modal-foot",
                     button {
                         class: "btn btn-ghost focus-ring",
@@ -597,21 +845,24 @@ fn ExportModal(props: ExportModalProps) -> Element {
                     }
                     button {
                         class: "btn btn-primary focus-ring",
-                        disabled: *downloading.read() || props.bundle.is_none(),
+                        disabled: !can_export || *downloading.read(),
+                        style: if !can_export { "opacity:0.5;cursor:not-allowed;" } else { "" },
                         onclick: {
-                            let bundle = props.bundle.clone();
+                            let bundle = props.selected_bundle.clone();
                             let systems_resp = props.systems_resp.clone();
                             let fmt = format.read().clone();
                             let scp = scope.read().clone();
                             let iw = *include_waivers.read();
                             let is = *include_source.read();
                             let fname = filename.clone();
+                            let download_label = fmt_name.to_string();
                             move |_| {
                                 let Some(bundle) = bundle.clone() else { return; };
                                 let systems_resp = systems_resp.clone();
                                 let fmt = fmt.clone();
                                 let scp = scp.clone();
                                 let fname = fname.clone();
+                                let _label = download_label.clone();
                                 downloading.set(true);
                                 download_error.set(None);
                                 spawn(async move {
@@ -638,7 +889,6 @@ fn ExportModal(props: ExportModalProps) -> Element {
                                         match fetch_compliance_system_evidence(&bundle.id, sys_id).await {
                                             Ok(ev) => all_evidence.push(ev),
                                             Err(err) => {
-                                                // Find hostname for error reporting
                                                 let hostname = systems
                                                     .iter()
                                                     .find(|s| s.system_id == *sys_id)
@@ -693,9 +943,8 @@ fn ExportModal(props: ExportModalProps) -> Element {
 
                                     match result {
                                         Ok(()) => {
-                                            // For non-PDF formats close the modal on success
                                             if fmt != "pdf" {
-                                                // leave open so user sees the filename; they can close
+                                                // leave open so user sees the filename
                                             }
                                         }
                                         Err(e) => download_error.set(Some(e)),
@@ -705,7 +954,7 @@ fn ExportModal(props: ExportModalProps) -> Element {
                             }
                         },
                         Icon { name: IconName::Download, size: 13 }
-                        if *downloading.read() { " Preparing…" } else { " Download" }
+                        if *downloading.read() { " Preparing…" } else { " Download {fmt_name}" }
                     }
                 }
             }
