@@ -1,10 +1,10 @@
 ---
 id: TASK-336.2
 title: 'Admin Server: view parity + real server settings flows'
-status: Review
+status: Done
 assignee: []
 created_date: '2026-06-20 02:19'
-updated_date: '2026-06-20 16:46'
+updated_date: '2026-06-21 01:38'
 labels:
   - design-parity
   - admin
@@ -32,8 +32,17 @@ documentation:
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
 modified_files:
   - packages/web-ui/src/views/admin.rs
+  - packages/web-ui/src/components/icon.rs
   - packages/default/src/handlers/api/admin.rs
   - packages/default/src/queries/admin.rs
+  - packages/default/src/api/models.rs
+  - packages/default/src/bin/server.rs
+  - packages/default/src/handlers/agent_request.rs
+  - packages/web-ui/src/api/client.rs
+  - packages/web-ui/src/api/models.rs
+  - packages/web-ui/src/components/layout/app_shell.rs
+  - packages/web-ui/src/components/onboarding/coach_panel.rs
+  - packages/web-ui/assets/app.css
 parent_task_id: TASK-336
 priority: high
 ordinal: 1671
@@ -109,5 +118,5 @@ Medium-high. The task touches an Admin/Server surface where incorrect placeholde
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Classification placement correction in MR !282 commit 47251170: the session-local classification preview now renders as fixed top and bottom viewport banners instead of in-flow Admin content, matching the app-frame placement from the reference. Persistence and true global app rendering remain tracked by TASK-336.7. Verification passed: nix develop -c bash -lc 'cd packages/web-ui && cargo fmt -- --check && cargo check --target wasm32-unknown-unknown'.
+MR !282 merged into dev: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/282
 <!-- SECTION:FINAL_SUMMARY:END -->

@@ -25,6 +25,7 @@
 pub mod builders;
 pub mod builds;
 pub mod charts;
+pub mod compliance;
 pub mod cve;
 pub mod dashboard;
 pub mod diff;

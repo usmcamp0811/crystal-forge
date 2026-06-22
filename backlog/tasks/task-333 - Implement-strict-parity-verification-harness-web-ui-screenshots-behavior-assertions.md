@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-05-31 15:57'
-updated_date: '2026-06-10 02:57'
+updated_date: '2026-06-21 02:08'
 labels:
   - design-parity
   - verification
@@ -17,7 +17,6 @@ dependencies:
   - TASK-329
   - TASK-330
   - TASK-331
-  - TASK-332
 modified_files:
   - checks/web-ui
 priority: high

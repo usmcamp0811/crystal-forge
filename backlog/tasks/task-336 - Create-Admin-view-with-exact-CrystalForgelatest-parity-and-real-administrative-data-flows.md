@@ -4,7 +4,7 @@ title: Admin sidebar surface umbrella
 status: Backlog
 assignee: []
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-10 03:36'
+updated_date: '2026-06-21 02:08'
 labels:
   - design-parity
   - admin
@@ -14,7 +14,6 @@ milestone: 'm-20: Design Parity Missing Surfaces'
 dependencies:
   - TASK-328
   - TASK-329
-  - TASK-332
   - TASK-333
 references:
   - /home/mcamp/code/crystal-forge/CrystalForgelatest
