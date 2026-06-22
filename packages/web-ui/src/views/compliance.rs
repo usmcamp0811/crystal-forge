@@ -874,15 +874,14 @@ fn ExportModal(props: ExportModalProps) -> Element {
                                         format!("{}bundles", ids.len())
                                     }
                                 };
-                                let env_part = {
-                                    let envs = selected_env_names.read();
-                                    if envs.is_empty() {
-                                        "no-envs".to_string()
-                                    } else if envs.len() == 1 {
-                                        envs[0].clone()
-                                    } else {
-                                        format!("{}envs", envs.len())
-                                    }
+                                let selected_envs: Vec<String> =
+                                    selected_env_names.read().clone();
+                                let env_part = if selected_envs.is_empty() {
+                                    "no-envs".to_string()
+                                } else if selected_envs.len() == 1 {
+                                    selected_envs[0].clone()
+                                } else {
+                                    format!("{}envs", selected_envs.len())
                                 };
                                 let ext = formats.iter()
                                     .find(|f| f.0 == fmt)
@@ -910,21 +909,37 @@ fn ExportModal(props: ExportModalProps) -> Element {
                                 download_error.set(None);
                                 spawn(async move {
                                     // Fetch per-system evidence for all scoped systems
-                                    let systems = systems_resp.as_ref()
+                                    let all_systems = systems_resp.as_ref()
                                         .map(|r| r.systems.clone())
                                         .unwrap_or_default();
                                     let totals = systems_resp.as_ref()
                                         .map(|r| r.totals.clone())
                                         .unwrap_or_default();
 
-                                    let scoped_sys_ids: Vec<uuid::Uuid> = systems.iter()
-                                        .filter(|s| match scp.as_str() {
-                                            "fail"  => s.fail > 0,
-                                            "clean" => s.fail == 0 && s.warn == 0,
-                                            _       => true,
+                                    // Apply both environment and host-scope filters.
+                                    // Environment: only systems whose env name is in selected_envs
+                                    //   (if selected_envs is empty, skip env filter — no systems
+                                    //    pass anyway, but that case is blocked by can_export).
+                                    // Scope: "all" | "fail" | "clean"
+                                    let systems: Vec<_> = all_systems.iter()
+                                        .filter(|s| {
+                                            if !selected_envs.is_empty() {
+                                                let env = s.environment.as_deref().unwrap_or("");
+                                                if !selected_envs.iter().any(|e| e == env) {
+                                                    return false;
+                                                }
+                                            }
+                                            match scp.as_str() {
+                                                "fail"  => s.fail > 0,
+                                                "clean" => s.fail == 0 && s.warn == 0,
+                                                _       => true,
+                                            }
                                         })
-                                        .map(|s| s.system_id)
+                                        .cloned()
                                         .collect();
+
+                                    let scoped_sys_ids: Vec<uuid::Uuid> =
+                                        systems.iter().map(|s| s.system_id).collect();
 
                                     let mut all_evidence = Vec::new();
                                     let mut evidence_failures = Vec::new();
@@ -960,11 +975,13 @@ fn ExportModal(props: ExportModalProps) -> Element {
                                     let payload = ExportPayload {
                                         bundle: &bundle,
                                         totals: &totals,
+                                        // Already filtered by env + scope above;
+                                        // pass "all" so generators don't double-filter.
                                         systems: &systems,
                                         evidence: &all_evidence,
                                         include_waivers: iw,
                                         include_source: is,
-                                        scope: &scp,
+                                        scope: "all",
                                     };
 
                                     let result = match fmt.as_str() {
