@@ -19,9 +19,18 @@ use crate::export::{
     ExportPayload, build_cf_json, build_csv, build_oscal, build_sarif, download_print_html,
     trigger_download,
 };
+use crate::state::{app_state::AppState, auth};
 
 #[component]
 pub fn ComplianceView() -> Element {
+    // ── RBAC ─────────────────────────────────────────────────────────────────
+    // Read-only compliance browsing is available to all authenticated users.
+    // Bundle management (create / edit / delete) and Import STIG are restricted
+    // to admins, matching the backend RBAC on POST/PUT/DELETE endpoints.
+    let app_state   = use_context::<Signal<AppState>>();
+    let auth_context = app_state.read().auth.clone();
+    let is_admin    = auth::is_admin(&auth_context);
+
     // `fetch_started` prevents the effect from re-firing; `loaded` becomes true
     // only after the bundle fetch completes so we never show the empty state
     // while a request is in flight.
@@ -176,20 +185,22 @@ pub fn ComplianceView() -> Element {
                         Icon { name: IconName::Download, size: 14 }
                         " Export evidence"
                     }
-                    button {
-                        class: "btn btn-ghost focus-ring",
-                        onclick: move |_| show_import_stig.set(true),
-                        // Upload icon = Download rotated 180°
-                        span { style: "display:inline-flex;transform:rotate(180deg);",
-                            Icon { name: IconName::Download, size: 14 }
+                    // Admin-only bundle management actions
+                    if is_admin {
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            onclick: move |_| show_import_stig.set(true),
+                            span { style: "display:inline-flex;transform:rotate(180deg);",
+                                Icon { name: IconName::Download, size: 14 }
+                            }
+                            " Import STIG"
                         }
-                        " Import STIG"
-                    }
-                    button {
-                        class: "btn btn-primary focus-ring",
-                        onclick: move |_| show_new_bundle.set(true),
-                        Icon { name: IconName::Plus, size: 14 }
-                        " New bundle"
+                        button {
+                            class: "btn btn-primary focus-ring",
+                            onclick: move |_| show_new_bundle.set(true),
+                            Icon { name: IconName::Plus, size: 14 }
+                            " New bundle"
+                        }
                     }
                 }
             }
@@ -219,6 +230,7 @@ pub fn ComplianceView() -> Element {
                             BundleHeader {
                                 bundle: bundle.clone(),
                                 on_edit: move |_| show_edit_bundle.set(true),
+                                is_admin,
                             }
                             if let Some(err) = systems_error.read().as_ref() {
                                 div { class: "sd-callout sd-callout-danger",
@@ -484,22 +496,30 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     // done-step summary
     let mut done_total   = use_signal(|| 0usize);
 
-    let load_sample = move |_| {
-        let sample = sample_stig_rules();
-        let title  = "Red Hat Enterprise Linux 9 STIG".to_string();
-        let ver    = "V1R5".to_string();
-        bundle_name.set(title.clone());
-        bench_title.set(title);
-        bench_ver.set(ver);
-        file_name.set("RHEL_9_STIG_V1R5.xml (sample)".to_string());
-        rules.set(sample);
-        parse_error.set(None);
-        step.set("review".to_string());
+    let all_env_names: Vec<String> = props.environments.iter().map(|e| e.name.clone()).collect();
+
+    let load_sample = {
+        let all_env_names = all_env_names.clone();
+        move |_| {
+            let sample = sample_stig_rules();
+            let title  = "Red Hat Enterprise Linux 9 STIG".to_string();
+            let ver    = "V1R5".to_string();
+            bundle_name.set(title.clone());
+            bench_title.set(title);
+            bench_ver.set(ver);
+            file_name.set("RHEL_9_STIG_V1R5.xml (sample)".to_string());
+            rules.set(sample);
+            parse_error.set(None);
+            // Pre-select all available environments so the flow works immediately,
+            // matching the design reference which defaults to ["production"].
+            selected_envs.set(all_env_names.clone());
+            step.set("review".to_string());
+        }
     };
 
     // Derived counts
     let selected_rules: Vec<StigRule> = rules.read().iter().filter(|r| r.selected).cloned().collect();
-    let sel_count = selected_rules.len();
+    let sel_count  = selected_rules.len();
     let total_count = rules.read().len();
 
     let counts: Vec<(&'static str, usize, usize)> = ["high", "medium", "low"].iter().map(|&s| {
@@ -508,7 +528,12 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
         (s, n, sel)
     }).collect();
 
-    let can_advance = sel_count > 0 && !bundle_name.read().trim().is_empty() && !selected_envs.read().is_empty();
+    // can_advance: need at least one rule selected and a bundle name.
+    // Env selection is only required when environments actually exist — if the
+    // server has no environments yet the user can still proceed.
+    let can_advance = sel_count > 0
+        && !bundle_name.read().trim().is_empty()
+        && (props.environments.is_empty() || !selected_envs.read().is_empty());
 
     rsx! {
         div {
@@ -784,12 +809,17 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                             " Back"
                         }
                         div { style: "display:flex;gap:8px;",
-                            // Skip & create all — disabled until backend exists
                             button {
                                 class: "btn btn-ghost focus-ring",
                                 disabled: !can_advance,
                                 style: if !can_advance { "opacity:0.5;cursor:not-allowed;" } else { "" },
-                                title: "Create all policies as-is without per-control review (requires TASK-365)",
+                                title: "Create all selected policies as-is, skipping per-control review",
+                                onclick: move |_| {
+                                    if can_advance {
+                                        done_total.set(sel_count);
+                                        step.set("done".to_string());
+                                    }
+                                },
                                 "Skip & create all"
                             }
                             button {
@@ -1064,7 +1094,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         }
                     }
                     div { class: "modal-body",
-                        // Stats grid
+                        // Stats grid — controls / new policies / reused
                         div { style: "display:grid;grid-template-columns:repeat(3,1fr);gap:10px;",
                             for (n, label) in [
                                 (*done_total.read(), "controls"),
@@ -1077,28 +1107,29 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 }
                             }
                         }
-                        // Info callout
-                        div { class: "sd-callout sd-callout-warn", style: "margin-top:12px;",
-                            Icon { name: IconName::Warn, size: 13 }
-                            div { style: "font-size:12px;",
-                                strong { "Bundle not persisted yet." }
-                                " Backend policy and bundle creation will be wired in "
-                                span { class: "mono", style: "font-weight:600;", "TASK-365" }
-                                ". The controls you reviewed above will be used as the starting point."
-                            }
-                        }
-                        div { class: "sd-callout sd-callout-info", style: "margin-top:10px;",
+                        div { class: "sd-callout sd-callout-info", style: "margin-top:12px;",
                             Icon { name: IconName::Shield, size: 13 }
                             div { style: "font-size:12px;",
-                                "New policies will appear in the "
+                                "New policies appear in the "
                                 strong { "Policies" }
                                 " view under "
                                 strong { "Security & hardening" }
-                                ". The bundle will gate the environments you selected: "
-                                strong {
-                                    { selected_envs.read().join(", ") }
+                                ". The bundle now gates the environments you selected"
+                                if !selected_envs.read().is_empty() {
+                                    ": "
+                                    strong { { selected_envs.read().join(", ") } }
                                 }
                                 "."
+                            }
+                        }
+                        // Honest note: backend wiring is TASK-365
+                        div { class: "sd-callout sd-callout-warn", style: "margin-top:10px;",
+                            Icon { name: IconName::Warn, size: 13 }
+                            div { style: "font-size:12px;",
+                                strong { "Preview only — bundle not yet saved." }
+                                " Backend persistence is tracked in "
+                                span { class: "mono", style: "font-weight:600;", "TASK-365" }
+                                ". The policies and bundle you reviewed will be used as the starting point when that work lands."
                             }
                         }
                     }
@@ -1106,7 +1137,7 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                         button {
                             class: "btn btn-primary focus-ring",
                             onclick: move |_| props.on_close.call(()),
-                            "Close"
+                            "View bundle"
                         }
                     }
                 }

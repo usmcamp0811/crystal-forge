@@ -75,6 +75,9 @@ fn env_count_suffix(n: i64) -> &'static str {
 pub struct BundleHeaderProps {
     pub bundle: ComplianceBundleSummary,
     pub on_edit: EventHandler<()>,
+    /// When false the Edit button is hidden — non-admin users get a read-only view.
+    #[props(default = false)]
+    pub is_admin: bool,
 }
 
 #[component]
@@ -130,11 +133,13 @@ pub fn BundleHeader(props: BundleHeaderProps) -> Element {
                             }
                         }
                     }
-                    button {
-                        class: "btn btn-ghost focus-ring",
-                        onclick: move |_| props.on_edit.call(()),
-                        Icon { name: IconName::Edit, size: 13 }
-                        " Edit bundle"
+                    if props.is_admin {
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            onclick: move |_| props.on_edit.call(()),
+                            Icon { name: IconName::Edit, size: 13 }
+                            " Edit bundle"
+                        }
                     }
                 }
             }

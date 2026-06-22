@@ -510,22 +510,44 @@ async fn list_applicable_system_rows(pool: &PgPool, bundle_id: Uuid) -> Result<V
 }
 
 fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> ComplianceSystemRollup {
-    let mut pass = 0;
-    let mut warn = 0;
-    let mut fail = 0;
-    let waiver = 0;
+    let mut pass  = 0i64;
+    let mut warn  = 0i64;
+    let mut fail  = 0i64;
+    let waiver    = 0i64;
+    // Only policies that were actually evaluated count toward total and score.
+    // Disabled and unsupported policies are surfaced as warn but excluded from
+    // the denominator so they don't silently deflate the score.
+    let mut evaluated_total = 0i64;
 
     for policy in policies {
-        match policy_status(&system, policy) {
-            ComplianceControlStatus::Pass => pass += 1,
-            ComplianceControlStatus::Warn => warn += 1,
-            ComplianceControlStatus::Fail => fail += 1,
-            ComplianceControlStatus::Waiver => {}
+        match evaluate_policy(&system, policy) {
+            PolicyEval::Evaluated(ComplianceControlStatus::Pass) => {
+                pass += 1;
+                evaluated_total += 1;
+            }
+            PolicyEval::Evaluated(ComplianceControlStatus::Warn) => {
+                warn += 1;
+                evaluated_total += 1;
+            }
+            PolicyEval::Evaluated(ComplianceControlStatus::Fail) => {
+                fail += 1;
+                evaluated_total += 1;
+            }
+            PolicyEval::Evaluated(ComplianceControlStatus::Waiver) => {
+                evaluated_total += 1;
+            }
+            // Disabled or unsupported: count in warn for visibility, but not
+            // in evaluated_total so they don't skew the percentage score.
+            PolicyEval::Disabled | PolicyEval::Unsupported => {
+                warn += 1;
+            }
         }
     }
 
+    // total exposed to clients is the full policy count (including disabled/
+    // unsupported) so the UI can show "N of M controls evaluated".
     let total = policies.len() as i64;
-    let score = if total == 0 { 0 } else { (pass * 100) / total };
+    let score = if evaluated_total == 0 { 0 } else { (pass * 100) / evaluated_total };
 
     ComplianceSystemRollup {
         system_id: system.id,
@@ -566,18 +588,32 @@ fn totals_for_rollups(rollups: &[ComplianceSystemRollup]) -> ComplianceRollupTot
     totals
 }
 
-fn policy_status(system: &SystemRow, policy: &PolicyRow) -> ComplianceControlStatus {
+/// Three-way status result so callers can distinguish evaluatable outcomes
+/// from controls that were not evaluated (disabled or unsupported type).
+enum PolicyEval {
+    /// Control was evaluated and produced a compliance outcome.
+    Evaluated(ComplianceControlStatus),
+    /// Control is disabled — excluded from scores, surfaced as not-evaluated.
+    Disabled,
+    /// Policy type is not yet supported — not a pass, but not a scored failure.
+    Unsupported,
+}
+
+fn evaluate_policy(system: &SystemRow, policy: &PolicyRow) -> PolicyEval {
     if !policy.enabled {
-        return ComplianceControlStatus::Warn;
+        return PolicyEval::Disabled;
     }
 
     match policy.policy_type.as_str() {
         "require_cf_agent" => {
-            if system.health_status == "offline" {
-                ComplianceControlStatus::Fail
-            } else {
-                ComplianceControlStatus::Pass
-            }
+            // Fail-closed: only known-healthy statuses pass.
+            // Unknown / stale / error values → Warn (indeterminate, not a scored pass).
+            let status = match system.health_status.as_str() {
+                "healthy" | "online" => ComplianceControlStatus::Pass,
+                "offline"            => ComplianceControlStatus::Fail,
+                _                    => ComplianceControlStatus::Warn,
+            };
+            PolicyEval::Evaluated(status)
         }
         "require_cve_check" => {
             let max_critical = policy
@@ -591,20 +627,40 @@ fn policy_status(system: &SystemRow, policy: &PolicyRow) -> ComplianceControlSta
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
 
-            if i64::from(system.critical_cve_count) > max_critical {
+            let status = if i64::from(system.critical_cve_count) > max_critical {
                 ComplianceControlStatus::Fail
             } else if require_high_justification && system.high_cve_count > 0 {
                 ComplianceControlStatus::Warn
             } else {
                 ComplianceControlStatus::Pass
-            }
+            };
+            PolicyEval::Evaluated(status)
         }
-        _ => ComplianceControlStatus::Warn,
+        // Unknown policy type: not a fabricated pass, but also not a scored
+        // failure — return Warn so the reviewer knows it needs attention.
+        _ => PolicyEval::Unsupported,
+    }
+}
+
+/// Translate a PolicyEval into the ComplianceControlStatus used by rollups and
+/// evidence. Disabled and unsupported controls both surface as Warn so they are
+/// visible to reviewers, but the rollup excludes them from the total count so
+/// they don't deflate scores for controls Crystal Forge can't evaluate.
+fn policy_status(system: &SystemRow, policy: &PolicyRow) -> ComplianceControlStatus {
+    match evaluate_policy(system, policy) {
+        PolicyEval::Evaluated(s) => s,
+        PolicyEval::Disabled     => ComplianceControlStatus::Warn,
+        PolicyEval::Unsupported  => ComplianceControlStatus::Warn,
     }
 }
 
 fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlEvidence {
-    let status = policy_status(system, &policy);
+    let eval   = evaluate_policy(system, &policy);
+    let status = match &eval {
+        PolicyEval::Evaluated(s)              => s.clone(),
+        PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::Warn,
+    };
+
     let severity = match status {
         ComplianceControlStatus::Fail => "high",
         ComplianceControlStatus::Warn => "medium",
@@ -612,24 +668,35 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
     }
     .to_string();
 
-    let summary = match status {
-        ComplianceControlStatus::Pass => format!(
-            "{} satisfies {} from available Crystal Forge data.",
+    let summary = match &eval {
+        PolicyEval::Evaluated(ComplianceControlStatus::Pass) => format!(
+            "{} satisfies {} based on current Crystal Forge evaluation data.",
             system.hostname, policy.name
         ),
-        ComplianceControlStatus::Warn => format!(
-            "{} needs reviewer attention for {}; this control is either unenforced or not fully evaluable from current data.",
+        PolicyEval::Evaluated(ComplianceControlStatus::Warn) => format!(
+            "{} requires reviewer attention for {}; the evaluation produced an indeterminate result.",
             system.hostname, policy.name
         ),
-        ComplianceControlStatus::Fail => format!(
-            "{} violates {} according to current Crystal Forge data.",
+        PolicyEval::Evaluated(ComplianceControlStatus::Fail) => format!(
+            "{} does not satisfy {} based on current Crystal Forge evaluation data.",
             system.hostname, policy.name
         ),
-        ComplianceControlStatus::Waiver => {
-            format!("{} has a waiver for {}.", system.hostname, policy.name)
-        }
+        PolicyEval::Evaluated(ComplianceControlStatus::Waiver) => format!(
+            "{} has a waiver recorded for {}.",
+            system.hostname, policy.name
+        ),
+        PolicyEval::Disabled => format!(
+            "Policy '{}' is disabled and was not evaluated on {}.",
+            policy.name, system.hostname
+        ),
+        PolicyEval::Unsupported => format!(
+            "Policy type '{}' is not yet supported by the Crystal Forge evaluator; '{}' was not evaluated on {}.",
+            policy.policy_type, policy.name, system.hostname
+        ),
     };
 
+    // The evidence body contains the raw inputs Crystal Forge used.
+    // This is evaluation input data, not auditor-collected evidence.
     let body = format!(
         "policy_type={} enabled={} health_status={} critical_cves={} high_cves={}",
         policy.policy_type,
@@ -638,6 +705,11 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
         system.critical_cve_count,
         system.high_cve_count
     );
+
+    // Framework mapping: only emit when a real framework control identifier
+    // exists on the policy. The policy_type → name string is an internal label,
+    // not a framework mapping, so we omit it rather than fabricate one.
+    let framework_mapping = String::new();
 
     ComplianceControlEvidence {
         policy_id: policy.id,
@@ -650,7 +722,7 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
             label: policy
                 .description
                 .clone()
-                .unwrap_or_else(|| "Deployment policy evidence".to_string()),
+                .unwrap_or_else(|| policy.name.clone()),
             body: body.clone(),
             artifact: Some(ComplianceEvidenceArtifact {
                 artifact_type: if policy.policy_type == "require_cve_check" {
@@ -658,11 +730,13 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
                 } else {
                     "policy_eval".to_string()
                 },
-                title: "Authoritative Crystal Forge signal".to_string(),
+                // Accurate label: these are Crystal Forge evaluation inputs,
+                // not authoritative auditor-collected evidence artifacts.
+                title: "Crystal Forge evaluation inputs".to_string(),
                 body,
             }),
         }],
-        framework_mapping: format!("{} → {}", policy.policy_type, policy.name),
+        framework_mapping,
     }
 }
 
@@ -670,15 +744,19 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
 mod tests {
     use super::*;
 
-    fn policy(policy_type: &str, config: Value, enabled: bool) -> PolicyRow {
+    fn named_policy(policy_type: &str, name: &str, config: Value, enabled: bool) -> PolicyRow {
         PolicyRow {
             id: Uuid::nil(),
-            name: policy_type.to_string(),
+            name: name.to_string(),
             description: None,
             policy_type: policy_type.to_string(),
             config,
             enabled,
         }
+    }
+
+    fn policy(policy_type: &str, config: Value, enabled: bool) -> PolicyRow {
+        named_policy(policy_type, policy_type, config, enabled)
     }
 
     fn system(health_status: &str, critical: i32, high: i32) -> SystemRow {
@@ -692,25 +770,164 @@ mod tests {
         }
     }
 
+    // ── require_cve_check ─────────────────────────────────────────────────────
+
     #[test]
     fn cve_policy_fails_when_critical_exceeds_threshold() {
         let status = policy_status(
             &system("healthy", 1, 0),
-            &policy(
-                "require_cve_check",
-                serde_json::json!({ "max_critical": 0 }),
-                true,
-            ),
+            &policy("require_cve_check", serde_json::json!({ "max_critical": 0 }), true),
         );
         assert!(matches!(status, ComplianceControlStatus::Fail));
     }
 
     #[test]
-    fn unknown_policy_warns_instead_of_fabricating_pass() {
+    fn cve_policy_passes_when_within_threshold() {
+        let status = policy_status(
+            &system("healthy", 0, 0),
+            &policy("require_cve_check", serde_json::json!({ "max_critical": 0 }), true),
+        );
+        assert!(matches!(status, ComplianceControlStatus::Pass));
+    }
+
+    #[test]
+    fn cve_policy_warns_when_high_justification_required_and_high_cves_present() {
+        let status = policy_status(
+            &system("healthy", 0, 3),
+            &policy(
+                "require_cve_check",
+                serde_json::json!({ "max_critical": 0, "require_high_justification": true }),
+                true,
+            ),
+        );
+        assert!(matches!(status, ComplianceControlStatus::Warn));
+    }
+
+    // ── require_cf_agent ──────────────────────────────────────────────────────
+
+    #[test]
+    fn agent_policy_passes_for_healthy_status() {
+        let status = policy_status(
+            &system("healthy", 0, 0),
+            &policy("require_cf_agent", serde_json::json!({}), true),
+        );
+        assert!(matches!(status, ComplianceControlStatus::Pass));
+    }
+
+    #[test]
+    fn agent_policy_passes_for_online_status() {
+        let status = policy_status(
+            &system("online", 0, 0),
+            &policy("require_cf_agent", serde_json::json!({}), true),
+        );
+        assert!(matches!(status, ComplianceControlStatus::Pass));
+    }
+
+    #[test]
+    fn agent_policy_fails_for_offline_status() {
+        let status = policy_status(
+            &system("offline", 0, 0),
+            &policy("require_cf_agent", serde_json::json!({}), true),
+        );
+        assert!(matches!(status, ComplianceControlStatus::Fail));
+    }
+
+    #[test]
+    fn agent_policy_warns_for_unknown_status_not_fabricate_pass() {
+        // Any unrecognised status must not pass — it is indeterminate.
+        for unknown in &["stale", "error", "unhealthy", "degraded", "unknown", ""] {
+            let status = policy_status(
+                &system(unknown, 0, 0),
+                &policy("require_cf_agent", serde_json::json!({}), true),
+            );
+            assert!(
+                matches!(status, ComplianceControlStatus::Warn),
+                "expected Warn for health_status={unknown:?}, got {status:?}"
+            );
+        }
+    }
+
+    // ── disabled policies ─────────────────────────────────────────────────────
+
+    #[test]
+    fn disabled_policy_surfaces_as_warn_not_pass() {
+        let status = policy_status(
+            &system("healthy", 0, 0),
+            &policy("require_cf_agent", serde_json::json!({}), false),
+        );
+        assert!(matches!(status, ComplianceControlStatus::Warn));
+    }
+
+    #[test]
+    fn disabled_policy_is_excluded_from_score_denominator() {
+        // A disabled policy contributes warn to the counts but must not count
+        // toward evaluated_total, so a host with only disabled policies scores 0
+        // rather than 100%.
+        let sys = system("healthy", 0, 0);
+        let rollup = system_rollup(
+            sys,
+            &[policy("require_cf_agent", serde_json::json!({}), false)],
+        );
+        // warn count is 1 (disabled shows as warn for visibility)
+        assert_eq!(rollup.warn, 1, "disabled policy should surface as warn");
+        // score must be 0 — no evaluated policies means the score is undefined/0
+        assert_eq!(rollup.score, 0, "score with only disabled policies should be 0");
+        // total is 1 (the policy exists in the bundle)
+        assert_eq!(rollup.total, 1);
+    }
+
+    // ── unsupported policy types ──────────────────────────────────────────────
+
+    #[test]
+    fn unknown_policy_warns_not_fabricating_pass() {
         let status = policy_status(
             &system("healthy", 0, 0),
             &policy("custom_check", serde_json::json!({}), true),
         );
         assert!(matches!(status, ComplianceControlStatus::Warn));
+    }
+
+    #[test]
+    fn unsupported_policy_excluded_from_score_denominator() {
+        let sys = system("healthy", 0, 0);
+        let rollup = system_rollup(
+            sys,
+            &[policy("custom_unsupported_type", serde_json::json!({}), true)],
+        );
+        assert_eq!(rollup.warn, 1, "unsupported policy should surface as warn");
+        assert_eq!(rollup.score, 0, "score with only unsupported policies should be 0");
+    }
+
+    // ── evidence labels ───────────────────────────────────────────────────────
+
+    #[test]
+    fn evidence_artifact_title_is_not_authoritative() {
+        let sys = system("healthy", 0, 0);
+        let pol = policy("require_cf_agent", serde_json::json!({}), true);
+        let ev  = control_evidence(&sys, pol);
+        let artifact = ev.evidence_items[0].artifact.as_ref().unwrap();
+        assert_ne!(
+            artifact.title, "Authoritative Crystal Forge signal",
+            "artifact title must not claim to be authoritative auditor evidence"
+        );
+        assert!(
+            artifact.title.contains("evaluation inputs")
+                || artifact.title.contains("Crystal Forge"),
+            "artifact title should describe evaluation inputs, got: {:?}",
+            artifact.title
+        );
+    }
+
+    #[test]
+    fn framework_mapping_is_empty_when_no_real_mapping_exists() {
+        let sys = system("healthy", 0, 0);
+        let pol = named_policy("require_cf_agent", "CF Agent Check", serde_json::json!({}), true);
+        let ev  = control_evidence(&sys, pol);
+        assert!(
+            ev.framework_mapping.is_empty(),
+            "framework_mapping must be empty when no real framework control ID exists, \
+             got: {:?}",
+            ev.framework_mapping
+        );
     }
 }
