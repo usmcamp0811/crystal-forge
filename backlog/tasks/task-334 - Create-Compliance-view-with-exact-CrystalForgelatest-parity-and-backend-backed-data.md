@@ -7,7 +7,7 @@ status: Review
 assignee:
   - opencode-agent
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-21 23:21'
+updated_date: '2026-06-22 01:09'
 labels:
   - design-parity
   - compliance
@@ -166,4 +166,6 @@ Progress: added compliance bundle persistence migration, server DTOs, query/serv
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/285 | Verification: nix build web-ui ✅, nix build server ✅, nix build checks.x86_64-linux.web-ui ✅ (all steps pass including 29–29e compliance steps), sqlx migrate run ✅, cargo sqlx prepare ✅ (no new offline metadata needed — compliance queries use runtime-binding form)
 
 2026-06-21: Addressed OSCAL export review — prop→props, party type organization, ns namespace, import-ap fix, local objectives+targets, include-controls, evaluation-status, TEST method, hardware type. Fixed gen keyword conflict (edition 2024) and borrow checker issues in generation-counter code. Commit 96c15fb4 pushed to MR !285.
+
+2026-06-21: Replaced oscal-fixture-based check with Playwright E2E test for OSCAL export. New `checks/web-ui/tests/oscal-export-test.js` opens the real web UI, triggers the production OSCAL download via the Export modal, and validates the downloaded file against NIST 1.1.2 AR + AP + SSP schemas. This exercises the actual `build_oscal()` code path in the WASM bundle — the same code that runs when a user clicks Download. Added `validate.py` to checks/web-ui/tests/, added Python jsonschema+regex deps and oscal-1-1-2-schemas to VM check. The old oscal-fixture and checks/oscal-export/ remain temporarily until the Playwright test is proven in CI, then they'll be removed in a follow-up commit.
 <!-- SECTION:NOTES:END -->
