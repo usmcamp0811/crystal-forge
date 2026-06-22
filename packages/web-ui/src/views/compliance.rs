@@ -538,7 +538,7 @@ fn ExportModal(props: ExportModalProps) -> Element {
                 onclick: move |e| e.stop_propagation(),
 
                 div { class: "modal-head",
-                    h2 {
+                    h2 { style: "display:flex;align-items:center;gap:8px;",
                         Icon { name: IconName::Download, size: 14 }
                         "Export evidence"
                     }
@@ -846,23 +846,48 @@ fn ExportModal(props: ExportModalProps) -> Element {
                     button {
                         class: "btn btn-primary focus-ring",
                         disabled: !can_export || *downloading.read(),
-                        style: if !can_export { "opacity:0.5;cursor:not-allowed;" } else { "" },
+                        style: if !can_export {
+                            "border-color:var(--cf-divider);color:var(--cf-text-muted);background:var(--cf-bg-secondary);"
+                        } else { "" },
                         onclick: {
                             let bundle = props.selected_bundle.clone();
                             let systems_resp = props.systems_resp.clone();
-                            let fmt = format.read().clone();
-                            let scp = scope.read().clone();
-                            let iw = *include_waivers.read();
-                            let is = *include_source.read();
-                            let fname = filename.clone();
-                            let download_label = fmt_name.to_string();
                             move |_| {
                                 let Some(bundle) = bundle.clone() else { return; };
                                 let systems_resp = systems_resp.clone();
-                                let fmt = fmt.clone();
-                                let scp = scp.clone();
-                                let fname = fname.clone();
-                                let _label = download_label.clone();
+                                // Read signals inside the closure so values are fresh at click time
+                                let fmt = format.read().clone();
+                                let scp = scope.read().clone();
+                                let iw = *include_waivers.read();
+                                let is = *include_source.read();
+                                let today = js_sys::Date::new_0()
+                                    .to_iso_string()
+                                    .as_string()
+                                    .unwrap_or_default();
+                                let today_slice: String = today.chars().take(10).collect();
+                                let bundle_part = {
+                                    let ids = selected_bundle_ids.read();
+                                    if ids.len() == 1 {
+                                        ids[0].to_string()
+                                    } else {
+                                        format!("{}bundles", ids.len())
+                                    }
+                                };
+                                let env_part = {
+                                    let envs = selected_env_names.read();
+                                    if envs.is_empty() {
+                                        "no-envs".to_string()
+                                    } else if envs.len() == 1 {
+                                        envs[0].clone()
+                                    } else {
+                                        format!("{}envs", envs.len())
+                                    }
+                                };
+                                let ext = formats.iter()
+                                    .find(|f| f.0 == fmt)
+                                    .map(|f| f.2)
+                                    .unwrap_or("json");
+                                let fname = format!("cf-{bundle_part}-{env_part}-{today_slice}.{ext}");
                                 downloading.set(true);
                                 download_error.set(None);
                                 spawn(async move {
