@@ -1,0 +1,15 @@
+[package]
+name = "crystal-forge-oscal-fixture"
+version = "0.3.0"
+edition = "2024"
+
+# Native-only binary that generates a deterministic OSCAL 1.1.2
+# Assessment Results document for schema validation in CI.
+# The build_oscal() logic is duplicated from packages/web-ui/src/export/mod.rs
+# to keep this binary native-compilable while exercising the same algorithm.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v1", "v4", "serde"] }
+base64 = "0.22"

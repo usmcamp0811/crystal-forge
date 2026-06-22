@@ -95,6 +95,10 @@ in pkgs.testers.runNixOSTest {
         pkgs.crystal-forge.default.migrate
         pkgs.crystal-forge.cf-test-suite.runTests
         pkgs.crystal-forge.cf-test-suite.testRunner
+        # Python with jsonschema+regex for OSCAL export validation
+        (pkgs.python3.withPackages (p: [ p.jsonschema p.regex ]))
+        # Vendored NIST OSCAL 1.1.2 schemas for export validation
+        pkgs.crystal-forge.oscal-1-1-2-schemas
       ];
 
       environment.variables = {
@@ -387,7 +391,46 @@ in pkgs.testers.runNixOSTest {
     if failed_critical:
         raise Exception(f"Critical web UI checks failed: {failed_critical}")
 
+    # === Phase 5: OSCAL Export Validation (end-to-end via web UI) ===
+    print("=== Phase 5: OSCAL Export Validation ===")
+
+    # Run the OSCAL export test - this routes compliance API data, opens the
+    # export modal in the real web UI, captures the browser-triggered download,
+    # and validates the downloaded file against NIST OSCAL 1.1.2 schemas.
+    #
+    # This exercises the actual production build_oscal() code path in the WASM
+    # bundle — the file a user would download is what gets validated.
+    machine.succeed(
+        f"${pkgs.nodejs}/bin/node /tmp/web-ui-tests/oscal-export-test.js"
+        f" http://127.0.0.1:{toString CF_TEST_SERVER_PORT}"
+        f" /tmp/screenshots {pkgs.crystal-forge.oscal-1-1-2-schemas}"
+        f" > /tmp/web-ui-tests/oscal-export.log 2>&1"
+    )
+
+    oscal_output = machine.succeed("cat /tmp/web-ui-tests/oscal-export.log")
+    print(oscal_output)
+
+    oscal_results_json = machine.succeed("cat /tmp/screenshots/oscal-export-results.json")
+    oscal_results = json.loads(oscal_results_json)
+
+    oscal_ok = all(r.get("ok") for r in oscal_results)
+    if not oscal_ok:
+        failed = [r for r in oscal_results if not r.get("ok")]
+        for r in failed:
+            print(f"  FAIL: {r['name']} - {r.get('error', 'unknown error')}")
+        raise Exception(f"OSCAL export validation failed: {len(failed)}/{len(oscal_results)} steps failed")
+
+    # Copy OSCAL export screenshot if available
+    try:
+        machine.copy_from_vm("/tmp/screenshots/oscal-export-final.png", "screenshots")
+    except:
+        pass
+
+    print("=== OSCAL Export Validation Passed ===")
+    print("The downloaded OSCAL file was validated against NIST 1.1.2 AR + AP + SSP schemas.")
+    print("")
+
     print("\n=== All Mega Integration Tests Passed ===")
-    print("Completed: Cache (Attic+S3), Builder, Web UI")
+    print("Completed: Cache (Attic+S3), Builder, Web UI, OSCAL Export")
   '';
 }
