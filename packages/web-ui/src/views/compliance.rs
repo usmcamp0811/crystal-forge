@@ -1734,22 +1734,28 @@ fn ExportModal(props: ExportModalProps) -> Element {
                                         scope: "all",
                                     };
 
+                                    // Use application/octet-stream for all text-based
+                                    // formats so the browser always saves to disk
+                                    // rather than rendering the content inline.
+                                    // Browsers treat application/json and text/csv
+                                    // as displayable and may open them in a new tab
+                                    // instead of triggering a save dialog.
                                     let result = match fmt.as_str() {
                                         "json" => {
                                             let content = build_cf_json(&payload);
-                                            trigger_download(&fname, "application/json", &content)
+                                            trigger_download(&fname, "application/octet-stream", &content)
                                         }
                                         "csv" => {
                                             let content = build_csv(&payload);
-                                            trigger_download(&fname, "text/csv", &content)
+                                            trigger_download(&fname, "application/octet-stream", &content)
                                         }
                                         "sarif" => {
                                             let content = build_sarif(&payload);
-                                            trigger_download(&fname, "application/json", &content)
+                                            trigger_download(&fname, "application/octet-stream", &content)
                                         }
                                         "oscal" => {
                                             let content = build_oscal(&payload);
-                                            trigger_download(&fname, "application/json", &content)
+                                            trigger_download(&fname, "application/octet-stream", &content)
                                         }
                                         "pdf" => download_print_html(&fname, &payload),
                                         _ => Err(format!("Unknown format: {fmt}")),

@@ -832,10 +832,11 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
 /// constructing a Blob URL and opening that directly.
 /// Build and download a print-ready HTML report as a `.html` file.
 /// The user can open it in any browser and use Ctrl-P / "Save as PDF".
-/// This is a plain file download — no popups required.
+/// Uses application/octet-stream so the browser saves to disk rather
+/// than rendering the HTML inline in a new tab.
 pub fn download_print_html(filename: &str, p: &ExportPayload<'_>) -> Result<(), String> {
     let html = build_print_html(p);
-    trigger_download(filename, "text/html", &html)
+    trigger_download(filename, "application/octet-stream", &html)
 }
 
 fn build_print_html(p: &ExportPayload<'_>) -> String {
