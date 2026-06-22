@@ -806,6 +806,8 @@ pub struct ComplianceRollupTotals {
     pub fail: i64,
     pub waiver: i64,
     pub total_controls: i64,
+    #[serde(default)]
+    pub evaluated_controls: i64,
     pub overall_score: i64,
 }
 
@@ -816,6 +818,8 @@ pub struct ComplianceSystemRollup {
     pub environment: Option<String>,
     pub applies: bool,
     pub total: i64,
+    #[serde(default)]
+    pub evaluated_total: i64,
     pub pass: i64,
     pub warn: i64,
     pub fail: i64,

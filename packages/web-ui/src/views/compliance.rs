@@ -214,7 +214,10 @@ pub fn ComplianceView() -> Element {
             } else if !*loaded.read() {
                 DashboardLoadingSpinner { label: "Loading compliance…".to_string() }
             } else if bundles.read().is_empty() {
-                EmptyComplianceState { on_new: move |_| show_new_bundle.set(true) }
+                EmptyComplianceState {
+                    is_admin,
+                    on_new: move |_| show_new_bundle.set(true),
+                }
             } else {
                 div {
                     style: "display:grid;grid-template-columns:320px 1fr;gap:16px;align-items:start;",
@@ -323,8 +326,8 @@ pub fn ComplianceView() -> Element {
             }
         }
 
-        // ── New bundle modal ───────────────────────────────────────────────
-        if *show_new_bundle.read() {
+        // ── New bundle modal (admin-only) ──────────────────────────────────
+        if is_admin && *show_new_bundle.read() {
             NewBundleModal {
                 policies: policies.read().clone(),
                 environments: environments.read().clone(),
@@ -345,8 +348,8 @@ pub fn ComplianceView() -> Element {
             }
         }
 
-        // ── Edit bundle modal ──────────────────────────────────────────────
-        if *show_edit_bundle.read() {
+        // ── Edit bundle modal (admin-only) ─────────────────────────────────
+        if is_admin && *show_edit_bundle.read() {
             if let Some(bundle) = selected_bundle_id.read()
                 .and_then(|id| bundles.read().iter().find(|b| b.id == id).cloned())
             {
@@ -384,8 +387,8 @@ pub fn ComplianceView() -> Element {
             }
         }
 
-        // ── Import STIG modal ─────────────────────────────────────────────
-        if *show_import_stig.read() {
+        // ── Import STIG modal (admin-only) ────────────────────────────────
+        if is_admin && *show_import_stig.read() {
             ImportStigModal {
                 environments: environments.read().clone(),
                 on_close: move |_| show_import_stig.set(false),
@@ -399,6 +402,8 @@ pub fn ComplianceView() -> Element {
 #[derive(Props, Clone, PartialEq)]
 struct EmptyComplianceStateProps {
     on_new: EventHandler<()>,
+    #[props(default = false)]
+    is_admin: bool,
 }
 
 #[component]
@@ -406,17 +411,22 @@ fn EmptyComplianceState(props: EmptyComplianceStateProps) -> Element {
     rsx! {
         div { class: "empty",
             h3 { "No compliance bundles" }
-            div {
-                "Create a bundle by grouping deployment policies into a reviewable compliance standard."
-            }
-            button {
-                class: "btn btn-primary focus-ring",
-                onclick: move |_| props.on_new.call(()),
-                Icon { name: IconName::Plus, size: 14 }
-                " New bundle"
+            if props.is_admin {
+                div {
+                    "Create a bundle by grouping deployment policies into a reviewable compliance standard."
+                }
+                button {
+                    class: "btn btn-primary focus-ring",
+                    onclick: move |_| props.on_new.call(()),
+                    Icon { name: IconName::Plus, size: 14 }
+                    " New bundle"
+                }
+            } else {
+                div {
+                    "No compliance bundles have been configured. Contact an administrator to set up compliance bundles."
+                }
             }
         }
-
     }
 }
 

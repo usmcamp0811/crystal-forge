@@ -1044,7 +1044,12 @@ pub struct ComplianceRollupTotals {
     pub warn: i64,
     pub fail: i64,
     pub waiver: i64,
+    /// Total policy slots across all systems (includes disabled/unsupported).
     pub total_controls: i64,
+    /// Controls that were actually evaluated (excludes disabled/unsupported).
+    /// Used as the denominator for overall_score.
+    #[serde(default)]
+    pub evaluated_controls: i64,
     pub overall_score: i64,
 }
 
@@ -1054,7 +1059,12 @@ pub struct ComplianceSystemRollup {
     pub hostname: String,
     pub environment: Option<String>,
     pub applies: bool,
+    /// Total policy slots in the bundle (includes disabled/unsupported).
     pub total: i64,
+    /// Controls that were actually evaluated for this system.
+    /// Use this as the score denominator; total includes non-evaluated policies.
+    #[serde(default)]
+    pub evaluated_total: i64,
     pub pass: i64,
     pub warn: i64,
     pub fail: i64,

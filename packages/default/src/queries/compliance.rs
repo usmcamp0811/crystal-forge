@@ -544,8 +544,9 @@ fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> ComplianceSystemR
         }
     }
 
-    // total exposed to clients is the full policy count (including disabled/
-    // unsupported) so the UI can show "N of M controls evaluated".
+    // total = full bundle policy count (for UI display: "N of M controls evaluated").
+    // evaluated_total = only the policies that were actually assessed; this is the
+    // correct denominator for the score.
     let total = policies.len() as i64;
     let score = if evaluated_total == 0 { 0 } else { (pass * 100) / evaluated_total };
 
@@ -555,6 +556,7 @@ fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> ComplianceSystemR
         environment: system.environment,
         applies: true,
         total,
+        evaluated_total,
         pass,
         warn,
         fail,
@@ -570,20 +572,30 @@ fn totals_for_rollups(rollups: &[ComplianceSystemRollup]) -> ComplianceRollupTot
     };
 
     for rollup in rollups {
-        if rollup.fail == 0 && rollup.warn == 0 && rollup.total > 0 {
+        // A host is "fully compliant" when every evaluated control passed —
+        // i.e. no failures and no evaluated warnings.  Disabled/unsupported
+        // policies surface in rollup.warn but should not prevent a host that
+        // has no real failures from counting as compliant.
+        let evaluated_warns = rollup.warn.saturating_sub(
+            rollup.total - rollup.evaluated_total
+        );
+        if rollup.fail == 0 && evaluated_warns == 0 && rollup.evaluated_total > 0 {
             totals.fully_compliant_count += 1;
         }
-        totals.pass += rollup.pass;
-        totals.warn += rollup.warn;
-        totals.fail += rollup.fail;
-        totals.waiver += rollup.waiver;
-        totals.total_controls += rollup.total;
+        totals.pass                += rollup.pass;
+        totals.warn                += rollup.warn;
+        totals.fail                += rollup.fail;
+        totals.waiver              += rollup.waiver;
+        totals.total_controls      += rollup.total;
+        totals.evaluated_controls  += rollup.evaluated_total;
     }
 
-    totals.overall_score = if totals.total_controls == 0 {
+    // overall_score uses evaluated_controls (not total_controls) as the
+    // denominator so disabled/unsupported policies cannot deflate the headline score.
+    totals.overall_score = if totals.evaluated_controls == 0 {
         0
     } else {
-        (totals.pass * 100) / totals.total_controls
+        (totals.pass * 100) / totals.evaluated_controls
     };
     totals
 }
@@ -860,20 +872,15 @@ mod tests {
 
     #[test]
     fn disabled_policy_is_excluded_from_score_denominator() {
-        // A disabled policy contributes warn to the counts but must not count
-        // toward evaluated_total, so a host with only disabled policies scores 0
-        // rather than 100%.
         let sys = system("healthy", 0, 0);
         let rollup = system_rollup(
             sys,
             &[policy("require_cf_agent", serde_json::json!({}), false)],
         );
-        // warn count is 1 (disabled shows as warn for visibility)
         assert_eq!(rollup.warn, 1, "disabled policy should surface as warn");
-        // score must be 0 — no evaluated policies means the score is undefined/0
         assert_eq!(rollup.score, 0, "score with only disabled policies should be 0");
-        // total is 1 (the policy exists in the bundle)
         assert_eq!(rollup.total, 1);
+        assert_eq!(rollup.evaluated_total, 0, "disabled policy must not count as evaluated");
     }
 
     // ── unsupported policy types ──────────────────────────────────────────────
@@ -896,6 +903,63 @@ mod tests {
         );
         assert_eq!(rollup.warn, 1, "unsupported policy should surface as warn");
         assert_eq!(rollup.score, 0, "score with only unsupported policies should be 0");
+        assert_eq!(rollup.evaluated_total, 0);
+    }
+
+    // ── mixed: evaluated pass + disabled ─────────────────────────────────────
+    // This is the key regression test from the re-review finding.
+
+    #[test]
+    fn mixed_passing_and_disabled_scores_100_percent() {
+        let sys = system("healthy", 0, 0);
+        let policies = vec![
+            // evaluated → pass
+            policy("require_cf_agent", serde_json::json!({}), true),
+            // not evaluated → warn (excluded from denominator)
+            policy("require_cf_agent", serde_json::json!({}), false),
+        ];
+        let rollup = system_rollup(sys, &policies);
+
+        assert_eq!(rollup.pass, 1, "one passing control");
+        assert_eq!(rollup.warn, 1, "one disabled (surfaces as warn)");
+        assert_eq!(rollup.fail, 0);
+        assert_eq!(rollup.evaluated_total, 1, "only one control was evaluated");
+        assert_eq!(rollup.score, 100, "host score must be 100 with one pass and one disabled");
+    }
+
+    #[test]
+    fn aggregate_score_uses_evaluated_controls_not_total() {
+        let sys = system("healthy", 0, 0);
+        let policies = vec![
+            policy("require_cf_agent", serde_json::json!({}), true),  // pass
+            policy("require_cf_agent", serde_json::json!({}), false), // disabled → warn
+        ];
+        let rollup = system_rollup(sys, &policies);
+        let totals = totals_for_rollups(&[rollup]);
+
+        // Overall score must use evaluated_controls (1) not total_controls (2).
+        assert_eq!(totals.overall_score, 100,
+            "bundle overall score must be 100 when the only evaluated control passes");
+        assert_eq!(totals.evaluated_controls, 1);
+        assert_eq!(totals.total_controls, 2);
+    }
+
+    #[test]
+    fn fully_compliant_count_ignores_not_evaluated_controls() {
+        let sys = system("healthy", 0, 0);
+        let policies = vec![
+            policy("require_cf_agent", serde_json::json!({}), true),  // pass
+            policy("require_cf_agent", serde_json::json!({}), false), // disabled → warn
+        ];
+        let rollup = system_rollup(sys, &policies);
+        // warn = 1 (from disabled), but all *evaluated* controls pass,
+        // so the host must count as fully compliant.
+        assert_eq!(rollup.warn, 1);
+        assert_eq!(rollup.pass, 1);
+        let totals = totals_for_rollups(&[rollup]);
+        assert_eq!(totals.fully_compliant_count, 1,
+            "host with all evaluated controls passing must count as fully compliant \
+             even when disabled policies surface as warn");
     }
 
     // ── evidence labels ───────────────────────────────────────────────────────
