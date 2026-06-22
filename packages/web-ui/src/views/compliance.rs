@@ -431,21 +431,35 @@ fn ExportModal(props: ExportModalProps) -> Element {
     let mut downloading = use_signal(|| false);
     let mut download_error = use_signal(|| None::<String>);
 
-    let total_hosts = props
+    // ── Env-filtered + scope-aware counts (reactive to signal reads) ──────────
+    // These drive the summary callout, host-scope segment labels, and can_export.
+    // They must match what the export will actually produce, so we derive them
+    // from the per-system list filtered by the currently selected environments.
+    let all_systems_list = props
         .systems_resp
         .as_ref()
-        .map(|r| r.totals.system_count)
-        .unwrap_or(0);
-    let total_controls = props
-        .systems_resp
-        .as_ref()
-        .map(|r| r.totals.total_controls)
-        .unwrap_or(0);
-    let fail_count = props
-        .systems_resp
-        .as_ref()
-        .map(|r| r.totals.fail)
-        .unwrap_or(0);
+        .map(|r| r.systems.clone())
+        .unwrap_or_default();
+
+    let env_filtered_systems: Vec<_> = {
+        let envs = selected_env_names.read();
+        all_systems_list
+            .iter()
+            .filter(|s| {
+                if envs.is_empty() {
+                    return true;
+                }
+                let env = s.environment.as_deref().unwrap_or("");
+                envs.iter().any(|e| e == env)
+            })
+            .cloned()
+            .collect()
+    };
+
+    let total_hosts = env_filtered_systems.len() as i64;
+    let total_controls: i64 = env_filtered_systems.iter().map(|s| s.total).sum();
+    // fail_count = number of systems that have at least one failing control
+    let fail_count: i64 = env_filtered_systems.iter().filter(|s| s.fail > 0).count() as i64;
 
     let formats: &[(&str, &str, &str, &str)] = &[
         ("oscal", "OSCAL 1.1.2 JSON", "oscal.json", "NIST OSCAL System Security Plan + Assessment Results for ATO packages."),
