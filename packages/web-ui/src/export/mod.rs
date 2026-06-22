@@ -300,23 +300,43 @@ pub fn build_sarif(p: &ExportPayload<'_>) -> String {
 
     let scoped_ev = p.scoped_evidence();
 
-    // Rules = unique controls (by policy_id)
+    // ── Rules = unique controls (by policy_id) ────────────────────────────────
+    // The rule describes the *invariant* (the policy), not any host-specific
+    // result.  We build a stable description from policy_name alone; the
+    // host-specific assessment lives under results[].message below.
+    //
+    // Apply the same include_waivers filter as results so we never emit a rule
+    // with no corresponding result.
     let rules: Vec<Value> = {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::HashSet::<uuid::Uuid>::new();
         let mut rules = Vec::new();
         for ev in &scoped_ev {
             for ctrl in &ev.controls {
+                // Mirror the results filter so rules and results stay in sync.
+                if !p.include_waivers && matches!(ctrl.status, ComplianceControlStatus::Waiver) {
+                    continue;
+                }
                 if seen.insert(ctrl.policy_id) {
+                    // fullDescription describes the rule invariant, not any
+                    // host-specific summary.  Use the framework mapping as a
+                    // stable, policy-level description when available.
+                    let full_desc = if ctrl.framework_mapping.is_empty() {
+                        format!("Verifies compliance with: {}", ctrl.policy_name)
+                    } else {
+                        format!("Verifies compliance with: {} ({})", ctrl.policy_name, ctrl.framework_mapping)
+                    };
                     rules.push(json!({
                         "id": ctrl.policy_id.to_string(),
                         "name": ctrl.policy_name,
                         "shortDescription": { "text": ctrl.policy_name },
-                        "fullDescription": { "text": ctrl.summary },
-                        "helpUri": "",
+                        // Policy-level description — no host-specific text here.
+                        "fullDescription": { "text": full_desc },
                         "properties": {
                             "tags": ["compliance", &p.bundle.framework],
                             "frameworkMapping": ctrl.framework_mapping,
                         }
+                        // helpUri omitted: empty URIs fail URI-format validators.
+                        // Add when policy documentation URLs are available.
                     }));
                 }
             }
@@ -324,48 +344,92 @@ pub fn build_sarif(p: &ExportPayload<'_>) -> String {
         rules
     };
 
-    // Results = one per (system × control)
+    // ── Results = one per (system × control) ──────────────────────────────────
     let results: Vec<Value> = scoped_ev
         .iter()
         .flat_map(|ev| {
-            ev.controls.iter().filter_map(|ctrl| {
+            let sys = p.systems.iter().find(|s| s.system_id == ev.system_id);
+            let env_name = sys
+                .and_then(|s| s.environment.as_deref())
+                .unwrap_or("unknown");
+            let sys_id_str = ev.system_id.to_string();
+
+            let env_name = env_name.to_string();
+            let sys_id_str = sys_id_str.clone();
+            ev.controls.iter().filter_map(move |ctrl| {
                 if !p.include_waivers && matches!(ctrl.status, ComplianceControlStatus::Waiver) {
                     return None;
                 }
-                let sarif_level = match ctrl.status {
-                    ComplianceControlStatus::Pass => "none",
-                    ComplianceControlStatus::Warn | ComplianceControlStatus::Waiver => "warning",
-                    ComplianceControlStatus::Fail => "error",
+
+                // kind + level mapping:
+                //   Pass   → pass  / none     — requirement satisfied
+                //   Warn   → review/ warning  — indeterminate, needs reviewer attention
+                //   Fail   → fail  / error    — requirement not satisfied
+                //   Waiver → fail  / warning  — failed but risk formally accepted
+                let (sarif_kind, sarif_level) = match ctrl.status {
+                    ComplianceControlStatus::Pass   => ("pass",   "none"),
+                    ComplianceControlStatus::Warn   => ("review", "warning"),
+                    ComplianceControlStatus::Fail   => ("fail",   "error"),
+                    ComplianceControlStatus::Waiver => ("fail",   "warning"),
                 };
-                let sarif_kind = match ctrl.status {
-                    ComplianceControlStatus::Pass => "pass",
-                    ComplianceControlStatus::Waiver => "open",
-                    _ => "fail",
-                };
-                Some(json!({
+
+                // Stable fingerprint: bundle:system:policy — allows consumers
+                // to correlate the same finding across repeated exports.
+                let fingerprint = format!(
+                    "{}:{}:{}",
+                    p.bundle.id, ev.system_id, ctrl.policy_id
+                );
+
+                // Host-specific result message (contrasts with rule.fullDescription
+                // which describes the policy invariant, not any specific host).
+                let msg = format!(
+                    "{} on {} ({}): {}",
+                    ctrl.policy_name, ev.hostname, env_name, ctrl.summary
+                );
+
+                let mut result = json!({
                     "ruleId": ctrl.policy_id.to_string(),
                     "kind": sarif_kind,
                     "level": sarif_level,
-                    "message": { "text": ctrl.summary },
+                    "message": { "text": msg },
                     "locations": [{
                         "logicalLocations": [{
                             "name": ev.hostname,
+                            "fullyQualifiedName": format!("{}/{}", env_name, ev.hostname),
                             "kind": "machine",
                             "properties": {
-                                "environment": p.systems.iter()
-                                    .find(|s| s.system_id == ev.system_id)
-                                    .and_then(|s| s.environment.as_deref())
-                                    .unwrap_or("unknown"),
+                                // Include system UUID so two hosts with the same
+                                // hostname remain distinguishable across tenants.
+                                "systemId": sys_id_str,
+                                "environment": env_name,
                             }
                         }]
                     }],
+                    "partialFingerprints": {
+                        // Stable crystal-forge fingerprint for result correlation.
+                        "crystalForge/v1": fingerprint,
+                    },
                     "properties": {
                         "severity": ctrl.severity,
                         "frameworkMapping": ctrl.framework_mapping,
                         "bundleName": p.bundle.name,
                         "bundleVersion": p.bundle.version,
                     }
-                }))
+                });
+
+                // Waivers: represent as a failed result with a SARIF suppression
+                // so consumers can distinguish open problems, genuine failures,
+                // and failures whose risk has been formally accepted.
+                if matches!(ctrl.status, ComplianceControlStatus::Waiver) {
+                    result["suppressions"] = json!([{
+                        "kind": "external",
+                        "status": "accepted",
+                        "justification": "Risk accepted through Crystal Forge waiver.",
+                    }]);
+                    result["properties"]["disposition"] = json!("waived");
+                }
+
+                Some(result)
             })
         })
         .collect();
@@ -377,14 +441,20 @@ pub fn build_sarif(p: &ExportPayload<'_>) -> String {
             "tool": {
                 "driver": {
                     "name": "Crystal Forge",
-                    "version": "0.3.0",
-                    "informationUri": "",
+                    // Use the crate version from Cargo.toml — not hardcoded.
+                    "version": env!("CARGO_PKG_VERSION"),
+                    // informationUri omitted: empty strings fail URI-format
+                    // validators.  Add a real URL when documentation exists.
                     "rules": rules,
                 }
             },
             "automationDetails": {
-                "id": format!("{}/{}", p.bundle.id, js_sys::Date::new_0().to_iso_string().as_string().unwrap_or_default()),
-                "description": { "text": format!("{} v{} compliance assessment", p.bundle.name, p.bundle.version) },
+                "id": format!("{}/{}", p.bundle.id,
+                    js_sys::Date::new_0().to_iso_string().as_string().unwrap_or_default()),
+                "description": {
+                    "text": format!("{} v{} compliance assessment",
+                        p.bundle.name, p.bundle.version)
+                },
             },
             "results": results,
             "properties": {
