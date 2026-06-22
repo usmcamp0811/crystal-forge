@@ -846,8 +846,8 @@ fn ExportModal(props: ExportModalProps) -> Element {
                     button {
                         class: "btn btn-primary focus-ring",
                         disabled: !can_export || *downloading.read(),
-                        style: if !can_export {
-                            "border-color:var(--cf-divider);color:var(--cf-text-muted);background:var(--cf-bg-secondary);"
+                        style: if !can_export || *downloading.read() {
+                            "opacity:0.5;cursor:not-allowed;"
                         } else { "" },
                         onclick: {
                             let bundle = props.selected_bundle.clone();
@@ -978,8 +978,13 @@ fn ExportModal(props: ExportModalProps) -> Element {
                                 });
                             }
                         },
-                        Icon { name: IconName::Download, size: 13 }
-                        if *downloading.read() { " Preparing…" } else { " Download {fmt_name}" }
+                        if *downloading.read() {
+                            span { class: "cf-spinner-ring", style: "display:inline-flex;margin-right:4px;", Icon { name: IconName::Sync, size: 13 } }
+                            " Preparing…"
+                        } else {
+                            Icon { name: IconName::Download, size: 13 }
+                            " Download {fmt_name}"
+                        }
                     }
                 }
             }
