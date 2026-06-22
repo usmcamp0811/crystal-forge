@@ -29,6 +29,7 @@ ordinal: 299000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+<!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem
 
 The System Detail Compliance tab (`ComplianceTab` in `system_detail.rs`) currently renders entirely from `mocked_compliance_bundles()` — hardcoded data authorized as a temporary placeholder in TASK-353. The evidence drawer (`ComplianceEvidenceDrawer`) likewise uses four hardcoded sample controls.
@@ -55,6 +56,7 @@ Replace every mock/placeholder in `ComplianceTab` and `ComplianceEvidenceDrawer`
 - The "View bundle" button in the drawer header should deep-link to `/compliance` with the bundle pre-selected (pass via router state or query param); if the router cannot carry state today, navigate to `/compliance` and let the user select the bundle — do not block this task on that
 - Remove `mocked_compliance_bundles`, `ComplianceMockBundle`, and `ComplianceEvidenceDrawer` (the placeholder) once replaced
 - No new migrations or backend changes are required — TASK-334 delivered the full backend
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
@@ -66,3 +68,9 @@ Replace every mock/placeholder in `ComplianceTab` and `ComplianceEvidenceDrawer`
 - [ ] #6 The sd-callout-info preview banner, mocked_compliance_bundles, ComplianceMockBundle, and the placeholder ComplianceEvidenceDrawer are fully removed from the production render path
 - [ ] #7 nix build .#packages.x86_64-linux.web-ui passes with no new warnings introduced by this task
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-agent on $(hostname) in ~/code/crystal-forge/TASK-356-wire-system-detail-compliance
+<!-- SECTION:NOTES:END -->
