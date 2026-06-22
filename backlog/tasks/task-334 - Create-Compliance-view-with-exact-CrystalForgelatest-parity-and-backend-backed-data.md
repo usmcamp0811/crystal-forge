@@ -7,7 +7,7 @@ status: Review
 assignee:
   - opencode-agent
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-22 01:29'
+updated_date: '2026-06-22 01:44'
 labels:
   - design-parity
   - compliance
@@ -172,4 +172,6 @@ MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/285 | Verifi
 2026-06-22: Committed and pushed Playwright E2E test (8ab4ed1e to MR !285). New checks/web-ui/tests/oscal-export-test.js exercises the real production build_oscal() code path: opens web UI, triggers download via Export modal, captures file, validates against NIST 1.1.2 schemas. Runs as Phase 5 inside the existing web-ui NixOS VM check.
 
 - 2026-06-22: Fixed E0507 "cannot move out of value" — shared `all_bundles_ref` via `Rc` to fix multiple `FnMut` closure capture. Updated integration-test.js step 29c for new export modal layout. Committed 9f20b152, pushed to MR !285.
+
+- 2026-06-22: Fixed ExportModal header layout (icon + heading on separate lines) — added display:flex to h2. Fixed download button: read signals inside onclick closure instead of capturing stale snapshots at render time. Replaced cursor:not-allowed + opacity disabled style with muted border/text/bg for less confusing disabled state. Committed 64a18777, pushed to MR !285.
 <!-- SECTION:NOTES:END -->
