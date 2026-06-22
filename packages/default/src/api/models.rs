@@ -1002,6 +1002,140 @@ pub struct EnvironmentPolicyMapEntry {
     pub required_policy_ids: Vec<uuid::Uuid>,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Compliance DTOs — /api/v1/compliance/*
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceBundleSummary {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub framework: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub layer: String,
+    pub owner: String,
+    pub last_review: Option<DateTime<Utc>>,
+    pub policy_ids: Vec<uuid::Uuid>,
+    pub required_envs: Vec<ComplianceEnvironmentRef>,
+    pub control_count: i64,
+    pub environment_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceEnvironmentRef {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub color_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceBundleSystemsResponse {
+    pub bundle_id: uuid::Uuid,
+    pub systems: Vec<ComplianceSystemRollup>,
+    pub totals: ComplianceRollupTotals,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ComplianceRollupTotals {
+    pub system_count: i64,
+    pub fully_compliant_count: i64,
+    pub pass: i64,
+    pub warn: i64,
+    pub fail: i64,
+    pub waiver: i64,
+    /// Total policy slots across all systems (includes disabled/unsupported).
+    pub total_controls: i64,
+    /// Controls that were actually evaluated (excludes disabled/unsupported).
+    /// Used as the denominator for overall_score.
+    #[serde(default)]
+    pub evaluated_controls: i64,
+    pub overall_score: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceSystemRollup {
+    pub system_id: uuid::Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub applies: bool,
+    /// Total policy slots in the bundle (includes disabled/unsupported).
+    pub total: i64,
+    /// Controls that were actually evaluated for this system.
+    /// Use this as the score denominator; total includes non-evaluated policies.
+    #[serde(default)]
+    pub evaluated_total: i64,
+    pub pass: i64,
+    pub warn: i64,
+    pub fail: i64,
+    pub waiver: i64,
+    pub score: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComplianceControlStatus {
+    Pass,
+    Warn,
+    Fail,
+    Waiver,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceEvidenceResponse {
+    pub bundle_id: uuid::Uuid,
+    pub system_id: uuid::Uuid,
+    pub hostname: String,
+    pub controls: Vec<ComplianceControlEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceControlEvidence {
+    pub policy_id: uuid::Uuid,
+    pub policy_name: String,
+    pub status: ComplianceControlStatus,
+    pub severity: String,
+    pub summary: String,
+    pub evidence_items: Vec<ComplianceEvidenceItem>,
+    pub framework_mapping: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceEvidenceItem {
+    pub kind: String,
+    pub label: String,
+    pub body: String,
+    pub artifact: Option<ComplianceEvidenceArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceEvidenceArtifact {
+    pub artifact_type: String,
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateComplianceBundleRequest {
+    pub name: String,
+    pub framework: String,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub layer: Option<String>,
+    pub required_envs: Vec<uuid::Uuid>,
+    pub policy_ids: Vec<uuid::Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateComplianceBundleRequest {
+    pub name: String,
+    pub framework: String,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub required_envs: Vec<uuid::Uuid>,
+    pub policy_ids: Vec<uuid::Uuid>,
+}
+
 /// Request payload for creating a flake registry entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateFlakeRequest {

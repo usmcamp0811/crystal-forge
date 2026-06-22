@@ -6043,6 +6043,422 @@ const steps = [
       await unrouteSystemsWarningData(page);
     },
   },
+  // ── TASK-334: Compliance view evidence ──────────────────────────────────────
+  {
+    name: "29-compliance-empty",
+    description: "Compliance view renders empty state when no bundles exist",
+    action: async (page) => {
+      await page.route("**/api/v1/compliance/bundles*", async (route) => {
+        if (route.request().method() === "GET") {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify([]),
+          });
+        } else {
+          await route.continue();
+        }
+      });
+
+      await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1200);
+
+      await assertVisible(
+        page.getByRole("heading", { name: /^Compliance$/i }).first(),
+        "Expected Compliance page heading in empty state",
+      );
+      await assertVisible(
+        page.getByText(/No compliance bundles yet/i).first(),
+        "Expected empty-state message when no bundles are present",
+      );
+      await assertVisible(
+        page.getByRole("button", { name: /Export evidence/i }).first(),
+        "Expected 'Export evidence' ghost action in page head",
+      );
+      await assertVisible(
+        page.getByRole("button", { name: /New bundle/i }).first(),
+        "Expected 'New bundle' primary action in page head",
+      );
+
+      await page.unroute("**/api/v1/compliance/bundles*");
+    },
+  },
+  {
+    name: "29a-compliance-populated",
+    description: "Compliance view renders bundle catalog, header, score strip, and systems matrix",
+    action: async (page) => {
+      const bundleId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const systemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+      const envId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+      const policyId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+      const bundle = {
+        id: bundleId,
+        name: "NIST 800-53 High",
+        framework: "NIST 800-53",
+        version: "rev5",
+        description: "NIST 800-53 rev5 High baseline for production fleet.",
+        layer: "fleet",
+        owner: "Platform Security",
+        last_review: new Date().toISOString(),
+        policy_ids: [policyId],
+        required_envs: [{ id: envId, name: "production", color_hex: "#3b82f6" }],
+        control_count: 1,
+        environment_count: 1,
+      };
+
+      await page.route("**/api/v1/compliance/bundles*", async (route) => {
+        if (route.request().method() === "GET" && !route.request().url().includes("/systems")) {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify([bundle]),
+          });
+        } else {
+          await route.continue();
+        }
+      });
+
+      await page.route(`**/api/v1/compliance/bundles/${bundleId}/systems*`, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            bundle_id: bundleId,
+            systems: [
+              {
+                system_id: systemId,
+                hostname: "prod-web-01",
+                environment: "production",
+                applies: true,
+                total: 1,
+                pass: 1,
+                warn: 0,
+                fail: 0,
+                waiver: 0,
+                score: 100,
+              },
+            ],
+            totals: {
+              system_count: 1,
+              fully_compliant_count: 1,
+              pass: 1,
+              warn: 0,
+              fail: 0,
+              waiver: 0,
+              total_controls: 1,
+              overall_score: 100,
+            },
+          }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      // Page head
+      await assertVisible(
+        page.getByRole("heading", { name: /^Compliance$/i }).first(),
+        "Expected Compliance page heading",
+      );
+
+      // Bundle catalog
+      await assertVisible(
+        page.getByText("NIST 800-53 High").first(),
+        "Expected bundle name in catalog",
+      );
+      await assertVisible(
+        page.getByText(/fleet/i).first(),
+        "Expected layer chip in bundle catalog",
+      );
+
+      // Bundle header card
+      await assertVisible(
+        page.getByText("Platform Security").first(),
+        "Expected bundle owner in header card",
+      );
+      await assertVisible(
+        page.getByText("production").first(),
+        "Expected required-env badge in header card",
+      );
+
+      // Score strip
+      await assertVisible(
+        page.getByText(/Overall score/i).first(),
+        "Expected 'Overall score' label in score strip",
+      );
+      await assertVisible(
+        page.getByText(/100%/i).first(),
+        "Expected 100% overall score in score strip",
+      );
+      await assertVisible(
+        page.getByText(/Fully compliant hosts/i).first(),
+        "Expected 'Fully compliant hosts' in score strip",
+      );
+
+      // Systems matrix
+      await assertVisible(
+        page.getByText("prod-web-01").first(),
+        "Expected system hostname in systems matrix",
+      );
+      await assertVisible(
+        page.getByRole("button", { name: /View evidence/i }).first(),
+        "Expected 'View evidence' action in systems matrix",
+      );
+
+      await page.unroute("**/api/v1/compliance/bundles*");
+      await page.unroute(`**/api/v1/compliance/bundles/${bundleId}/systems*`);
+    },
+  },
+  {
+    name: "29b-compliance-evidence-drawer",
+    description: "Compliance evidence drawer opens and renders control evidence",
+    action: async (page) => {
+      const bundleId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const systemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+      const envId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+      const policyId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+      const bundle = {
+        id: bundleId,
+        name: "NIST 800-53 High",
+        framework: "NIST 800-53",
+        version: "rev5",
+        description: "NIST 800-53 rev5 High baseline.",
+        layer: "fleet",
+        owner: "Platform Security",
+        last_review: new Date().toISOString(),
+        policy_ids: [policyId],
+        required_envs: [{ id: envId, name: "production", color_hex: "#3b82f6" }],
+        control_count: 1,
+        environment_count: 1,
+      };
+
+      await page.route("**/api/v1/compliance/bundles*", async (route) => {
+        if (route.request().method() === "GET" && !route.request().url().includes("/systems")) {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify([bundle]),
+          });
+        } else {
+          await route.continue();
+        }
+      });
+
+      await page.route(`**/api/v1/compliance/bundles/${bundleId}/systems*`, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            bundle_id: bundleId,
+            systems: [{ system_id: systemId, hostname: "prod-web-01", environment: "production", applies: true, total: 1, pass: 0, warn: 0, fail: 1, waiver: 0, score: 0 }],
+            totals: { system_count: 1, fully_compliant_count: 0, pass: 0, warn: 0, fail: 1, waiver: 0, total_controls: 1, overall_score: 0 },
+          }),
+        });
+      });
+
+      await page.route(`**/api/v1/compliance/bundles/${bundleId}/systems/${systemId}/evidence*`, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            bundle_id: bundleId,
+            system_id: systemId,
+            hostname: "prod-web-01",
+            controls: [
+              {
+                policy_id: policyId,
+                policy_name: "require_no_critical_cves",
+                status: "fail",
+                severity: "high",
+                summary: "prod-web-01 violates require_no_critical_cves according to current Crystal Forge data.",
+                evidence_items: [
+                  {
+                    kind: "cve_scan",
+                    label: "CVE scan result",
+                    body: "critical_cves=3 threshold=0",
+                    artifact: { artifact_type: "cve_scan", title: "Authoritative Crystal Forge signal", body: "3 critical CVEs detected" },
+                  },
+                ],
+                framework_mapping: "require_cve_check → require_no_critical_cves",
+              },
+            ],
+          }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      // Click "View evidence" to open the drawer
+      const evidenceBtn = page.getByRole("button", { name: /View evidence/i }).first();
+      await evidenceBtn.waitFor({ timeout: 5000 });
+      await evidenceBtn.click({ force: true });
+      await page.waitForTimeout(1200);
+
+      // Evidence drawer assertions
+      await assertVisible(
+        page.getByText(/Evidence · prod-web-01/i).first(),
+        "Expected evidence drawer heading with hostname",
+      );
+      await assertVisible(
+        page.getByText("require_no_critical_cves").first(),
+        "Expected policy name in evidence control card",
+      );
+      await assertVisible(
+        page.getByText(/3 critical CVEs detected/i).first(),
+        "Expected artifact body in evidence item",
+      );
+      await assertVisible(
+        page.getByRole("button", { name: /Close/i }).first(),
+        "Expected Close button in evidence drawer",
+      );
+
+      // Close drawer
+      await page.getByRole("button", { name: /Close/i }).first().click({ force: true });
+      await page.waitForTimeout(500);
+
+      await page.unroute("**/api/v1/compliance/bundles*");
+      await page.unroute(`**/api/v1/compliance/bundles/${bundleId}/systems*`);
+      await page.unroute(`**/api/v1/compliance/bundles/${bundleId}/systems/${systemId}/evidence*`);
+    },
+  },
+  {
+    name: "29c-compliance-export-modal",
+    description: "Compliance export evidence modal renders format picker and toggles",
+    action: async (page) => {
+      const bundleId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const bundle = {
+        id: bundleId, name: "NIST 800-53 High", framework: "NIST 800-53", version: "rev5",
+        description: "Test bundle.", layer: "fleet", owner: "Platform Security",
+        last_review: null, policy_ids: [], required_envs: [], control_count: 0, environment_count: 0,
+      };
+
+      await page.route("**/api/v1/compliance/bundles*", async (route) => {
+        if (route.request().method() === "GET" && !route.request().url().includes("/systems")) {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([bundle]) });
+        } else {
+          await route.continue();
+        }
+      });
+
+      await page.route(`**/api/v1/compliance/bundles/${bundleId}/systems*`, async (route) => {
+        await route.fulfill({
+          status: 200, contentType: "application/json",
+          body: JSON.stringify({ bundle_id: bundleId, systems: [], totals: { system_count: 0, fully_compliant_count: 0, pass: 0, warn: 0, fail: 0, waiver: 0, total_controls: 0, overall_score: 0 } }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      await page.getByRole("button", { name: /Export evidence/i }).first().click({ force: true });
+      await page.waitForTimeout(800);
+
+      await assertVisible(page.getByRole("heading", { name: /Export evidence/i }).first(), "Expected export modal heading");
+      await assertVisible(page.getByText(/Each environment typically has its own ATO package/i).first(), "Expected export modal description");
+      // Bundle multi-select section
+      await assertVisible(page.getByText(/Compliance bundles/i).first(), "Expected bundle multi-select section");
+      await assertVisible(page.getByText(/Select all/i).first(), "Expected Select all button");
+      await assertVisible(page.getByText(/Reset/i).first(), "Expected Reset button");
+      // Environment selection section
+      await assertVisible(page.getByText(/Environments/i).first(), "Expected environments section");
+      await assertVisible(page.getByText(/OSCAL/i).first(), "Expected OSCAL format option");
+      await assertVisible(page.getByText(/SARIF/i).first(), "Expected SARIF format option");
+      await assertVisible(page.getByText(/Include waivers/i).first(), "Expected include-waivers toggle");
+      await assertVisible(page.getByText(/Include rendered NixOS module source/i).first(), "Expected include-source toggle");
+      // Filename follows new pattern: cf-<bundleId>-<envPart>-<date>.<ext>
+      await assertVisible(page.getByText(/cf-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-no-envs-/i).first(), "Expected computed export filename");
+
+      await page.getByRole("button", { name: /Close/i }).first().click({ force: true });
+      await page.unroute("**/api/v1/compliance/bundles*");
+      await page.unroute(`**/api/v1/compliance/bundles/${bundleId}/systems*`);
+    },
+  },
+  {
+    name: "29d-compliance-new-bundle-modal",
+    description: "Compliance new bundle modal renders fields, policy picker, and validates",
+    action: async (page) => {
+      const policyId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+      const envId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+      await page.route("**/api/v1/compliance/bundles*", async (route) => {
+        if (route.request().method() === "GET" && !route.request().url().includes("/systems")) {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([]) });
+        } else {
+          await route.continue();
+        }
+      });
+
+      await page.route("**/api/v1/policies*", async (route) => {
+        await route.fulfill({
+          status: 200, contentType: "application/json",
+          body: JSON.stringify([
+            { id: policyId, name: "require_no_critical_cves", description: "Block on critical CVEs.", policy_type: "require_cve_check", config: {}, enabled: true },
+          ]),
+        });
+      });
+
+      await page.route("**/api/v1/environments*", async (route) => {
+        await route.fulfill({
+          status: 200, contentType: "application/json",
+          body: JSON.stringify([
+            { id: envId, name: "production", description: null, color_hex: "#3b82f6", is_active: true, system_count: 3, rollup: { active_system_count: 3, healthy: 3, warning: 0, critical: 0, offline: 0, cve_critical_high: 0, flakes: [] } },
+          ]),
+        });
+      });
+
+      await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1200);
+
+      await page.getByRole("button", { name: /New bundle/i }).first().click({ force: true });
+      await page.waitForTimeout(800);
+
+      // Modal fields
+      await assertVisible(page.getByRole("heading", { name: /New bundle/i }).first(), "Expected new bundle modal heading");
+      await assertVisible(page.getByText(/Name/i).first(), "Expected Name field in new bundle modal");
+      await assertVisible(page.getByText(/Framework/i).first(), "Expected Framework field");
+      await assertVisible(page.getByText(/Policies/i).first(), "Expected Policies section in modal");
+      await assertVisible(page.getByText("require_no_critical_cves").first(), "Expected policy in policy picker");
+      await assertVisible(page.getByText("production").first(), "Expected environment chip in modal");
+
+      // Create button is disabled until name + policy are filled
+      await assertDisabled(
+        page.getByRole("button", { name: /Create bundle/i }).first(),
+        "Create bundle button should be disabled without required fields",
+      );
+
+      await page.getByRole("button", { name: /Cancel/i }).first().click({ force: true });
+      await page.unroute("**/api/v1/compliance/bundles*");
+      await page.unroute("**/api/v1/policies*");
+      await page.unroute("**/api/v1/environments*");
+    },
+  },
+  {
+    name: "29e-compliance-api-error",
+    description: "Compliance view renders error state when bundle API fails",
+    action: async (page) => {
+      await page.route("**/api/v1/compliance/bundles*", async (route) => {
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "internal server error" }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      await assertVisible(
+        page.getByText(/Failed to load compliance bundles/i).first(),
+        "Expected error state when compliance API fails",
+      );
+
+      await page.unroute("**/api/v1/compliance/bundles*");
+    },
+  },
+  // ── End TASK-334 ─────────────────────────────────────────────────────────────
   {
     name: "13i-flakes-non-admin",
     description: "Flakes view hides admin-only mutations for non-admin users",
@@ -6149,6 +6565,13 @@ const CI_FAST_STEP_NAMES = new Set([
   // TASK-276: Hardening dashboard + system tab evidence
   "27-hardening-fleet",
   "28-system-hardening-tab",
+  // TASK-334: Compliance view evidence
+  "29-compliance-empty",
+  "29a-compliance-populated",
+  "29b-compliance-evidence-drawer",
+  "29c-compliance-export-modal",
+  "29d-compliance-new-bundle-modal",
+  "29e-compliance-api-error",
 ]);
 
 (async () => {

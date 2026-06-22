@@ -293,8 +293,9 @@ pub fn SidebarNav() -> Element {
                         }
                     )
                 }
-                PlaceholderNavItem {
+                NavLink {
                     collapsed: is_collapsed,
+                    to: Route::ComplianceView {},
                     label: "Compliance",
                     icon: rsx!(
                         svg {
@@ -657,8 +658,9 @@ pub fn MobileDrawer() -> Element {
                         }
                     )
                 }
-                PlaceholderNavItem {
+                NavLink {
                     collapsed: false,
+                    to: Route::ComplianceView {},
                     label: "Compliance",
                     icon: rsx!(
                         svg {

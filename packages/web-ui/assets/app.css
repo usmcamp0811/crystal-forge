@@ -3725,6 +3725,52 @@ tr.kbd-focused > td {
   animation: fadeIn 150ms ease;
 }
 
+/* Compliance view */
+.compliance-layout { display: grid; grid-template-columns: minmax(260px, 320px) 1fr; gap: 1rem; align-items: start; }
+.compliance-main { display: grid; gap: 1rem; }
+.compliance-catalog { position: sticky; top: 5rem; }
+.compliance-catalog-list { display: grid; gap: .5rem; }
+.compliance-bundle { width: 100%; text-align: left; padding: .8rem; border: 1px solid var(--cf-border); border-radius: 14px; background: transparent; color: var(--cf-text); cursor: pointer; }
+.compliance-bundle.is-active { border-color: var(--cf-accent); background: color-mix(in srgb, var(--cf-accent) 12%, transparent); }
+.compliance-bundle-top { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.compliance-bundle-name { font-weight: 700; }
+.compliance-bundle-meta { margin-top: .25rem; color: var(--cf-text-muted); font-size: .82rem; }
+.compliance-hero { display: grid; grid-template-columns: 1fr minmax(220px, 300px); gap: 1rem; }
+.compliance-hero-kicker, .compliance-control-chips, .chip-row, .page-actions { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+.compliance-hero-title { margin: .75rem 0 .35rem; font-size: 1.6rem; }
+.compliance-hero-copy, .compliance-control-summary { color: var(--cf-text-muted); }
+.compliance-envs { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .75rem; }
+.env-pill { border: 1px solid var(--cf-border); border-radius: 999px; padding: .2rem .55rem; font-size: .78rem; }
+.compliance-score-strip { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.score-good { color: #22c55e; }
+.score-warn { color: #f59e0b; }
+.score-bad { color: #ef4444; }
+.score-waiver { color: #a78bfa; }
+.score-bar { width: 92px; height: 8px; border-radius: 999px; background: var(--cf-surface-muted); overflow: hidden; display: inline-block; margin-right: .5rem; }
+.score-bar-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, #22c55e, #60a5fa); }
+.score-inline { color: var(--cf-text-muted); font-size: .78rem; }
+.compliance-evidence-drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(760px, 92vw); z-index: 80; overflow: auto; background: var(--cf-surface); box-shadow: -20px 0 80px rgba(0,0,0,.35); }
+.compliance-evidence-body { display: grid; gap: .75rem; padding: 1rem; }
+.compliance-control-head { display: flex; justify-content: space-between; gap: 1rem; align-items: start; }
+.compliance-control-title { font-weight: 700; }
+.evidence-artifact { border: 1px solid var(--cf-border); border-radius: 12px; padding: .65rem; margin-top: .5rem; }
+.evidence-artifact pre, .evidence-artifact-body pre { white-space: pre-wrap; overflow: auto; font-size: .78rem; }
+.modal-card { background: var(--cf-surface); color: var(--cf-text); border: 1px solid var(--cf-border); border-radius: 20px; padding: 1rem; width: min(720px, 92vw); max-height: 88vh; overflow: auto; }
+.modal-head, .modal-actions { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+.format-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .5rem; margin: 1rem 0; }
+.format-card, .policy-picker-row { border: 1px solid var(--cf-border); border-radius: 12px; padding: .65rem; background: transparent; color: var(--cf-text); }
+.form-field { display: grid; gap: .25rem; margin: .75rem 0; color: var(--cf-text-muted); }
+.form-field input, .form-field textarea { border: 1px solid var(--cf-border); border-radius: 10px; padding: .55rem; background: var(--cf-surface-muted); color: var(--cf-text); }
+.modal-section-title { margin-top: 1rem; margin-bottom: .5rem; font-weight: 700; }
+.policy-picker { display: grid; gap: .35rem; max-height: 220px; overflow: auto; }
+.policy-picker-row { display: flex; gap: .5rem; align-items: center; }
+
+@media (max-width: 900px) {
+  .compliance-layout, .compliance-hero { grid-template-columns: 1fr; }
+  .compliance-catalog { position: static; }
+  .compliance-score-strip, .format-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 :root[data-theme="light"] .modal-backdrop {
   background: rgba(15, 23, 42, 0.4);
 }
