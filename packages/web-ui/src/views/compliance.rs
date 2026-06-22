@@ -40,6 +40,7 @@ pub fn ComplianceView() -> Element {
     let mut show_export = use_signal(|| false);
     let mut show_new_bundle = use_signal(|| false);
     let mut show_edit_bundle = use_signal(|| false);
+    let mut show_import_stig = use_signal(|| false);
     let mut policies = use_signal(Vec::<DeploymentPolicySummary>::new);
     let mut environments = use_signal(Vec::<EnvironmentSummary>::new);
     let mut sys_filter = use_signal(|| "all".to_string());
@@ -174,6 +175,15 @@ pub fn ComplianceView() -> Element {
                         onclick: move |_| show_export.set(true),
                         Icon { name: IconName::Download, size: 14 }
                         " Export evidence"
+                    }
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        onclick: move |_| show_import_stig.set(true),
+                        // Upload icon = Download rotated 180°
+                        span { style: "display:inline-flex;transform:rotate(180deg);",
+                            Icon { name: IconName::Download, size: 14 }
+                        }
+                        " Import STIG"
                     }
                     button {
                         class: "btn btn-primary focus-ring",
@@ -361,6 +371,13 @@ pub fn ComplianceView() -> Element {
                 }
             }
         }
+
+        // ── Import STIG modal (stub) ───────────────────────────────────────
+        if *show_import_stig.read() {
+            ImportStigModal {
+                on_close: move |_| show_import_stig.set(false),
+            }
+        }
     }
 }
 
@@ -384,6 +401,98 @@ fn EmptyComplianceState(props: EmptyComplianceStateProps) -> Element {
                 onclick: move |_| props.on_new.call(()),
                 Icon { name: IconName::Plus, size: 14 }
                 " New bundle"
+            }
+        }
+
+    }
+}
+
+// ─── Import STIG modal (stub — not yet implemented) ───────────────────────────
+
+#[derive(Props, Clone, PartialEq)]
+struct ImportStigModalProps {
+    on_close: EventHandler<()>,
+}
+
+#[component]
+fn ImportStigModal(props: ImportStigModalProps) -> Element {
+    rsx! {
+        div {
+            class: "modal-backdrop",
+            onclick: move |_| props.on_close.call(()),
+            div {
+                class: "modal",
+                style: "width:min(720px,97vw);max-height:92vh;",
+                onclick: move |e| e.stop_propagation(),
+
+                div { class: "modal-head",
+                    h2 { style: "display:flex;align-items:center;gap:8px;",
+                        span { style: "display:inline-flex;transform:rotate(180deg);",
+                            Icon { name: IconName::Download, size: 14 }
+                        }
+                        "Import STIG"
+                    }
+                    p {
+                        "Upload a DISA XCCDF benchmark ("
+                        span { class: "mono", ".xml" }
+                        "). Crystal Forge will parse each rule into a policy and assemble them into a compliance bundle."
+                    }
+                }
+
+                div { class: "modal-body",
+                    // ── Not-yet-implemented callout ───────────────────────
+                    div { class: "sd-callout sd-callout-warn", style: "margin-bottom:16px;",
+                        Icon { name: IconName::Warn, size: 14 }
+                        div { style: "font-size:12px;",
+                            strong { "STIG import is not yet implemented." }
+                            " This UI is a preview. Uploading a file here will not create any policies or bundles yet — server-side XCCDF parsing and policy generation are tracked in "
+                            span { class: "mono", style: "font-weight:600;", "TASK-345" }
+                            "."
+                        }
+                    }
+
+                    // ── Drop zone (visual preview — not wired) ────────────
+                    div {
+                        style: "border:2px dashed var(--cf-divider);background:var(--cf-card-bg);\
+                                border-radius:12px;padding:38px 20px;text-align:center;\
+                                opacity:0.6;cursor:not-allowed;",
+                        div { style: "font-size:30px;margin-bottom:8px;", "📄" }
+                        div { style: "font-size:14px;font-weight:600;color:var(--cf-text-muted);",
+                            "Drop an XCCDF .xml here, or click to browse"
+                        }
+                        div { style: "font-size:12px;color:var(--cf-text-muted);margin-top:4px;",
+                            "DISA STIG / SCAP benchmark · not yet functional"
+                        }
+                    }
+
+                    div { style: "display:flex;align-items:center;gap:10px;margin:16px 0 4px;",
+                        div { style: "flex:1;height:1px;background:var(--cf-divider);" }
+                        span { style: "font-size:11px;color:var(--cf-text-muted);", "or" }
+                        div { style: "flex:1;height:1px;background:var(--cf-divider);" }
+                    }
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        style: "width:100%;opacity:0.5;cursor:not-allowed;",
+                        disabled: true,
+                        Icon { name: IconName::Shield, size: 13 }
+                        " Try with a sample RHEL 9 STIG"
+                    }
+                }
+
+                div { class: "modal-foot",
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        onclick: move |_| props.on_close.call(()),
+                        "Cancel"
+                    }
+                    button {
+                        class: "btn btn-primary focus-ring",
+                        disabled: true,
+                        style: "opacity:0.5;cursor:not-allowed;",
+                        Icon { name: IconName::Check, size: 13 }
+                        " Continue to review"
+                    }
+                }
             }
         }
     }
