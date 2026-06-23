@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-23 22:10'
+updated_date: '2026-06-23 22:25'
 labels:
   - design-parity
   - builders
@@ -155,4 +155,19 @@ The builder-specific code changes (key rotation fix, disabled builder logic) are
 Recommendation: Create separate backlog tasks for:
 - INFRA: Update integration tests for NixOS 26.05 Grafana requirements
 - INFRA: Replace MinIO with Garage/SeaweedFS/Ceph in test infrastructure
+
+Infrastructure fixes committed and pushed (commit 1005e415):
+
+1. Grafana secret_key: Added default value using old key for test/dev environments
+   - Satisfies NixOS 26.05 assertion requirement
+   - Uses mkDefault so production can override
+   - Unblocks integration check
+
+2. MinIO insecure package: Allowed via permittedInsecurePackages in s3Cache test node
+   - Temporary workaround until TASK-367 (Garage migration) is complete
+   - Only affects test infrastructure, not production
+   - Unblocks web-ui check
+
+Both fixes are test infrastructure workarounds that should not affect production deployments.
+Waiting for CI pipeline to run...
 <!-- SECTION:NOTES:END -->
