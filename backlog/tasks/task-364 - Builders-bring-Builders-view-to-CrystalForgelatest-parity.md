@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-23 20:50'
+updated_date: '2026-06-23 21:01'
 labels:
   - design-parity
   - builders
@@ -108,4 +108,28 @@ MR !283 Review blockers identified:
 2. Disabled builders counted as running: enabled field not consulted when computing running count
 
 Fixing both issues now.
+
+Review blocker fixes committed and pushed:
+
+1. Key rotation credential loss FIXED:
+   - Modal now stays open after successful key rotation
+   - Success banner displayed with warning to save private key
+   - Private key section highlighted with warning colors
+   - User must explicitly close modal (private key retained until closure)
+
+2. Disabled builders counting FIXED:
+   - Running count: enabled && status==Active (was: status==Active only)
+   - Slot totals: only enabled builders counted
+   - Running filter: excludes disabled builders
+   - Status display: shows 'disabled' chip for enabled=false
+   - Rail color: yellow for disabled builders
+
+3. Test coverage added:
+   - New fixture: status='active', enabled=false
+   - Updated assertions: 1 of 3 running, 1/4 slots (excludes 2 disabled)
+   - Running filter test: asserts disabled builder hidden
+   - Disabled chip assertion added
+
+Commit c7a2c960 pushed to TASK-364-builders-view-parity branch.
+MR !283 updated automatically.
 <!-- SECTION:NOTES:END -->
