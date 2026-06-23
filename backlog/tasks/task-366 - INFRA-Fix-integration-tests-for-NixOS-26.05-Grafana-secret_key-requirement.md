@@ -1,9 +1,10 @@
 ---
 id: TASK-366
 title: 'INFRA: Fix integration tests for NixOS 26.05 Grafana secret_key requirement'
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-06-23 22:10'
+updated_date: '2026-06-23 22:24'
 labels:
   - infrastructure
   - testing
