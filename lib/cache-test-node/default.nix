@@ -22,6 +22,12 @@
       networking.useDHCP = true;
       networking.firewall.enable = enableFirewall;
 
+      # Allow insecure MinIO for test infrastructure
+      # TODO: Replace MinIO with Garage/SeaweedFS (tracked in TASK-367)
+      nixpkgs.config.permittedInsecurePackages = [
+        "minio-2025-10-15T17-29-55Z"
+      ];
+
       # BUGFIX: you only want to open ports when the firewall is enabled
       networking.firewall.allowedTCPPorts = lib.mkIf enableFirewall [port consolePort];
 
