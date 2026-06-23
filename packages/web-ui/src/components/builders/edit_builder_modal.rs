@@ -62,6 +62,7 @@ pub fn EditBuilderModal(
     let mut rotated_public_key = use_signal(|| String::new());
     let mut rotated_private_key = use_signal(|| String::new());
     let mut show_rotated_private_key = use_signal(|| false);
+    let mut key_rotation_applied = use_signal(|| false);
 
     let mut is_initialized = use_signal(|| false);
     let mut is_submitting = use_signal(|| false);
@@ -132,6 +133,7 @@ pub fn EditBuilderModal(
             rotated_private_key.set(priv_b64);
             rotated_public_key.set(pub_b64);
             show_rotated_private_key.set(false);
+            key_rotation_applied.set(false);
             error_message.set(None);
         }
         Err(e) => {
@@ -160,7 +162,10 @@ pub fn EditBuilderModal(
         error_message.set(None);
 
         match apply_builder_public_key(&builder_id, next_public_key).await {
-            Ok(_) => on_success.call(()),
+            Ok(_) => {
+                key_rotation_applied.set(true);
+                is_submitting.set(false);
+            }
             Err(message) => {
                 error_message.set(Some(message));
                 is_submitting.set(false);
@@ -231,6 +236,15 @@ pub fn EditBuilderModal(
                             div {
                                 class: "mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded text-red-400 text-sm",
                                 "{err}"
+                            }
+                        }
+
+                        // Key rotation success message
+                        if key_rotation_applied() {
+                            div {
+                                class: "mb-4 p-3 bg-green-500/10 border border-green-500/30 rounded text-green-400 text-sm",
+                                "✓ Public key updated successfully. ",
+                                strong { "Save the private key below before closing this modal." }
                             }
                         }
 
@@ -456,9 +470,9 @@ pub fn EditBuilderModal(
                                         }
                                     }
                                     if !rotated_private_key().is_empty() {
-                                        div { style: "margin-top:10px;",
+                                        div { style: "margin-top:10px; padding:12px; border:1px solid rgba(251, 191, 36, 0.3); border-radius:10px; background:rgba(251, 191, 36, 0.08);",
                                             div { style: "display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;",
-                                                span { class: "help", style: "margin:0;", "Generated private key (save securely)" }
+                                                span { style: "font-size:12px; font-weight:600; color:#fbbf24;", "⚠️ Generated private key — save securely before closing" }
                                                 button {
                                                     class: "btn btn-ghost focus-ring",
                                                     onclick: handle_toggle_private_key,
@@ -480,6 +494,9 @@ pub fn EditBuilderModal(
                                                     style: "font-size:11px; padding:10px; color:var(--cf-text-muted);",
                                                     "••••••••••••••••••••••••••••••••"
                                                 }
+                                            }
+                                            div { style: "margin-top:8px; font-size:11px; color:var(--cf-text-secondary);",
+                                                "Copy this key now. It will be lost when you close this modal."
                                             }
                                         }
                                     }

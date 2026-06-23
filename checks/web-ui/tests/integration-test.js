@@ -420,6 +420,21 @@ function mockBuilders() {
       active_jobs: 0,
       queued_jobs: 0,
     },
+    {
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      name: "builder-disabled-active",
+      host: "build-disabled.test.cf.internal",
+      arch: "x86_64-linux",
+      status: "active",
+      max_cpu_cores: 4,
+      max_memory_mb: 8192,
+      max_concurrent_jobs: 2,
+      enabled: false,
+      last_heartbeat_at: timestamp,
+      assigned_environment_count: 1,
+      active_jobs: 0,
+      queued_jobs: 0,
+    },
   ];
 }
 
@@ -2876,14 +2891,25 @@ const steps = [
         await page.waitForTimeout(1500);
 
         await assertVisible(page.getByRole("heading", { name: "Builders" }).first(), "Expected Builders page heading");
-        await assertVisible(page.getByText("1 of 2 running · 1/12 slots used").first(), "Expected API-backed builders subtitle");
+        await assertVisible(page.getByText("1 of 3 running · 1/4 slots used").first(), "Expected API-backed builders subtitle (disabled builders excluded from running count and slot totals)");
         await assertVisible(page.getByRole("button", { name: /Register builder/i }).first(), "Expected Register builder CTA");
         await assertVisible(page.locator(".stat-strip .stat-label:has-text('Slot use')").first(), "Expected slot-use stat card");
-        await assertVisible(page.locator(".filter-count:has-text('2 builders')").first(), "Expected filtered builder count");
+        await assertVisible(page.locator(".filter-count:has-text('3 builders')").first(), "Expected filtered builder count (all builders shown by default)");
         await assertVisible(page.locator(".sys-card:has-text('builder-primary')").first(), "Expected builder card from API data");
         await assertVisible(page.locator(".sys-card:has-text('build-x86.production.cf.internal')").first(), "Expected builder host on card");
         await assertVisible(page.locator(".chip:has-text('running')").first(), "Expected running status chip");
+        await assertVisible(page.locator(".chip:has-text('disabled')").first(), "Expected disabled status chip for disabled builder");
         await assertVisible(page.locator(".chip:has-text('24h metrics unavailable')").first(), "Expected non-fabricated 24h metric notice");
+
+        // Test running filter excludes disabled builders
+        await page.getByRole("button", { name: /running/i }).first().click();
+        await page.waitForTimeout(400);
+        await assertVisible(page.locator(".filter-count:has-text('1 builder')").first(), "Expected running filter to show only 1 enabled+active builder");
+        await assertHidden(page.locator(".sys-card:has-text('builder-disabled-active')").first(), "Expected disabled builder with active status to be hidden by running filter");
+        
+        // Reset to all filter
+        await page.getByRole("button", { name: /^all$/i }).first().click();
+        await page.waitForTimeout(400);
 
         await page.getByRole("button", { name: /Table/i }).first().click();
         await assertVisible(page.locator("table.sys-table tbody tr:has-text('builder-primary')").first(), "Expected builder table row");

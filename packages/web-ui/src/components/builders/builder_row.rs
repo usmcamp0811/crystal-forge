@@ -6,9 +6,16 @@ use crate::api::models::BuilderSummary;
 use crate::components::{Icon, IconName};
 
 fn builder_status_chip(builder: &BuilderSummary) -> Element {
-    let chip_class = builder.status.chip_class();
-    let dot_color = builder.status.dot_color();
-    let label = builder.status.label();
+    // If disabled, override status display
+    let (chip_class, dot_color, label) = if !builder.enabled {
+        ("chip-warning", "#fbbf24", "disabled")
+    } else {
+        (
+            builder.status.chip_class(),
+            builder.status.dot_color(),
+            builder.status.label(),
+        )
+    };
 
     rsx! {
         span {

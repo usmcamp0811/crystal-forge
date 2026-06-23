@@ -90,12 +90,14 @@ pub fn BuildersView() -> Element {
                                 Some(Ok(builders_list)) => {
                                     let total = builders_list.len();
                                     let running = builders_list.iter()
-                                        .filter(|b| b.status == crate::api::models::BuilderStatus::Active)
+                                        .filter(|b| b.enabled && b.status == crate::api::models::BuilderStatus::Active)
                                         .count();
                                     let slots_used: i32 = builders_list.iter()
+                                        .filter(|b| b.enabled)
                                         .map(|b| b.active_jobs)
                                         .sum();
                                     let slots_total: i32 = builders_list.iter()
+                                        .filter(|b| b.enabled)
                                         .map(|b| b.max_concurrent_jobs)
                                         .sum();
                                     format!("{} of {} running · {}/{} slots used · 24h build metrics unavailable",
@@ -124,10 +126,10 @@ pub fn BuildersView() -> Element {
                     Some(Ok(builders_list)) => {
                         let total = builders_list.len();
                         let running = builders_list.iter()
-                            .filter(|b| b.status == crate::api::models::BuilderStatus::Active)
+                            .filter(|b| b.enabled && b.status == crate::api::models::BuilderStatus::Active)
                             .count();
-                        let slots_used: i32 = builders_list.iter().map(|b| b.active_jobs).sum();
-                        let slots_total: i32 = builders_list.iter().map(|b| b.max_concurrent_jobs).sum();
+                        let slots_used: i32 = builders_list.iter().filter(|b| b.enabled).map(|b| b.active_jobs).sum();
+                        let slots_total: i32 = builders_list.iter().filter(|b| b.enabled).map(|b| b.max_concurrent_jobs).sum();
                         let slot_pct = if slots_total > 0 {
                             ((slots_used as f64 / slots_total as f64) * 100.0).round() as i32
                         } else {
@@ -232,10 +234,15 @@ pub fn BuildersView() -> Element {
                         // Apply filters
                         let filtered: Vec<_> = builders_list.iter()
                             .filter(|b| {
-                                // Status filter
+                                // Status filter - consider both enabled and status fields
                                 let status_match = status_filter() == "all" || {
-                                    let status_label = b.status.label();
-                                    status_filter() == status_label
+                                    let filter = status_filter();
+                                    if filter == "running" {
+                                        b.enabled && b.status == crate::api::models::BuilderStatus::Active
+                                    } else {
+                                        let status_label = b.status.label();
+                                        filter == status_label
+                                    }
                                 };
 
                                 // Arch filter
