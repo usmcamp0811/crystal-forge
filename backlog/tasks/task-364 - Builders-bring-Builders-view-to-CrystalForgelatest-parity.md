@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-21 02:47'
+updated_date: '2026-06-23 20:50'
 labels:
   - design-parity
   - builders
@@ -102,4 +102,10 @@ Follow-up modal parity fix: added server-derived builder public key fingerprint 
 Verification run: `git diff --check` passed; `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed; `SQLX_OFFLINE=true nix develop -c cargo check --manifest-path packages/default/Cargo.toml` passed; focused fingerprint unit test passed; `nix develop -c node --check checks/web-ui/tests/integration-test.js` passed; changed-file `rustfmt --edition 2024 --check` passed; `nix build .#checks.x86_64-linux.web-ui -L` passed after the edit-modal fingerprint/layout changes.
 
 Known unrelated formatting drift: full `cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check` is blocked by pre-existing formatting drift in `packages/web-ui/src/views/admin.rs`; full backend fmt check is blocked by pre-existing formatting drift across backend files.
+
+MR !283 Review blockers identified:
+1. Key rotation can permanently lock out builder: Apply Public Key Update closes modal immediately, losing private key
+2. Disabled builders counted as running: enabled field not consulted when computing running count
+
+Fixing both issues now.
 <!-- SECTION:NOTES:END -->
