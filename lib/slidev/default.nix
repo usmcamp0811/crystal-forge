@@ -116,6 +116,9 @@
               strict: false,
               allow: ['.', '/build']
             }
+          },
+          build: {
+            cssMinify: 'esbuild'
           }
         })
         EOF
