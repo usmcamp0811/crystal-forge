@@ -16,14 +16,6 @@
     customCss ? null,
     meta ? {},
   }: let
-    cfg = {
-      version = "0.50.0";
-      rev = "v0.50.0";
-      srcHash = "sha256-8LP7bAFWJAxd17u77aqX+j0mqTw59AODlrqot8np21g=";
-      depsHash = "sha256-M9wqO+V5r2+PlxRMBe47fULTyaaeDWq45rR6XtKPsBw=";
-      pnpm = pkgs.pnpm_9;
-    };
-
     neversink-theme = lib.crystal-forge.buildPnpmTheme {
       inherit pkgs;
       pname = "slidev-theme-neversink";
@@ -34,61 +26,19 @@
         rev = "v0.3.6";
         hash = "sha256-JcdkZBcf059Pk5lqwGIlcTHmfIM54no98adeHe+TNBs=";
       };
-      depsHash = "sha256-NKQ/MISoYnQFYMfcb8vOTE+YF1/AUHYRlGU4qNQalVY=";
-      pnpm = pkgs.pnpm_9;
+      depsHash = "sha256-n1VIwehFBeIAceCsn15wJSi3AX2IHw5GMP9RsW8AhWc=";
+      pnpm = pkgs.pnpm_10;
     };
 
     themes = [neversink-theme];
 
-    slidev = pkgs.stdenv.mkDerivation {
-      pname = "slidev";
-      version = cfg.version;
-
-      src = pkgs.fetchFromGitHub {
-        owner = "slidevjs";
-        repo = "slidev";
-        rev = cfg.rev;
-        hash = cfg.srcHash;
-      };
-
-      nativeBuildInputs = [pkgs.nodejs cfg.pnpm.configHook pkgs.makeWrapper];
-
-      pnpmDeps = cfg.pnpm.fetchDeps {
-        pname = "slidev";
-        version = cfg.version;
-        inherit (slidev) src;
-        hash = cfg.depsHash;
-        fetcherVersion = 1;
-      };
-
-      buildPhase = ''
-        runHook preBuild
-        pnpm build
-        runHook postBuild
-      '';
-
-      installPhase = ''
-        runHook preInstall
-        mkdir -p $out
-        cp -r packages $out/packages
-        cp -r node_modules $out/node_modules
-        makeWrapper ${pkgs.nodejs}/bin/node $out/bin/slidev \
-          --set NODE_PATH "$out/node_modules" \
-          --add-flags "$out/packages/slidev/bin/slidev.mjs"
-        runHook postInstall
-      '';
-
-      postInstall = ''
-        find $out -type l ! -exec test -e {} \; -print | xargs -r rm
-      '';
-
-      meta = {
-        description = "Presentation Slides for Developers";
-        homepage = "https://sli.dev/";
-        changelog = "https://github.com/slidevjs/slidev/releases/tag/v${cfg.version}";
-        mainProgram = "slidev";
-      };
-    };
+    # Use nixpkgs slidev-cli (now available in 26.05), wrapped for compatibility
+    slidev = pkgs.runCommand "slidev-compat" {} ''
+      mkdir -p $out/bin
+      mkdir -p $out/node_modules
+      ln -s ${pkgs.slidev-cli}/bin/slidev $out/bin/slidev
+      ln -s ${pkgs.slidev-cli}/lib/node_modules/slidev-cli/node_modules/* $out/node_modules/
+    '';
   in
     stdenv.mkDerivation {
       pname = "slidev-presentation";
@@ -126,7 +76,20 @@
         mkdir -p node_modules
 
         # Copy all top-level packages from slidev
-        cp -r ${slidev}/node_modules/* node_modules/
+        # Handle both the compat wrapper and direct slidev-cli
+        if [ -L "${slidev}/node_modules" ]; then
+          # Compat wrapper with symlinks
+          cp -rL ${slidev}/node_modules/* node_modules/
+        elif [ -d "${slidev}/node_modules" ]; then
+          # Direct node_modules directory
+          cp -r ${slidev}/node_modules/* node_modules/
+        elif [ -d "${slidev}/lib/node_modules/slidev-cli/node_modules" ]; then
+          # nixpkgs slidev-cli structure
+          cp -r ${slidev}/lib/node_modules/slidev-cli/node_modules/* node_modules/
+        else
+          echo "Error: Could not find node_modules in slidev package"
+          exit 1
+        fi
 
         # Inject extra packages (like sass-embedded)
         ${builtins.concatStringsSep "\n" (builtins.map (pkg: ''
@@ -142,6 +105,21 @@
           then "cp ${customCss} ./styles/index.css"
           else ""
         }
+        
+        # Create vite.config.ts to allow assets from public directory
+        cat > vite.config.ts <<EOF
+        import { defineConfig } from 'vite'
+        
+        export default defineConfig({
+          server: {
+            fs: {
+              strict: false,
+              allow: ['.', '/build']
+            }
+          }
+        })
+        EOF
+        
         slidev build --base "${urlBase}"
 
         runHook postBuild
@@ -170,18 +148,18 @@
     version,
     src,
     depsHash,
-    pnpm,
+    pnpm ? pkgs.pnpm_10,
     meta ? {},
   }:
     pkgs.stdenv.mkDerivation {
       inherit pname version src;
 
-      nativeBuildInputs = [pkgs.nodejs pnpm.configHook];
+      nativeBuildInputs = [pkgs.nodejs pkgs.pnpmConfigHook pnpm];
 
-      pnpmDeps = pnpm.fetchDeps {
-        inherit pname version src;
+      pnpmDeps = pkgs.fetchPnpmDeps {
+        inherit pname version src pnpm;
         hash = depsHash;
-        fetcherVersion = 1;
+        fetcherVersion = 3;
       };
 
       installPhase = ''
