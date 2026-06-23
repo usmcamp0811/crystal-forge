@@ -3,9 +3,10 @@ id: TASK-367
 title: >-
   INFRA: Replace MinIO with secure S3-compatible alternative in test
   infrastructure
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-06-23 22:10'
+updated_date: '2026-06-23 22:24'
 labels:
   - infrastructure
   - testing
