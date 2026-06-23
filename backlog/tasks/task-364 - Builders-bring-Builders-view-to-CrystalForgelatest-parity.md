@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-23 21:01'
+updated_date: '2026-06-23 22:10'
 labels:
   - design-parity
   - builders
@@ -132,4 +132,27 @@ Review blocker fixes committed and pushed:
 
 Commit c7a2c960 pushed to TASK-364-builders-view-parity branch.
 MR !283 updated automatically.
+
+CI Status after blocker fixes (commit c7a2c960):
+
+Failed checks are UNRELATED to builder blocker fixes:
+
+1. flake-check: [integration] - FAILED
+   Root cause: Grafana secret_key requirement in NixOS 26.05
+   Error: 'services.grafana.settings.security.secret_key doesn't have a default value anymore'
+   This is an infrastructure configuration issue, not a code issue.
+
+2. flake-check: [web-ui] - FAILED
+   Root cause: MinIO marked insecure due to multiple CVEs
+   Error: 'Refusing to evaluate package minio-2025-10-15T17-29-55Z because it is marked as insecure'
+   CVEs: CVE-2026-40344, CVE-2026-41145, CVE-2026-33322, CVE-2026-33419, CVE-2026-34204, CVE-2026-39414
+   Note: MinIO has been abandoned by upstream
+   This is a test infrastructure dependency issue, not a builder parity code issue.
+
+Both failures are pre-existing infrastructure issues that affect all branches.
+The builder-specific code changes (key rotation fix, disabled builder logic) are correct.
+
+Recommendation: Create separate backlog tasks for:
+- INFRA: Update integration tests for NixOS 26.05 Grafana requirements
+- INFRA: Replace MinIO with Garage/SeaweedFS/Ceph in test infrastructure
 <!-- SECTION:NOTES:END -->
