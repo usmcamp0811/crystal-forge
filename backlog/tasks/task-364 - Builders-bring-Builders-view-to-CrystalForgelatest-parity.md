@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-24 03:12'
+updated_date: '2026-06-24 17:34'
 labels:
   - design-parity
   - builders
@@ -216,4 +216,11 @@ Icon component fixes applied (commit 882486f6):
 
 Commit pushed to origin/TASK-364-builders-view-parity.
 CI pipeline should now pass web-ui compilation.
+
+Builds view disabled builder fix (commit 56585340):
+- Builds view was ignoring builder.enabled field when displaying worker status
+- Disabled builders (enabled=false) now show as Paused in builds view worker strip
+- Matches the behavior already implemented in builders view
+
+This fixes the bug where disabling a builder in the builders view still showed it as Running in the builds view.
 <!-- SECTION:NOTES:END -->
