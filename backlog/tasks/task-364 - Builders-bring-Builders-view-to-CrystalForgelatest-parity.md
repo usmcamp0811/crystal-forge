@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-24 17:34'
+updated_date: '2026-06-24 23:49'
 labels:
   - design-parity
   - builders
@@ -223,4 +223,25 @@ Builds view disabled builder fix (commit 56585340):
 - Matches the behavior already implemented in builders view
 
 This fixes the bug where disabling a builder in the builders view still showed it as Running in the builds view.
+
+MR !283 review blockers fixed (commit b3ef55dd):
+
+**Blocker 1: Stale fingerprint after key rotation**
+- Modal was displaying builder_data.public_key_fingerprint (stale after rotation)
+- Added current_fingerprint signal to track live fingerprint state
+- apply_builder_public_key now returns BuilderDetail with new fingerprint
+- Fingerprint updates immediately after successful rotation
+- Critical security fix: operators verify new credentials using displayed fingerprint
+
+**Blocker 2: Disabled builders missing from paused filter**
+- Paused filter was only checking status.label(), ignoring enabled field
+- Disabled builders (enabled=false, status=Active) appeared in neither Running nor Paused
+- Rewrote filter logic with explicit match:
+  - running: enabled && status==Active
+  - paused: !enabled || status==Inactive
+  - offline: enabled && status==Offline
+- Disabled builders now correctly appear under Paused filter
+- Matches operational reality: disabled builders don't accept work
+
+Both issues identified in code review, now resolved.
 <!-- SECTION:NOTES:END -->
