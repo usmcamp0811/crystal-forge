@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-24 00:44'
+updated_date: '2026-06-24 02:39'
 labels:
   - design-parity
   - builders
@@ -177,4 +177,10 @@ Branch rebased onto origin/dev HEAD (817e3b35):
 - Force-pushed to TASK-364-builders-view-parity
 - New HEAD: 869c5436
 - CI pipeline will re-run with rebased commits
+
+Add builder modal layout mismatch identified:
+Reference uses cleaner 2-column grid (Name | Environments) → Host (full-width) → 3-col (Arch | Cores | Mem) → 2-col (Max Slots | Status) → Public Key
+Current implementation has different layout and excessive coaching callouts dominating the view.
+
+Fixing now to match reference design.
 <!-- SECTION:NOTES:END -->
