@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-23 22:25'
+updated_date: '2026-06-24 00:44'
 labels:
   - design-parity
   - builders
@@ -170,4 +170,11 @@ Infrastructure fixes committed and pushed (commit 1005e415):
 
 Both fixes are test infrastructure workarounds that should not affect production deployments.
 Waiting for CI pipeline to run...
+
+Branch rebased onto origin/dev HEAD (817e3b35):
+- Resolved backlog task conflicts (TASK-336.7, TASK-336.2)
+- All builder-specific commits preserved
+- Force-pushed to TASK-364-builders-view-parity
+- New HEAD: 869c5436
+- CI pipeline will re-run with rebased commits
 <!-- SECTION:NOTES:END -->
