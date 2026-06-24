@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-24 02:46'
+updated_date: '2026-06-24 02:55'
 labels:
   - design-parity
   - builders
@@ -201,4 +201,11 @@ Garage migration and add builder modal redesign completed (commit d0a05893):
 
 **Status**: Commit ready locally, cannot push (GitLab token lacks write scope)
 Commit d0a05893 needs manual push or user intervention to upload.
+
+Compilation fix applied (commit 6fdf2c38 - amended):
+- Fixed String method call issue in add_builder_modal.rs
+- Changed key_looks_valid from top-level let binding to inline computation
+- Used .as_str() to convert String to &str before calling .starts_with()
+
+Commit ready to push from worktree.
 <!-- SECTION:NOTES:END -->
