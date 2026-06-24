@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-24 02:39'
+updated_date: '2026-06-24 02:46'
 labels:
   - design-parity
   - builders
@@ -183,4 +183,22 @@ Reference uses cleaner 2-column grid (Name | Environments) → Host (full-width)
 Current implementation has different layout and excessive coaching callouts dominating the view.
 
 Fixing now to match reference design.
+
+Garage migration and add builder modal redesign completed (commit d0a05893):
+
+**MinIO → Garage Migration (TASK-367 complete)**
+- Replaced insecure MinIO with Garage (Rust-based, actively maintained)
+- Updated S3 cache test node: port 9000 → 3900
+- Simplified setup using Garage CLI (no minio-client needed)
+- Removed permittedInsecurePackages workaround
+
+**Add Builder Modal Redesign (parity fix)**
+- Matches BuildersView.jsx reference layout exactly
+- Clean 2-col → full-width → 3-col → 2-col → full-width grid structure
+- Removed excessive onboarding callouts
+- SSH key validation feedback (green=valid, red=invalid)
+- Submit disabled if key format invalid
+
+**Status**: Commit ready locally, cannot push (GitLab token lacks write scope)
+Commit d0a05893 needs manual push or user intervention to upload.
 <!-- SECTION:NOTES:END -->
