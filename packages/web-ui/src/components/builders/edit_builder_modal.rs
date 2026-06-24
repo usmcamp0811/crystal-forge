@@ -63,6 +63,7 @@ pub fn EditBuilderModal(
     let mut rotated_private_key = use_signal(|| String::new());
     let mut show_rotated_private_key = use_signal(|| false);
     let mut key_rotation_applied = use_signal(|| false);
+    let mut current_fingerprint = use_signal(|| String::new());
 
     let mut is_initialized = use_signal(|| false);
     let mut is_submitting = use_signal(|| false);
@@ -89,6 +90,7 @@ pub fn EditBuilderModal(
                 max_concurrent_jobs.set(builder_data.max_concurrent_jobs.to_string());
                 selected_environments.set(builder_data.assigned_environment_ids.clone());
                 rotated_public_key.set(builder_data.public_key.clone());
+                current_fingerprint.set(builder_data.public_key_fingerprint.clone());
                 is_initialized.set(true);
             }
         }
@@ -162,7 +164,8 @@ pub fn EditBuilderModal(
         error_message.set(None);
 
         match apply_builder_public_key(&builder_id, next_public_key).await {
-            Ok(_) => {
+            Ok(updated_builder) => {
+                current_fingerprint.set(updated_builder.public_key_fingerprint);
                 key_rotation_applied.set(true);
                 is_submitting.set(false);
             }
@@ -501,7 +504,7 @@ pub fn EditBuilderModal(
                                         }
                                     }
                                     // Fingerprint (below key textarea)
-                                    if !builder_data.public_key_fingerprint.is_empty() {
+                                    if !current_fingerprint().is_empty() {
                                         div {
                                             style: "margin-top:8px; padding:10px 12px; border:1px solid var(--cf-card-border); border-radius:10px; background:rgba(255,255,255,0.025); display:flex; align-items:center; gap:8px;",
                                             Icon { name: IconName::Key, size: 12 }
@@ -512,7 +515,7 @@ pub fn EditBuilderModal(
                                             code {
                                                 class: "mono",
                                                 style: "font-size:11px; color:#10b981; overflow-wrap:anywhere;",
-                                                "{builder_data.public_key_fingerprint}"
+                                                "{current_fingerprint()}"
                                             }
                                         }
                                     }

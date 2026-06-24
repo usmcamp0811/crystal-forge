@@ -234,15 +234,13 @@ pub fn BuildersView() -> Element {
                         // Apply filters
                         let filtered: Vec<_> = builders_list.iter()
                             .filter(|b| {
-                                // Status filter - consider both enabled and status fields
-                                let status_match = status_filter() == "all" || {
-                                    let filter = status_filter();
-                                    if filter == "running" {
-                                        b.enabled && b.status == crate::api::models::BuilderStatus::Active
-                                    } else {
-                                        let status_label = b.status.label();
-                                        filter == status_label
-                                    }
+                                // Status filter - explicitly define each filter based on enabled and status
+                                let status_match = match status_filter().as_str() {
+                                    "all" => true,
+                                    "running" => b.enabled && b.status == crate::api::models::BuilderStatus::Active,
+                                    "paused" => !b.enabled || b.status == crate::api::models::BuilderStatus::Inactive,
+                                    "offline" => b.enabled && b.status == crate::api::models::BuilderStatus::Offline,
+                                    _ => false,
                                 };
 
                                 // Arch filter
