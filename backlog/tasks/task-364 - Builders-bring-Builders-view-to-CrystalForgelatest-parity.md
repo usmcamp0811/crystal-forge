@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-24 02:55'
+updated_date: '2026-06-24 03:12'
 labels:
   - design-parity
   - builders
@@ -208,4 +208,12 @@ Compilation fix applied (commit 6fdf2c38 - amended):
 - Used .as_str() to convert String to &str before calling .starts_with()
 
 Commit ready to push from worktree.
+
+Icon component fixes applied (commit 882486f6):
+- Fixed IconName::Warning → IconName::Warn (Warning variant doesn't exist)
+- Removed invalid style prop from Icon component (not supported)
+- Wrapped Icons in span elements with style for custom colors
+
+Commit pushed to origin/TASK-364-builders-view-parity.
+CI pipeline should now pass web-ui compilation.
 <!-- SECTION:NOTES:END -->
