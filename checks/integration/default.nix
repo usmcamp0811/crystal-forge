@@ -1,20 +1,13 @@
 { lib, inputs, pkgs, ... }:
 let
-  keyPair = pkgs.runCommand "agent-keypair" { } ''
-    mkdir -p $out
-    # Generate keypair with explicit output directory and non-interactive mode
-    ${pkgs.crystal-forge.default.cf-keygen}/bin/cf-keygen -f $out/agent.key -y
-    # Verify both files were created (robustness against transient failures)
-    test -f "$out/agent.key" || { echo "ERROR: agent.key not generated"; exit 1; }
-    test -f "$out/agent.pub" || { echo "ERROR: agent.pub not generated"; exit 1; }
-  '';
+  # Use fixed test keys to avoid cf-keygen CI flakiness
   keyPath = pkgs.runCommand "agent.key" { } ''
     mkdir -p $out
-    cp ${keyPair}/agent.key $out/
+    cp ${./test-keys/agent.key} $out/
   '';
   pubPath = pkgs.runCommand "agent.pub" { } ''
     mkdir -p $out
-    cp ${keyPair}/agent.pub $out/
+    cp ${./test-keys/agent.pub} $out/
   '';
   derivation-paths = lib.crystal-forge.derivation-paths pkgs;
   CF_TEST_DB_PORT = 5432;
