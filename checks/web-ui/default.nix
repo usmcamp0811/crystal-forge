@@ -25,11 +25,11 @@ let
   # Use fixed test keys to avoid cf-keygen CI flakiness
   keyPath = pkgs.runCommand "agent.key" { } ''
     mkdir -p $out
-    cp ${./test-keys/agent.key} $out/
+    cp ${../test-keys/agent.key} $out/
   '';
   pubPath = pkgs.runCommand "agent.pub" { } ''
     mkdir -p $out
-    cp ${./test-keys/agent.pub} $out/
+    cp ${../test-keys/agent.pub} $out/
   '';
   derivation-paths = lib.crystal-forge.derivation-paths pkgs;
   systemBuildClosure = pkgs.closureInfo {
