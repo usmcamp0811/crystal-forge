@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-25 21:54'
+updated_date: '2026-06-25 21:58'
 labels:
   - design-parity
   - user-profile
@@ -23,12 +23,19 @@ references:
 documentation:
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
 modified_files:
+  - packages/default/migrations/0144_user_profile_preferences.sql
+  - packages/default/src/api/models.rs
+  - packages/default/src/handlers/api/mod.rs
+  - packages/default/src/handlers/api/profile.rs
+  - packages/default/src/bin/server.rs
+  - packages/default/src/queries/mod.rs
+  - packages/default/src/queries/profile.rs
+  - packages/web-ui/src/api/models.rs
+  - packages/web-ui/src/api/client.rs
   - packages/web-ui/src/views/profile.rs
   - packages/web-ui/src/views/mod.rs
   - packages/web-ui/src/routes.rs
   - packages/web-ui/src/components/layout/sidebar.rs
-  - packages/web-ui/src/api/models.rs
-  - packages/web-ui/src/api/client.rs
   - checks/web-ui/tests/integration-test.js
 priority: high
 ordinal: 1680
@@ -112,3 +119,25 @@ Medium: this introduces a new routed UI surface and may require profile/account 
 - [ ] #5 Any missing backend API support needed for current-user profile/account/preferences is implemented with minimal scoped endpoints/models and targeted tests
 - [ ] #6 web-ui check captures profile loading, populated, and editing states and asserts a real interaction
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Add a minimal current-user Profile API:
+   - GET /api/v1/profile
+   - PUT /api/v1/profile/preferences
+   - Use existing authenticated-session extraction and user/session tables.
+   - Add a small user_preferences table for theme, density, sidebar mode, default systems view, and notification preferences.
+2. Add server DTOs, handler, route wiring, query helpers, migration, and targeted backend tests.
+3. Add web-ui DTOs/client methods for Profile read/update.
+4. Add ProfileView route/module and sidebar user-block navigation to /profile.
+5. Implement the Profile & Preferences UI based on CrystalForgelatest/components/ProfileView.jsx, with loading/error/success/editing states.
+6. Extend checks/web-ui/tests/integration-test.js to capture profile states and assert an edit/save interaction.
+7. Run verification, including SQLx sync because this plan adds a migration/query support.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Approved implementation plan recorded; coding may begin in dedicated worktree.
+<!-- SECTION:NOTES:END -->
