@@ -2,9 +2,10 @@
 id: TASK-335
 title: Create User Profile view (new route+view) with CrystalForgelatest parity
 status: In Progress
-assignee: []
+assignee:
+  - '@gpt-5.5'
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-25 21:53'
+updated_date: '2026-06-25 21:54'
 labels:
   - design-parity
   - user-profile
@@ -111,9 +112,3 @@ Medium: this introduces a new routed UI surface and may require profile/account 
 - [ ] #5 Any missing backend API support needed for current-user profile/account/preferences is implemented with minimal scoped endpoints/models and targeted tests
 - [ ] #6 web-ui check captures profile loading, populated, and editing states and asserts a real interaction
 <!-- AC:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-335-profile-view
-<!-- SECTION:NOTES:END -->
