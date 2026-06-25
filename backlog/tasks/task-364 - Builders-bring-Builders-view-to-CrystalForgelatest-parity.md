@@ -1,11 +1,11 @@
 ---
 id: TASK-364
 title: 'Builders: bring Builders view to CrystalForgelatest parity'
-status: Review
+status: Done
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-25 01:09'
+updated_date: '2026-06-25 01:22'
 labels:
   - design-parity
   - builders
@@ -252,4 +252,6 @@ CI fix: Garage package configuration (commit dbf2c9fe):
 - Fixes web-ui check Nix evaluation error
 
 Garage rpc_secret fix applied (commit f6426b23): Added required 64-character hex rpc_secret to Garage configuration. Improved node ID extraction using awk. Added gawk to PATH. Added comprehensive diagnostic output on garage.service failure. Garage requires rpc_secret to be exactly 64 hexadecimal characters (32-byte secret). Added try/except wrapper around wait_for_unit with diagnostic commands. Commit pushed to origin. CI pipeline triggered via MR 283.
+
+MR !283 merged to dev. Task complete. Cleaning up worktree.
 <!-- SECTION:NOTES:END -->
