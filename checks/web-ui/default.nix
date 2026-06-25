@@ -24,7 +24,11 @@ let
 
   keyPair = pkgs.runCommand "agent-keypair" { } ''
     mkdir -p $out
-    ${pkgs.crystal-forge.default.cf-keygen}/bin/cf-keygen -f $out/agent.key
+    # Generate keypair with explicit output directory
+    ${pkgs.crystal-forge.default.cf-keygen}/bin/cf-keygen -f $out/agent.key -y
+    # Verify both files were created (robustness against transient failures)
+    test -f "$out/agent.key" || { echo "ERROR: agent.key not generated"; exit 1; }
+    test -f "$out/agent.pub" || { echo "ERROR: agent.pub not generated"; exit 1; }
   '';
   keyPath = pkgs.runCommand "agent.key" { } ''
     mkdir -p $out
