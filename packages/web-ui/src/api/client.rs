@@ -935,6 +935,15 @@ pub async fn fetch_compliance_bundle_systems(
     fetch_json(&url).await
 }
 
+/// Fetch compliance bundles applicable to a specific system with rollups.
+/// Optimized system-scoped endpoint that avoids N×fleet fetches.
+pub async fn fetch_system_compliance_bundles(
+    system_id: &Uuid,
+) -> Result<SystemComplianceBundlesResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/compliance", base_url(), system_id);
+    fetch_json(&url).await
+}
+
 pub async fn fetch_compliance_system_evidence(
     bundle_id: &Uuid,
     system_id: &Uuid,

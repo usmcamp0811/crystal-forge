@@ -19,9 +19,9 @@ pub enum BundleValidationError {
 impl std::fmt::Display for BundleValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NameRequired      => f.write_str("Bundle name is required"),
+            Self::NameRequired => f.write_str("Bundle name is required"),
             Self::FrameworkRequired => f.write_str("Framework is required"),
-            Self::PolicyRequired    => f.write_str("At least one policy is required"),
+            Self::PolicyRequired => f.write_str("At least one policy is required"),
         }
     }
 }
@@ -31,11 +31,7 @@ impl std::error::Error for BundleValidationError {}
 /// Validate fields common to both create and update.
 /// Returns an `anyhow::Error` wrapping a [`BundleValidationError`] so callers
 /// can downcast to distinguish validation failures from infrastructure errors.
-fn validate_bundle_request(
-    name: &str,
-    framework: &str,
-    policy_ids: &[Uuid],
-) -> Result<()> {
+fn validate_bundle_request(name: &str, framework: &str, policy_ids: &[Uuid]) -> Result<()> {
     if name.is_empty() {
         return Err(BundleValidationError::NameRequired.into());
     }
@@ -73,24 +69,26 @@ struct BundleRow {
     environment_count: i64,
 }
 
-#[derive(Debug, FromRow)]
-struct SystemRow {
-    id: Uuid,
-    hostname: String,
-    environment: Option<String>,
-    health_status: String,
-    critical_cve_count: i32,
-    high_cve_count: i32,
+#[derive(Debug, Clone, FromRow)]
+pub(crate) struct SystemRow {
+    pub id: Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub health_status: String,
+    pub critical_cve_count: i32,
+    pub high_cve_count: i32,
 }
 
 #[derive(Debug, Clone, FromRow)]
-struct PolicyRow {
-    id: Uuid,
-    name: String,
-    description: Option<String>,
-    policy_type: String,
-    config: Value,
-    enabled: bool,
+pub(crate) struct PolicyRow {
+    pub id: Uuid,
+    #[sqlx(default)]
+    pub bundle_id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub config: Value,
+    pub enabled: bool,
 }
 
 fn bundle_from_row(row: BundleRow) -> ComplianceBundleSummary {
@@ -364,12 +362,11 @@ pub async fn update_bundle(
 }
 
 pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<bool> {
-    let rows = sqlx::query_scalar::<_, i64>(
-        "DELETE FROM compliance_bundles WHERE id = $1 RETURNING 1",
-    )
-    .bind(bundle_id)
-    .fetch_optional(pool)
-    .await?;
+    let rows =
+        sqlx::query_scalar::<_, i64>("DELETE FROM compliance_bundles WHERE id = $1 RETURNING 1")
+            .bind(bundle_id)
+            .fetch_optional(pool)
+            .await?;
     Ok(rows.is_some())
 }
 
@@ -394,6 +391,159 @@ pub async fn list_bundle_systems(
         systems: rollups,
         totals,
     }))
+}
+
+/// Get all compliance bundles applicable to a specific system with their rollups.
+/// Returns only bundles where the system is in scope (matches environment filter).
+///
+/// This function uses set-based queries to avoid N+1 patterns:
+/// 1. Fetch system once
+/// 2. Fetch all bundles once
+/// 3. Fetch all applicable bundle IDs in one query (using environment filter)
+/// 4. Fetch policies for all applicable bundles in one query
+/// 5. Compute rollups in memory using deterministic logic
+///
+/// All-or-nothing behavior: Database or infrastructure failures fail the entire
+/// request. Individual bundle rollup computation uses pure deterministic logic
+/// with no fallible operations.
+///
+/// Returns None if the system does not exist (caller should return 404).
+pub async fn list_system_bundles(
+    pool: &PgPool,
+    system_id: Uuid,
+) -> Result<Option<Vec<(ComplianceBundleSummary, ComplianceSystemRollup)>>> {
+    // First verify the system exists - return None for 404 behavior
+    let system_row = sqlx::query_as::<_, SystemRow>(
+        r#"
+        SELECT
+            id,
+            hostname,
+            environment,
+            health_status,
+            critical_cve_count,
+            high_cve_count
+        FROM view_system_list
+        WHERE id = $1
+        "#,
+    )
+    .bind(system_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(system) = system_row else {
+        return Ok(None);
+    };
+
+    // Get all bundles (one query)
+    let all_bundles = list_bundles(pool).await?;
+
+    if all_bundles.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+
+    // Determine which bundles apply to this system using set-based query
+    // This replaces N individual applicability checks
+    let applicable_bundle_ids_vec: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT DISTINCT b.id
+        FROM compliance_bundles b
+        LEFT JOIN environments e ON e.name = $2
+        WHERE b.id = ANY($1)
+          AND (
+            NOT EXISTS (
+                SELECT 1 FROM compliance_bundle_environments cbe
+                WHERE cbe.bundle_id = b.id
+            )
+            OR EXISTS (
+                SELECT 1 FROM compliance_bundle_environments cbe
+                WHERE cbe.bundle_id = b.id AND cbe.environment_id = e.id
+            )
+          )
+        "#,
+    )
+    .bind(all_bundles.iter().map(|b| b.id).collect::<Vec<_>>())
+    .bind(&system.environment)
+    .fetch_all(pool)
+    .await?;
+
+    // Convert to HashSet for O(1) membership checks
+    let applicable_bundle_ids: std::collections::HashSet<Uuid> =
+        applicable_bundle_ids_vec.into_iter().collect();
+
+    if applicable_bundle_ids.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+
+    // Fetch all policies for all applicable bundles in one query
+    // This replaces N individual policy fetches
+    let all_policies = sqlx::query_as::<_, PolicyRow>(
+        r#"
+        SELECT dp.id, cbp.bundle_id, dp.name, dp.description, dp.policy_type, dp.config, dp.enabled
+        FROM compliance_bundle_policies cbp
+        JOIN deployment_policies dp ON dp.id = cbp.policy_id
+        WHERE cbp.bundle_id = ANY($1)
+        ORDER BY cbp.bundle_id, dp.name ASC
+        "#,
+    )
+    .bind(applicable_bundle_ids.iter().copied().collect::<Vec<_>>())
+    .fetch_all(pool)
+    .await?;
+
+    // Group policies by bundle_id for O(1) lookup
+    let mut policies_by_bundle: std::collections::HashMap<Uuid, Vec<PolicyRow>> =
+        std::collections::HashMap::new();
+    for policy in all_policies {
+        policies_by_bundle
+            .entry(policy.bundle_id)
+            .or_insert_with(Vec::new)
+            .push(policy);
+    }
+
+    // Compute rollups using deterministic in-memory logic
+    let result = assemble_system_compliance_bundles(
+        &system,
+        all_bundles,
+        &applicable_bundle_ids,
+        &policies_by_bundle,
+    );
+
+    Ok(Some(result))
+}
+
+/// Pure in-memory assembly of compliance bundles for a system.
+/// Exported as pub(crate) for unit testing without database fixtures.
+///
+/// Given:
+/// - A system row
+/// - All bundles
+/// - The set of applicable bundle IDs
+/// - Policies grouped by bundle_id
+///
+/// Returns bundles with computed rollups, filtered to only applicable bundles.
+pub(crate) fn assemble_system_compliance_bundles(
+    system: &SystemRow,
+    bundles: Vec<ComplianceBundleSummary>,
+    applicable_bundle_ids: &std::collections::HashSet<Uuid>,
+    policies_by_bundle: &std::collections::HashMap<Uuid, Vec<PolicyRow>>,
+) -> Vec<(ComplianceBundleSummary, ComplianceSystemRollup)> {
+    let mut result = Vec::new();
+
+    for bundle in bundles {
+        if !applicable_bundle_ids.contains(&bundle.id) {
+            continue;
+        }
+
+        let policies = policies_by_bundle
+            .get(&bundle.id)
+            .cloned()
+            .unwrap_or_default();
+
+        // system_rollup is pure deterministic computation with no fallible operations
+        let rollup = system_rollup(system.clone(), &policies);
+        result.push((bundle, rollup));
+    }
+
+    result
 }
 
 pub async fn get_system_evidence(
@@ -509,11 +659,11 @@ async fn list_applicable_system_rows(pool: &PgPool, bundle_id: Uuid) -> Result<V
     .await?)
 }
 
-fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> ComplianceSystemRollup {
-    let mut pass  = 0i64;
-    let mut warn  = 0i64;
-    let mut fail  = 0i64;
-    let waiver    = 0i64;
+pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> ComplianceSystemRollup {
+    let mut pass = 0i64;
+    let mut warn = 0i64;
+    let mut fail = 0i64;
+    let waiver = 0i64;
     // Only policies that were actually evaluated count toward total and score.
     // Disabled and unsupported policies are surfaced as warn but excluded from
     // the denominator so they don't silently deflate the score.
@@ -548,7 +698,11 @@ fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> ComplianceSystemR
     // evaluated_total = only the policies that were actually assessed; this is the
     // correct denominator for the score.
     let total = policies.len() as i64;
-    let score = if evaluated_total == 0 { 0 } else { (pass * 100) / evaluated_total };
+    let score = if evaluated_total == 0 {
+        0
+    } else {
+        (pass * 100) / evaluated_total
+    };
 
     ComplianceSystemRollup {
         system_id: system.id,
@@ -576,18 +730,18 @@ fn totals_for_rollups(rollups: &[ComplianceSystemRollup]) -> ComplianceRollupTot
         // i.e. no failures and no evaluated warnings.  Disabled/unsupported
         // policies surface in rollup.warn but should not prevent a host that
         // has no real failures from counting as compliant.
-        let evaluated_warns = rollup.warn.saturating_sub(
-            rollup.total - rollup.evaluated_total
-        );
+        let evaluated_warns = rollup
+            .warn
+            .saturating_sub(rollup.total - rollup.evaluated_total);
         if rollup.fail == 0 && evaluated_warns == 0 && rollup.evaluated_total > 0 {
             totals.fully_compliant_count += 1;
         }
-        totals.pass                += rollup.pass;
-        totals.warn                += rollup.warn;
-        totals.fail                += rollup.fail;
-        totals.waiver              += rollup.waiver;
-        totals.total_controls      += rollup.total;
-        totals.evaluated_controls  += rollup.evaluated_total;
+        totals.pass += rollup.pass;
+        totals.warn += rollup.warn;
+        totals.fail += rollup.fail;
+        totals.waiver += rollup.waiver;
+        totals.total_controls += rollup.total;
+        totals.evaluated_controls += rollup.evaluated_total;
     }
 
     // overall_score uses evaluated_controls (not total_controls) as the
@@ -622,8 +776,8 @@ fn evaluate_policy(system: &SystemRow, policy: &PolicyRow) -> PolicyEval {
             // Unknown / stale / error values → Warn (indeterminate, not a scored pass).
             let status = match system.health_status.as_str() {
                 "healthy" | "online" => ComplianceControlStatus::Pass,
-                "offline"            => ComplianceControlStatus::Fail,
-                _                    => ComplianceControlStatus::Warn,
+                "offline" => ComplianceControlStatus::Fail,
+                _ => ComplianceControlStatus::Warn,
             };
             PolicyEval::Evaluated(status)
         }
@@ -661,15 +815,15 @@ fn evaluate_policy(system: &SystemRow, policy: &PolicyRow) -> PolicyEval {
 fn policy_status(system: &SystemRow, policy: &PolicyRow) -> ComplianceControlStatus {
     match evaluate_policy(system, policy) {
         PolicyEval::Evaluated(s) => s,
-        PolicyEval::Disabled     => ComplianceControlStatus::Warn,
-        PolicyEval::Unsupported  => ComplianceControlStatus::Warn,
+        PolicyEval::Disabled => ComplianceControlStatus::Warn,
+        PolicyEval::Unsupported => ComplianceControlStatus::Warn,
     }
 }
 
 fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlEvidence {
-    let eval   = evaluate_policy(system, &policy);
+    let eval = evaluate_policy(system, &policy);
     let status = match &eval {
-        PolicyEval::Evaluated(s)              => s.clone(),
+        PolicyEval::Evaluated(s) => s.clone(),
         PolicyEval::Disabled | PolicyEval::Unsupported => ComplianceControlStatus::Warn,
     };
 
@@ -755,10 +909,12 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
 
     fn named_policy(policy_type: &str, name: &str, config: Value, enabled: bool) -> PolicyRow {
         PolicyRow {
             id: Uuid::nil(),
+            bundle_id: Uuid::nil(),
             name: name.to_string(),
             description: None,
             policy_type: policy_type.to_string(),
@@ -782,13 +938,57 @@ mod tests {
         }
     }
 
+    fn system_with_hostname(hostname: &str, environment: Option<&str>) -> SystemRow {
+        SystemRow {
+            id: Uuid::new_v4(),
+            hostname: hostname.to_string(),
+            environment: environment.map(str::to_string),
+            health_status: "healthy".to_string(),
+            critical_cve_count: 0,
+            high_cve_count: 0,
+        }
+    }
+
+    fn bundle(id: Uuid, name: &str) -> ComplianceBundleSummary {
+        ComplianceBundleSummary {
+            id,
+            name: name.to_string(),
+            framework: "Test Framework".to_string(),
+            version: "1.0".to_string(),
+            description: None,
+            layer: "infrastructure".to_string(),
+            owner: "test-owner".to_string(),
+            last_review: None,
+            policy_ids: vec![],
+            required_envs: vec![],
+            control_count: 0,
+            environment_count: 0,
+        }
+    }
+
+    fn bundled_policy(bundle_id: Uuid, name: &str, enabled: bool) -> PolicyRow {
+        PolicyRow {
+            id: Uuid::new_v4(),
+            bundle_id,
+            name: name.to_string(),
+            description: None,
+            policy_type: "require_cf_agent".to_string(),
+            config: serde_json::json!({}),
+            enabled,
+        }
+    }
+
     // ── require_cve_check ─────────────────────────────────────────────────────
 
     #[test]
     fn cve_policy_fails_when_critical_exceeds_threshold() {
         let status = policy_status(
             &system("healthy", 1, 0),
-            &policy("require_cve_check", serde_json::json!({ "max_critical": 0 }), true),
+            &policy(
+                "require_cve_check",
+                serde_json::json!({ "max_critical": 0 }),
+                true,
+            ),
         );
         assert!(matches!(status, ComplianceControlStatus::Fail));
     }
@@ -797,7 +997,11 @@ mod tests {
     fn cve_policy_passes_when_within_threshold() {
         let status = policy_status(
             &system("healthy", 0, 0),
-            &policy("require_cve_check", serde_json::json!({ "max_critical": 0 }), true),
+            &policy(
+                "require_cve_check",
+                serde_json::json!({ "max_critical": 0 }),
+                true,
+            ),
         );
         assert!(matches!(status, ComplianceControlStatus::Pass));
     }
@@ -878,9 +1082,15 @@ mod tests {
             &[policy("require_cf_agent", serde_json::json!({}), false)],
         );
         assert_eq!(rollup.warn, 1, "disabled policy should surface as warn");
-        assert_eq!(rollup.score, 0, "score with only disabled policies should be 0");
+        assert_eq!(
+            rollup.score, 0,
+            "score with only disabled policies should be 0"
+        );
         assert_eq!(rollup.total, 1);
-        assert_eq!(rollup.evaluated_total, 0, "disabled policy must not count as evaluated");
+        assert_eq!(
+            rollup.evaluated_total, 0,
+            "disabled policy must not count as evaluated"
+        );
     }
 
     // ── unsupported policy types ──────────────────────────────────────────────
@@ -899,10 +1109,17 @@ mod tests {
         let sys = system("healthy", 0, 0);
         let rollup = system_rollup(
             sys,
-            &[policy("custom_unsupported_type", serde_json::json!({}), true)],
+            &[policy(
+                "custom_unsupported_type",
+                serde_json::json!({}),
+                true,
+            )],
         );
         assert_eq!(rollup.warn, 1, "unsupported policy should surface as warn");
-        assert_eq!(rollup.score, 0, "score with only unsupported policies should be 0");
+        assert_eq!(
+            rollup.score, 0,
+            "score with only unsupported policies should be 0"
+        );
         assert_eq!(rollup.evaluated_total, 0);
     }
 
@@ -924,22 +1141,27 @@ mod tests {
         assert_eq!(rollup.warn, 1, "one disabled (surfaces as warn)");
         assert_eq!(rollup.fail, 0);
         assert_eq!(rollup.evaluated_total, 1, "only one control was evaluated");
-        assert_eq!(rollup.score, 100, "host score must be 100 with one pass and one disabled");
+        assert_eq!(
+            rollup.score, 100,
+            "host score must be 100 with one pass and one disabled"
+        );
     }
 
     #[test]
     fn aggregate_score_uses_evaluated_controls_not_total() {
         let sys = system("healthy", 0, 0);
         let policies = vec![
-            policy("require_cf_agent", serde_json::json!({}), true),  // pass
+            policy("require_cf_agent", serde_json::json!({}), true), // pass
             policy("require_cf_agent", serde_json::json!({}), false), // disabled → warn
         ];
         let rollup = system_rollup(sys, &policies);
         let totals = totals_for_rollups(&[rollup]);
 
         // Overall score must use evaluated_controls (1) not total_controls (2).
-        assert_eq!(totals.overall_score, 100,
-            "bundle overall score must be 100 when the only evaluated control passes");
+        assert_eq!(
+            totals.overall_score, 100,
+            "bundle overall score must be 100 when the only evaluated control passes"
+        );
         assert_eq!(totals.evaluated_controls, 1);
         assert_eq!(totals.total_controls, 2);
     }
@@ -948,7 +1170,7 @@ mod tests {
     fn fully_compliant_count_ignores_not_evaluated_controls() {
         let sys = system("healthy", 0, 0);
         let policies = vec![
-            policy("require_cf_agent", serde_json::json!({}), true),  // pass
+            policy("require_cf_agent", serde_json::json!({}), true), // pass
             policy("require_cf_agent", serde_json::json!({}), false), // disabled → warn
         ];
         let rollup = system_rollup(sys, &policies);
@@ -957,9 +1179,11 @@ mod tests {
         assert_eq!(rollup.warn, 1);
         assert_eq!(rollup.pass, 1);
         let totals = totals_for_rollups(&[rollup]);
-        assert_eq!(totals.fully_compliant_count, 1,
+        assert_eq!(
+            totals.fully_compliant_count, 1,
             "host with all evaluated controls passing must count as fully compliant \
-             even when disabled policies surface as warn");
+             even when disabled policies surface as warn"
+        );
     }
 
     // ── evidence labels ───────────────────────────────────────────────────────
@@ -968,7 +1192,7 @@ mod tests {
     fn evidence_artifact_title_is_not_authoritative() {
         let sys = system("healthy", 0, 0);
         let pol = policy("require_cf_agent", serde_json::json!({}), true);
-        let ev  = control_evidence(&sys, pol);
+        let ev = control_evidence(&sys, pol);
         let artifact = ev.evidence_items[0].artifact.as_ref().unwrap();
         assert_ne!(
             artifact.title, "Authoritative Crystal Forge signal",
@@ -985,8 +1209,13 @@ mod tests {
     #[test]
     fn framework_mapping_is_empty_when_no_real_mapping_exists() {
         let sys = system("healthy", 0, 0);
-        let pol = named_policy("require_cf_agent", "CF Agent Check", serde_json::json!({}), true);
-        let ev  = control_evidence(&sys, pol);
+        let pol = named_policy(
+            "require_cf_agent",
+            "CF Agent Check",
+            serde_json::json!({}),
+            true,
+        );
+        let ev = control_evidence(&sys, pol);
         assert!(
             ev.framework_mapping.is_empty(),
             "framework_mapping must be empty when no real framework control ID exists, \
@@ -994,4 +1223,142 @@ mod tests {
             ev.framework_mapping
         );
     }
+
+    #[test]
+    fn system_bundle_assembly_filters_non_applicable_bundles() {
+        let sys = system_with_hostname("test-host", Some("prod"));
+        let bundle1_id = Uuid::new_v4();
+        let bundle2_id = Uuid::new_v4();
+        let bundle3_id = Uuid::new_v4();
+
+        let mut applicable_ids = HashSet::new();
+        applicable_ids.insert(bundle1_id);
+        applicable_ids.insert(bundle3_id);
+
+        let result = assemble_system_compliance_bundles(
+            &sys,
+            vec![
+                bundle(bundle1_id, "Applicable Bundle 1"),
+                bundle(bundle2_id, "Non-Applicable Bundle"),
+                bundle(bundle3_id, "Applicable Bundle 2"),
+            ],
+            &applicable_ids,
+            &HashMap::new(),
+        );
+
+        assert_eq!(result.len(), 2, "should only include applicable bundles");
+        assert!(result.iter().any(|(bundle, _)| bundle.id == bundle1_id));
+        assert!(result.iter().any(|(bundle, _)| bundle.id == bundle3_id));
+        assert!(!result.iter().any(|(bundle, _)| bundle.id == bundle2_id));
+    }
+
+    #[test]
+    fn system_bundle_assembly_handles_bundle_with_no_policies() {
+        let sys = system_with_hostname("test-host", Some("prod"));
+        let bundle_id = Uuid::new_v4();
+
+        let mut applicable_ids = HashSet::new();
+        applicable_ids.insert(bundle_id);
+
+        let result = assemble_system_compliance_bundles(
+            &sys,
+            vec![bundle(bundle_id, "Empty Bundle")],
+            &applicable_ids,
+            &HashMap::new(),
+        );
+
+        assert_eq!(result.len(), 1);
+        let (_, rollup) = &result[0];
+        assert_eq!(rollup.hostname, "test-host");
+        assert_eq!(rollup.total, 0);
+        assert_eq!(rollup.pass, 0);
+        assert_eq!(rollup.warn, 0);
+        assert_eq!(rollup.fail, 0);
+        assert_eq!(rollup.score, 0);
+    }
+
+    #[test]
+    fn system_bundle_assembly_uses_policies_grouped_by_bundle() {
+        let sys = system_with_hostname("test-host", Some("prod"));
+        let bundle1_id = Uuid::new_v4();
+        let bundle2_id = Uuid::new_v4();
+
+        let mut applicable_ids = HashSet::new();
+        applicable_ids.insert(bundle1_id);
+        applicable_ids.insert(bundle2_id);
+
+        let mut policies_by_bundle = HashMap::new();
+        policies_by_bundle.insert(
+            bundle1_id,
+            vec![
+                bundled_policy(bundle1_id, "policy1", true),
+                bundled_policy(bundle1_id, "policy2", true),
+            ],
+        );
+        policies_by_bundle.insert(
+            bundle2_id,
+            vec![bundled_policy(bundle2_id, "policy3", true)],
+        );
+
+        let result = assemble_system_compliance_bundles(
+            &sys,
+            vec![
+                bundle(bundle1_id, "Bundle 1"),
+                bundle(bundle2_id, "Bundle 2"),
+            ],
+            &applicable_ids,
+            &policies_by_bundle,
+        );
+
+        assert_eq!(result.len(), 2);
+        let bundle1_rollup = result
+            .iter()
+            .find(|(bundle, _)| bundle.id == bundle1_id)
+            .expect("bundle 1 rollup should exist");
+        let bundle2_rollup = result
+            .iter()
+            .find(|(bundle, _)| bundle.id == bundle2_id)
+            .expect("bundle 2 rollup should exist");
+
+        assert_eq!(bundle1_rollup.1.total, 2);
+        assert_eq!(bundle2_rollup.1.total, 1);
+    }
+
+    #[test]
+    fn system_bundle_assembly_returns_empty_for_empty_bundle_list() {
+        let sys = system_with_hostname("test-host", None);
+
+        let result =
+            assemble_system_compliance_bundles(&sys, vec![], &HashSet::new(), &HashMap::new());
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn system_rollup_preserves_system_info() {
+        let sys = system_with_hostname("test-host-123", Some("staging"));
+        let policies = vec![bundled_policy(Uuid::new_v4(), "test-policy", true)];
+
+        let rollup = system_rollup(sys.clone(), &policies);
+
+        assert_eq!(rollup.hostname, "test-host-123");
+        assert_eq!(rollup.environment, Some("staging".to_string()));
+        assert_eq!(rollup.system_id, sys.id);
+    }
 }
+
+// Integration test cases for list_system_bundles (database-dependent)
+//
+// Pure assembly and rollup tests live in the unit-test module above so they can
+// exercise internal row types without widening the production API surface.
+//
+// The following integration test scenarios require database fixtures:
+//
+// 1. Unknown system returns None → 404
+// 2. System with no applicable bundles → 200 + empty array
+// 3. Environment-based applicability filtering (prod/dev/unscoped)
+// 4. Rollup parity with existing bundle-systems endpoint
+// 5. Query count is constant (4 queries) regardless of bundle count
+// 6. Handler auth enforcement (403 without credentials)
+//
+// These should be implemented as #[sqlx::test] or VM integration tests.
