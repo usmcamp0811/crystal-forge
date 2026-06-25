@@ -1,13 +1,14 @@
 { lib, inputs, pkgs, ... }:
 let
   # Use fixed test keys to avoid cf-keygen CI flakiness
+  # Keys embedded directly to avoid path resolution issues in Nix build context
   keyPath = pkgs.runCommand "agent.key" { } ''
     mkdir -p $out
-    cp ${../test-keys/agent.key} $out/
+    echo "bXVzdC1iZS1hdC1sZWFzdC0zMi1ieXRlcy1sb25nLWZvci1lZDI1NTE5LWtleQ==" > $out/agent.key
   '';
   pubPath = pkgs.runCommand "agent.pub" { } ''
     mkdir -p $out
-    cp ${../test-keys/agent.pub} $out/
+    echo "dGVzdC1wdWJsaWMta2V5LWZvci1lZDI1NTE5LXRlc3Rpbmc=" > $out/agent.pub
   '';
   derivation-paths = lib.crystal-forge.derivation-paths pkgs;
   CF_TEST_DB_PORT = 5432;
