@@ -16,7 +16,8 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api::client::{
-    ApiClientError, fetch_cve_scan_status, fetch_hardening_scan_status,
+    ApiClientError, fetch_compliance_system_evidence, fetch_cve_scan_status,
+    fetch_hardening_scan_status, fetch_system_compliance_bundles,
     fetch_system_cve_scan_eligibility, fetch_system_cves, fetch_system_hardening,
     fetch_system_hardening_justifications, fetch_system_hardening_scan_eligibility,
     request_system_generation_rollback, request_system_rollback, request_system_sync,
@@ -24,14 +25,16 @@ use crate::api::client::{
     verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
-    BuildStatus, CommitInfo, CveScanEligibilityResponse, CveSummary, DeploymentLogEntry,
-    DeploymentStatus, HardeningJustificationResponse, HardeningScanEligibilityResponse,
+    BuildStatus, CommitInfo, ComplianceEvidenceResponse, ComplianceSystemRollup,
+    CveScanEligibilityResponse, CveSummary, DeploymentLogEntry, DeploymentStatus,
+    HardeningJustificationResponse, HardeningScanEligibilityResponse,
     HardeningServiceResultResponse, HealthStatus, LogLevel, PipelineStage,
-    SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory, SystemDetail,
-    SystemGeneration, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
-    SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
+    SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
+    SystemComplianceBundle, SystemDetail, SystemGeneration, SystemHardwareInfo, SystemHistoryEntry,
+    SystemNetworkInfo, SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
     SystemVulnerability, VerifyGenerationClosureRequest,
 };
+use crate::components::compliance::EvidenceDrawer;
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
 use crate::components::icon::{Icon, IconName};
@@ -1132,77 +1135,14 @@ pub fn SystemDetailView(id: String) -> Element {
 // Tab Components
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Clone, PartialEq)]
-struct ComplianceMockBundle {
-    name: &'static str,
-    framework: &'static str,
-    version: &'static str,
-    owner: &'static str,
-    controls: u32,
-    score: u8,
-    pass: u32,
-    warn: u32,
-    fail: u32,
-    waiver: u32,
+/// Aggregated compliance data for the system detail tab.
+#[derive(Clone, PartialEq, Debug)]
+struct SystemComplianceData {
+    bundles: Vec<SystemComplianceBundle>,
+    error: Option<String>,
 }
 
-/// Temporary parity data for the System Detail Compliance tab.
-///
-/// IMPORTANT: This is intentionally mocked by maintainer authorization on
-/// TASK-353 because the real Compliance view/backend plumbing does not exist
-/// yet. Keep this isolated so TASK-355 can replace it with API-backed bundle
-/// rollups and per-control evidence without changing the view structure.
-fn mocked_compliance_bundles(system: &SystemDetail) -> Vec<ComplianceMockBundle> {
-    let production = system
-        .environment
-        .as_deref()
-        .map(|env| env.eq_ignore_ascii_case("production"))
-        .unwrap_or(false);
-
-    if production {
-        vec![
-            ComplianceMockBundle {
-                name: "Production baseline",
-                framework: "CIS",
-                version: "v2.0",
-                owner: "security-platform",
-                controls: 42,
-                score: 86,
-                pass: 34,
-                warn: 5,
-                fail: 2,
-                waiver: 1,
-            },
-            ComplianceMockBundle {
-                name: "STIG NixOS overlay",
-                framework: "DISA STIG",
-                version: "draft",
-                owner: "platform-secops",
-                controls: 28,
-                score: 92,
-                pass: 25,
-                warn: 2,
-                fail: 0,
-                waiver: 1,
-            },
-        ]
-    } else {
-        vec![ComplianceMockBundle {
-            name: "General fleet baseline",
-            framework: "Internal",
-            version: "2026.1",
-            owner: "platform",
-            controls: 24,
-            score: 94,
-            pass: 22,
-            warn: 1,
-            fail: 0,
-            waiver: 1,
-        }]
-    }
-}
-
-fn compliance_score_color(score: u8) -> &'static str {
+fn compliance_score_color(score: i64) -> &'static str {
     if score >= 90 {
         "#34d399"
     } else if score >= 70 {
@@ -1214,288 +1154,236 @@ fn compliance_score_color(score: u8) -> &'static str {
 
 #[component]
 fn ComplianceTab(system: SystemDetail) -> Element {
-    let bundles = mocked_compliance_bundles(&system);
-    // Selected bundle for the placeholder evidence drawer. The real per-control evidence
-    // drawer (config output, systemd unit state, audit results, waivers) is tracked by
-    // TASK-356; this placeholder shows the design-example layout with sample evidence so the
-    // "View evidence" action is no longer a dead button.
-    let mut selected_bundle: Signal<Option<ComplianceMockBundle>> = use_signal(|| None);
-    let system_hostname = system.hostname.clone();
+    let system_id = system.id;
+
+    // Fetch applicable bundles for this system using the optimized system-scoped endpoint.
+    // All-or-nothing behavior: infrastructure failures show top-level error.
+    let mut compliance_resource = use_resource(move || {
+        let sid = system_id;
+        async move {
+            match fetch_system_compliance_bundles(&sid).await {
+                Ok(response) => SystemComplianceData {
+                    bundles: response.bundles,
+                    error: None,
+                },
+                Err(e) => SystemComplianceData {
+                    bundles: Vec::new(),
+                    error: Some(format!("Failed to load compliance bundles: {e}")),
+                },
+            }
+        }
+    });
+
+    // Evidence drawer state
+    let mut evidence_open: Signal<Option<(Uuid, Uuid)>> = use_signal(|| None); // (bundle_id, system_id)
+    let mut evidence_data: Signal<Option<Result<ComplianceEvidenceResponse, String>>> =
+        use_signal(|| None);
+    let mut evidence_bundle_name: Signal<Option<String>> = use_signal(|| None);
+
+    let loading = compliance_resource.read_unchecked().is_none();
+    let data = compliance_resource
+        .read_unchecked()
+        .clone()
+        .unwrap_or(SystemComplianceData {
+            bundles: Vec::new(),
+            error: None,
+        });
 
     rsx! {
         div {
             style: "display:flex;flex-direction:column;gap:14px;",
 
-            div {
-                class: "sd-callout sd-callout-info",
-                Icon { name: IconName::Shield, size: 13 }
+            // Loading state
+            if loading {
                 div {
-                    style: "font-size:12px;",
-                    strong { "Temporary Compliance preview. " }
-                    "Mock bundle rollups are shown for design parity while real compliance evidence APIs are implemented."
+                    class: "flex items-center justify-center py-8",
+                    crate::components::loading::DashboardLoadingSpinner {
+                        label: "Loading compliance data…".to_string(),
+                        size: 36,
+                    }
                 }
             }
-
-            for bundle in bundles {
-                {
-                    let score_color = compliance_score_color(bundle.score);
-                    let score_width = format!("width:{}%;height:100%;background:{};", bundle.score, score_color);
-                    let bundle_for_drawer = bundle.clone();
-                    rsx! {
-                        div {
-                            class: "card",
-                            style: "padding:16px;",
-
+            // Error state (only if no bundles loaded at all)
+            else if data.bundles.is_empty() && data.error.is_some() {
+                div {
+                    class: "sd-callout sd-callout-danger",
+                    Icon { name: IconName::Warn, size: 13 }
+                    div { style: "font-size:12px;", "{data.error.as_ref().unwrap()}" }
+                }
+            }
+            // Empty state (no applicable bundles)
+            else if data.bundles.is_empty() {
+                div {
+                    class: "card",
+                    style: "padding:24px;text-align:center;",
+                    div { class: "empty",
+                        h3 { "No compliance bundles" }
+                        p { style: "font-size:13px;color:var(--cf-text-muted);margin-top:6px;",
+                            "This system is not covered by any compliance bundle."
+                        }
+                        Link {
+                            to: crate::routes::Route::ComplianceView {},
+                            class: "btn btn-primary focus-ring",
+                            style: "margin-top:14px;",
+                            "Go to Compliance"
+                        }
+                    }
+                }
+            }
+            // Populated state
+            else {
+                for bd in data.bundles.iter() {
+                    {
+                        let score = bd.rollup.score;
+                        let score_color = compliance_score_color(score);
+                        let score_width = format!("width:{}%;height:100%;background:{};", score, score_color);
+                        let bundle_id = bd.bundle.id;
+                        let bundle_name = bd.bundle.name.clone();
+                        let framework = bd.bundle.framework.clone();
+                        let version = bd.bundle.version.clone();
+                        let owner = bd.bundle.owner.clone();
+                        let total = bd.rollup.total;
+                        let pass = bd.rollup.pass;
+                        let warn = bd.rollup.warn;
+                        let fail = bd.rollup.fail;
+                        let waiver = bd.rollup.waiver;
+                        rsx! {
                             div {
-                                style: "display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;",
+                                class: "card",
+                                style: "padding:16px;",
+
                                 div {
-                                    style: "min-width:0;",
+                                    style: "display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;",
                                     div {
-                                        style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
-                                        span { style: "font-size:15px;font-weight:650;", "{bundle.name}" }
-                                        span { class: "chip chip-info", style: "font-size:10px;", "{bundle.framework}" }
-                                        span { class: "chip chip-unknown", style: "font-size:10px;", "{bundle.version}" }
-                                        if bundle.fail == 0 {
-                                            span {
-                                                class: "chip chip-healthy",
-                                                style: "font-size:10px;",
-                                                Icon { name: IconName::Check, size: 9 }
-                                                " Compliant"
+                                        style: "min-width:0;",
+                                        div {
+                                            style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                                            span { style: "font-size:15px;font-weight:650;", "{bundle_name}" }
+                                            span { class: "chip chip-info", style: "font-size:10px;", "{framework}" }
+                                            span { class: "chip chip-unknown", style: "font-size:10px;", "{version}" }
+                                            if fail == 0 {
+                                                span {
+                                                    class: "chip chip-healthy",
+                                                    style: "font-size:10px;",
+                                                    Icon { name: IconName::Check, size: 9 }
+                                                    " Compliant"
+                                                }
+                                            } else {
+                                                span {
+                                                    class: "chip chip-critical",
+                                                    style: "font-size:10px;",
+                                                    Icon { name: IconName::Warn, size: 9 }
+                                                    " {fail} failing"
+                                                }
                                             }
-                                        } else {
-                                            span {
-                                                class: "chip chip-critical",
-                                                style: "font-size:10px;",
-                                                Icon { name: IconName::Warn, size: 9 }
-                                                " {bundle.fail} failing"
-                                            }
+                                        }
+                                        div {
+                                            style: "font-size:12px;color:var(--cf-text-muted);margin-top:4px;",
+                                            "{total} controls · owned by "
+                                            span { class: "mono", "{owner}" }
+                                        }
+                                    }
+                                    button {
+                                        class: "btn btn-primary focus-ring",
+                                        onclick: move |_| {
+                                            let bn = bundle_name.clone();
+                                            evidence_open.set(Some((bundle_id, system_id)));
+                                            evidence_bundle_name.set(Some(bn));
+                                            evidence_data.set(None);
+                                            spawn({
+                                                let bid = bundle_id;
+                                                let sid = system_id;
+                                                async move {
+                                                    match fetch_compliance_system_evidence(&bid, &sid).await {
+                                                        Ok(resp) => evidence_data.set(Some(Ok(resp))),
+                                                        Err(e) => evidence_data.set(Some(Err(e.to_string()))),
+                                                    }
+                                                }
+                                            });
+                                        },
+                                        Icon { name: IconName::File, size: 13 }
+                                        "View evidence"
+                                    }
+                                }
+
+                                div {
+                                    style: "display:flex;align-items:center;gap:16px;margin-top:14px;flex-wrap:wrap;",
+                                    div {
+                                        style: "display:flex;align-items:center;gap:10px;",
+                                        div {
+                                            style: "width:120px;height:8px;background:var(--cf-subtle-bg);border-radius:99px;overflow:hidden;",
+                                            div { style: "{score_width}" }
+                                        }
+                                        span {
+                                            class: "mono",
+                                            style: "font-size:14px;font-weight:700;color:{score_color};",
+                                            "{score}%"
                                         }
                                     }
                                     div {
-                                        style: "font-size:12px;color:var(--cf-text-muted);margin-top:4px;",
-                                        "{bundle.controls} controls · owned by "
-                                        span { class: "mono", "{bundle.owner}" }
-                                    }
-                                }
-                                button {
-                                    class: "btn btn-primary focus-ring",
-                                    title: "Preview the evidence drawer layout (real per-control evidence is tracked by TASK-356)",
-                                    onclick: move |_| selected_bundle.set(Some(bundle_for_drawer.clone())),
-                                    Icon { name: IconName::File, size: 13 }
-                                    "View evidence"
-                                }
-                            }
-
-                            div {
-                                style: "display:flex;align-items:center;gap:16px;margin-top:14px;flex-wrap:wrap;",
-                                div {
-                                    style: "display:flex;align-items:center;gap:10px;",
-                                    div {
-                                        style: "width:120px;height:8px;background:var(--cf-subtle-bg);border-radius:99px;overflow:hidden;",
-                                        div { style: "{score_width}" }
-                                    }
-                                    span {
-                                        class: "mono",
-                                        style: "font-size:14px;font-weight:700;color:{score_color};",
-                                        "{bundle.score}%"
-                                    }
-                                }
-                                div {
-                                    style: "display:flex;gap:14px;font-size:12px;",
-                                    span { span { class: "mono", style: "font-weight:700;color:#34d399;", "{bundle.pass}" } " pass" }
-                                    span { span { class: "mono", style: "font-weight:700;color:#fbbf24;", "{bundle.warn}" } " warn" }
-                                    span { span { class: "mono", style: "font-weight:700;color:#f87171;", "{bundle.fail}" } " fail" }
-                                    span { span { class: "mono", style: "font-weight:700;color:#a78bfa;", "{bundle.waiver}" } " waiver" }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Placeholder evidence drawer (TASK-356 will replace with real per-control evidence).
-            if let Some(bundle) = selected_bundle.read().clone() {
-                ComplianceEvidenceDrawer {
-                    bundle,
-                    hostname: system_hostname.clone(),
-                    on_close: move |_| selected_bundle.set(None),
-                }
-            }
-        }
-    }
-}
-
-/// Placeholder "evidence drawer" for the Compliance tab.
-///
-/// IMPORTANT: This is a maintainer-authorized placeholder (TASK-353). It mirrors the design
-/// reference's evidence drawer layout with representative sample controls so the "View
-/// evidence" action demonstrates the intended UX. TASK-356 replaces this with real,
-/// per-control evidence (config output, systemd unit state, audit results, waivers).
-#[component]
-fn ComplianceEvidenceDrawer(
-    bundle: ComplianceMockBundle,
-    hostname: String,
-    on_close: EventHandler<()>,
-) -> Element {
-    // Representative sample controls for the placeholder drawer.
-    let sample_controls: [(&str, &str, &str, &str); 4] = [
-        (
-            "CIS-1.1.1",
-            "pass",
-            "low",
-            "Ensure mounting of cramfs filesystems is disabled",
-        ),
-        (
-            "CIS-1.4.1",
-            "pass",
-            "medium",
-            "Ensure bootloader password is set",
-        ),
-        (
-            "CIS-5.2.5",
-            "warn",
-            "medium",
-            "Ensure SSH LogLevel is appropriate",
-        ),
-        (
-            "CIS-5.3.1",
-            "fail",
-            "high",
-            "Ensure password creation requirements are configured",
-        ),
-    ];
-    let mut active_control = use_signal(|| 0_usize);
-    let active_idx = (*active_control.read()).min(sample_controls.len().saturating_sub(1));
-    let (active_id, active_status, active_severity, active_desc) = sample_controls[active_idx];
-    let status_color = match active_status {
-        "pass" => "#34d399",
-        "warn" => "#fbbf24",
-        "waiver" => "#a78bfa",
-        _ => "#f87171",
-    };
-    let severity_color = match active_severity {
-        "high" => "#f87171",
-        "medium" => "#fbbf24",
-        _ => "#60a5fa",
-    };
-    let evidence_count = 3;
-
-    rsx! {
-        div { class: "fl-tray-backdrop", onclick: move |_| on_close.call(()) }
-        aside {
-            class: "fl-tray",
-            style: "width:min(960px,96vw);",
-            header {
-                class: "fl-tray-head",
-                div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;",
-                    Icon { name: IconName::Shield, size: 18 }
-                    div { style: "min-width:0;",
-                        div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
-                            span { class: "mono", style: "font-weight:700;font-size:15px;", "{hostname}" }
-                            span { style: "font-size:11px;color:var(--cf-text-muted);", "vs" }
-                            span { class: "chip chip-info", "{bundle.name}" }
-                        }
-                        div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;",
-                            "Stepping through {sample_controls.len()} controls · preview data until TASK-356 wires real evidence"
-                        }
-                    }
-                }
-                div { style: "display:flex;gap:6px;",
-                    button { class: "btn btn-ghost focus-ring xs", Icon { name: IconName::ArrowRight, size: 11 } "View bundle" }
-                    button { class: "btn-icon focus-ring", onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } }
-                }
-            }
-
-            div { style: "display:grid;grid-template-columns:260px 1fr;flex:1;min-height:0;overflow:hidden;",
-                nav { style: "border-right:1px solid var(--cf-divider);overflow-y:auto;background:color-mix(in oklab,var(--cf-page-bg) 30%,var(--cf-card-bg));",
-                    for (idx, (id, status, _severity, desc)) in sample_controls.iter().enumerate() {
-                        {
-                            let is_selected = idx == active_idx;
-                            let dot = match *status {
-                                "pass" => "#34d399",
-                                "warn" => "#fbbf24",
-                                "waiver" => "#a78bfa",
-                                _ => "#f87171",
-                            };
-                            rsx! {
-                                button {
-                                    class: "focus-ring",
-                                    style: if is_selected {
-                                        "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 8%,transparent);border-bottom:1px solid var(--cf-divider);"
-                                    } else {
-                                        "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid transparent;background:transparent;border-bottom:1px solid var(--cf-divider);"
-                                    },
-                                    onclick: move |_| active_control.set(idx),
-                                    div { style: "display:flex;justify-content:space-between;align-items:center;gap:8px;",
-                                        span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{idx + 1:02}" }
-                                        span { style: "width:8px;height:8px;border-radius:50%;background:{dot};" }
-                                    }
-                                    div { style: if is_selected { "font-size:12px;color:var(--cf-text-primary);margin-top:4px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" } else { "font-size:12px;color:var(--cf-text-primary);margin-top:4px;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" },
-                                        "{id} · {desc}"
+                                        style: "display:flex;gap:14px;font-size:12px;",
+                                        span { span { class: "mono", style: "font-weight:700;color:#34d399;", "{pass}" } " pass" }
+                                        span { span { class: "mono", style: "font-weight:700;color:#fbbf24;", "{warn}" } " warn" }
+                                        span { span { class: "mono", style: "font-weight:700;color:#f87171;", "{fail}" } " fail" }
+                                        span { span { class: "mono", style: "font-weight:700;color:#a78bfa;", "{waiver}" } " waiver" }
                                     }
                                 }
                             }
                         }
                     }
                 }
+            }
 
-                div { style: "overflow:auto;padding:20px;display:flex;flex-direction:column;gap:16px;",
-                    div {
-                        div { style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;",
-                            span { style: "font-size:11px;color:var(--cf-text-muted);", "Control {active_idx + 1} of {sample_controls.len()}" }
-                            span { class: "chip", style: "color:{status_color};background:color-mix(in oklab,{status_color} 14%,transparent);border:1px solid {status_color};", "{active_status}" }
-                            span { class: "chip", style: "color:{severity_color};background:color-mix(in oklab,{severity_color} 14%,transparent);", "{active_severity} severity" }
-                        }
-                        h2 { class: "mono", style: "margin:0;font-size:18px;font-weight:700;", "{active_id}" }
-                        p { style: "margin:6px 0 0;font-size:13px;color:var(--cf-text-secondary);line-height:1.5;", "{active_desc}" }
-                    }
-
-                    div { class: "sd-callout sd-callout-info",
-                        Icon { name: IconName::File, size: 13 }
-                        div { style: "font-size:12px;", strong { "Preview only. " } "Representative evidence artifacts are shown until real Compliance evidence APIs land." }
-                    }
-
-                    div {
-                        h3 { style: "font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);margin:0 0 8px;font-weight:600;", "Evidence · {evidence_count} items" }
-                        div { style: "display:flex;flex-direction:column;gap:10px;",
-                            EvidencePreviewItem { label: "NixOS config output".to_string(), reference: "systemd.services.sshd.serviceConfig".to_string(), source: "agent".to_string(), artifact: "services.openssh.settings.LogLevel = \"VERBOSE\";".to_string() }
-                            EvidencePreviewItem { label: "systemd unit state".to_string(), reference: "systemctl show sshd.service".to_string(), source: "systemd".to_string(), artifact: "NoNewPrivileges=yes\nProtectSystem=strict\nPrivateTmp=yes".to_string() }
-                            EvidencePreviewItem { label: "Audit result".to_string(), reference: "crystal-forge hardening scan".to_string(), source: "scanner".to_string(), artifact: "PASS {active_id} on {hostname}".to_string() }
+            // Evidence drawer — shown when evidence is loading, loaded, or errored
+            if evidence_open.read().is_some() {
+                match &*evidence_data.read() {
+                    Some(Ok(evidence_response)) => {
+                        rsx! {
+                            EvidenceDrawer {
+                                evidence: evidence_response.clone(),
+                                bundle_name: evidence_bundle_name.read().clone().unwrap_or_default(),
+                                on_close: move |_| {
+                                    evidence_open.set(None);
+                                    evidence_data.set(None);
+                                },
+                            }
                         }
                     }
-
-                    div { style: "padding:12px;background:var(--cf-subtle-bg);border-radius:8px;font-size:11px;color:var(--cf-text-secondary);",
-                        strong { style: "color:var(--cf-text-primary);", "Framework mapping" }
-                        span { style: "margin-left:8px;", "—" }
-                        span { class: "mono", style: "margin-left:8px;", "{bundle.framework} / {bundle.version}" }
+                    Some(Err(error)) => {
+                        rsx! {
+                            div { class: "fl-tray-backdrop", onclick: move |_| { evidence_open.set(None); evidence_data.set(None); } }
+                            aside {
+                                class: "fl-tray",
+                                style: "width:min(480px,96vw);padding:24px;",
+                                div { class: "sd-callout sd-callout-danger",
+                                    Icon { name: IconName::Warn, size: 13 }
+                                    div { style: "font-size:12px;", "Failed to load evidence: {error}" }
+                                }
+                                div { style: "margin-top:14px;text-align:right;",
+                                    button {
+                                        class: "btn btn-ghost focus-ring",
+                                        onclick: move |_| { evidence_open.set(None); evidence_data.set(None); },
+                                        "Close"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        rsx! {
+                            div { class: "fl-tray-backdrop" }
+                            aside {
+                                class: "fl-tray",
+                                style: "width:min(480px,96vw);padding:24px;display:flex;align-items:center;justify-content:center;",
+                                crate::components::loading::DashboardLoadingSpinner {
+                                    label: "Loading evidence…".to_string(),
+                                    size: 36,
+                                }
+                            }
+                        }
                     }
                 }
             }
-        }
-    }
-}
-
-#[component]
-fn EvidencePreviewItem(
-    label: String,
-    reference: String,
-    source: String,
-    artifact: String,
-) -> Element {
-    rsx! {
-        div { class: "ev-item",
-            div { class: "ev-item-head",
-                Icon { name: IconName::File, size: 14 }
-                div { style: "min-width:0;flex:1;",
-                    div { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "{label}" }
-                    div { class: "mono", style: "font-size:11px;color:var(--cf-text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;", "{reference}" }
-                }
-                div { style: "font-size:11px;color:var(--cf-text-muted);text-align:right;white-space:nowrap;flex-shrink:0;",
-                    div { "preview" }
-                    div { class: "mono", style: "font-size:10px;margin-top:2px;", "{source}" }
-                }
-            }
-            pre { class: "sd-diff", style: "margin-top:8px;", "{artifact}" }
         }
     }
 }

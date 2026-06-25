@@ -1036,6 +1036,24 @@ pub struct ComplianceBundleSystemsResponse {
     pub totals: ComplianceRollupTotals,
 }
 
+/// Response for GET /api/v1/systems/:system_id/compliance
+/// Returns bundles applicable to the system with their rollups.
+/// 
+/// This endpoint is all-or-nothing: infrastructure failures (database errors,
+/// missing policies) fail the entire request. Individual bundle computation
+/// uses deterministic logic with no fallible operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemComplianceBundlesResponse {
+    pub system_id: uuid::Uuid,
+    pub bundles: Vec<SystemComplianceBundle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemComplianceBundle {
+    pub bundle: ComplianceBundleSummary,
+    pub rollup: ComplianceSystemRollup,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComplianceRollupTotals {
     pub system_count: i64,
