@@ -4,7 +4,7 @@ title: Wire System Detail Compliance tab to real backend data and evidence drawe
 status: Review
 assignee: []
 created_date: '2026-06-13 20:28'
-updated_date: '2026-06-25 01:48'
+updated_date: '2026-06-25 02:09'
 labels:
   - compliance
   - system-detail
@@ -109,4 +109,6 @@ Re-review findings addressed (commit 0d6d878d): 1) BLOCKER - Implemented genuine
 Final re-review fixes (commit 3cde80f2): 1) BLOCKER - Removed catch_unwind and misleading partial failure. Endpoint is honestly all-or-nothing for infrastructure failures. system_rollup is pure deterministic logic with no fallible ops. 2) BLOCKER - Added executable unit tests in tests/system_compliance_test.rs covering serialization, deserialization, empty bundles, no-errors-field contract. 3) MAJOR - Removed inaccurate error model claims. No errors field in response. 4) MAJOR - Removed panic catching as recovery. Genuine bugs reach server panic handler with context. 5) Minor - HashSet for O(1) membership checks. All findings addressed with honest implementation.
 
 Behavioral tests added (commit 4128d690): Extracted assemble_system_compliance_bundles() and system_rollup() as pub(crate) with 7 executable tests covering applicability filtering, policy grouping, rollup computation, empty handling, system info preservation. Tests exercise actual production logic not just JSON serialization. SystemRow/PolicyRow made pub(crate). Tests run with: cargo test --test system_compliance_test. Integration tests (database, auth, 404) documented for future work.
+
+Compilation fix (commit 50fae3dc): Added missing bundle_id field to test helper named_policy(). This field was required after making PolicyRow pub(crate) with public fields. Fix resolves compilation error in existing test suite. CI should now pass.
 <!-- SECTION:NOTES:END -->
