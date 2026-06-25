@@ -30,6 +30,11 @@
           replication_mode = "none";
           rpc_bind_addr = "127.0.0.1:3901";
           rpc_public_addr = "127.0.0.1:3901";
+
+          # Test-only deterministic 32-byte secret.
+          # Garage requires exactly 64 hexadecimal characters.
+          rpc_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
           s3_api = {
             api_bind_addr = "0.0.0.0:${toString port}";
             s3_region = "garage";
@@ -52,7 +57,7 @@
         wantedBy = ["multi-user.target"];
 
         environment = {
-          PATH = lib.mkForce "${pkgs.garage}/bin:${pkgs.coreutils}/bin:${pkgs.curl}/bin:${pkgs.gnugrep}/bin:${pkgs.jq}/bin";
+          PATH = lib.mkForce "${pkgs.garage}/bin:${pkgs.coreutils}/bin:${pkgs.curl}/bin:${pkgs.gnugrep}/bin:${pkgs.gawk}/bin:${pkgs.jq}/bin";
         };
 
         script = ''
@@ -73,11 +78,15 @@
             sleep 2
           done
 
-          # Get node ID
-          NODE_ID=$(garage status 2>/dev/null | grep -oP '^[a-f0-9]{16}' | head -1 || true)
+          # Get node ID (capture full first field, not just first 16 chars)
+          NODE_ID="$(
+            garage status 2>/dev/null |
+              awk '/^[0-9a-f]+[[:space:]]/ { print $1; exit }'
+          )"
           
           if [ -z "$NODE_ID" ]; then
             echo "ERROR: Could not determine Garage node ID"
+            garage status || true
             exit 1
           fi
           

@@ -253,7 +253,15 @@ in pkgs.testers.runNixOSTest {
     atticCache.wait_for_unit("atticd.service")
     atticCache.wait_for_open_port(8080)
 
-    s3Cache.wait_for_unit("garage.service")
+    try:
+        s3Cache.wait_for_unit("garage.service")
+    except Exception:
+        print(s3Cache.succeed("systemctl status garage.service --no-pager -l || true"))
+        print(s3Cache.succeed("journalctl -u garage.service --no-pager -n 200 || true"))
+        print(s3Cache.succeed("cat /etc/garage.toml || true"))
+        print(s3Cache.succeed("cat /etc/garage/garage.toml || true"))
+        raise
+
     s3Cache.wait_for_open_port(3900)
 
     # Set up test environment variables
