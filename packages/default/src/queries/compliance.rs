@@ -911,6 +911,7 @@ mod tests {
     fn named_policy(policy_type: &str, name: &str, config: Value, enabled: bool) -> PolicyRow {
         PolicyRow {
             id: Uuid::nil(),
+            bundle_id: Uuid::nil(),
             name: name.to_string(),
             description: None,
             policy_type: policy_type.to_string(),
