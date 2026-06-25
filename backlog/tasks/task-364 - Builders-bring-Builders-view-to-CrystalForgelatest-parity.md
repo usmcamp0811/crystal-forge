@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-25 00:34'
+updated_date: '2026-06-25 01:09'
 labels:
   - design-parity
   - builders
@@ -250,4 +250,6 @@ CI fix: Garage package configuration (commit dbf2c9fe):
 - NixOS garage.nix module requires this option to be set
 - Without it: "The option `nodes.s3Cache.services.garage.package' was accessed but has no value defined"
 - Fixes web-ui check Nix evaluation error
+
+Garage rpc_secret fix applied (commit f6426b23): Added required 64-character hex rpc_secret to Garage configuration. Improved node ID extraction using awk. Added gawk to PATH. Added comprehensive diagnostic output on garage.service failure. Garage requires rpc_secret to be exactly 64 hexadecimal characters (32-byte secret). Added try/except wrapper around wait_for_unit with diagnostic commands. Commit pushed to origin. CI pipeline triggered via MR 283.
 <!-- SECTION:NOTES:END -->
