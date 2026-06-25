@@ -4,11 +4,11 @@ let
   # Keys embedded directly to avoid path resolution issues in Nix build context
   keyPath = pkgs.runCommand "agent.key" { } ''
     mkdir -p $out
-    echo "bXVzdC1iZS1hdC1sZWFzdC0zMi1ieXRlcy1sb25nLWZvci1lZDI1NTE5LWtleQ==" > $out/agent.key
+    echo "+/GIbrjuyb3Hf2es5w+vWSlDUhEsAIojiyyfgskC7QA=" > $out/agent.key
   '';
   pubPath = pkgs.runCommand "agent.pub" { } ''
     mkdir -p $out
-    echo "dGVzdC1wdWJsaWMta2V5LWZvci1lZDI1NTE5LXRlc3Rpbmc=" > $out/agent.pub
+    echo "DpOiy7W+DqZEg3KR0fvP5Q8k4FR4K1NB+qyYQLxhnFc=" > $out/agent.pub
   '';
   derivation-paths = lib.crystal-forge.derivation-paths pkgs;
   CF_TEST_DB_PORT = 5432;
