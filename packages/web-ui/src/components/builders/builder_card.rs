@@ -6,9 +6,16 @@ use crate::api::models::BuilderSummary;
 use crate::components::{Icon, IconName};
 
 fn builder_status_chip(builder: &BuilderSummary) -> Element {
-    let chip_class = builder.status.chip_class();
-    let dot_color = builder.status.dot_color();
-    let label = builder.status.label();
+    // If disabled, override status display
+    let (chip_class, dot_color, label) = if !builder.enabled {
+        ("chip-warning", "#fbbf24", "disabled")
+    } else {
+        (
+            builder.status.chip_class(),
+            builder.status.dot_color(),
+            builder.status.label(),
+        )
+    };
 
     rsx! {
         span {
@@ -23,17 +30,25 @@ fn builder_status_chip(builder: &BuilderSummary) -> Element {
 }
 
 #[component]
-pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element {
+pub fn BuilderCard(
+    builder: BuilderSummary,
+    can_manage: bool,
+    on_edit: EventHandler<()>,
+) -> Element {
     let slot_pct = if builder.max_concurrent_jobs > 0 {
         ((builder.active_jobs as f64 / builder.max_concurrent_jobs as f64) * 100.0).round() as i32
     } else {
         0
     };
 
-    let rail_color = match builder.status {
-        crate::api::models::BuilderStatus::Active => "#34d399",
-        crate::api::models::BuilderStatus::Inactive => "#fbbf24",
-        _ => "#f87171",
+    let rail_color = if !builder.enabled {
+        "#fbbf24"
+    } else {
+        match builder.status {
+            crate::api::models::BuilderStatus::Active => "#34d399",
+            crate::api::models::BuilderStatus::Inactive => "#fbbf24",
+            _ => "#f87171",
+        }
     };
 
     let heartbeat_text = if let Some(heartbeat) = builder.last_heartbeat_at {
@@ -68,13 +83,6 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
     } else {
         "All / wildcard".to_string()
     };
-
-    // TODO: Load actual load metric when backend provides it
-    let load: f64 = 0.0;
-
-    // TODO: Load actual completed/failed 24h when backend provides them
-    let completed24h = 0;
-    let failed24h = 0;
 
     rsx! {
         div {
@@ -159,28 +167,11 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                 div {
                     style: "display: flex; justify-content: space-between; font-size: 11px; color: var(--cf-text-muted); margin-bottom: 4px;",
                     span { "Load" }
-                    span {
-                        class: "mono",
-                        "{(load * 100.0).round() as i32}%"
-                    }
+                    span { class: "mono", "—" }
                 }
                 div {
                     style: "height: 5px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden;",
-                    {
-                        let load_bg = if load > 0.85 {
-                            "#f87171"
-                        } else if load > 0.6 {
-                            "#fbbf24"
-                        } else {
-                            "#60a5fa"
-                        };
-                        let load_pct = (load * 100.0).round() as i32;
-                        rsx! {
-                            div {
-                                style: "width: {load_pct}%; height: 100%; background: {load_bg};"
-                            }
-                        }
-                    }
+                    div { style: "width: 0%; height: 100%; background: #60a5fa;" }
                 }
             }
 
@@ -190,25 +181,21 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                 div {
                     class: "chips-row",
                     span {
-                        class: "chip chip-healthy",
-                        "{completed24h} built"
-                    }
-                    if failed24h > 0 {
-                        span {
-                            class: "chip chip-critical",
-                            "{failed24h} failed"
-                        }
+                        class: "chip chip-info",
+                        "24h metrics unavailable"
                     }
                 }
-                button {
-                    class: "btn btn-subtle focus-ring",
-                    style: "padding: 4px 10px; font-size: 12px;",
-                    onclick: move |e| {
-                        e.stop_propagation();
-                        on_edit.call(())
-                    },
-                    Icon { name: IconName::Gear, size: 12 }
-                    " Edit"
+                if can_manage {
+                    button {
+                        class: "btn btn-subtle focus-ring",
+                        style: "padding: 4px 10px; font-size: 12px;",
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            on_edit.call(())
+                        },
+                        Icon { name: IconName::Gear, size: 12 }
+                        " Edit"
+                    }
                 }
             }
         }

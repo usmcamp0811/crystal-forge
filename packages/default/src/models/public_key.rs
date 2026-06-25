@@ -1,10 +1,11 @@
 use anyhow::Result;
 use base64::Engine;
-use base64::engine::general_purpose;
+use base64::engine::general_purpose::{self, STANDARD_NO_PAD};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
 use serde::ser::StdError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
 use sqlx::{Database, Decode, Encode, FromRow, Type};
 use std::fmt;
 use std::option::Option;
@@ -64,6 +65,29 @@ impl PublicKey {
     /// Get the raw bytes
     pub fn to_bytes(&self) -> [u8; 32] {
         self.0.to_bytes()
+    }
+
+    /// Return the stable SHA256 fingerprint for display in API clients.
+    pub fn fingerprint(&self) -> String {
+        let digest = Sha256::digest(self.to_bytes());
+        format!("SHA256:{}", STANDARD_NO_PAD.encode(digest))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PublicKey;
+
+    #[test]
+    fn fingerprint_uses_stable_sha256_display_format() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32]);
+        let public_key = PublicKey::from_verifying_key(signing_key.verifying_key());
+
+        let fingerprint = public_key.fingerprint();
+
+        assert!(fingerprint.starts_with("SHA256:"));
+        assert!(!fingerprint.contains('='));
+        assert_eq!(fingerprint, public_key.fingerprint());
     }
 }
 

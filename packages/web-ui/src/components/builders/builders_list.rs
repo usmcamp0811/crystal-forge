@@ -5,10 +5,14 @@ use dioxus::prelude::*;
 use crate::api;
 use crate::components::builders::{AddBuilderModal, BuilderCard, EditBuilderModal};
 use crate::components::loading::LoadingSpinner;
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::theme;
 
 #[component]
 pub fn BuildersList(show_onboarding_hint: bool) -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let can_manage_builders = auth::is_admin(&app_state.read().auth);
     let mut show_add_modal = use_signal(|| false);
     let mut dismiss_add_target_callout = use_signal(|| false);
     let mut edit_builder_id = use_signal(|| None::<uuid::Uuid>);
@@ -55,19 +59,21 @@ pub fn BuildersList(show_onboarding_hint: bool) -> Element {
                 }
                 div {
                     class: "relative",
-                    button {
-                        class: if show_onboarding_hint && !show_add_modal() && !dismiss_add_target_callout() {
-                            "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
-                        } else {
-                            "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}"
-                        },
-                        onclick: move |_| {
-                            dismiss_add_target_callout.set(true);
-                            show_add_modal.set(true)
-                        },
-                        "➕ Add Builder"
+                    if can_manage_builders {
+                        button {
+                            class: if show_onboarding_hint && !show_add_modal() && !dismiss_add_target_callout() {
+                                "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
+                            } else {
+                                "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}"
+                            },
+                            onclick: move |_| {
+                                dismiss_add_target_callout.set(true);
+                                show_add_modal.set(true)
+                            },
+                            "➕ Add Builder"
+                        }
                     }
-                    if show_onboarding_hint && !show_add_modal() && !dismiss_add_target_callout() {
+                    if can_manage_builders && show_onboarding_hint && !show_add_modal() && !dismiss_add_target_callout() {
                         div {
                             "data-testid": "setup-coach-builders-target-callout",
                             style: "position:absolute; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
@@ -109,6 +115,7 @@ pub fn BuildersList(show_onboarding_hint: bool) -> Element {
                                             BuilderCard {
                                                 key: "{builder.id}",
                                                 builder: builder.clone(),
+                                                can_manage: can_manage_builders,
                                                 on_edit: move |_| on_edit_builder(builder_id),
                                             }
                                         }
@@ -154,7 +161,7 @@ pub fn BuildersList(show_onboarding_hint: bool) -> Element {
         }
 
         // Modals
-        if show_add_modal() {
+        if show_add_modal() && can_manage_builders {
             AddBuilderModal {
                 on_close: move |_| show_add_modal.set(false),
                 on_success: move |_| on_builder_added(),
@@ -162,11 +169,13 @@ pub fn BuildersList(show_onboarding_hint: bool) -> Element {
             }
         }
 
-        if let Some(id) = edit_builder_id() {
-            EditBuilderModal {
-                builder_id: id,
-                on_close: move |_| edit_builder_id.set(None),
-                on_success: move |_| on_builder_updated(),
+        if can_manage_builders {
+            if let Some(id) = edit_builder_id() {
+                EditBuilderModal {
+                    builder_id: id,
+                    on_close: move |_| edit_builder_id.set(None),
+                    on_success: move |_| on_builder_updated(),
+                }
             }
         }
     }

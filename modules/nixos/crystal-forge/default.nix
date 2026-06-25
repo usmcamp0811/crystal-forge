@@ -1686,6 +1686,11 @@ in {
       enable = true;
       settings = {
         "plugin.grafana-postgresql-datasource" = {enabled = true;};
+        security = {
+          # Use old default for test/dev environments
+          # Production deployments should override this with a secure value
+          secret_key = lib.mkDefault "SW2YcwTIb9zpOOhoPsMm";
+        };
       };
 
       provision = lib.mkIf cfg.dashboards.grafana.provision {
