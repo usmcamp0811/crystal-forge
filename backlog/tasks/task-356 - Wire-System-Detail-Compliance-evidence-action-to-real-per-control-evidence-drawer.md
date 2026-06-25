@@ -1,10 +1,10 @@
 ---
 id: TASK-356
 title: Wire System Detail Compliance tab to real backend data and evidence drawer
-status: Review
+status: Done
 assignee: []
 created_date: '2026-06-13 20:28'
-updated_date: '2026-06-25 22:29'
+updated_date: '2026-06-25 23:56'
 labels:
   - compliance
   - system-detail
@@ -19,6 +19,7 @@ references:
   - packages/web-ui/src/views/system_detail.rs
   - packages/web-ui/src/views/compliance.rs
   - packages/web-ui/src/components/compliance/mod.rs
+  - TASK-369
 documentation:
   - >-
     /home/mcamp/code/crystal-forge/CrystalForgelatest/components/SystemDetail.jsx
@@ -77,15 +78,23 @@ Replace every mock/placeholder in `ComplianceTab` and `ComplianceEvidenceDrawer`
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-CI repair pushed to MR !286 in commit `ac968a64` (`fix(ci): repair compliance tests and VM keys`). Fixes two concrete CI blockers from pipeline #2627895427: 1) moved `system_compliance_test.rs` integration tests into the `queries::compliance` unit test module so crate-internal helpers/types are not imported across crate boundaries; 2) replaced invalid fixed VM test public/private key strings with a valid 32-byte Ed25519 keypair in `checks/web-ui` and `checks/integration`.
-
-Verification completed locally:
-- `nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml system_` ✅ (`48 passed; 0 failed; 12 ignored; 514 filtered out`)
-- `nix develop -c rustfmt --edition 2024 --check packages/default/src/queries/compliance.rs` ✅
-- `git diff --check` ✅
-- `nix build .#checks.x86_64-linux.web-ui --no-link` ✅ (`exit_status=0`)
-- `nix build .#checks.x86_64-linux.integration --no-link` ✅ (`exit_status=0`)
-- `nix build .#checks.x86_64-linux.oidc-auth --no-link` ✅ (`exit_status=0`)
-
-New GitLab pipeline for MR !286 is running: #2630378511.
+MR !286 verified merged via `glab mr view 286`. Post-merge cleanup completed: removed `/home/mcamp/code/crystal-forge/TASK-356-wire-system-detail-compliance` with `git worktree remove`, ran `git worktree prune`, and created follow-up TASK-369 for the deferred evidence drawer `View bundle` navigation item.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+MR !286 was merged. TASK-356 replaced the System Detail Compliance tab mock data path with real compliance API-backed data and reused the shared evidence drawer. CI repair was completed in commit ac968a64 by moving compliance assembly tests into the crate unit-test module and replacing invalid VM test keys with a valid 32-byte Ed25519 keypair.
+
+Verification completed before merge:
+- `nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml system_`
+- `nix develop -c rustfmt --edition 2024 --check packages/default/src/queries/compliance.rs`
+- `git diff --check`
+- `nix build .#checks.x86_64-linux.web-ui --no-link`
+- `nix build .#checks.x86_64-linux.integration --no-link`
+- `nix build .#checks.x86_64-linux.oidc-auth --no-link`
+
+Post-merge cleanup completed: task worktree `~/code/crystal-forge/TASK-356-wire-system-detail-compliance` was removed and `git worktree prune` was run.
+
+Follow-up created: TASK-369 tracks the evidence drawer `View bundle` navigation affordance that MR !286 explicitly left as future improvement.
+<!-- SECTION:FINAL_SUMMARY:END -->
