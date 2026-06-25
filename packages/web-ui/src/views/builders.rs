@@ -6,6 +6,8 @@ use crate::api;
 use crate::components::builders::{AddBuilderModal, EditBuilderModal};
 use crate::components::loading::LoadingSpinner;
 use crate::components::{Icon, IconName};
+use crate::state::app_state::AppState;
+use crate::state::auth;
 
 fn came_from_setup() -> bool {
     if let Some(storage) = web_sys::window()
@@ -30,6 +32,8 @@ enum ViewMode {
 /// Builders management page matching BuildersView.jsx structure.
 #[component]
 pub fn BuildersView() -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let can_manage_builders = auth::is_admin(&app_state.read().auth);
     let mut query = use_signal(String::new);
     let mut status_filter = use_signal(|| "all".to_string());
     let mut arch_filter = use_signal(|| "all".to_string());
@@ -86,16 +90,17 @@ pub fn BuildersView() -> Element {
                                 Some(Ok(builders_list)) => {
                                     let total = builders_list.len();
                                     let running = builders_list.iter()
-                                        .filter(|b| b.status == crate::api::models::BuilderStatus::Active)
+                                        .filter(|b| b.enabled && b.status == crate::api::models::BuilderStatus::Active)
                                         .count();
                                     let slots_used: i32 = builders_list.iter()
+                                        .filter(|b| b.enabled)
                                         .map(|b| b.active_jobs)
                                         .sum();
                                     let slots_total: i32 = builders_list.iter()
+                                        .filter(|b| b.enabled)
                                         .map(|b| b.max_concurrent_jobs)
                                         .sum();
-                                    // TODO: Add completed/failed 24h metrics when backend provides them
-                                    format!("{} of {} running · {}/{} slots used · builds in last 24h",
+                                    format!("{} of {} running · {}/{} slots used · 24h build metrics unavailable",
                                         running, total, slots_used, slots_total)
                                 },
                                 _ => "Loading...".to_string()
@@ -103,11 +108,14 @@ pub fn BuildersView() -> Element {
                         }
                     }
                 }
-                button {
-                    class: "btn btn-primary focus-ring",
-                    onclick: move |_| show_add_modal.set(true),
-                    Icon { name: IconName::Plus, size: 14 }
-                    " Add builder"
+                if can_manage_builders {
+                    button {
+                        class: "btn btn-primary focus-ring",
+                        "data-coach-target": "builder",
+                        onclick: move |_| show_add_modal.set(true),
+                        Icon { name: IconName::Plus, size: 14 }
+                        " Register builder"
+                    }
                 }
             }
 
@@ -118,19 +126,15 @@ pub fn BuildersView() -> Element {
                     Some(Ok(builders_list)) => {
                         let total = builders_list.len();
                         let running = builders_list.iter()
-                            .filter(|b| b.status == crate::api::models::BuilderStatus::Active)
+                            .filter(|b| b.enabled && b.status == crate::api::models::BuilderStatus::Active)
                             .count();
-                        let slots_used: i32 = builders_list.iter().map(|b| b.active_jobs).sum();
-                        let slots_total: i32 = builders_list.iter().map(|b| b.max_concurrent_jobs).sum();
+                        let slots_used: i32 = builders_list.iter().filter(|b| b.enabled).map(|b| b.active_jobs).sum();
+                        let slots_total: i32 = builders_list.iter().filter(|b| b.enabled).map(|b| b.max_concurrent_jobs).sum();
                         let slot_pct = if slots_total > 0 {
                             ((slots_used as f64 / slots_total as f64) * 100.0).round() as i32
                         } else {
                             0
                         };
-                        // TODO: Add completed/failed 24h from backend
-                        let completed = 0;
-                        let failed = 0;
-
                         rsx! {
                             div {
                                 class: "stat-strip",
@@ -191,28 +195,20 @@ pub fn BuildersView() -> Element {
                                     div {
                                         class: "stat-value",
                                         style: "color: #34d399;",
-                                        "{completed}"
+                                        "—"
                                     }
                                 }
                                 div {
                                     class: "stat",
                                     span {
                                         class: "stat-accent",
-                                        style: if failed > 0 {
-                                            "--stat-color: #f87171;"
-                                        } else {
-                                            "--stat-color: #34d399;"
-                                        }
+                                        style: "--stat-color: #34d399;"
                                     }
                                     div { class: "stat-label", "Failed 24h" }
                                     div {
                                         class: "stat-value",
-                                        style: if failed > 0 {
-                                            "color: #f87171;"
-                                        } else {
-                                            "color: #34d399;"
-                                        },
-                                        "{failed}"
+                                        style: "color: #34d399;",
+                                        "—"
                                     }
                                 }
                             }
@@ -238,10 +234,13 @@ pub fn BuildersView() -> Element {
                         // Apply filters
                         let filtered: Vec<_> = builders_list.iter()
                             .filter(|b| {
-                                // Status filter
-                                let status_match = status_filter() == "all" || {
-                                    let status_label = b.status.label();
-                                    status_filter() == status_label
+                                // Status filter - explicitly define each filter based on enabled and status
+                                let status_match = match status_filter().as_str() {
+                                    "all" => true,
+                                    "running" => b.enabled && b.status == crate::api::models::BuilderStatus::Active,
+                                    "paused" => !b.enabled || b.status == crate::api::models::BuilderStatus::Inactive,
+                                    "offline" => b.enabled && b.status == crate::api::models::BuilderStatus::Offline,
+                                    _ => false,
                                 };
 
                                 // Arch filter
@@ -304,11 +303,6 @@ pub fn BuildersView() -> Element {
                                         onclick: move |_| status_filter.set("offline".to_string()),
                                         "offline"
                                     }
-                                    button {
-                                        class: if status_filter() == "draining" { "active" } else { "" },
-                                        onclick: move |_| status_filter.set("draining".to_string()),
-                                        "draining"
-                                    }
                                 }
 
                                 // Architecture dropdown
@@ -362,6 +356,7 @@ pub fn BuildersView() -> Element {
                                                 BuilderCard {
                                                     key: "{builder.id}",
                                                     builder: builder.clone(),
+                                                    can_manage: can_manage_builders,
                                                     on_edit: move |_| on_edit_builder(builder.id)
                                                 }
                                             }
@@ -397,6 +392,7 @@ pub fn BuildersView() -> Element {
                                                         BuilderRow {
                                                             key: "{builder.id}",
                                                             builder: builder.clone(),
+                                                            can_manage: can_manage_builders,
                                                             on_edit: move |_| on_edit_builder(builder.id)
                                                         }
                                                     }
@@ -422,7 +418,7 @@ pub fn BuildersView() -> Element {
         }
 
         // Modals
-        if show_add_modal() {
+        if show_add_modal() && can_manage_builders {
             AddBuilderModal {
                 on_close: move |_| show_add_modal.set(false),
                 on_success: move |_| on_builder_added(),
@@ -430,11 +426,13 @@ pub fn BuildersView() -> Element {
             }
         }
 
-        if let Some(id) = edit_builder_id() {
-            EditBuilderModal {
-                builder_id: id,
-                on_close: move |_| edit_builder_id.set(None),
-                on_success: move |_| on_builder_updated()
+        if can_manage_builders {
+            if let Some(id) = edit_builder_id() {
+                EditBuilderModal {
+                    builder_id: id,
+                    on_close: move |_| edit_builder_id.set(None),
+                    on_success: move |_| on_builder_updated()
+                }
             }
         }
     }

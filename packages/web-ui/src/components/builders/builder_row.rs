@@ -6,9 +6,16 @@ use crate::api::models::BuilderSummary;
 use crate::components::{Icon, IconName};
 
 fn builder_status_chip(builder: &BuilderSummary) -> Element {
-    let chip_class = builder.status.chip_class();
-    let dot_color = builder.status.dot_color();
-    let label = builder.status.label();
+    // If disabled, override status display
+    let (chip_class, dot_color, label) = if !builder.enabled {
+        ("chip-warning", "#fbbf24", "disabled")
+    } else {
+        (
+            builder.status.chip_class(),
+            builder.status.dot_color(),
+            builder.status.label(),
+        )
+    };
 
     rsx! {
         span {
@@ -23,7 +30,7 @@ fn builder_status_chip(builder: &BuilderSummary) -> Element {
 }
 
 #[component]
-pub fn BuilderRow(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element {
+pub fn BuilderRow(builder: BuilderSummary, can_manage: bool, on_edit: EventHandler<()>) -> Element {
     let slot_pct = if builder.max_concurrent_jobs > 0 {
         ((builder.active_jobs as f64 / builder.max_concurrent_jobs as f64) * 100.0).round() as i32
     } else {
@@ -63,14 +70,14 @@ pub fn BuilderRow(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element
         "All / wildcard".to_string()
     };
 
-    // TODO: Load actual completed/failed 24h when backend provides them
-    let completed24h = 0;
-    let failed24h = 0;
-
     rsx! {
         tr {
-            style: "cursor: pointer;",
-            onclick: move |_| on_edit.call(()),
+            style: if can_manage { "cursor: pointer;" } else { "cursor: default;" },
+            onclick: move |_| {
+                if can_manage {
+                    on_edit.call(())
+                }
+            },
 
             // Builder name + host
             td {
@@ -140,13 +147,7 @@ pub fn BuilderRow(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element
                     span {
                         class: "mono",
                         style: "font-size: 12px;",
-                        "{completed24h}"
-                    }
-                    if failed24h > 0 {
-                        span {
-                            style: "font-size: 11px; color: #f87171;",
-                            "{failed24h} failed"
-                        }
+                        "—"
                     }
                 }
             }
@@ -161,14 +162,16 @@ pub fn BuilderRow(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element
             td {
                 div {
                     class: "row-actions",
-                    button {
-                        class: "btn-icon focus-ring",
-                        title: "Edit",
-                        onclick: move |e| {
-                            e.stop_propagation();
-                            on_edit.call(())
-                        },
-                        Icon { name: IconName::Gear, size: 14 }
+                    if can_manage {
+                        button {
+                            class: "btn-icon focus-ring",
+                            title: "Edit",
+                            onclick: move |e| {
+                                e.stop_propagation();
+                                on_edit.call(())
+                            },
+                            Icon { name: IconName::Gear, size: 14 }
+                        }
                     }
                 }
             }

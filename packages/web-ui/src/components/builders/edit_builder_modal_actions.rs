@@ -57,11 +57,13 @@ pub async fn submit_builder_update(
         .map_err(|e| format!("Failed to update environments: {e}"))
 }
 
-pub async fn apply_builder_public_key(builder_id: &Uuid, public_key: String) -> Result<(), String> {
+pub async fn apply_builder_public_key(
+    builder_id: &Uuid,
+    public_key: String,
+) -> Result<crate::api::models::BuilderDetail, String> {
     let request = UpdateBuilderPublicKeyRequest { public_key };
     api::client::update_builder_public_key(builder_id, &request)
         .await
-        .map(|_| ())
         .map_err(|e| format!("Failed to update builder key: {e}"))
 }
 

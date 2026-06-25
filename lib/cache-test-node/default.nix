@@ -7,133 +7,107 @@
   makeS3CacheNode = {
     pkgs,
     bucketName ? "nix-cache",
-    accessKey ? "minioadmin",
-    secretKey ? "minioadmin",
-    port ? 9000,
-    consolePort ? 9001,
+    accessKey ? "GK1234567890123456789",
+    secretKey ? "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    port ? 3900,
     enableFirewall ? false,
     extraConfig ? {},
     ...
   }:
     {
       virtualisation.writableStore = true;
-      virtualisation.memorySize = 1024;
+      virtualisation.memorySize = 2048;
 
       networking.useDHCP = true;
       networking.firewall.enable = enableFirewall;
+      networking.firewall.allowedTCPPorts = lib.mkIf enableFirewall [port];
 
-      # BUGFIX: you only want to open ports when the firewall is enabled
-      networking.firewall.allowedTCPPorts = lib.mkIf enableFirewall [port consolePort];
-
-      services.minio = {
+      # Garage S3-compatible storage
+      services.garage = {
         enable = true;
-        listenAddress = "0.0.0.0:${toString port}";
-        consoleAddress = "0.0.0.0:${toString consolePort}";
-        rootCredentialsFile = pkgs.writeText "minio-credentials" ''
-          MINIO_ROOT_USER=${accessKey}
-          MINIO_ROOT_PASSWORD=${secretKey}
-        '';
-        # Optional but nice to be explicit
-        dataDir = ["/var/lib/minio"];
+        package = pkgs.garage;
+        settings = {
+          replication_mode = "none";
+          rpc_bind_addr = "127.0.0.1:3901";
+          rpc_public_addr = "127.0.0.1:3901";
+
+          # Test-only deterministic 32-byte secret.
+          # Garage requires exactly 64 hexadecimal characters.
+          rpc_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+          s3_api = {
+            api_bind_addr = "0.0.0.0:${toString port}";
+            s3_region = "garage";
+          };
+          s3_web = {
+            bind_addr = "127.0.0.1:3902";
+            root_domain = ".s3.garage.localhost";
+          };
+          admin = {
+            api_bind_addr = "127.0.0.1:3903";
+          };
+        };
       };
 
-      # Create bucket and set policy
-      systemd.services.minio-setup = {
-        # Ensure network is actually up and MinIO is running before we poke it
-        after = ["network-online.target" "minio.service"];
-        wants = ["network-online.target" "minio.service"];
-        requires = ["minio.service"];
+      # Setup bucket and credentials
+      systemd.services.garage-setup = {
+        after = ["network-online.target" "garage.service"];
+        wants = ["network-online.target" "garage.service"];
+        requires = ["garage.service"];
         wantedBy = ["multi-user.target"];
 
         environment = {
-          # BUGFIX: you call `ip` but didn’t have iproute2 in PATH
-          PATH =
-            lib.mkForce
-            "${pkgs.minio-client}/bin:${pkgs.iproute2}/bin:${pkgs.coreutils}/bin:${pkgs.curl}/bin:${pkgs.gnugrep}/bin";
-          # keep mc state ephemeral
-          HOME = "/tmp";
+          PATH = lib.mkForce "${pkgs.garage}/bin:${pkgs.coreutils}/bin:${pkgs.curl}/bin:${pkgs.gnugrep}/bin:${pkgs.gawk}/bin:${pkgs.jq}/bin";
         };
 
         script = ''
           set -euo pipefail
-          echo "Starting MinIO setup for bucket: ${bucketName}"
+          echo "Starting Garage setup for bucket: ${bucketName}"
 
-          # Prefer localhost (avoids interface name assumptions like eth0/ens3)
-          MINIO_URL="http://127.0.0.1:${toString port}"
-          echo "Using MinIO URL: $MINIO_URL"
-
-          # Wait for MinIO readiness
+          # Wait for Garage to be ready
           for i in {1..60}; do
-            if curl -fsS "$MINIO_URL/minio/health/live" >/dev/null; then
-              echo "MinIO is ready after $i attempts"
+            if curl -fsS http://127.0.0.1:3903/health >/dev/null 2>&1; then
+              echo "Garage admin API is ready after $i attempts"
               break
             fi
             if [ "$i" -eq 60 ]; then
-              echo "ERROR: MinIO failed to start after 60 attempts"
+              echo "ERROR: Garage failed to start after 60 attempts"
               exit 1
             fi
-            echo "Waiting for MinIO... attempt $i/60"
+            echo "Waiting for Garage... attempt $i/60"
             sleep 2
           done
 
-          echo "Configuring MinIO client..."
-          mc alias set local "$MINIO_URL" "${accessKey}" "${secretKey}"
-
-          echo "Creating bucket: ${bucketName}"
-          if mc mb "local/${bucketName}" 2>/dev/null; then
-            echo "Created bucket"
-          elif mc ls local/ | grep -q "^${bucketName}/\?$"; then
-            echo "Bucket already exists"
-          else
-            echo "ERROR: Failed to create or find bucket"
+          # Get node ID (capture full first field, not just first 16 chars)
+          NODE_ID="$(
+            garage status 2>/dev/null |
+              awk '/^[0-9a-f]+[[:space:]]/ { print $1; exit }'
+          )"
+          
+          if [ -z "$NODE_ID" ]; then
+            echo "ERROR: Could not determine Garage node ID"
+            garage status || true
             exit 1
           fi
+          
+          echo "Garage node ID: $NODE_ID"
 
-          echo "Setting bucket policy for public read (anon download)..."
-          # For Nix substituters without AWS creds; remove if you’ll auth from Nix
-          mc anonymous set download "local/${bucketName}" || \
-            echo "WARNING: failed to set anonymous download policy"
+          # Configure node
+          garage layout assign "$NODE_ID" -c 1G -z test-zone
+          garage layout apply --version 1 2>/dev/null || echo "Layout already applied"
 
-          echo "Verifying access via mc..."
-          mc ls "local/${bucketName}" >/dev/null
+          # Create bucket
+          garage bucket info "${bucketName}" >/dev/null 2>&1 || \
+            garage bucket create "${bucketName}"
 
-          echo "Testing S3 path-style via curl (anonymous)…"
-          # This will only succeed if anonymous was enabled above
-          if curl -fsS "$MINIO_URL/${bucketName}/" >/dev/null; then
-            echo "S3 API test passed"
-          else
-            echo "WARNING: S3 API test failed (expected if bucket is not public)"
-          fi
+          # Create API key
+          garage key info test-key >/dev/null 2>&1 || \
+            garage key create test-key
 
-          echo "MinIO setup completed successfully"
-        '';
+          # Allow key to access bucket
+          garage bucket allow --read --write "${bucketName}" --key test-key
 
-        serviceConfig = {
-          Type = "oneshot";
-          RemainAfterExit = true;
-          User = "root";
-          Group = "root";
-          ExitType = "main";
-        };
-      };
-
-      systemd.services.minio-verify = {
-        after = ["minio-setup.service"];
-        wants = ["minio-setup.service"];
-        wantedBy = ["multi-user.target"];
-
-        environment = {
-          PATH = lib.mkForce "${pkgs.minio-client}/bin:${pkgs.coreutils}/bin:${pkgs.curl}/bin";
-          HOME = "/tmp"; # keep mc state consistent with setup
-        };
-
-        script = ''
-          set -euo pipefail
-          echo "Verifying MinIO setup..."
-          MINIO_URL="http://127.0.0.1:${toString port}"
-          mc alias set verify "$MINIO_URL" "${accessKey}" "${secretKey}"
-          mc ls "verify/${bucketName}" >/dev/null
-          echo "Bucket verification successful"
+          echo "Garage setup completed successfully"
         '';
 
         serviceConfig = {

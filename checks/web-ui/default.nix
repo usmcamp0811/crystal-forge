@@ -62,12 +62,11 @@ in pkgs.testers.runNixOSTest {
       jwtSecretB64 = "dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==";
     };
 
-    # S3-compatible cache (MinIO)
+    # S3-compatible cache (Garage)
     s3Cache = lib.crystal-forge.makeS3CacheNode {
       inherit lib pkgs;
-      port = 9000;
-      region = "us-east-1";
-      bucket = "nix-cache";
+      port = 3900;
+      bucketName = "nix-cache";
     };
 
     # Main Crystal Forge server with all services enabled
@@ -254,8 +253,16 @@ in pkgs.testers.runNixOSTest {
     atticCache.wait_for_unit("atticd.service")
     atticCache.wait_for_open_port(8080)
 
-    s3Cache.wait_for_unit("minio.service")
-    s3Cache.wait_for_open_port(9000)
+    try:
+        s3Cache.wait_for_unit("garage.service")
+    except Exception:
+        print(s3Cache.succeed("systemctl status garage.service --no-pager -l || true"))
+        print(s3Cache.succeed("journalctl -u garage.service --no-pager -n 200 || true"))
+        print(s3Cache.succeed("cat /etc/garage.toml || true"))
+        print(s3Cache.succeed("cat /etc/garage/garage.toml || true"))
+        raise
+
+    s3Cache.wait_for_open_port(3900)
 
     # Set up test environment variables
     main_head = "${

@@ -2053,6 +2053,8 @@ pub struct BuilderDetail {
     pub host: Option<String>,
     pub arch: String,
     pub public_key: String,
+    #[serde(default)]
+    pub public_key_fingerprint: String,
     pub status: BuilderStatus,
     pub max_cpu_cores: Option<i32>,
     pub max_memory_mb: Option<i32>,

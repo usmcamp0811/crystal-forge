@@ -1,10 +1,9 @@
-//! Add builder modal component with keypair generation.
+//! Add builder modal component - matches BuildersView.jsx reference design.
 
 use dioxus::prelude::*;
 use uuid::Uuid;
 
 use crate::api::{self, models::CreateBuilderRequest};
-use crate::components::builders::generate_ed25519_keypair;
 use crate::components::{Icon, IconName};
 use crate::theme;
 
@@ -18,32 +17,16 @@ pub fn AddBuilderModal(
     let mut host = use_signal(|| String::new());
     let mut arch = use_signal(|| String::from("x86_64-linux"));
     let mut public_key = use_signal(|| String::new());
-    let mut private_key = use_signal(|| String::new());
     let mut max_cpu_cores = use_signal(|| String::new());
-    let mut max_memory_mb = use_signal(|| String::new());
+    let mut max_memory_gib = use_signal(|| String::new());
     let mut max_concurrent_jobs = use_signal(|| String::from("1"));
     let mut selected_environments = use_signal(|| Vec::<Uuid>::new());
+    let mut enabled = use_signal(|| true);
 
-    let mut show_private_key = use_signal(|| false);
     let mut is_submitting = use_signal(|| false);
     let mut error_message = use_signal(|| None::<String>);
-    let mut show_name_callout = use_signal(|| show_onboarding_callouts);
-    let mut show_public_key_callout = use_signal(|| show_onboarding_callouts);
-    let mut show_resource_callout = use_signal(|| show_onboarding_callouts);
-    let mut show_environment_callout = use_signal(|| show_onboarding_callouts);
 
-    // Fetch environments for multi-select
     let environments = use_resource(|| async move { api::client::fetch_environments().await });
-
-    let generate_keypair = move |_| match generate_ed25519_keypair() {
-        Ok((priv_b64, pub_b64)) => {
-            private_key.set(priv_b64);
-            public_key.set(pub_b64);
-        }
-        Err(e) => {
-            error_message.set(Some(format!("Failed to generate keypair: {}", e)));
-        }
-    };
 
     let mut toggle_environment = move |env_id: Uuid| {
         let mut envs = selected_environments();
@@ -73,17 +56,17 @@ pub fn AddBuilderModal(
                 .parse::<i32>()
                 .ok()
                 .filter(|&n| n > 0),
-            max_memory_mb: max_memory_mb()
+            max_memory_mb: max_memory_gib()
                 .trim()
-                .parse::<i32>()
+                .parse::<f64>()
                 .ok()
-                .filter(|&n| n > 0),
+                .map(|gib| ((gib * 1024.0).round() as i32).max(1024)),
             max_concurrent_jobs: max_concurrent_jobs()
                 .trim()
                 .parse::<i32>()
                 .ok()
                 .filter(|&n| n > 0),
-            enabled: true, // Default to enabled
+            enabled: enabled(),
             environment_ids: selected_environments(),
         };
 
@@ -115,101 +98,175 @@ pub fn AddBuilderModal(
                 // Header
                 div {
                     class: "modal-head",
-                    style: "display:flex; align-items:center; justify-content:space-between;",
-                    div {
-                        h2 {
+                    h2 {
+                        span {
+                            style: "margin-right:6px; vertical-align:text-bottom;",
                             Icon { name: IconName::Plus, size: 14 }
-                            " Add builder"
                         }
-                        p { "Register a new Nix build worker." }
+                        "Register builder"
                     }
-                    button {
-                        class: "btn btn-ghost focus-ring",
-                        onclick: move |_| on_close.call(()),
-                        disabled: is_submitting(),
-                        "✕"
-                    }
+                    p { "Recognize a build worker by its public key." }
                 }
 
                 // Error message
                 if let Some(err) = error_message() {
                     div {
-                        class: "relative overflow-visible",
                         class: "mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded text-red-400 text-sm",
                         "{err}"
                     }
                 }
 
-                // Form
+                // Form body
                 div {
                     class: "modal-body",
                     style: "overflow-y:auto;",
 
-                    div {
-                        class: "space-y-4",
-
-                    // Name
-                    div {
-                        class: "field relative overflow-visible",
-                        label {
-                            class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                            "Builder Name"
-                            span { class: "text-red-400", " *" }
-                        }
-                        input {
-                            class: "input focus-ring mono",
-                            r#type: "text",
-                            placeholder: "e.g., builder-01",
-                            value: "{name}",
-                            onfocus: move |_| show_name_callout.set(false),
-                            oninput: move |e| {
-                                show_name_callout.set(false);
-                                name.set(e.value())
-                            },
-                            disabled: is_submitting(),
-                        }
-                        if show_name_callout() && name().trim().is_empty() {
+                    // Info callout
+                    if !show_onboarding_callouts {
+                        div {
+                            class: "sd-callout sd-callout-info",
+                            style: "font-size:11.5px; display:block; margin-bottom:16px;",
                             div {
-                                "data-testid": "setup-coach-builder-field-name",
-                                style: "position:absolute; left:0; top:calc(100% + 8px); width:min(360px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                                div {
-                                    style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                style: "display:flex; align-items:center; gap:6px; margin-bottom:6px; font-weight:600; color:var(--cf-text-secondary);",
+                                Icon { name: IconName::Cpu, size: 12 }
+                                "How registration works"
+                            }
+                            ol {
+                                style: "margin:0; padding-left:18px; line-height:1.7; color:var(--cf-text-secondary);",
+                                li {
+                                    "Deploy the host with "
+                                    span { class: "mono", "services.crystal-forge.build.api_mode = true" }
+                                    ". On first start it generates its own keypair and runs — it just won't be recognized yet."
                                 }
-                                p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                                p { style: "margin:2px 0 0 0;", "Name this builder so operators can identify where builds run (for example: build-eu-west-1)." }
+                                li {
+                                    "Grab the builder's "
+                                    strong { "public" }
+                                    " key from that host:"
+                                    br {}
+                                    span { class: "mono", style: "font-size:10.5px;", "cat /var/lib/crystal-forge/builder-api.key.pub" }
+                                    " (also printed in "
+                                    span { class: "mono", style: "font-size:10.5px;", "journalctl -u crystal-forge-builder" }
+                                    ")."
+                                }
+                                li { "Paste it below to register. The builder is recognized on its next check-in — no redeploy needed." }
                             }
                         }
                     }
 
-                    // Host and Architecture
+                    // Row 1: Name + Environments (2-col grid)
                     div {
-                        class: "grid grid-cols-2 gap-4",
+                        style: "display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:16px;",
+
                         div {
                             class: "field",
-                            label {
-                                class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                "Host (SSH endpoint)"
-                            }
+                            label { "Name" }
                             input {
                                 class: "input focus-ring mono",
-                                r#type: "text",
-                                placeholder: "e.g., builder-01.lab.internal",
-                                value: "{host}",
-                                oninput: move |e| host.set(e.value()),
+                                value: "{name}",
+                                oninput: move |e| name.set(e.value()),
+                                placeholder: "e.g. hydra-03",
                                 disabled: is_submitting(),
                             }
-                            p {
-                                class: "text-xs {theme::text::SECONDARY} mt-1",
-                                "Optional SSH endpoint for the builder"
-                            }
                         }
+
                         div {
                             class: "field",
-                            label {
-                                class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                "Architecture"
-                                span { class: "text-red-400", " *" }
+                            label { "Environments served" }
+                            {
+                                let env_data = environments.read();
+                                match &*env_data {
+                                    Some(Ok(env_list)) => rsx! {
+                                        div {
+                                            style: "display:flex; flex-wrap:wrap; gap:6px;",
+                                            for env in env_list {
+                                                {
+                                                    let env_id = env.id;
+                                                    let env_color = if env.color_hex.trim().is_empty() {
+                                                        "#6b7280".to_string()
+                                                    } else {
+                                                        env.color_hex.clone()
+                                                    };
+                                                    let is_selected = selected_environments().contains(&env_id);
+                                                    let border = if is_selected {
+                                                        format!("1px solid {}", env_color)
+                                                    } else {
+                                                        "1px solid var(--cf-card-border)".to_string()
+                                                    };
+                                                    let background = if is_selected {
+                                                        format!(
+                                                            "color-mix(in oklab, {} 14%, var(--cf-card-bg))",
+                                                            env_color
+                                                        )
+                                                    } else {
+                                                        "transparent".to_string()
+                                                    };
+                                                    let color = if is_selected {
+                                                        env_color.clone()
+                                                    } else {
+                                                        "var(--cf-text-secondary)".to_string()
+                                                    };
+                                                    rsx! {
+                                                        button {
+                                                            key: "{env.id}",
+                                                            class: "focus-ring",
+                                                            r#type: "button",
+                                                            onclick: move |_| toggle_environment(env_id),
+                                                            disabled: is_submitting(),
+                                                            style: "padding:4px 10px; border-radius:99px; font-size:11px; border:{border}; background:{background}; color:{color}; cursor:pointer; display:inline-flex; align-items:center; gap:6px; font-family:inherit;",
+                                                            span {
+                                                                style: "width:6px; height:6px; border-radius:50%; background:{env_color};"
+                                                            }
+                                                            "{env.name}"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        div {
+                                            class: "help",
+                                            "Builds for systems in any of these environments will be routed to this worker."
+                                        }
+                                    },
+                                    Some(Err(e)) => rsx! {
+                                        p {
+                                            class: "text-sm text-red-400",
+                                            "Failed to load environments: {e}"
+                                        }
+                                    },
+                                    None => rsx! {
+                                        p {
+                                            class: "text-sm {theme::text::SECONDARY}",
+                                            "Loading environments..."
+                                        }
+                                    },
+                                }
                             }
+                        }
+                    }
+
+                    // Row 2: Host (full-width)
+                    div {
+                        class: "field",
+                        style: "margin-bottom:16px;",
+                        label { "Host (SSH endpoint)" }
+                        input {
+                            class: "input focus-ring mono",
+                            r#type: "text",
+                            value: "{host}",
+                            oninput: move |e| host.set(e.value()),
+                            placeholder: "hydra-03.production.cf.internal",
+                            style: "font-size:12px;",
+                            disabled: is_submitting(),
+                        }
+                    }
+
+                    // Row 3: Architecture + Cores + Memory (3-col grid)
+                    div {
+                        style: "display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; margin-bottom:16px;",
+
+                        div {
+                            class: "field",
+                            label { "Architecture" }
                             select {
                                 class: "input focus-ring",
                                 value: "{arch}",
@@ -221,279 +278,140 @@ pub fn AddBuilderModal(
                                 option { value: "x86_64-darwin", "x86_64-darwin" }
                             }
                         }
-                    }
 
-                    // Keypair section
-                    div {
-                        class: "border border-slate-700 rounded p-4 space-y-3",
                         div {
-                            class: "relative overflow-visible",
-                            class: "flex items-center justify-between mb-2",
-                            h3 {
-                                class: "text-sm font-medium {theme::text::PRIMARY}",
-                                "Authentication Keypair"
-                            }
-                            button {
-                                class: "btn btn-primary focus-ring",
-                                onclick: generate_keypair,
-                                disabled: is_submitting(),
-                                "Generate Keypair"
-                            }
-                        }
-                        p {
-                            class: "text-xs {theme::text::SECONDARY}",
-                            "Generate a new Ed25519 keypair for this builder. Save the private key securely - you'll need it to configure the builder binary."
-                        }
-
-                        // Public Key
-                        div {
-                            class: "relative overflow-visible",
-                            label {
-                                class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                "Public Key"
-                                span { class: "text-red-400", " *" }
-                            }
-                            textarea {
-                                class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono text-xs",
-                                rows: "2",
-                                placeholder: "Base64-encoded public key",
-                                value: "{public_key}",
-                                onfocus: move |_| show_public_key_callout.set(false),
-                                oninput: move |e| {
-                                    show_public_key_callout.set(false);
-                                    public_key.set(e.value())
-                                },
-                                disabled: is_submitting(),
-                            }
-                            if show_public_key_callout() && !name().trim().is_empty() && public_key().trim().is_empty() {
-                                div {
-                                    "data-testid": "setup-coach-builder-field-public-key",
-                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                                    div {
-                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                                    }
-                                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                                    p { style: "margin:2px 0 0 0;", "Use the builder public key from the host's Crystal Forge builder config, or generate one and install the paired private key on the builder host." }
-                                }
-                            }
-                        }
-
-                        // Private Key (show/hide)
-                        if !private_key().is_empty() {
-                            div {
-                                div {
-                                    class: "flex items-center justify-between mb-1",
-                                    label {
-                                        class: "block text-sm font-medium text-amber-400",
-                                        "Private Key"
-                                        span { class: "text-xs {theme::text::SECONDARY} ml-2", "(save this securely)" }
-                                    }
-                                    button {
-                                        class: "text-xs text-blue-400 hover:text-blue-300",
-                                        onclick: move |_| show_private_key.set(!show_private_key()),
-                                        if show_private_key() { "Hide" } else { "Show" }
-                                    }
-                                }
-                                if show_private_key() {
-                                    textarea {
-                                        class: "w-full px-3 py-2 bg-amber-900/20 border border-amber-700/50 rounded text-amber-200 font-mono text-xs",
-                                        rows: "2",
-                                        readonly: true,
-                                        value: "{private_key}",
-                                    }
-                                } else {
-                                    div {
-                                        class: "px-3 py-2 bg-slate-900 border border-slate-700 rounded text-slate-500 font-mono text-xs",
-                                        "••••••••••••••••••••••••••••••••"
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Resource Limits
-                    div {
-                        class: if show_resource_callout()
-                            && !name().trim().is_empty()
-                            && !public_key().trim().is_empty()
-                            && max_cpu_cores().trim().is_empty()
-                            && max_memory_mb().trim().is_empty()
-                        {
-                            "relative grid grid-cols-3 gap-4 pb-28"
-                        } else {
-                            "relative grid grid-cols-3 gap-4"
-                        },
-                        div {
-                            class: "relative overflow-visible",
-                            label {
-                                class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                "Max CPU Cores"
-                            }
+                            class: "field",
+                            label { "Cores" }
                             input {
-                                class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white placeholder-slate-500 focus:outline-none focus:border-blue-500",
+                                class: "input focus-ring",
                                 r#type: "number",
                                 min: "1",
-                                placeholder: "Unlimited",
                                 value: "{max_cpu_cores}",
-                                onfocus: move |_| show_resource_callout.set(false),
-                                oninput: move |e| {
-                                    show_resource_callout.set(false);
-                                    max_cpu_cores.set(e.value())
-                                },
+                                oninput: move |e| max_cpu_cores.set(e.value()),
                                 disabled: is_submitting(),
                             }
-                            if show_resource_callout()
-                                && !name().trim().is_empty()
-                                && !public_key().trim().is_empty()
-                                && max_cpu_cores().trim().is_empty()
-                                && max_memory_mb().trim().is_empty()
-                            {
-                                div {
-                                    "data-testid": "setup-coach-builder-resource-guidance-callout",
-                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(680px, 92vw); z-index:60; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                                    div {
-                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                                    }
-                                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                                    p { style: "margin:2px 0 0 0;", "Leave CPU or memory empty only when this host is dedicated and heavily provisioned for builder workloads." }
-                                    p { style: "margin:2px 0 0 0;", "Max Concurrent Jobs controls how many builds run at once. If CPU/memory are unlimited and concurrency is greater than 1, heavy builds (for example Firefox or Chromium) can exhaust resources and stall or fail repeatedly." }
-                                    p { style: "margin:2px 0 0 0;", "Safer default: keep concurrency at 1 and set explicit CPU/memory limits close to what this host can sustain." }
-                                }
-                            }
                         }
+
                         div {
-                            label {
-                                class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                "Max Memory (MB)"
-                            }
+                            class: "field",
+                            label { "Memory (GiB)" }
                             input {
-                                class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white placeholder-slate-500 focus:outline-none focus:border-blue-500",
+                                class: "input focus-ring",
                                 r#type: "number",
-                                min: "1024",
-                                step: "1024",
-                                placeholder: "Unlimited",
-                                value: "{max_memory_mb}",
-                                onfocus: move |_| show_resource_callout.set(false),
-                                oninput: move |e| {
-                                    show_resource_callout.set(false);
-                                    max_memory_mb.set(e.value())
-                                },
+                                min: "1",
+                                value: "{max_memory_gib}",
+                                oninput: move |e| max_memory_gib.set(e.value()),
                                 disabled: is_submitting(),
                             }
                         }
+                    }
+
+                    // Row 4: Max Slots + Status (2-col grid)
+                    div {
+                        style: "display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:16px;",
+
                         div {
-                            label {
-                                class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                "Max Concurrent Jobs"
-                                span { class: "text-red-400", " *" }
-                            }
+                            class: "field",
+                            label { "Max concurrent slots" }
                             input {
-                                class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white placeholder-slate-500 focus:outline-none focus:border-blue-500",
+                                class: "input focus-ring",
                                 r#type: "number",
                                 min: "1",
                                 value: "{max_concurrent_jobs}",
-                                onfocus: move |_| show_resource_callout.set(false),
-                                oninput: move |e| {
-                                    show_resource_callout.set(false);
-                                    max_concurrent_jobs.set(e.value())
-                                },
+                                oninput: move |e| max_concurrent_jobs.set(e.value()),
                                 disabled: is_submitting(),
                             }
+                            div {
+                                class: "help",
+                                "How many builds this worker may run in parallel."
+                            }
+                        }
+
+                        div {
+                            class: "field",
+                            label { "Status" }
+                            label {
+                                style: "display:flex; gap:8px; align-items:center; font-size:13px; padding:6px 0;",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: enabled(),
+                                    onchange: move |e| enabled.set(e.checked()),
+                                    style: "accent-color:var(--cf-brand-purple);",
+                                }
+                                span { "Enabled (accepts jobs)" }
+                            }
                         }
                     }
 
-                    // Environment assignments
+                    // Row 5: Public Key (full-width)
                     div {
-                        class: "relative overflow-visible",
+                        class: "field",
                         label {
-                            class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                            "Environment Assignments"
+                            "Builder public key "
+                            span { style: "color:#f87171;", "*" }
                         }
-                        p {
-                            class: "text-xs {theme::text::SECONDARY} mb-2",
-                            "Leave empty for wildcard (builder handles all environments)"
+                        textarea {
+                            class: "input focus-ring mono",
+                            rows: "3",
+                            value: "{public_key}",
+                            oninput: move |e| public_key.set(e.value()),
+                            placeholder: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5… crystal-forge@hostname",
+                            style: "font-size:11px; resize:vertical; padding:10px; margin-top:2px;",
+                            disabled: is_submitting(),
+                        }
+                        div {
+                            class: "help",
+                            "The public half of the keypair the builder generated on first start. Crystal Forge uses it to authenticate the builder and verify build signatures — the private key never leaves the builder host."
                         }
 
-                        {
-                            let env_data = environments.read();
-                            match &*env_data {
-                                Some(Ok(env_list)) => rsx! {
+                        // Key validation feedback
+                        if !public_key().trim().is_empty() {
+                            {
+                                let key_looks_valid = public_key().as_str().trim().starts_with("ssh-");
+                                rsx! {
                                     div {
-                                        class: "relative border border-slate-700 rounded p-3 space-y-2 max-h-48 overflow-y-auto",
-                                        if env_list.is_empty() {
-                                            p {
-                                                class: "text-sm {theme::text::SECONDARY}",
-                                                "No environments available"
-                                            }
+                                        style: if key_looks_valid {
+                                            "margin-top:10px; padding:9px 12px; border-radius:8px; border:1px solid rgba(52,211,153,0.3); background:rgba(52,211,153,0.06); display:flex; align-items:center; gap:8px;"
                                         } else {
-                                            for env in env_list {
-                                                {
-                                                    let env_id = env.id;
-                                                    rsx! {
-                                                        div {
-                                                            key: "{env.id}",
-                                                            class: "flex items-center gap-2",
-                                                            input {
-                                                                r#type: "checkbox",
-                                                                id: "env-{env.id}",
-                                                                class: "rounded border-slate-600 text-blue-600 focus:ring-blue-500",
-                                                                checked: selected_environments().contains(&env.id),
-                                                                onchange: move |_| {
-                                                                    show_environment_callout.set(false);
-                                                                    toggle_environment(env_id)
-                                                                },
-                                                                disabled: is_submitting(),
-                                                            }
-                                                            label {
-                                                                r#for: "env-{env.id}",
-                                                                class: "text-sm {theme::text::PRIMARY} cursor-pointer",
-                                                                "{env.name}"
-                                                            }
-                                                        }
-                                                    }
+                                            "margin-top:10px; padding:9px 12px; border-radius:8px; border:1px solid rgba(248,113,113,0.35); background:rgba(248,113,113,0.06); display:flex; align-items:center; gap:8px;"
+                                        },
+                                        span {
+                                            style: if key_looks_valid {
+                                                "color:#34d399; flex-shrink:0;"
+                                            } else {
+                                                "color:#f87171; flex-shrink:0;"
+                                            },
+                                            Icon {
+                                                name: if key_looks_valid { IconName::Key } else { IconName::Warn },
+                                                size: 13
+                                            }
+                                        }
+                                        if key_looks_valid {
+                                            div {
+                                                style: "min-width:0;",
+                                                div {
+                                                    style: "font-size:10px; text-transform:uppercase; letter-spacing:0.06em; color:var(--cf-text-muted); font-weight:600;",
+                                                    "Key format looks valid"
                                                 }
                                             }
-                                        }
-                                    }
-                                    if show_environment_callout()
-                                        && !name().trim().is_empty()
-                                        && !public_key().trim().is_empty()
-                                        && !show_resource_callout()
-                                    {
-                                        div {
-                                            "data-testid": "setup-coach-builder-field-environments",
-                                            style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                                            div {
-                                                style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                        } else {
+                                            span {
+                                                style: "font-size:11.5px; color:#fca5a5;",
+                                                "Doesn't look like an SSH public key — expected it to start with "
+                                                span { class: "mono", "ssh-ed25519" }
+                                                "."
                                             }
-                                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                                            p { style: "margin:2px 0 0 0;", "Select environments this builder should serve, or leave empty to allow all environments." }
                                         }
                                     }
-                                },
-                                Some(Err(e)) => rsx! {
-                                    p {
-                                        class: "text-sm text-red-400",
-                                        "Failed to load environments: {e}"
-                                    }
-                                },
-                                None => rsx! {
-                                    p {
-                                        class: "text-sm {theme::text::SECONDARY}",
-                                        "Loading environments..."
-                                    }
-                                },
+                                }
                             }
                         }
                     }
                 }
 
-                }
-
-                // Footer buttons
+                // Footer
                 div {
                     class: "modal-foot",
-                    style: "display:flex; justify-content:flex-end; gap:12px;",
                     button {
                         class: "btn btn-ghost focus-ring",
                         onclick: move |_| on_close.call(()),
@@ -503,11 +421,12 @@ pub fn AddBuilderModal(
                     button {
                         class: "btn btn-primary focus-ring",
                         onclick: handle_submit,
-                        disabled: is_submitting() || name().trim().is_empty() || public_key().trim().is_empty(),
+                        disabled: is_submitting() || !public_key().as_str().trim().starts_with("ssh-"),
+                        Icon { name: IconName::Check, size: 13 }
                         if is_submitting() {
-                            "Creating..."
+                            " Creating..."
                         } else {
-                            "Create Builder"
+                            " Register builder"
                         }
                     }
                 }

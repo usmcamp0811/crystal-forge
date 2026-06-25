@@ -286,11 +286,15 @@ pub fn BuildsView() -> Element {
                     active_slots: builder.active_jobs.max(0) as usize,
                     total_slots: builder.max_concurrent_jobs.max(1) as usize,
                     queue_depth: builder.queued_jobs.max(0) as usize,
-                    status: match builder.status {
-                        BuilderStatus::Active => WorkerStatus::Running,
-                        BuilderStatus::Inactive => WorkerStatus::Paused,
-                        BuilderStatus::Offline => WorkerStatus::Paused, // Treat offline as paused in UI
-                        BuilderStatus::Draining => WorkerStatus::Draining,
+                    status: if !builder.enabled {
+                        WorkerStatus::Paused // Disabled builders always show as paused
+                    } else {
+                        match builder.status {
+                            BuilderStatus::Active => WorkerStatus::Running,
+                            BuilderStatus::Inactive => WorkerStatus::Paused,
+                            BuilderStatus::Offline => WorkerStatus::Paused, // Treat offline as paused in UI
+                            BuilderStatus::Draining => WorkerStatus::Draining,
+                        }
                     },
                 })
                 .collect::<Vec<_>>();

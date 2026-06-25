@@ -548,6 +548,7 @@ mod tests {
             host: Some("offline-builder.test.local".to_string()),
             arch: "x86_64-linux".to_string(),
             public_key: PublicKey::from_verifying_key(verifying_key),
+            public_key_fingerprint: String::new(),
             status: BuilderStatus::Offline,
             max_cpu_cores: None,
             max_memory_mb: None,
@@ -585,12 +586,7 @@ mod tests {
         );
 
         let result = authenticate_builder_request_with_lookup_options(
-            &headers,
-            body,
-            method,
-            path,
-            &lookup,
-            true,
+            &headers, body, method, path, &lookup, true,
         )
         .await;
 
@@ -608,6 +604,7 @@ mod tests {
             host: Some("disabled-builder.test.local".to_string()),
             arch: "x86_64-linux".to_string(),
             public_key: PublicKey::from_verifying_key(verifying_key),
+            public_key_fingerprint: String::new(),
             status: BuilderStatus::Active,
             max_cpu_cores: None,
             max_memory_mb: None,
@@ -645,12 +642,7 @@ mod tests {
         );
 
         let result = authenticate_builder_request_with_lookup_options(
-            &headers,
-            body,
-            method,
-            path,
-            &lookup,
-            false,
+            &headers, body, method, path, &lookup, false,
         )
         .await;
 
@@ -668,6 +660,7 @@ mod tests {
             host: Some("disabled-heartbeat-builder.test.local".to_string()),
             arch: "x86_64-linux".to_string(),
             public_key: PublicKey::from_verifying_key(verifying_key),
+            public_key_fingerprint: String::new(),
             status: BuilderStatus::Active,
             max_cpu_cores: None,
             max_memory_mb: None,
@@ -705,12 +698,7 @@ mod tests {
         );
 
         let result = authenticate_builder_request_with_lookup_options(
-            &headers,
-            body,
-            method,
-            path,
-            &lookup,
-            true,
+            &headers, body, method, path, &lookup, true,
         )
         .await;
 
