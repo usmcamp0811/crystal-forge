@@ -25,6 +25,7 @@
       # Garage S3-compatible storage
       services.garage = {
         enable = true;
+        package = pkgs.garage;
         settings = {
           replication_mode = "none";
           rpc_bind_addr = "127.0.0.1:3901";
