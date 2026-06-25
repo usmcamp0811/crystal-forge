@@ -16,8 +16,8 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api::client::{
-    ApiClientError, fetch_compliance_bundle_systems, fetch_compliance_bundles,
-    fetch_compliance_system_evidence, fetch_cve_scan_status, fetch_hardening_scan_status,
+    ApiClientError, fetch_compliance_system_evidence, fetch_cve_scan_status,
+    fetch_hardening_scan_status, fetch_system_compliance_bundles,
     fetch_system_cve_scan_eligibility, fetch_system_cves, fetch_system_hardening,
     fetch_system_hardening_justifications, fetch_system_hardening_scan_eligibility,
     request_system_generation_rollback, request_system_rollback, request_system_sync,
@@ -25,13 +25,13 @@ use crate::api::client::{
     verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
-    BuildStatus, CommitInfo, ComplianceBundleSummary, ComplianceEvidenceResponse,
-    ComplianceSystemRollup, CveScanEligibilityResponse, CveSummary, DeploymentLogEntry,
-    DeploymentStatus, HardeningJustificationResponse, HardeningScanEligibilityResponse,
+    BuildStatus, CommitInfo, ComplianceEvidenceResponse, ComplianceSystemRollup,
+    CveScanEligibilityResponse, CveSummary, DeploymentLogEntry, DeploymentStatus,
+    HardeningJustificationResponse, HardeningScanEligibilityResponse,
     HardeningServiceResultResponse, HealthStatus, LogLevel, PipelineStage,
-    SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory, SystemDetail,
-    SystemGeneration, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
-    SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
+    SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
+    SystemComplianceBundle, SystemDetail, SystemGeneration, SystemHardwareInfo, SystemHistoryEntry,
+    SystemNetworkInfo, SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
     SystemVulnerability, VerifyGenerationClosureRequest,
 };
 use crate::components::compliance::EvidenceDrawer;
@@ -1135,14 +1135,6 @@ pub fn SystemDetailView(id: String) -> Element {
 // Tab Components
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A compliance bundle applicable to the current system, paired with the
-/// system-specific rollup from the API.
-#[derive(Clone, PartialEq, Debug)]
-struct SystemComplianceBundle {
-    summary: ComplianceBundleSummary,
-    rollup: ComplianceSystemRollup,
-}
-
 /// Aggregated compliance data for the system detail tab.
 #[derive(Clone, PartialEq, Debug)]
 struct SystemComplianceData {
@@ -1164,52 +1156,19 @@ fn compliance_score_color(score: i64) -> &'static str {
 fn ComplianceTab(system: SystemDetail) -> Element {
     let system_id = system.id;
 
-    // Fetch applicable bundles for this system: get all bundles, then for each
-    // bundle check if this system appears in its system rollup list.
+    // Fetch applicable bundles for this system using the optimized system-scoped endpoint.
     let mut compliance_resource = use_resource(move || {
         let sid = system_id;
         async move {
-            let bundles = match fetch_compliance_bundles().await {
-                Ok(b) => b,
-                Err(e) => {
-                    return SystemComplianceData {
-                        bundles: Vec::new(),
-                        error: Some(format!("Failed to load compliance bundles: {e}")),
-                    };
-                }
-            };
-
-            let mut applicable = Vec::new();
-            for bundle in &bundles {
-                match fetch_compliance_bundle_systems(&bundle.id).await {
-                    Ok(sys_resp) => {
-                        if let Some(rollup) = sys_resp
-                            .systems
-                            .iter()
-                            .find(|s| s.system_id == sid)
-                            .cloned()
-                        {
-                            applicable.push(SystemComplianceBundle {
-                                summary: bundle.clone(),
-                                rollup,
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        return SystemComplianceData {
-                            bundles: Vec::new(),
-                            error: Some(format!(
-                                "Failed to load systems for bundle '{}': {e}",
-                                bundle.name
-                            )),
-                        };
-                    }
-                }
-            }
-
-            SystemComplianceData {
-                bundles: applicable,
-                error: None,
+            match fetch_system_compliance_bundles(&sid).await {
+                Ok(response) => SystemComplianceData {
+                    bundles: response.bundles,
+                    error: None,
+                },
+                Err(e) => SystemComplianceData {
+                    bundles: Vec::new(),
+                    error: Some(format!("Failed to load compliance bundles: {e}")),
+                },
             }
         }
     });
@@ -1243,15 +1202,15 @@ fn ComplianceTab(system: SystemDetail) -> Element {
                     }
                 }
             }
-            // Error state
-            else if let Some(ref error) = data.error {
+            // Error state (only if no bundles loaded at all)
+            else if data.bundles.is_empty() && data.error.is_some() {
                 div {
                     class: "sd-callout sd-callout-danger",
                     Icon { name: IconName::Warn, size: 13 }
-                    div { style: "font-size:12px;", "{error}" }
+                    div { style: "font-size:12px;", "{data.error.as_ref().unwrap()}" }
                 }
             }
-            // Empty state
+            // Empty state (no applicable bundles)
             else if data.bundles.is_empty() {
                 div {
                     class: "card",
@@ -1272,16 +1231,25 @@ fn ComplianceTab(system: SystemDetail) -> Element {
             }
             // Populated state
             else {
+                // Show partial error warning if some bundles failed to load
+                if let Some(ref error) = data.error {
+                    div {
+                        class: "sd-callout sd-callout-warn",
+                        Icon { name: IconName::Warn, size: 13 }
+                        div { style: "font-size:12px;", "{error}" }
+                    }
+                }
+
                 for bd in data.bundles.iter() {
                     {
                         let score = bd.rollup.score;
                         let score_color = compliance_score_color(score);
                         let score_width = format!("width:{}%;height:100%;background:{};", score, score_color);
-                        let bundle_id = bd.summary.id;
-                        let bundle_name = bd.summary.name.clone();
-                        let framework = bd.summary.framework.clone();
-                        let version = bd.summary.version.clone();
-                        let owner = bd.summary.owner.clone();
+                        let bundle_id = bd.bundle.id;
+                        let bundle_name = bd.bundle.name.clone();
+                        let framework = bd.bundle.framework.clone();
+                        let version = bd.bundle.version.clone();
+                        let owner = bd.bundle.owner.clone();
                         let total = bd.rollup.total;
                         let pass = bd.rollup.pass;
                         let warn = bd.rollup.warn;

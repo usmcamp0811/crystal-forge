@@ -396,6 +396,63 @@ pub async fn list_bundle_systems(
     }))
 }
 
+/// Get all compliance bundles applicable to a specific system with their rollups.
+/// Returns only bundles where the system is in scope (matches environment filter).
+/// This is the system-oriented endpoint that avoids N×fleet fetches.
+pub async fn list_system_bundles(
+    pool: &PgPool,
+    system_id: Uuid,
+) -> Result<Vec<(ComplianceBundleSummary, ComplianceSystemRollup)>> {
+    // First verify the system exists
+    let system_row = sqlx::query_as::<_, SystemRow>(
+        r#"
+        SELECT
+            id,
+            hostname,
+            environment,
+            health_status,
+            critical_cve_count,
+            high_cve_count
+        FROM view_system_list
+        WHERE id = $1
+        "#,
+    )
+    .bind(system_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(system) = system_row else {
+        return Ok(Vec::new());
+    };
+
+    // Get all bundles
+    let all_bundles = list_bundles(pool).await?;
+
+    // For each bundle, check if this system is applicable and compute its rollup
+    let mut result = Vec::new();
+
+    for bundle in all_bundles {
+        // Check if system is in bundle scope using the same predicate as find_applicable_system_row
+        let is_applicable = find_applicable_system_row(pool, bundle.id, system_id)
+            .await?
+            .is_some();
+
+        if !is_applicable {
+            continue;
+        }
+
+        // Get policies for this bundle
+        let policies = list_bundle_policies(pool, bundle.id).await?;
+
+        // Compute the rollup for this specific system
+        let rollup = system_rollup(system.clone(), &policies);
+
+        result.push((bundle, rollup));
+    }
+
+    Ok(result)
+}
+
 pub async fn get_system_evidence(
     pool: &PgPool,
     bundle_id: Uuid,
