@@ -4,7 +4,7 @@ title: Wire System Detail Compliance tab to real backend data and evidence drawe
 status: Review
 assignee: []
 created_date: '2026-06-13 20:28'
-updated_date: '2026-06-22 19:27'
+updated_date: '2026-06-25 01:26'
 labels:
   - compliance
   - system-detail
@@ -99,4 +99,6 @@ Verification:
 - cargo clippy ✅ (no new warnings)
 
 - 312 lines removed, 240 lines added
+
+Review blocker fixes applied: 1) Partial failure tolerance - bundles that fail to load no longer discard all successfully loaded bundles. Errors are accumulated and shown as warnings. 2) Concurrent fetching - replaced sequential N+1 requests with join_all for parallel fetching to reduce latency. 3) Added futures-util dependency for join_all. Note: The underlying issue of fetching fleet-sized data for every bundle remains - proper fix requires backend endpoint GET /api/systems/:id/compliance. Creating follow-up task for that.
 <!-- SECTION:NOTES:END -->
