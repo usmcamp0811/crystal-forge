@@ -4,7 +4,7 @@ title: Create User Profile view (new route+view) with CrystalForgelatest parity
 status: To Do
 assignee: []
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-25 21:50'
+updated_date: '2026-06-25 21:52'
 labels:
   - design-parity
   - user-profile
@@ -40,7 +40,7 @@ ordinal: 1680
 There is currently no Profile route or view in the repo today, while the CrystalForgelatest design includes `components/ProfileView.jsx` with Profile & Preferences content. Users need a first-class Profile surface reachable from the shell user block.
 
 ## Goal
-Create the Profile surface from scratch with CrystalForgelatest parity and backend-backed account data, including account information, preferences, and security/session sections where supported by existing APIs.
+Create the Profile surface from scratch with CrystalForgelatest parity and backend-backed account data, including account information, preferences, and security/session sections where supported by existing or minimally added APIs.
 
 See `design/doc-14 - Parity-execution-playbook-agent-proof.md` for the standard parity execution procedure.
 
@@ -48,7 +48,8 @@ See `design/doc-14 - Parity-execution-playbook-agent-proof.md` for the standard 
 - No global auth architecture rework beyond what the profile surface needs.
 - No broad user-management/admin redesign.
 - No unrelated shell/sidebar redesign beyond making the existing user block navigate to Profile.
-- No persistence of preferences that do not have an existing backend contract unless a minimal endpoint is clearly required by the profile scope; missing backend support should be captured as a follow-up if it cannot be implemented safely in scope.
+- No speculative preference systems or settings categories beyond those required by `ProfileView.jsx` and the current product model.
+- No broad RBAC/auth migration; backend additions must stay limited to profile/account/preferences data needed by this view.
 
 ## Exact Scope
 1. Create `packages/web-ui/src/views/profile.rs` with a `ProfileView` component.
@@ -56,9 +57,11 @@ See `design/doc-14 - Parity-execution-playbook-agent-proof.md` for the standard 
 3. Add a `ProfileView` route in `packages/web-ui/src/routes.rs` (for example `/profile`) and a title entry.
 4. Wire the sidebar user block at the bottom of `components/layout/sidebar.rs` to navigate to Profile, matching `Shell.jsx` behavior.
 5. Implement sections/controls from `ProfileView.jsx`: account info, preferences, and security/session as applicable.
-6. Back profile/account content with the real API client; add minimal endpoints only if missing and needed for the scoped view.
-7. Implement edit/save/cancel/validation feedback plus loading, empty, error, and success states.
-8. Extend the web-ui check with Profile coverage for loading, populated, and editing states plus at least one real interaction assertion.
+6. Back profile/account/preference content with the real API client.
+7. Add minimal backend API/model/query support when existing APIs cannot provide the required backend-backed profile data. Backend additions must be scoped to current-user profile read/update and supported preference/security/session fields only.
+8. Implement edit/save/cancel/validation feedback plus loading, empty, error, and success states.
+9. Extend the web-ui check with Profile coverage for loading, populated, and editing states plus at least one real interaction assertion.
+10. Add targeted backend/API tests if new server endpoints, models, queries, or validation paths are introduced.
 
 ## Architectural Constraints
 - Follow existing Dioxus view/component patterns in `packages/web-ui`.
@@ -66,6 +69,9 @@ See `design/doc-14 - Parity-execution-playbook-agent-proof.md` for the standard 
 - UI code must not import infrastructure/server internals directly.
 - Do not place business logic in the view; keep validation/state transitions small and localized or extracted if they grow.
 - Preserve existing auth and role-gating behavior.
+- Follow existing server API/domain/query layering for any backend additions.
+- Prefer current-user scoped endpoints over admin/user-management endpoints for profile data.
+- If database schema or SQLx query changes are needed, include the required migration and run/update SQLx metadata per repository policy.
 - Follow the parity workflow in `design/doc-14 - Parity-execution-playbook-agent-proof.md`.
 
 ## Impact Areas
@@ -73,11 +79,15 @@ See `design/doc-14 - Parity-execution-playbook-agent-proof.md` for the standard 
 - `packages/web-ui/src/views/mod.rs`
 - `packages/web-ui/src/routes.rs`
 - `packages/web-ui/src/components/layout/sidebar.rs`
-- `packages/web-ui/src/api/models.rs` and `packages/web-ui/src/api/client.rs` if profile API support is needed
+- `packages/web-ui/src/api/models.rs`
+- `packages/web-ui/src/api/client.rs`
+- Server API route/handler/model/query files as needed for current-user profile read/update support
+- Database migrations and SQLx metadata if persistence shape changes are required
 - `checks/web-ui/tests/integration-test.js`
+- Targeted backend/API tests if backend code is added
 
 ## Risk Level
-Medium: this introduces a new routed UI surface and may require profile/account API integration, but the scope is constrained to web-ui Profile parity and minimal supporting client/API changes.
+Medium: this introduces a new routed UI surface and may require profile/account API integration, but the scope is constrained to web-ui Profile parity and minimal current-user backend API support.
 
 ## Dependencies
 - `TASK-328` completed: parity matrix/spec foundation.
@@ -85,6 +95,8 @@ Medium: this introduces a new routed UI surface and may require profile/account 
 - `TASK-333` is not an execution blocker for this task because its own notes place full strict parity harness closure in the final-audit milestone; this task must still add its own profile-specific web-ui screenshot/assertion coverage.
 
 ## Verification Plan
+- If backend API code is added: run targeted server/API tests for the new current-user profile endpoints.
+- If SQLx query or schema changes are added: use `nix develop`, start the repo dev database with process-compose, and run `cargo sqlx prepare` / project SQLx helper as required.
 - `nix develop -c cargo fmt -- --check`
 - `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`
 - `nix build .#checks.x86_64-linux.web-ui` with a new profile step that captures required states and asserts a real interaction.
@@ -96,16 +108,18 @@ Medium: this introduces a new routed UI surface and may require profile/account 
 - [ ] #2 Sidebar user block navigates to the Profile view as in the design
 - [ ] #3 Profile layout/controls match ProfileView.jsx across supported breakpoints
 - [ ] #4 Edit/save/cancel/validation feedback works and profile/account content is backend-driven
-- [ ] #5 web-ui check captures profile loading, populated, and editing states and asserts a real interaction
+- [ ] #5 Any missing backend API support needed for current-user profile/account/preferences is implemented with minimal scoped endpoints/models and targeted tests
+- [ ] #6 web-ui check captures profile loading, populated, and editing states and asserts a real interaction
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
 1. Inspect the CrystalForgelatest ProfileView.jsx and current web-ui route/view/layout/API patterns.
-2. Add and wire the Profile route/view module and sidebar user-block navigation.
-3. Implement Profile & Preferences sections using backend-backed profile/account data and scoped edit/save/cancel validation states.
-4. Add or reuse minimal API client/model support required for account/profile data without changing global auth architecture.
-5. Extend the web-ui check to cover Profile loading/populated/editing states and assert at least one real interaction.
-6. Run the declared formatting, wasm cargo check, and web-ui check verification commands.
+2. Inspect existing server/API capabilities for current-user account/profile/preferences/security/session data.
+3. Add and wire the Profile route/view module and sidebar user-block navigation.
+4. Implement or reuse minimal backend API support required for backend-backed current-user profile/account/preference data, including tests and SQLx updates if applicable.
+5. Implement Profile & Preferences sections using backend-backed data and scoped edit/save/cancel validation states.
+6. Extend the web-ui check to cover Profile loading/populated/editing states and assert at least one real interaction.
+7. Run the declared backend/API, formatting, wasm cargo check, SQLx-if-applicable, and web-ui check verification commands.
 <!-- SECTION:PLAN:END -->
