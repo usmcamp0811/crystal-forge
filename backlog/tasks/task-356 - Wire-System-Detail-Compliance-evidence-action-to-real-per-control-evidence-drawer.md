@@ -4,7 +4,7 @@ title: Wire System Detail Compliance tab to real backend data and evidence drawe
 status: Review
 assignee: []
 created_date: '2026-06-13 20:28'
-updated_date: '2026-06-25 21:11'
+updated_date: '2026-06-25 22:29'
 labels:
   - compliance
   - system-detail
@@ -22,6 +22,11 @@ references:
 documentation:
   - >-
     /home/mcamp/code/crystal-forge/CrystalForgelatest/components/SystemDetail.jsx
+modified_files:
+  - checks/integration/default.nix
+  - checks/web-ui/default.nix
+  - packages/default/src/queries/compliance.rs
+  - packages/default/tests/system_compliance_test.rs
 priority: high
 ordinal: 299000
 ---
@@ -69,18 +74,18 @@ Replace every mock/placeholder in `ComplianceTab` and `ComplianceEvidenceDrawer`
 - [x] #7 nix build .#packages.x86_64-linux.web-ui passes with no new warnings introduced by this task
 <!-- AC:END -->
 
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-CI repair plan for MR !286:
-1. Keep the existing `pub(crate)` visibility for internal compliance assembly helpers and row types; do not widen production API surface just for tests.
-2. Move the behavioral tests currently in `packages/default/tests/system_compliance_test.rs` into a `#[cfg(test)]` unit test module inside `packages/default/src/queries/compliance.rs`, where `pub(crate)`/private internals are accessible.
-3. Remove unused imports and the now-invalid integration test file.
-4. Run targeted verification with `nix develop -c cargo test --manifest-path packages/default/Cargo.toml system_compliance` or the exact unit test names, then run the relevant Nix check/build for the failed CI path before pushing.
-<!-- SECTION:PLAN:END -->
-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-CI fix session: LOCK confirmed by user as sole active agent. Working in `/home/mcamp/code/crystal-forge/TASK-356-wire-system-detail-compliance` on branch `TASK-356-wire-system-detail-compliance`. Current CI root cause from MR !286 pipeline #2627895427: `packages/default/tests/system_compliance_test.rs` is an integration test importing `pub(crate)` helpers/types from `queries::compliance`, causing E0603 private item compile failures in `flake-check: [web-ui]` and cascading dependent checks.
+CI repair pushed to MR !286 in commit `ac968a64` (`fix(ci): repair compliance tests and VM keys`). Fixes two concrete CI blockers from pipeline #2627895427: 1) moved `system_compliance_test.rs` integration tests into the `queries::compliance` unit test module so crate-internal helpers/types are not imported across crate boundaries; 2) replaced invalid fixed VM test public/private key strings with a valid 32-byte Ed25519 keypair in `checks/web-ui` and `checks/integration`.
+
+Verification completed locally:
+- `nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml system_` ✅ (`48 passed; 0 failed; 12 ignored; 514 filtered out`)
+- `nix develop -c rustfmt --edition 2024 --check packages/default/src/queries/compliance.rs` ✅
+- `git diff --check` ✅
+- `nix build .#checks.x86_64-linux.web-ui --no-link` ✅ (`exit_status=0`)
+- `nix build .#checks.x86_64-linux.integration --no-link` ✅ (`exit_status=0`)
+- `nix build .#checks.x86_64-linux.oidc-auth --no-link` ✅ (`exit_status=0`)
+
+New GitLab pipeline for MR !286 is running: #2630378511.
 <!-- SECTION:NOTES:END -->
