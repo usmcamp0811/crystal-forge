@@ -1,9 +1,10 @@
 ---
 id: TASK-368
 title: Add system-scoped compliance endpoint to avoid N-bundle fleet fetches
-status: Backlog
+status: Done
 assignee: []
 created_date: '2026-06-25 01:26'
+updated_date: '2026-06-25 01:29'
 labels:
   - backend
   - api
@@ -63,3 +64,9 @@ Response schema:
 - Backend query efficient (single DB query or minimal joins)
 - API documented in OpenAPI schema if applicable
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Task absorbed into TASK-356 - implementing backend fix directly instead of deferring.
+<!-- SECTION:NOTES:END -->
