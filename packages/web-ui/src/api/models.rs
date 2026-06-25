@@ -802,21 +802,12 @@ pub struct ComplianceBundleSystemsResponse {
 pub struct SystemComplianceBundlesResponse {
     pub system_id: Uuid,
     pub bundles: Vec<SystemComplianceBundle>,
-    #[serde(default)]
-    pub errors: Vec<SystemComplianceBundleError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemComplianceBundle {
     pub bundle: ComplianceBundleSummary,
     pub rollup: ComplianceSystemRollup,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SystemComplianceBundleError {
-    pub bundle_id: Uuid,
-    pub bundle_name: String,
-    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

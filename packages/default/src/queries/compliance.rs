@@ -52,8 +52,7 @@ use crate::api::models::{
     ComplianceBundleSummary, ComplianceBundleSystemsResponse, ComplianceControlEvidence,
     ComplianceControlStatus, ComplianceEnvironmentRef, ComplianceEvidenceArtifact,
     ComplianceEvidenceItem, ComplianceEvidenceResponse, ComplianceRollupTotals,
-    ComplianceSystemRollup, CreateComplianceBundleRequest, SystemComplianceBundleError,
-    UpdateComplianceBundleRequest,
+    ComplianceSystemRollup, CreateComplianceBundleRequest, UpdateComplianceBundleRequest,
 };
 
 #[derive(Debug, FromRow)]
@@ -407,20 +406,17 @@ pub async fn list_bundle_systems(
 /// 2. Fetch all bundles once
 /// 3. Fetch all applicable bundle IDs in one query (using environment filter)
 /// 4. Fetch policies for all applicable bundles in one query
-/// 5. Compute rollups in memory
+/// 5. Compute rollups in memory using deterministic logic
 ///
-/// Partial failure handling: If a specific bundle's policy query fails or rollup
-/// computation panics, that bundle is added to the error list but other bundles
-/// are still returned.
+/// All-or-nothing behavior: Database or infrastructure failures fail the entire
+/// request. Individual bundle rollup computation uses pure deterministic logic
+/// with no fallible operations.
 ///
 /// Returns None if the system does not exist (caller should return 404).
 pub async fn list_system_bundles(
     pool: &PgPool,
     system_id: Uuid,
-) -> Result<Option<(
-    Vec<(ComplianceBundleSummary, ComplianceSystemRollup)>,
-    Vec<SystemComplianceBundleError>,
-)>> {
+) -> Result<Option<Vec<(ComplianceBundleSummary, ComplianceSystemRollup)>>> {
     // First verify the system exists - return None for 404 behavior
     let system_row = sqlx::query_as::<_, SystemRow>(
         r#"
@@ -447,12 +443,12 @@ pub async fn list_system_bundles(
     let all_bundles = list_bundles(pool).await?;
 
     if all_bundles.is_empty() {
-        return Ok(Some((Vec::new(), Vec::new())));
+        return Ok(Some(Vec::new()));
     }
 
     // Determine which bundles apply to this system using set-based query
     // This replaces N individual applicability checks
-    let applicable_bundle_ids: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
+    let applicable_bundle_ids_vec: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
         r#"
         SELECT DISTINCT b.id
         FROM compliance_bundles b
@@ -475,8 +471,12 @@ pub async fn list_system_bundles(
     .fetch_all(pool)
     .await?;
 
+    // Convert to HashSet for O(1) membership checks
+    let applicable_bundle_ids: std::collections::HashSet<Uuid> =
+        applicable_bundle_ids_vec.into_iter().collect();
+
     if applicable_bundle_ids.is_empty() {
-        return Ok(Some((Vec::new(), Vec::new())));
+        return Ok(Some(Vec::new()));
     }
 
     // Fetch all policies for all applicable bundles in one query
@@ -490,7 +490,7 @@ pub async fn list_system_bundles(
         ORDER BY cbp.bundle_id, dp.name ASC
         "#,
     )
-    .bind(&applicable_bundle_ids)
+    .bind(applicable_bundle_ids.iter().copied().collect::<Vec<_>>())
     .fetch_all(pool)
     .await?;
 
@@ -504,9 +504,8 @@ pub async fn list_system_bundles(
             .push(policy);
     }
 
-    // Compute rollups with partial failure handling
+    // Compute rollups using deterministic in-memory logic
     let mut result = Vec::new();
-    let mut errors = Vec::new();
 
     for bundle in all_bundles {
         if !applicable_bundle_ids.contains(&bundle.id) {
@@ -515,22 +514,12 @@ pub async fn list_system_bundles(
 
         let policies = policies_by_bundle.get(&bundle.id).cloned().unwrap_or_default();
 
-        // Catch panics or computation errors for this specific bundle
-        match std::panic::catch_unwind(|| system_rollup(system.clone(), &policies)) {
-            Ok(rollup) => {
-                result.push((bundle, rollup));
-            }
-            Err(_) => {
-                errors.push(SystemComplianceBundleError {
-                    bundle_id: bundle.id,
-                    bundle_name: bundle.name.clone(),
-                    message: "Failed to compute compliance rollup".to_string(),
-                });
-            }
-        }
+        // system_rollup is pure deterministic computation with no fallible operations
+        let rollup = system_rollup(system.clone(), &policies);
+        result.push((bundle, rollup));
     }
 
-    Ok(Some((result, errors)))
+    Ok(Some(result))
 }
 
 pub async fn get_system_evidence(
@@ -1133,47 +1122,17 @@ mod tests {
     }
 }
 
-// Integration tests for list_system_bundles endpoint
-// These require a real database and are run with: cargo test --test '*' -- --ignored
-#[cfg(test)]
-mod list_system_bundles_tests {
-    use super::*;
-
-    // Note: Actual integration tests with database setup would go here.
-    // For now, documenting the test cases that MUST be covered:
-    //
-    // 1. test_unknown_system_returns_none()
-    //    - Request for non-existent system_id returns None (not empty vec)
-    //    - Caller should map to 404 Not Found
-    //
-    // 2. test_system_with_no_applicable_bundles()
-    //    - System exists but no bundles apply (environment mismatch)
-    //    - Returns Some((empty_vec, empty_errors))
-    //
-    // 3. test_authenticated_request_returns_only_applicable_bundles()
-    //    - Create 3 bundles: one scoped to "prod", one to "dev", one unscoped
-    //    - System in "prod" environment
-    //    - Returns bundles: unscoped + prod-scoped (not dev-scoped)
-    //
-    // 4. test_partial_failure_handling()
-    //    - Create 2 valid bundles and simulate one with malformed policy config
-    //    - Returns 1 bundle + 1 error entry
-    //    - Valid bundle data is preserved
-    //
-    // 5. test_rollup_values_match_bundle_systems_endpoint()
-    //    - For same bundle + system, compare:
-    //      - GET /compliance/bundles/:id/systems (existing endpoint)
-    //      - GET /systems/:id/compliance (new endpoint)
-    //    - Rollup fields (pass/warn/fail/score) must be identical
-    //
-    // 6. test_set_based_queries_avoid_n_plus_one()
-    //    - Create 10 bundles with varying applicability
-    //    - Assert total query count is O(1) not O(N)
-    //    - Use sqlx query logging or DB instrumentation
-    //
-    // 7. test_unauthenticated_request_forbidden()
-    //    - Handler-level test: no auth header → 403
-    //
-    // TODO: Implement these as proper #[sqlx::test] integration tests
-    // once the test database fixture infrastructure is in place.
-}
+// Integration test cases for list_system_bundles (database-dependent)
+// 
+// Unit tests for serialization/deserialization are in tests/system_compliance_test.rs
+// 
+// The following integration test scenarios require database fixtures:
+//
+// 1. Unknown system returns None → 404
+// 2. System with no applicable bundles → 200 + empty array
+// 3. Environment-based applicability filtering (prod/dev/unscoped)
+// 4. Rollup parity with existing bundle-systems endpoint
+// 5. Query count is constant (4 queries) regardless of bundle count
+// 6. Handler auth enforcement (403 without credentials)
+//
+// These should be implemented as #[sqlx::test] or VM integration tests.

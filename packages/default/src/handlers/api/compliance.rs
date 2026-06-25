@@ -58,8 +58,8 @@ pub async fn get_compliance_bundle_systems(
 /// `GET /api/v1/systems/:system_id/compliance`
 /// Returns all compliance bundles applicable to the specified system with rollups.
 /// 
-/// This endpoint uses set-based queries to avoid N+1 database patterns and includes
-/// partial failure handling so one broken bundle doesn't hide all valid data.
+/// This endpoint uses set-based queries to avoid N+1 database patterns.
+/// All-or-nothing behavior: infrastructure failures return 500.
 ///
 /// Returns 404 if the system does not exist.
 pub async fn get_system_compliance_bundles(
@@ -72,7 +72,7 @@ pub async fn get_system_compliance_bundles(
     }
 
     match list_system_bundles(&pool, system_id).await {
-        Ok(Some((bundle_rollup_pairs, errors))) => {
+        Ok(Some(bundle_rollup_pairs)) => {
             let bundles = bundle_rollup_pairs
                 .into_iter()
                 .map(|(bundle, rollup)| SystemComplianceBundle { bundle, rollup })
@@ -83,7 +83,6 @@ pub async fn get_system_compliance_bundles(
                 Json(SystemComplianceBundlesResponse {
                     system_id,
                     bundles,
-                    errors,
                 }),
             )
                 .into_response()
