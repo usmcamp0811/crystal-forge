@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-06-20 02:07'
-updated_date: '2026-06-24 23:49'
+updated_date: '2026-06-25 00:34'
 labels:
   - design-parity
   - builders
@@ -244,4 +244,10 @@ MR !283 review blockers fixed (commit b3ef55dd):
 - Matches operational reality: disabled builders don't accept work
 
 Both issues identified in code review, now resolved.
+
+CI fix: Garage package configuration (commit dbf2c9fe):
+- Added explicit `services.garage.package = pkgs.garage;`
+- NixOS garage.nix module requires this option to be set
+- Without it: "The option `nodes.s3Cache.services.garage.package' was accessed but has no value defined"
+- Fixes web-ui check Nix evaluation error
 <!-- SECTION:NOTES:END -->
