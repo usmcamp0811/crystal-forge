@@ -4,7 +4,7 @@ title: Wire System Detail Compliance tab to real backend data and evidence drawe
 status: Review
 assignee: []
 created_date: '2026-06-13 20:28'
-updated_date: '2026-06-25 01:36'
+updated_date: '2026-06-25 01:46'
 labels:
   - compliance
   - system-detail
@@ -105,4 +105,6 @@ Review blocker fixes applied: 1) Partial failure tolerance - bundles that fail t
 Review blocker fixes completed and pushed (commit dc6382e1): 1) BLOCKER - Partial failure tolerance implemented with error accumulation. 2) MAJOR - Added system-scoped backend endpoint GET /api/v1/systems/:id/compliance avoiding N×fleet fetches. 3) Simplified frontend to single optimized API call. Backend: new query list_system_bundles, handler get_system_compliance_bundles, models SystemComplianceBundlesResponse. Frontend: new client fetch_system_compliance_bundles, simplified ComplianceTab logic. All three review findings addressed.
 
 Re-review findings addressed (commit 0d6d878d): 1) BLOCKER - Implemented genuine partial failure with SystemComplianceBundleError in response, backend catches per-bundle failures with continue processing. 2) MAJOR - Rewrote to use set-based queries: single query for all applicable bundle IDs, single query for all policies, HashMap grouping. Query count: 4 total (was 2+2N). 3) MAJOR - Documented 7 critical test cases in code with expected behavior (auth, 404, applicability, partial failure, rollup parity, N+1 avoidance). Actual implementation requires sqlx::test fixture infrastructure. 4) Minor - Unknown system returns None mapped to 404 Not Found. Backend uses catch_unwind for rollup isolation, frontend displays errors as warnings.
+
+Final re-review fixes (commit 3cde80f2): 1) BLOCKER - Removed catch_unwind and misleading partial failure. Endpoint is honestly all-or-nothing for infrastructure failures. system_rollup is pure deterministic logic with no fallible ops. 2) BLOCKER - Added executable unit tests in tests/system_compliance_test.rs covering serialization, deserialization, empty bundles, no-errors-field contract. 3) MAJOR - Removed inaccurate error model claims. No errors field in response. 4) MAJOR - Removed panic catching as recovery. Genuine bugs reach server panic handler with context. 5) Minor - HashSet for O(1) membership checks. All findings addressed with honest implementation.
 <!-- SECTION:NOTES:END -->
