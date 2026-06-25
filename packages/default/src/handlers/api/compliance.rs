@@ -57,7 +57,11 @@ pub async fn get_compliance_bundle_systems(
 
 /// `GET /api/v1/systems/:system_id/compliance`
 /// Returns all compliance bundles applicable to the specified system with rollups.
-/// This endpoint is optimized for system detail views and avoids N×fleet fetches.
+/// 
+/// This endpoint uses set-based queries to avoid N+1 database patterns and includes
+/// partial failure handling so one broken bundle doesn't hide all valid data.
+///
+/// Returns 404 if the system does not exist.
 pub async fn get_system_compliance_bundles(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -68,7 +72,7 @@ pub async fn get_system_compliance_bundles(
     }
 
     match list_system_bundles(&pool, system_id).await {
-        Ok(bundle_rollup_pairs) => {
+        Ok(Some((bundle_rollup_pairs, errors))) => {
             let bundles = bundle_rollup_pairs
                 .into_iter()
                 .map(|(bundle, rollup)| SystemComplianceBundle { bundle, rollup })
@@ -79,10 +83,12 @@ pub async fn get_system_compliance_bundles(
                 Json(SystemComplianceBundlesResponse {
                     system_id,
                     bundles,
+                    errors,
                 }),
             )
                 .into_response()
         }
+        Ok(None) => not_found(),
         Err(_) => internal_error("Failed to load system compliance bundles"),
     }
 }

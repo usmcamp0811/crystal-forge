@@ -1161,10 +1161,25 @@ fn ComplianceTab(system: SystemDetail) -> Element {
         let sid = system_id;
         async move {
             match fetch_system_compliance_bundles(&sid).await {
-                Ok(response) => SystemComplianceData {
-                    bundles: response.bundles,
-                    error: None,
-                },
+                Ok(response) => {
+                    let error = if response.errors.is_empty() {
+                        None
+                    } else {
+                        Some(format!(
+                            "Some compliance bundles could not be loaded: {}",
+                            response
+                                .errors
+                                .iter()
+                                .map(|e| format!("{}: {}", e.bundle_name, e.message))
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        ))
+                    };
+                    SystemComplianceData {
+                        bundles: response.bundles,
+                        error,
+                    }
+                }
                 Err(e) => SystemComplianceData {
                     bundles: Vec::new(),
                     error: Some(format!("Failed to load compliance bundles: {e}")),

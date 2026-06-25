@@ -1038,16 +1038,28 @@ pub struct ComplianceBundleSystemsResponse {
 
 /// Response for GET /api/v1/systems/:system_id/compliance
 /// Returns bundles applicable to the system with their rollups.
+/// Includes partial failures so one broken bundle doesn't hide all valid data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemComplianceBundlesResponse {
     pub system_id: uuid::Uuid,
     pub bundles: Vec<SystemComplianceBundle>,
+    /// Bundle-level failures (e.g., malformed policies, query errors).
+    /// Frontend should display these as warnings alongside successful bundles.
+    #[serde(default)]
+    pub errors: Vec<SystemComplianceBundleError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemComplianceBundle {
     pub bundle: ComplianceBundleSummary,
     pub rollup: ComplianceSystemRollup,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemComplianceBundleError {
+    pub bundle_id: uuid::Uuid,
+    pub bundle_name: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
