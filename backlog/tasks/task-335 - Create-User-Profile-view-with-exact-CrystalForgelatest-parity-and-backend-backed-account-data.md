@@ -1,10 +1,10 @@
 ---
 id: TASK-335
 title: Create User Profile view (new route+view) with CrystalForgelatest parity
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-25 21:52'
+updated_date: '2026-06-25 21:53'
 labels:
   - design-parity
   - user-profile
@@ -112,14 +112,8 @@ Medium: this introduces a new routed UI surface and may require profile/account 
 - [ ] #6 web-ui check captures profile loading, populated, and editing states and asserts a real interaction
 <!-- AC:END -->
 
-## Implementation Plan
+## Implementation Notes
 
-<!-- SECTION:PLAN:BEGIN -->
-1. Inspect the CrystalForgelatest ProfileView.jsx and current web-ui route/view/layout/API patterns.
-2. Inspect existing server/API capabilities for current-user account/profile/preferences/security/session data.
-3. Add and wire the Profile route/view module and sidebar user-block navigation.
-4. Implement or reuse minimal backend API support required for backend-backed current-user profile/account/preference data, including tests and SQLx updates if applicable.
-5. Implement Profile & Preferences sections using backend-backed data and scoped edit/save/cancel validation states.
-6. Extend the web-ui check to cover Profile loading/populated/editing states and assert at least one real interaction.
-7. Run the declared backend/API, formatting, wasm cargo check, SQLx-if-applicable, and web-ui check verification commands.
-<!-- SECTION:PLAN:END -->
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-335-profile-view
+<!-- SECTION:NOTES:END -->
