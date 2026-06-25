@@ -73,26 +73,26 @@ struct BundleRow {
     environment_count: i64,
 }
 
-#[derive(Debug, FromRow)]
-struct SystemRow {
-    id: Uuid,
-    hostname: String,
-    environment: Option<String>,
-    health_status: String,
-    critical_cve_count: i32,
-    high_cve_count: i32,
+#[derive(Debug, Clone, FromRow)]
+pub(crate) struct SystemRow {
+    pub id: Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub health_status: String,
+    pub critical_cve_count: i32,
+    pub high_cve_count: i32,
 }
 
 #[derive(Debug, Clone, FromRow)]
-struct PolicyRow {
-    id: Uuid,
+pub(crate) struct PolicyRow {
+    pub id: Uuid,
     #[sqlx(default)]
-    bundle_id: Uuid,
-    name: String,
-    description: Option<String>,
-    policy_type: String,
-    config: Value,
-    enabled: bool,
+    pub bundle_id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub config: Value,
+    pub enabled: bool,
 }
 
 fn bundle_from_row(row: BundleRow) -> ComplianceBundleSummary {
@@ -505,9 +505,35 @@ pub async fn list_system_bundles(
     }
 
     // Compute rollups using deterministic in-memory logic
+    let result = assemble_system_compliance_bundles(
+        &system,
+        all_bundles,
+        &applicable_bundle_ids,
+        &policies_by_bundle,
+    );
+
+    Ok(Some(result))
+}
+
+/// Pure in-memory assembly of compliance bundles for a system.
+/// Exported as pub(crate) for unit testing without database fixtures.
+///
+/// Given:
+/// - A system row
+/// - All bundles
+/// - The set of applicable bundle IDs
+/// - Policies grouped by bundle_id
+///
+/// Returns bundles with computed rollups, filtered to only applicable bundles.
+pub(crate) fn assemble_system_compliance_bundles(
+    system: &SystemRow,
+    bundles: Vec<ComplianceBundleSummary>,
+    applicable_bundle_ids: &std::collections::HashSet<Uuid>,
+    policies_by_bundle: &std::collections::HashMap<Uuid, Vec<PolicyRow>>,
+) -> Vec<(ComplianceBundleSummary, ComplianceSystemRollup)> {
     let mut result = Vec::new();
 
-    for bundle in all_bundles {
+    for bundle in bundles {
         if !applicable_bundle_ids.contains(&bundle.id) {
             continue;
         }
@@ -519,7 +545,7 @@ pub async fn list_system_bundles(
         result.push((bundle, rollup));
     }
 
-    Ok(Some(result))
+    result
 }
 
 pub async fn get_system_evidence(
@@ -635,7 +661,7 @@ async fn list_applicable_system_rows(pool: &PgPool, bundle_id: Uuid) -> Result<V
     .await?)
 }
 
-fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> ComplianceSystemRollup {
+pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> ComplianceSystemRollup {
     let mut pass  = 0i64;
     let mut warn  = 0i64;
     let mut fail  = 0i64;

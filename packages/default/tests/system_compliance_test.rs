@@ -1,138 +1,220 @@
-//! Unit tests for system compliance endpoint logic
+//! Unit tests for system compliance endpoint assembly logic
 
 use crystal_forge::api::models::{
-    ComplianceBundleSummary, ComplianceEnvironmentRef, ComplianceSystemRollup,
-    SystemComplianceBundle, SystemComplianceBundlesResponse,
+    ComplianceBundleSummary, ComplianceEnvironmentRef,
 };
-use serde_json;
+use crystal_forge::queries::compliance::{
+    assemble_system_compliance_bundles, system_rollup, PolicyRow, SystemRow,
+};
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-/// Test that response serialization matches expected JSON structure
-#[test]
-fn test_response_serialization() {
-    let system_id = Uuid::new_v4();
-    let bundle_id = Uuid::new_v4();
-    let env_id = Uuid::new_v4();
-
-    let response = SystemComplianceBundlesResponse {
-        system_id,
-        bundles: vec![SystemComplianceBundle {
-            bundle: ComplianceBundleSummary {
-                id: bundle_id,
-                name: "Test Bundle".to_string(),
-                framework: "NIST".to_string(),
-                version: "1.0".to_string(),
-                description: Some("Test compliance bundle".to_string()),
-                layer: "infrastructure".to_string(),
-                owner: "security-team".to_string(),
-                last_review: None,
-                policy_ids: vec![],
-                required_envs: vec![ComplianceEnvironmentRef {
-                    id: env_id,
-                    name: "prod".to_string(),
-                    color_hex: "#ff0000".to_string(),
-                }],
-                control_count: 5,
-                environment_count: 1,
-            },
-            rollup: ComplianceSystemRollup {
-                system_id,
-                hostname: "test-host".to_string(),
-                environment: Some("prod".to_string()),
-                applies: true,
-                total: 5,
-                evaluated_total: 5,
-                pass: 4,
-                warn: 1,
-                fail: 0,
-                waiver: 0,
-                score: 80,
-            },
-        }],
-    };
-
-    let json = serde_json::to_string(&response).expect("serialization should succeed");
-    assert!(json.contains("\"system_id\""));
-    assert!(json.contains("\"bundles\""));
-    assert!(json.contains("Test Bundle"));
-    assert!(json.contains("\"score\":80"));
+fn make_system(hostname: &str, environment: Option<&str>) -> SystemRow {
+    SystemRow {
+        id: Uuid::new_v4(),
+        hostname: hostname.to_string(),
+        environment: environment.map(|s| s.to_string()),
+        health_status: "healthy".to_string(),
+        critical_cve_count: 0,
+        high_cve_count: 0,
+    }
 }
 
-/// Test that response with no bundles serializes correctly
-#[test]
-fn test_empty_bundles_response() {
-    let system_id = Uuid::new_v4();
-    let response = SystemComplianceBundlesResponse {
-        system_id,
-        bundles: vec![],
-    };
-
-    let json = serde_json::to_string(&response).expect("serialization should succeed");
-    assert!(json.contains("\"bundles\":[]"));
+fn make_bundle(id: Uuid, name: &str) -> ComplianceBundleSummary {
+    ComplianceBundleSummary {
+        id,
+        name: name.to_string(),
+        framework: "Test Framework".to_string(),
+        version: "1.0".to_string(),
+        description: None,
+        layer: "infrastructure".to_string(),
+        owner: "test-owner".to_string(),
+        last_review: None,
+        policy_ids: vec![],
+        required_envs: vec![],
+        control_count: 0,
+        environment_count: 0,
+    }
 }
 
-/// Test that response deserializes correctly
-#[test]
-fn test_response_deserialization() {
-    let system_id = Uuid::new_v4();
-    let bundle_id = Uuid::new_v4();
+fn make_policy(bundle_id: Uuid, name: &str, enabled: bool) -> PolicyRow {
+    PolicyRow {
+        id: Uuid::new_v4(),
+        bundle_id,
+        name: name.to_string(),
+        description: None,
+        policy_type: "require_cf_agent".to_string(),
+        config: serde_json::json!({}),
+        enabled,
+    }
+}
 
-    let json = format!(
-        r#"{{
-            "system_id": "{}",
-            "bundles": [{{
-                "bundle": {{
-                    "id": "{}",
-                    "name": "Test Bundle",
-                    "framework": "NIST",
-                    "version": "1.0",
-                    "description": null,
-                    "layer": "infrastructure",
-                    "owner": "security-team",
-                    "last_review": null,
-                    "policy_ids": [],
-                    "required_envs": [],
-                    "control_count": 5,
-                    "environment_count": 0
-                }},
-                "rollup": {{
-                    "system_id": "{}",
-                    "hostname": "test-host",
-                    "environment": "prod",
-                    "applies": true,
-                    "total": 5,
-                    "evaluated_total": 5,
-                    "pass": 4,
-                    "warn": 1,
-                    "fail": 0,
-                    "waiver": 0,
-                    "score": 80
-                }}
-            }}]
-        }}"#,
-        system_id, bundle_id, system_id
+/// Test that only applicable bundles are included in the result
+#[test]
+fn test_filters_non_applicable_bundles() {
+    let system = make_system("test-host", Some("prod"));
+    
+    let bundle1_id = Uuid::new_v4();
+    let bundle2_id = Uuid::new_v4();
+    let bundle3_id = Uuid::new_v4();
+    
+    let bundle1 = make_bundle(bundle1_id, "Applicable Bundle 1");
+    let bundle2 = make_bundle(bundle2_id, "Non-Applicable Bundle");
+    let bundle3 = make_bundle(bundle3_id, "Applicable Bundle 2");
+    
+    let mut applicable_ids = HashSet::new();
+    applicable_ids.insert(bundle1_id);
+    applicable_ids.insert(bundle3_id);
+    // bundle2 is intentionally not in the applicable set
+    
+    let policies_by_bundle = HashMap::new();
+    
+    let result = assemble_system_compliance_bundles(
+        &system,
+        vec![bundle1, bundle2, bundle3],
+        &applicable_ids,
+        &policies_by_bundle,
     );
-
-    let response: SystemComplianceBundlesResponse =
-        serde_json::from_str(&json).expect("deserialization should succeed");
-
-    assert_eq!(response.system_id, system_id);
-    assert_eq!(response.bundles.len(), 1);
-    assert_eq!(response.bundles[0].bundle.name, "Test Bundle");
-    assert_eq!(response.bundles[0].rollup.score, 80);
+    
+    assert_eq!(result.len(), 2, "Should only include 2 applicable bundles");
+    assert!(
+        result.iter().any(|(b, _)| b.id == bundle1_id),
+        "Should include bundle1"
+    );
+    assert!(
+        result.iter().any(|(b, _)| b.id == bundle3_id),
+        "Should include bundle3"
+    );
+    assert!(
+        !result.iter().any(|(b, _)| b.id == bundle2_id),
+        "Should NOT include bundle2"
+    );
 }
 
-/// Test that the all-or-nothing model is correctly represented
+/// Test that bundles with no policies receive a valid rollup
 #[test]
-fn test_no_partial_error_field() {
-    let system_id = Uuid::new_v4();
-    let response = SystemComplianceBundlesResponse {
-        system_id,
-        bundles: vec![],
-    };
+fn test_bundle_with_no_policies() {
+    let system = make_system("test-host", Some("prod"));
+    
+    let bundle_id = Uuid::new_v4();
+    let bundle = make_bundle(bundle_id, "Empty Bundle");
+    
+    let mut applicable_ids = HashSet::new();
+    applicable_ids.insert(bundle_id);
+    
+    let policies_by_bundle = HashMap::new();
+    
+    let result = assemble_system_compliance_bundles(
+        &system,
+        vec![bundle],
+        &applicable_ids,
+        &policies_by_bundle,
+    );
+    
+    assert_eq!(result.len(), 1);
+    let (_, rollup) = &result[0];
+    
+    assert_eq!(rollup.hostname, "test-host");
+    assert_eq!(rollup.total, 0, "No policies means zero total");
+    assert_eq!(rollup.pass, 0);
+    assert_eq!(rollup.warn, 0);
+    assert_eq!(rollup.fail, 0);
+    assert_eq!(rollup.score, 0, "Empty bundle should have 0 score");
+}
 
-    let json = serde_json::to_value(&response).expect("serialization should succeed");
+/// Test that policies are correctly assigned to their bundle
+#[test]
+fn test_policies_grouped_by_bundle() {
+    let system = make_system("test-host", Some("prod"));
+    
+    let bundle1_id = Uuid::new_v4();
+    let bundle2_id = Uuid::new_v4();
+    
+    let bundle1 = make_bundle(bundle1_id, "Bundle 1");
+    let bundle2 = make_bundle(bundle2_id, "Bundle 2");
+    
+    let mut applicable_ids = HashSet::new();
+    applicable_ids.insert(bundle1_id);
+    applicable_ids.insert(bundle2_id);
+    
+    let mut policies_by_bundle = HashMap::new();
+    policies_by_bundle.insert(
+        bundle1_id,
+        vec![
+            make_policy(bundle1_id, "policy1", true),
+            make_policy(bundle1_id, "policy2", true),
+        ],
+    );
+    policies_by_bundle.insert(
+        bundle2_id,
+        vec![make_policy(bundle2_id, "policy3", true)],
+    );
+    
+    let result = assemble_system_compliance_bundles(
+        &system,
+        vec![bundle1, bundle2],
+        &applicable_ids,
+        &policies_by_bundle,
+    );
+    
+    assert_eq!(result.len(), 2);
+    
+    let bundle1_rollup = result.iter().find(|(b, _)| b.id == bundle1_id).unwrap();
+    let bundle2_rollup = result.iter().find(|(b, _)| b.id == bundle2_id).unwrap();
+    
+    assert_eq!(bundle1_rollup.1.total, 2, "Bundle 1 should have 2 policies");
+    assert_eq!(bundle2_rollup.1.total, 1, "Bundle 2 should have 1 policy");
+}
 
-    // Verify there is no "errors" field in the JSON
-    assert!(json.get("errors").is_none(), "Response should not contain errors field - endpoint is all-or-nothing");
+/// Test that system_rollup generates expected pass/warn/fail counts
+#[test]
+fn test_system_rollup_with_mixed_policies() {
+    let system = make_system("healthy-host", Some("prod"));
+    
+    let bundle_id = Uuid::new_v4();
+    let policies = vec![
+        make_policy(bundle_id, "enabled-policy-1", true),
+        make_policy(bundle_id, "enabled-policy-2", true),
+        make_policy(bundle_id, "disabled-policy", false),
+    ];
+    
+    let rollup = system_rollup(system, &policies);
+    
+    assert_eq!(rollup.total, 3, "Should count all policies");
+    assert_eq!(rollup.pass, 2, "Enabled policies on healthy system should pass");
+    assert_eq!(rollup.warn, 1, "Disabled policy should show as warn");
+    assert_eq!(rollup.fail, 0);
+    assert_eq!(rollup.evaluated_total, 2, "Only enabled policies evaluated");
+    assert_eq!(rollup.score, 100, "All evaluated policies passed");
+}
+
+/// Test that empty assembly returns empty result
+#[test]
+fn test_empty_bundles_list() {
+    let system = make_system("test-host", None);
+    let applicable_ids = HashSet::new();
+    let policies_by_bundle = HashMap::new();
+    
+    let result = assemble_system_compliance_bundles(
+        &system,
+        vec![],
+        &applicable_ids,
+        &policies_by_bundle,
+    );
+    
+    assert_eq!(result.len(), 0, "Empty bundle list should produce empty result");
+}
+
+/// Test that rollup preserves system information
+#[test]
+fn test_rollup_preserves_system_info() {
+    let system = make_system("test-host-123", Some("staging"));
+    let policies = vec![make_policy(Uuid::new_v4(), "test-policy", true)];
+    
+    let rollup = system_rollup(system.clone(), &policies);
+    
+    assert_eq!(rollup.hostname, "test-host-123");
+    assert_eq!(rollup.environment, Some("staging".to_string()));
+    assert_eq!(rollup.system_id, system.id);
 }
