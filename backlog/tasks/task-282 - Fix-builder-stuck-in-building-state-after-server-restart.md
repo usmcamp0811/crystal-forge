@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-gpt-5.5'
 created_date: '2026-04-20 19:22'
-updated_date: '2026-06-26 01:21'
+updated_date: '2026-06-26 01:24'
 labels:
   - bug
   - builder
@@ -70,10 +70,20 @@ High: incorrect state transition logic could duplicate work or regress queue beh
 - [ ] #7 Targeted integration tests cover startup orphan recovery and runtime builder-loss recovery.
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Verify existing recovery primitives: `mark_stale_builders_offline`, `requeue_orphaned_building_jobs`, and `run_builder_recovery_loop`.
+2. Tighten recovery observability so startup/runtime requeue transitions record/log explicit reasons.
+3. Preserve queue ordering and lease safety: recovered jobs return to `queued`, clear stale `builder_id`, and stale builders cannot complete/fail reclaimed jobs.
+4. Run targeted ignored DB tests for startup orphan recovery, runtime stale-builder recovery, and stale builder race-safety using the repo Nix devshell and local process-compose database.
+5. Run formatting and a scoped Nix build/check if targeted tests pass.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: openai-gpt-5.5 on reckless in ~/code/crystal-forge/TASK-282-builder-stuck-building-recovery
+Pre-flight complete. Existing implementation already contains recovery primitives and DB tests in `packages/default/src/queries/builders.rs` plus a server recovery loop in `packages/default/src/server/mod.rs`. I will keep scope limited to making recovery reasons explicit/auditable and verifying the existing startup/runtime recovery behavior.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
