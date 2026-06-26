@@ -1385,9 +1385,7 @@ mod tests {
     async fn queue_test_pool() -> PgPool {
         let database_url = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| {
-                "postgres://crystal_forge:password@127.0.0.1:3042/crystal_forge".to_string()
-            });
+            .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1/cf_test".to_string());
 
         PgPoolOptions::new()
             .connect_lazy(&database_url)
