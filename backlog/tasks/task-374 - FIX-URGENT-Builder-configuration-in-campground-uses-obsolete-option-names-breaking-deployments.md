@@ -5,7 +5,7 @@ status: Review
 assignee:
   - gpt-5.5
 created_date: '2026-06-27 16:04'
-updated_date: '2026-06-27 21:41'
+updated_date: '2026-06-27 21:51'
 labels:
   - bug
   - hotfix
@@ -93,5 +93,22 @@ None known.
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Adjusted Acceptance Criterion #1 after MR review: preserving `api_mode = false` as the default is required for upgrade compatibility. Explicit API mode remains the supported path for distributed builders.
+Addressed re-review test-quality finding in commit 2c15a362 (`test: verify builder bootstrap signing interoperability`) and pushed to MR !288.
+
+Changes:
+- Made `BuilderApiClient::sign_bootstrap_request` visible within the crate.
+- Added `resolve_builder_request_accepts_client_generated_bootstrap_signature`, which signs with the client helper, builds the same headers sent by the client, and verifies through the server handler verifier.
+- Updated MR description and verified via `glab mr view 288` that the description now reflects the compatibility default and cross-module interoperability test.
+
+Verification:
+- `SQLX_OFFLINE=true nix develop -c cargo test handlers::api::builders::tests::resolve_builder_request_accepts_client_generated_bootstrap_signature --lib` passed: 1 passed, 0 failed.
+- `SQLX_OFFLINE=true nix develop -c cargo test handlers::api::builders::tests --lib` passed: 13 passed, 0 failed.
+- `SQLX_OFFLINE=true nix develop -c cargo test builder::api_client::tests --lib` passed: 6 passed, 0 failed.
+- `git diff --check` passed.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implemented API-mode builder runtime config and public-key builder ID resolution while preserving upgrade compatibility. After review, restored `build.api_mode = false` as the default so existing combined server/local-builder deployments do not silently require public-key registration; distributed builders can explicitly set `api_mode = true`. Added focused bootstrap authentication tests, including a cross-module client/server signing interoperability test, and NixOS eval regression coverage. MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/288
+<!-- SECTION:FINAL_SUMMARY:END -->
