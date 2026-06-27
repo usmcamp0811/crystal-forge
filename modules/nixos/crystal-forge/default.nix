@@ -18,7 +18,8 @@
 
   # Build the raw config first (your existing baseConfig logic, unchanged)
   baseConfigRaw =
-    {
+    {}
+    // lib.optionalAttrs (cfg.server.enable || (cfg.build.enable && !cfg.build.api_mode)) {
       database = {
         host = cfg.database.host;
         port = cfg.database.port;
@@ -124,6 +125,17 @@
         }
         // lib.optionalAttrs (cfg.build.systemd_properties != []) {
           systemd_properties = cfg.build.systemd_properties;
+        };
+    }
+    // lib.optionalAttrs cfg.build.enable {
+      builder =
+        {enable_api_mode = cfg.build.api_mode;}
+        // lib.optionalAttrs cfg.build.api_mode {
+          private_key_path =
+            if cfg.build.api_key_file != null
+            then toString cfg.build.api_key_file
+            else "/var/lib/crystal-forge/builder-api.key";
+          server_url = cfg.build.server_url;
         };
     }
     // lib.optionalAttrs (cfg.auth.ssh_key_path
@@ -951,11 +963,11 @@ in {
         type = lib.types.bool;
         default = false;
         description = lib.mdDoc ''
-          Use builder API mode (recommended).
+          Use builder API mode.
 
           When enabled, the builder authenticates to the Crystal Forge server
           via API using a private key, rather than connecting directly to the
-          database (legacy mode).
+          database. This is the recommended mode for distributed builder hosts.
 
           **Benefits of API mode:**
           - No database credentials needed on builder machines
@@ -963,15 +975,17 @@ in {
           - Supports distributed builds across networks
           - Builder registration via server UI
 
-          **Default**: false (legacy mode for backward compatibility)
+          **Default**: false, to preserve compatibility for existing combined
+          server/builder deployments where `build.enable` follows
+          `server.enable`. New distributed builder hosts should set this to
+          `true` explicitly.
 
-          **Migration**: Set to true to use API mode. After enabling, the
-          builder API key will be auto-generated and displayed in systemd
-          logs. Register the builder using the public key in the UI.
+          When API mode is enabled without `api_key_file`, the builder API key
+          will be auto-generated and displayed in systemd logs. Register the
+          builder using the public key in the UI.
 
-          **Deprecation**: Legacy database mode (false) is deprecated and
-          will be removed in a future release. New deployments should use
-          API mode (true).
+          **Deprecation**: Legacy database mode (`false`) is deprecated and
+          should only be used for temporary migration/testing.
         '';
       };
 
@@ -1891,8 +1905,14 @@ in {
     in {
       description = "Crystal Forge Builder";
       wantedBy = ["multi-user.target"];
-      after = lib.optional cfg.local-database "postgresql.service";
-      wants = lib.optional cfg.local-database "postgresql.service";
+      after =
+        lib.optional
+        (cfg.local-database && !cfg.build.api_mode)
+        "postgresql.service";
+      wants =
+        lib.optional
+        (cfg.local-database && !cfg.build.api_mode)
+        "postgresql.service";
 
       path = with pkgs;
         [nix git vulnix systemd nix-fast-build nix-eval-jobs]
@@ -1960,15 +1980,10 @@ in {
           echo "ATTIC_TOKEN: ''${ATTIC_TOKEN:+SET}"
         fi
 
-        # Test attic configuration as the crystal-forge user
+        # Test attic configuration directly in the service context. The builder
+        # service already runs as crystal-forge.
         echo "Testing Attic configuration..."
-        ${pkgs.util-linux}/bin/runuser -u crystal-forge -- env \
-          HOME="/var/lib/crystal-forge" \
-          XDG_CONFIG_HOME="/var/lib/crystal-forge/.config" \
-          ATTIC_SERVER_URL="''${ATTIC_SERVER_URL:-}" \
-          ATTIC_TOKEN="''${ATTIC_TOKEN:-}" \
-          ATTIC_REMOTE_NAME="''${ATTIC_REMOTE_NAME:-}" \
-          attic login list || echo "Attic configuration test failed"
+        attic login list || echo "Attic configuration test failed"
       '';
 
       # Splice arbitrary unit properties (e.g., IOWeight=100, TasksMax=3000) parsed above
