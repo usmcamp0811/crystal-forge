@@ -548,7 +548,13 @@ pub async fn requeue_orphaned_building_jobs_with_reason(
             started_at = NULL,
             logs = RIGHT(
                 COALESCE(logs, ''),
-                10 * 1024 * 1024 - OCTET_LENGTH(E'\n\nRecovery: re-queued from building by ' || $1)
+                -- RIGHT(text, n) counts characters, not bytes. Divide the
+                -- remaining byte budget by 4 so retained UTF-8 text cannot
+                -- exceed the log byte ceiling even with 4-byte code points.
+                GREATEST(
+                    0,
+                    (10 * 1024 * 1024 - OCTET_LENGTH(E'\n\nRecovery: re-queued from building by ' || $1)) / 4
+                )
             ) || E'\n\nRecovery: re-queued from building by ' || $1,
             updated_at = now()
         WHERE bj.status = 'building'
@@ -2523,7 +2529,7 @@ mod tests {
             r#"
             UPDATE build_jobs
             SET builder_id = NULL,
-                logs = repeat('x', $2::int)
+                logs = repeat('é', ($2 / 2)::int)
             WHERE id = $1
             "#,
         )
