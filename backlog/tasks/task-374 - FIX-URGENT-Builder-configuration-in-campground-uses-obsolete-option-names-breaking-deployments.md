@@ -5,7 +5,7 @@ status: Review
 assignee:
   - gpt-5.5
 created_date: '2026-06-27 16:04'
-updated_date: '2026-06-27 21:18'
+updated_date: '2026-06-27 21:40'
 labels:
   - bug
   - hotfix
@@ -93,13 +93,26 @@ None known.
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR opened and task moved to Review: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/288
+Addressed MR review findings in commit 8710c926 (`fix: preserve legacy builder mode default`) and pushed to MR !288.
 
-Commit: 30f40d15 fix: make builder API mode self-register by public key
+Review response summary:
+- Restored `services.crystal-forge.build.api_mode` default to `false` for upgrade compatibility.
+- Updated NixOS option docs to say distributed builders should opt into API mode explicitly.
+- Added handler/unit tests covering accepted canonical bootstrap payload, tampered body rejection, invalid signature rejection, expired timestamp rejection, unregistered key -> 404 mapping, disabled builder -> 403 mapping, and enabled builder UUID mapping.
+- Added ignored DB-backed query regression for `get_builder_by_public_key` resolving a registered key and returning none for an unregistered key.
+- Updated MR description to remove the incorrect default-true/no-breakage claims and document the compatibility default.
+
+Verification after review fixes:
+- `SQLX_OFFLINE=true nix develop -c cargo test handlers::api::builders::tests --lib` passed: 12 passed, 0 failed.
+- NixOS eval passed for legacy combined config: `legacyApiMode=false`, builder still depends on `postgresql.service`.
+- NixOS eval passed for explicit API mode: API env is set, no PostgreSQL `after`/`wants`, no `runuser` in preStart.
+- `SQLX_OFFLINE=true nix develop -c cargo test builder --lib` passed: 66 passed, 0 failed, 29 ignored.
+- `SQLX_OFFLINE=true nix develop -c cargo check --bins` passed with pre-existing warnings.
+- `git diff --check` passed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Implemented API-first builder deployment for NixOS and public-key-based builder ID resolution. Builders now default to API mode, generate/consume the correct runtime config, avoid PostgreSQL dependencies in API mode, and can resolve their server-side UUID after operator public-key registration. Opened MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/288
+Implemented API-mode builder runtime config and public-key builder ID resolution while preserving upgrade compatibility. After review, restored `build.api_mode = false` as the default so existing combined server/local-builder deployments do not silently require public-key registration; distributed builders can explicitly set `api_mode = true`. Added focused bootstrap authentication tests and NixOS eval regression coverage. MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/288
 <!-- SECTION:FINAL_SUMMARY:END -->
