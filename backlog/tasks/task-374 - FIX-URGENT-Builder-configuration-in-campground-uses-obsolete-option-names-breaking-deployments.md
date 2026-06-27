@@ -5,7 +5,7 @@ status: Review
 assignee:
   - gpt-5.5
 created_date: '2026-06-27 16:04'
-updated_date: '2026-06-27 21:40'
+updated_date: '2026-06-27 21:41'
 labels:
   - bug
   - hotfix
@@ -81,38 +81,17 @@ None known.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 With `build.enable = true`, the NixOS module configures builder API mode by default without requiring users to set `api_mode = true`.
-- [x] #2 Generated Crystal Forge config includes the builder API-mode fields consumed by the builder runtime: enabled API mode, private key path, and server URL.
-- [x] #3 A deployed builder can start without a local `builder_id`, derive its public key, and resolve its server-side builder ID after the operator registers that public key in the UI/API.
+- [x] #1 Existing combined server/local-builder deployments that do not set `build.api_mode` remain in legacy database mode on upgrade; distributed builders can explicitly set `build.api_mode = true`.
+- [x] #2 Generated Crystal Forge config includes the builder API-mode fields consumed by the builder runtime when API mode is explicitly enabled: enabled API mode, private key path, and server URL.
+- [x] #3 A deployed API-mode builder can start without a local `builder_id`, derive its public key, and resolve its server-side builder ID after the operator registers that public key in the UI/API.
 - [x] #4 In API mode, builder startup does not require or attempt direct PostgreSQL/database configuration.
 - [x] #5 Builder API key generation remains non-interactive and writes files with restrictive permissions.
 - [x] #6 Builder pre-start does not call `runuser` from a non-root service context.
-- [x] #7 A targeted Rust and/or NixOS evaluation test verifies the generated config/API-mode path.
+- [x] #7 Targeted Rust and NixOS evaluation tests verify the generated config/API-mode path and upgrade-compatible legacy default.
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Addressed MR review findings in commit 8710c926 (`fix: preserve legacy builder mode default`) and pushed to MR !288.
-
-Review response summary:
-- Restored `services.crystal-forge.build.api_mode` default to `false` for upgrade compatibility.
-- Updated NixOS option docs to say distributed builders should opt into API mode explicitly.
-- Added handler/unit tests covering accepted canonical bootstrap payload, tampered body rejection, invalid signature rejection, expired timestamp rejection, unregistered key -> 404 mapping, disabled builder -> 403 mapping, and enabled builder UUID mapping.
-- Added ignored DB-backed query regression for `get_builder_by_public_key` resolving a registered key and returning none for an unregistered key.
-- Updated MR description to remove the incorrect default-true/no-breakage claims and document the compatibility default.
-
-Verification after review fixes:
-- `SQLX_OFFLINE=true nix develop -c cargo test handlers::api::builders::tests --lib` passed: 12 passed, 0 failed.
-- NixOS eval passed for legacy combined config: `legacyApiMode=false`, builder still depends on `postgresql.service`.
-- NixOS eval passed for explicit API mode: API env is set, no PostgreSQL `after`/`wants`, no `runuser` in preStart.
-- `SQLX_OFFLINE=true nix develop -c cargo test builder --lib` passed: 66 passed, 0 failed, 29 ignored.
-- `SQLX_OFFLINE=true nix develop -c cargo check --bins` passed with pre-existing warnings.
-- `git diff --check` passed.
+Adjusted Acceptance Criterion #1 after MR review: preserving `api_mode = false` as the default is required for upgrade compatibility. Explicit API mode remains the supported path for distributed builders.
 <!-- SECTION:NOTES:END -->
-
-## Final Summary
-
-<!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Implemented API-mode builder runtime config and public-key builder ID resolution while preserving upgrade compatibility. After review, restored `build.api_mode = false` as the default so existing combined server/local-builder deployments do not silently require public-key registration; distributed builders can explicitly set `api_mode = true`. Added focused bootstrap authentication tests and NixOS eval regression coverage. MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/288
-<!-- SECTION:FINAL_SUMMARY:END -->
