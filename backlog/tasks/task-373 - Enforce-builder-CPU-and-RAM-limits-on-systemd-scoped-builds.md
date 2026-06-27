@@ -1,9 +1,10 @@
 ---
 id: TASK-373
 title: Enforce builder CPU and RAM limits on systemd-scoped builds
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-06-27 04:04'
+updated_date: '2026-06-27 04:06'
 labels:
   - builder
   - resource-limits
@@ -11,6 +12,7 @@ labels:
   - cpu
   - memory
   - bug
+  - high-priority
 milestone: 'm-19: Design Parity Existing Surfaces'
 dependencies: []
 references:
@@ -23,7 +25,7 @@ references:
 documentation:
   - >-
     https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html
-priority: medium
+priority: high
 ordinal: 0
 ---
 
@@ -72,7 +74,7 @@ Make builder CPU/RAM settings authoritative for build execution resource limits,
 
 ## Risk Level
 
-Medium: resource-limit enforcement can affect build reliability and host stability. Incorrect precedence or unit conversion could under-limit, over-limit, or fail builds unexpectedly.
+High: resource-limit enforcement protects builder host stability. Incorrect precedence or unit conversion could under-limit, over-limit, or fail builds unexpectedly.
 
 ## Verification Plan
 
@@ -105,3 +107,9 @@ Medium: resource-limit enforcement can affect build reliability and host stabili
 - [ ] #5 The precedence between persisted builder limits and static builder process config is deterministic and documented in code or user-facing help text.
 - [ ] #6 Tests cover resource-limit generation for explicit builder limits and fallback behavior for missing limits.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Human explicitly selected this resource-limit enforcement task into the sprint and requested it be highest priority.
+<!-- SECTION:NOTES:END -->
