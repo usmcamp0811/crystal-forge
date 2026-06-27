@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-06-27 16:04'
-updated_date: '2026-06-27 20:17'
+updated_date: '2026-06-27 21:13'
 labels:
   - bug
   - hotfix
@@ -23,9 +23,10 @@ modified_files:
   - packages/default/src/config/builder.rs
   - packages/default/src/builder/api_client.rs
   - packages/default/src/handlers/api/builders.rs
-  - packages/default/src/handlers/builder_request.rs
   - packages/default/src/queries/builders.rs
   - packages/default/src/bin/server.rs
+  - packages/default/src/bin/builder.rs
+  - packages/default/src/models/builders.rs
 priority: high
 ordinal: 100
 ---
@@ -79,30 +80,26 @@ None known.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 With `build.enable = true`, the NixOS module configures builder API mode by default without requiring users to set `api_mode = true`.
-- [ ] #2 Generated Crystal Forge config includes the builder API-mode fields consumed by the builder runtime: enabled API mode, private key path, and server URL.
-- [ ] #3 A deployed builder can start without a local `builder_id`, derive its public key, and resolve its server-side builder ID after the operator registers that public key in the UI/API.
-- [ ] #4 In API mode, builder startup does not require or attempt direct PostgreSQL/database configuration.
-- [ ] #5 Builder API key generation remains non-interactive and writes files with restrictive permissions.
-- [ ] #6 Builder pre-start does not call `runuser` from a non-root service context.
-- [ ] #7 A targeted Rust and/or NixOS evaluation test verifies the generated config/API-mode path.
+- [x] #1 With `build.enable = true`, the NixOS module configures builder API mode by default without requiring users to set `api_mode = true`.
+- [x] #2 Generated Crystal Forge config includes the builder API-mode fields consumed by the builder runtime: enabled API mode, private key path, and server URL.
+- [x] #3 A deployed builder can start without a local `builder_id`, derive its public key, and resolve its server-side builder ID after the operator registers that public key in the UI/API.
+- [x] #4 In API mode, builder startup does not require or attempt direct PostgreSQL/database configuration.
+- [x] #5 Builder API key generation remains non-interactive and writes files with restrictive permissions.
+- [x] #6 Builder pre-start does not call `runuser` from a non-root service context.
+- [x] #7 A targeted Rust and/or NixOS evaluation test verifies the generated config/API-mode path.
 <!-- AC:END -->
-
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-1. Make the NixOS builder deployment path API-first: `build.enable = true` should generate a builder API key and API-mode runtime config without requiring users to set `api_mode = true`.
-2. Keep the operator-approved public-key joining flow: the deployed builder generates/keeps a local private key, prints the derived public key, and the operator creates/approves the builder in Crystal Forge UI using that public key.
-3. Add server-side lookup by builder public key so a running builder can discover its server-assigned UUID after the operator registers the public key.
-4. Add a minimal builder-auth bootstrap endpoint (for example `POST /api/v1/builders/resolve-id`) that accepts the derived public key plus a signed/timestamped request, verifies the signature against that public key, looks up the registered builder, and returns the builder UUID only if the builder is enabled/allowed.
-5. Update `BuilderApiClient` and `BuilderConfig` so `builder_id` is optional locally. At startup, load the private key, derive the public key, resolve the server-side builder ID, then use the existing ID-based signed endpoints for heartbeat/jobs/logs.
-6. Update the NixOS module to generate TOML `[builder]` API-mode config consumed by the runtime: `enable_api_mode = true`, `private_key_path`, and `server_url`, without requiring local `builder_id` or database configuration.
-7. Fix the builder pre-start Attic check so it does not call `runuser` from the non-root service context; run `attic login list` directly with the service environment.
-8. Add targeted tests for public-key builder lookup/bootstrap auth where practical, and run targeted Rust/Nix verification for the touched paths.
-<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Scope clarification from human: API mode is the only supported/intended builder deployment mode. NixOS users should not need to set `api_mode = true`; enabling the builder should configure API mode by default.
+Rebased hotfix worktree changes onto current origin/dev (6daa90c4) by resetting the task branch to origin/dev and reapplying the WIP patch; working tree now has only TASK-374 scoped changes.
+
+Verification after rebase:
+- `nix develop -c rustfmt --edition 2024 packages/default/src/config/builder.rs packages/default/src/builder/api_client.rs packages/default/src/handlers/api/builders.rs packages/default/src/queries/builders.rs packages/default/src/bin/builder.rs packages/default/src/bin/server.rs packages/default/src/models/builders.rs && git diff --check` passed.
+- `SQLX_OFFLINE=true nix develop -c cargo check --bins` passed with pre-existing warnings.
+- `SQLX_OFFLINE=true nix develop -c cargo test builder --lib` passed: 59 passed, 0 failed, 28 ignored.
+- NixOS module evaluation for `services.crystal-forge.build.enable = true` showed `apiModeDefault = true`, builder API private key path `/var/lib/crystal-forge/builder-api.key`, server URL set, empty `builderAfter`/`builderWants`, and no `runuser` in preStart.
+- Built/realized the generated config script and inspected generated TOML; it contains `[builder] enable_api_mode = true`, `private_key_path = "/var/lib/crystal-forge/builder-api.key"`, and `server_url = "https://cf.example.invalid"`.
+
+Also accidentally triggered a package build while realizing the config script; it completed successfully and ran package tests in the Nix build log, but this was not the declared primary verification command.
 <!-- SECTION:NOTES:END -->
