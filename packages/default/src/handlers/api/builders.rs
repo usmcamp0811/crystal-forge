@@ -13,7 +13,9 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use base64::engine::{Engine, general_purpose};
 use bytes::Bytes;
+use ed25519_dalek::{Signature, Verifier};
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -28,14 +30,127 @@ use crate::handlers::builder_request::{
 use crate::models::builders::{
     AppendLogsRequest, BuildJob, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary,
     BuilderWithEnvironments, CreateBuilderRequest, KeypairRegeneratedResponse,
-    ReportMetricsRequest, UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest,
-    UpdateBuilderRequest,
+    ReportMetricsRequest, ResolveBuilderIdRequest, ResolveBuilderIdResponse,
+    UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
 };
+use crate::models::public_key::PublicKey;
 use crate::queries::builders;
 
 // =============================================================================
 // BUILDER MANAGEMENT ENDPOINTS (Admin-only)
 // =============================================================================
+
+fn canonical_signature_payload(method: &str, path: &str, timestamp: &str, body: &[u8]) -> Vec<u8> {
+    let mut payload =
+        Vec::with_capacity(method.len() + path.len() + timestamp.len() + body.len() + 3);
+    payload.extend_from_slice(method.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(path.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(timestamp.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(body);
+    payload
+}
+
+/// POST /api/v1/builders/resolve-id - Resolve a registered builder ID by public key.
+///
+/// This bootstrap endpoint lets a newly deployed builder start with only its local
+/// private key and server URL. The operator registers the derived public key in
+/// the UI, then the builder signs this request with the matching private key to
+/// discover its server-assigned UUID.
+pub async fn resolve_builder_id(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<ResolveBuilderIdResponse>, (StatusCode, String)> {
+    let request: ResolveBuilderIdRequest = serde_json::from_slice(&body).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid resolve builder request".to_string(),
+        )
+    })?;
+
+    let public_key = PublicKey::from_base64(&request.public_key, "builder").map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid builder public key".to_string(),
+        )
+    })?;
+
+    let timestamp_str = headers
+        .get("X-Timestamp")
+        .and_then(|v| v.to_str().ok())
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "Missing X-Timestamp header".to_string(),
+        ))?;
+    let request_timestamp = chrono::DateTime::parse_from_rfc3339(timestamp_str)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid timestamp".to_string()))?
+        .with_timezone(&chrono::Utc);
+    let now = chrono::Utc::now();
+    const FRESHNESS_WINDOW_SECS: i64 = 5 * 60;
+    if (now - request_timestamp).num_seconds().abs() > FRESHNESS_WINDOW_SECS {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Builder resolve timestamp outside freshness window".to_string(),
+        ));
+    }
+
+    let signature_header = headers
+        .get("X-Signature")
+        .and_then(|v| v.to_str().ok())
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "Missing X-Signature header".to_string(),
+        ))?;
+    let signature_bytes = general_purpose::STANDARD
+        .decode(signature_header)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature".to_string()))?;
+    let signature_array: [u8; 64] = signature_bytes.try_into().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid signature length".to_string(),
+        )
+    })?;
+    let signature = Signature::from_bytes(&signature_array);
+
+    let path = "/api/v1/builders/resolve-id";
+    let signed_payload = canonical_signature_payload("POST", path, timestamp_str, &body);
+    public_key
+        .verifying_key()
+        .verify(&signed_payload, &signature)
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "Builder resolve signature verification failed".to_string(),
+            )
+        })?;
+
+    let builder = builders::get_builder_by_public_key(&state.pool, &request.public_key)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to resolve builder".to_string(),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Builder public key is not registered".to_string(),
+        ))?;
+
+    if !builder.enabled {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Builder is registered but disabled".to_string(),
+        ));
+    }
+
+    Ok(Json(ResolveBuilderIdResponse {
+        builder_id: builder.id,
+    }))
+}
 
 /// POST /api/v1/builders - Create a new builder (admin-only)
 ///
@@ -147,11 +262,19 @@ fn map_create_builder_error(error: &anyhow::Error) -> (StatusCode, String) {
 }
 
 fn validate_builder_arch(arch: &str) -> Result<(), (StatusCode, String)> {
-    let valid_arches = ["x86_64-linux", "aarch64-linux", "aarch64-darwin", "x86_64-darwin"];
+    let valid_arches = [
+        "x86_64-linux",
+        "aarch64-linux",
+        "aarch64-darwin",
+        "x86_64-darwin",
+    ];
     if !valid_arches.contains(&arch) {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!("Invalid architecture. Must be one of: {}", valid_arches.join(", ")),
+            format!(
+                "Invalid architecture. Must be one of: {}",
+                valid_arches.join(", ")
+            ),
         ));
     }
 

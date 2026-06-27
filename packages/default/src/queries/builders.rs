@@ -9,7 +9,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::models::builders::{
-    BuildJob, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderStatus, BuilderSummary,
+    BuildJob, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderSummary,
     BuilderWithEnvironments, CreateBuilderRequest, ReportMetricsRequest, UpdateBuilderRequest,
 };
 use crate::models::public_key::PublicKey;
@@ -111,6 +111,23 @@ pub async fn get_builder_by_id(pool: &PgPool, builder_id: &Uuid) -> Result<Optio
         .fetch_optional(pool)
         .await
         .context("Failed to fetch builder by ID")?;
+
+    Ok(builder.map(Builder::with_public_key_fingerprint))
+}
+
+/// Get a builder by its registered public key.
+pub async fn get_builder_by_public_key(
+    pool: &PgPool,
+    public_key_base64: &str,
+) -> Result<Option<Builder>> {
+    let public_key = PublicKey::from_base64(public_key_base64, "builder")
+        .context("Invalid public key format")?;
+
+    let builder = sqlx::query_as::<_, Builder>("SELECT * FROM builders WHERE public_key = $1")
+        .bind(public_key.to_base64())
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch builder by public key")?;
 
     Ok(builder.map(Builder::with_public_key_fingerprint))
 }
@@ -1387,6 +1404,7 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::builders::BuilderStatus;
     use crate::test_utils::db::test_pool;
     use base64::Engine;
     use chrono::{Duration, Utc};

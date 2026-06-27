@@ -341,8 +341,7 @@ async fn main() -> anyhow::Result<()> {
             // GET is intentionally absent: use GET /bundles/:id/systems instead.
             // Having GET here return the systems payload at both paths created a
             // misleading API contract (reviewer finding #3).
-            put(compliance::update_compliance_bundle)
-                .delete(compliance::delete_compliance_bundle),
+            put(compliance::update_compliance_bundle).delete(compliance::delete_compliance_bundle),
         )
         .route(
             "/api/v1/compliance/bundles/:id/systems",
@@ -423,6 +422,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/builders",
             get(builders::list_builders).post(builders::create_builder),
+        )
+        .route(
+            "/api/v1/builders/resolve-id",
+            post(builders::resolve_builder_id),
         )
         .route(
             "/api/v1/builders/:id",
