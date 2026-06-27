@@ -1981,6 +1981,50 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires running test database"]
+    async fn test_get_builder_by_public_key_resolves_registered_builder() {
+        let pool = test_pool().await;
+
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let public_key_base64 = base64::engine::general_purpose::STANDARD
+            .encode(signing_key.verifying_key().to_bytes());
+
+        let request = CreateBuilderRequest {
+            name: "public-key-lookup-builder".to_string(),
+            host: Some("public-key-lookup-builder.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
+            public_key: Some(public_key_base64.clone()),
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: None,
+            enabled: Some(true),
+            environment_ids: vec![],
+        };
+
+        let (builder, _private_key) = create_builder(&pool, &request)
+            .await
+            .expect("Failed to create builder");
+
+        let fetched = get_builder_by_public_key(&pool, &public_key_base64)
+            .await
+            .expect("Failed to fetch builder by public key")
+            .expect("Builder should resolve by registered public key");
+
+        assert_eq!(fetched.id, builder.id);
+
+        let unregistered_key = base64::engine::general_purpose::STANDARD.encode(
+            ed25519_dalek::SigningKey::generate(&mut rand::thread_rng())
+                .verifying_key()
+                .to_bytes(),
+        );
+        let missing = get_builder_by_public_key(&pool, &unregistered_key)
+            .await
+            .expect("Failed to query unregistered public key");
+
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
     async fn test_builder_heartbeat() {
         let pool = test_pool().await;
 

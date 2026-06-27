@@ -961,14 +961,13 @@ in {
 
       api_mode = lib.mkOption {
         type = lib.types.bool;
-        default = true;
+        default = false;
         description = lib.mdDoc ''
           Use builder API mode.
 
-          The NixOS module configures builders for API mode by default. The
-          builder authenticates to the Crystal Forge server
+          When enabled, the builder authenticates to the Crystal Forge server
           via API using a private key, rather than connecting directly to the
-          database.
+          database. This is the recommended mode for distributed builder hosts.
 
           **Benefits of API mode:**
           - No database credentials needed on builder machines
@@ -976,11 +975,14 @@ in {
           - Supports distributed builds across networks
           - Builder registration via server UI
 
-          **Default**: true
+          **Default**: false, to preserve compatibility for existing combined
+          server/builder deployments where `build.enable` follows
+          `server.enable`. New distributed builder hosts should set this to
+          `true` explicitly.
 
-          After enabling the builder service, the builder API key will be
-          auto-generated and displayed in systemd logs. Register the builder
-          using the public key in the UI.
+          When API mode is enabled without `api_key_file`, the builder API key
+          will be auto-generated and displayed in systemd logs. Register the
+          builder using the public key in the UI.
 
           **Deprecation**: Legacy database mode (`false`) is deprecated and
           should only be used for temporary migration/testing.

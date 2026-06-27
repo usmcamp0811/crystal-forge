@@ -64,7 +64,42 @@ pub async fn resolve_builder_id(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<ResolveBuilderIdResponse>, (StatusCode, String)> {
-    let request: ResolveBuilderIdRequest = serde_json::from_slice(&body).map_err(|_| {
+    let request = verify_builder_resolve_request(&headers, &body)?;
+
+    let builder = builders::get_builder_by_public_key(&state.pool, &request.public_key)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to resolve builder".to_string(),
+            )
+        })?;
+    let builder_id = builder_id_for_resolved_builder(builder)?;
+
+    Ok(Json(ResolveBuilderIdResponse { builder_id }))
+}
+
+fn builder_id_for_resolved_builder(builder: Option<Builder>) -> Result<Uuid, (StatusCode, String)> {
+    let builder = builder.ok_or((
+        StatusCode::NOT_FOUND,
+        "Builder public key is not registered".to_string(),
+    ))?;
+
+    if !builder.enabled {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Builder is registered but disabled".to_string(),
+        ));
+    }
+
+    Ok(builder.id)
+}
+
+fn verify_builder_resolve_request(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<ResolveBuilderIdRequest, (StatusCode, String)> {
+    let request: ResolveBuilderIdRequest = serde_json::from_slice(body).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
             "Invalid resolve builder request".to_string(),
@@ -116,7 +151,7 @@ pub async fn resolve_builder_id(
     let signature = Signature::from_bytes(&signature_array);
 
     let path = "/api/v1/builders/resolve-id";
-    let signed_payload = canonical_signature_payload("POST", path, timestamp_str, &body);
+    let signed_payload = canonical_signature_payload("POST", path, timestamp_str, body);
     public_key
         .verifying_key()
         .verify(&signed_payload, &signature)
@@ -127,31 +162,8 @@ pub async fn resolve_builder_id(
             )
         })?;
 
-    let builder = builders::get_builder_by_public_key(&state.pool, &request.public_key)
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to resolve builder".to_string(),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            "Builder public key is not registered".to_string(),
-        ))?;
-
-    if !builder.enabled {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Builder is registered but disabled".to_string(),
-        ));
-    }
-
-    Ok(Json(ResolveBuilderIdResponse {
-        builder_id: builder.id,
-    }))
+    Ok(request)
 }
-
 /// POST /api/v1/builders - Create a new builder (admin-only)
 ///
 /// If `public_key` is not provided in request, server generates a proper Ed25519 keypair.
@@ -1422,10 +1434,68 @@ async fn record_build_stream_message(state: &CFState, job_id: Uuid, msg: &BuildS
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
-    use axum::http::StatusCode;
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use base64::engine::{Engine, general_purpose};
+    use chrono::{Duration, Utc};
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand::rngs::OsRng;
+    use uuid::Uuid;
 
-    use super::BuildStreamMessage;
-    use super::map_create_builder_error;
+    use super::{
+        BuildStreamMessage, builder_id_for_resolved_builder, canonical_signature_payload,
+        map_create_builder_error, verify_builder_resolve_request,
+    };
+    use crate::models::builders::{Builder, BuilderStatus, ResolveBuilderIdRequest};
+    use crate::models::public_key::PublicKey;
+
+    fn signed_resolve_request(
+        signing_key: &SigningKey,
+        timestamp: String,
+    ) -> (HeaderMap, Vec<u8>, String) {
+        let public_key_base64 =
+            general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes());
+        let body = serde_json::to_vec(&ResolveBuilderIdRequest {
+            public_key: public_key_base64.clone(),
+        })
+        .expect("resolve request should serialize");
+        let payload =
+            canonical_signature_payload("POST", "/api/v1/builders/resolve-id", &timestamp, &body);
+        let signature = signing_key.sign(&payload);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Timestamp",
+            HeaderValue::from_str(&timestamp).expect("valid timestamp header"),
+        );
+        headers.insert(
+            "X-Signature",
+            HeaderValue::from_str(&general_purpose::STANDARD.encode(signature.to_bytes()))
+                .expect("valid signature header"),
+        );
+
+        (headers, body, public_key_base64)
+    }
+
+    fn test_builder(public_key_base64: &str, enabled: bool) -> Builder {
+        let now = Utc::now();
+        Builder {
+            id: Uuid::new_v4(),
+            name: "bootstrap-builder".to_string(),
+            host: Some("bootstrap-builder.test".to_string()),
+            arch: "x86_64-linux".to_string(),
+            public_key: PublicKey::from_base64(public_key_base64, "builder")
+                .expect("test public key should parse"),
+            public_key_fingerprint: String::new(),
+            status: BuilderStatus::Inactive,
+            max_cpu_cores: Some(4),
+            max_memory_mb: Some(8192),
+            max_concurrent_jobs: 1,
+            enabled,
+            last_heartbeat_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
 
     #[test]
     fn build_stream_requires_explicit_type_discriminator() {
@@ -1437,6 +1507,104 @@ mod tests {
             parsed.is_err(),
             "untagged JSON should not be accepted as a valid stream frame"
         );
+    }
+
+    #[test]
+    fn resolve_builder_request_accepts_client_canonical_payload() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let timestamp = Utc::now().to_rfc3339();
+        let (headers, body, public_key_base64) = signed_resolve_request(&signing_key, timestamp);
+
+        let request = verify_builder_resolve_request(&headers, &body)
+            .expect("signed bootstrap request should verify");
+
+        assert_eq!(request.public_key, public_key_base64);
+    }
+
+    #[test]
+    fn resolve_builder_request_rejects_tampered_body_bytes() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let timestamp = Utc::now().to_rfc3339();
+        let (headers, mut body, _) = signed_resolve_request(&signing_key, timestamp);
+        body.push(b' ');
+
+        let (status, message) = verify_builder_resolve_request(&headers, &body)
+            .expect_err("body-byte tampering should invalidate signature");
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(message.contains("signature verification failed"));
+    }
+
+    #[test]
+    fn resolve_builder_request_rejects_expired_timestamp() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let expired_timestamp = (Utc::now() - Duration::minutes(10)).to_rfc3339();
+        let (headers, body, _) = signed_resolve_request(&signing_key, expired_timestamp);
+
+        let (status, message) = verify_builder_resolve_request(&headers, &body)
+            .expect_err("expired bootstrap timestamp should be rejected");
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(message.contains("freshness window"));
+    }
+
+    #[test]
+    fn resolve_builder_request_rejects_invalid_signature() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let other_signing_key = SigningKey::generate(&mut OsRng);
+        let timestamp = Utc::now().to_rfc3339();
+        let (mut headers, body, _) = signed_resolve_request(&signing_key, timestamp.clone());
+        let wrong_payload =
+            canonical_signature_payload("POST", "/api/v1/builders/resolve-id", &timestamp, &body);
+        let wrong_signature = other_signing_key.sign(&wrong_payload);
+        headers.insert(
+            "X-Signature",
+            HeaderValue::from_str(&general_purpose::STANDARD.encode(wrong_signature.to_bytes()))
+                .expect("valid signature header"),
+        );
+
+        let (status, message) = verify_builder_resolve_request(&headers, &body)
+            .expect_err("signature from another key should be rejected");
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(message.contains("signature verification failed"));
+    }
+
+    #[test]
+    fn resolve_registered_builder_returns_uuid_for_enabled_builder() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let public_key_base64 =
+            general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes());
+        let builder = test_builder(&public_key_base64, true);
+        let expected_id = builder.id;
+
+        let resolved_id = builder_id_for_resolved_builder(Some(builder))
+            .expect("enabled registered builder should resolve");
+
+        assert_eq!(resolved_id, expected_id);
+    }
+
+    #[test]
+    fn resolve_registered_builder_returns_404_for_unregistered_key() {
+        let (status, message) = builder_id_for_resolved_builder(None)
+            .expect_err("missing builder should return not found");
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(message.contains("not registered"));
+    }
+
+    #[test]
+    fn resolve_registered_builder_returns_403_for_disabled_builder() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let public_key_base64 =
+            general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes());
+        let builder = test_builder(&public_key_base64, false);
+
+        let (status, message) = builder_id_for_resolved_builder(Some(builder))
+            .expect_err("disabled builder should be forbidden");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(message.contains("disabled"));
     }
 
     #[test]
