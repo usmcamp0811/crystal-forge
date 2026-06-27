@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-06-27 16:04'
-updated_date: '2026-06-27 20:09'
+updated_date: '2026-06-27 20:15'
 labels:
   - bug
   - hotfix
@@ -20,6 +20,12 @@ references:
     /home/mcamp/code/campground/fmf-flake/modules/nixos/services/crystal-forge/default.nix
 modified_files:
   - modules/nixos/crystal-forge/default.nix
+  - packages/default/src/config/builder.rs
+  - packages/default/src/builder/api_client.rs
+  - packages/default/src/handlers/api/builders.rs
+  - packages/default/src/handlers/builder_request.rs
+  - packages/default/src/queries/builders.rs
+  - packages/default/src/bin/server.rs
 priority: high
 ordinal: 100
 ---
@@ -81,8 +87,14 @@ None known.
 - [ ] #6 A targeted Nix/NixOS evaluation or test verifies the generated config/API-mode path.
 <!-- AC:END -->
 
-## Implementation Notes
+## Implementation Plan
 
-<!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-374-builder-api-mode-hotfix
-<!-- SECTION:NOTES:END -->
+<!-- SECTION:PLAN:BEGIN -->
+1. Keep the operator-approved public-key joining flow: the deployed builder generates/keeps a local private key, prints the derived public key, and the operator creates/approves the builder in Crystal Forge UI using that public key.
+2. Add server-side lookup by builder public key so a running builder can discover its server-assigned UUID after the operator registers the public key.
+3. Add a minimal builder-auth bootstrap endpoint (for example `POST /api/v1/builders/resolve-id`) that accepts the derived public key plus a signed/timestamped request, verifies the signature against that public key, looks up the registered builder, and returns the builder UUID only if the builder is enabled/allowed.
+4. Update `BuilderApiClient` and `BuilderConfig` so `builder_id` is optional locally. At startup in API mode, load the private key, derive the public key, resolve the server-side builder ID, then use the existing ID-based signed endpoints for heartbeat/jobs/logs.
+5. Update the NixOS module to generate TOML `[builder]` API-mode config consumed by the runtime: `enable_api_mode`, `private_key_path`, and `server_url`, without requiring local `builder_id` or database configuration.
+6. Fix the builder pre-start Attic check so it does not call `runuser` from the non-root service context; run `attic login list` directly with the service environment.
+7. Add targeted tests for public-key builder lookup/bootstrap auth where practical, and run targeted Rust/Nix verification for the touched paths.
+<!-- SECTION:PLAN:END -->
