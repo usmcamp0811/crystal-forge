@@ -1445,6 +1445,7 @@ mod tests {
         BuildStreamMessage, builder_id_for_resolved_builder, canonical_signature_payload,
         map_create_builder_error, verify_builder_resolve_request,
     };
+    use crate::builder::api_client::BuilderApiClient;
     use crate::models::builders::{Builder, BuilderStatus, ResolveBuilderIdRequest};
     use crate::models::public_key::PublicKey;
 
@@ -1517,6 +1518,38 @@ mod tests {
 
         let request = verify_builder_resolve_request(&headers, &body)
             .expect("signed bootstrap request should verify");
+
+        assert_eq!(request.public_key, public_key_base64);
+    }
+
+    #[test]
+    fn resolve_builder_request_accepts_client_generated_bootstrap_signature() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let public_key_base64 =
+            general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes());
+        let body = serde_json::to_vec(&ResolveBuilderIdRequest {
+            public_key: public_key_base64.clone(),
+        })
+        .expect("resolve request should serialize");
+
+        let (signature, timestamp) = BuilderApiClient::sign_bootstrap_request(
+            &signing_key,
+            "POST",
+            "/api/v1/builders/resolve-id",
+            &body,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Timestamp",
+            HeaderValue::from_str(&timestamp).expect("valid timestamp header"),
+        );
+        headers.insert(
+            "X-Signature",
+            HeaderValue::from_str(&signature).expect("valid signature header"),
+        );
+
+        let request = verify_builder_resolve_request(&headers, &body)
+            .expect("server verifier should accept client-generated bootstrap signature");
 
         assert_eq!(request.public_key, public_key_base64);
     }

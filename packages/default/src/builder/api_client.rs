@@ -140,7 +140,7 @@ impl BuilderApiClient {
         base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes())
     }
 
-    fn sign_bootstrap_request(
+    pub(crate) fn sign_bootstrap_request(
         signing_key: &SigningKey,
         method: &str,
         path: &str,
