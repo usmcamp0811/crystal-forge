@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@openai-gpt-5.5'
 created_date: '2026-04-20 19:22'
-updated_date: '2026-06-26 02:28'
+updated_date: '2026-06-27 03:05'
 labels:
   - bug
   - builder
@@ -77,25 +77,22 @@ High: incorrect state transition logic could duplicate work or regress queue beh
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Implementation complete and MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/287
+Review findings addressed and pushed in commit `668e90df`.
 
-Changes:
-- Added reason-aware orphaned `building` job recovery via `requeue_orphaned_building_jobs_with_reason`.
-- Startup recovery records `startup builder recovery`; runtime stale-builder recovery records `runtime builder liveness recovery`.
-- Recovered jobs are reset to `queued`, clear stale builder ownership, clear `started_at`, append an auditable recovery line to job logs, and notify the build queue.
-- Targeted DB tests now use unique builder names and support `CRYSTAL_FORGE_TEST_DATABASE_URL` for repo process-compose DB verification while preserving the prior `cf_test` fallback.
+Fixes:
+- Disabled builders are now treated as invalid owners during orphan recovery: jobs owned by builders with `status = 'active'` and `enabled = false` are requeued.
+- Recovery log append now preserves the 10 MiB build log ceiling by truncating existing logs before appending the recovery reason.
+- Added DB-backed tests for the disabled-builder orphan case and recovery log truncation.
 
-Verification completed:
-- `nix develop -c env SQLX_OFFLINE=true CRYSTAL_FORGE_TEST_DATABASE_URL=postgres://crystal_forge:password@127.0.0.1:3042/crystal_forge cargo test --manifest-path packages/default/Cargo.toml test_requeue_orphaned_building_jobs_keeps_active_builder_jobs -- --ignored` ✅
-- `nix develop -c env SQLX_OFFLINE=true CRYSTAL_FORGE_TEST_DATABASE_URL=postgres://crystal_forge:password@127.0.0.1:3042/crystal_forge cargo test --manifest-path packages/default/Cargo.toml test_mark_stale_builders_offline_then_requeue_building_jobs -- --ignored` ✅
-- `nix develop -c env SQLX_OFFLINE=true CRYSTAL_FORGE_TEST_DATABASE_URL=postgres://crystal_forge:password@127.0.0.1:3042/crystal_forge cargo test --manifest-path packages/default/Cargo.toml test_late_stale_builder_completion_does_not_clobber_requeued_job -- --ignored` ✅
-- `nix develop -c env SQLX_OFFLINE=true CRYSTAL_FORGE_TEST_DATABASE_URL=postgres://crystal_forge:password@127.0.0.1:3042/crystal_forge cargo test --manifest-path packages/default/Cargo.toml test_late_stale_builder_failure_does_not_clobber_requeued_job -- --ignored` ✅
+Verification rerun:
+- `test_requeue_orphaned_building_jobs_treats_disabled_active_builder_as_orphaned` ✅
+- `test_requeue_orphaned_building_jobs_preserves_log_size_limit` ✅
+- original startup/runtime/stale race recovery tests ✅
 - `nix develop -c rustfmt --edition 2024 --check packages/default/src/queries/builders.rs packages/default/src/server/mod.rs` ✅
-- `git diff --check` ✅
 - `nix develop -c env SQLX_OFFLINE=true cargo check --manifest-path packages/default/Cargo.toml` ✅
 - `nix build .#packages.x86_64-linux.server --no-link` ✅
 
-Note: An exploratory existing queue-order ignored test was attempted against a dirty persistent dev database and failed because unrelated pre-existing queued rows affected ordering. It was not used as completion evidence; the targeted recovery tests above were run with explicit DB URL and passed.
+GitLab pipeline #2633355744 is running for MR !287.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
