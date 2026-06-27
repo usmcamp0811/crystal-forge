@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-06-27 03:41'
-updated_date: '2026-06-27 03:43'
+updated_date: '2026-06-27 03:58'
 labels:
   - builds
   - ui
@@ -88,8 +88,17 @@ Low-medium: likely a localized UI interaction fix, but careless CSS could preven
 - [ ] #5 Manual verification or a targeted UI interaction test covers the shift-click behavior.
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Update `packages/web-ui/src/components/builds/build_queue_pane.rs` so shift-click row selection prevents the browser default text-selection behavior.
+2. Add a scoped class/style only to Builds queue selectable rows, avoiding global `user-select: none`.
+3. Preserve existing nested action button behavior, which already stops propagation.
+4. Verify with targeted frontend formatting/check commands and inspect whether a web-ui interaction check can cover this.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-371-fix-builds-shift-click-text-highlighting
+User approved implementation plan on 2026-06-26.
 <!-- SECTION:NOTES:END -->
