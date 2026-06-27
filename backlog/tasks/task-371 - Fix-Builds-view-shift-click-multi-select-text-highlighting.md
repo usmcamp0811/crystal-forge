@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-06-27 03:41'
-updated_date: '2026-06-27 03:58'
+updated_date: '2026-06-27 04:01'
 labels:
   - builds
   - ui
@@ -17,6 +17,11 @@ dependencies: []
 references:
   - packages/web-ui/src/views/builds.rs
   - packages/web-ui/src/components
+  - checks/web-ui/tests/integration-test.js
+modified_files:
+  - packages/web-ui/src/components/builds/build_queue_pane.rs
+  - packages/web-ui/assets/app.css
+  - checks/web-ui/tests/integration-test.js
 priority: medium
 ordinal: 0
 ---
@@ -91,14 +96,11 @@ Low-medium: likely a localized UI interaction fix, but careless CSS could preven
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Update `packages/web-ui/src/components/builds/build_queue_pane.rs` so shift-click row selection prevents the browser default text-selection behavior.
-2. Add a scoped class/style only to Builds queue selectable rows, avoiding global `user-select: none`.
-3. Preserve existing nested action button behavior, which already stops propagation.
-4. Verify with targeted frontend formatting/check commands and inspect whether a web-ui interaction check can cover this.
+5. Add a targeted `checks/web-ui/tests/integration-test.js` step for the existing web-ui screenshot check so the MR can include the Builds shift-click selection screenshot and the check can assert no browser text selection remains.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-User approved implementation plan on 2026-06-26.
+Implementation expanded within TASK-371 verification scope to add a targeted `web-ui` check step (`15i-builds-shift-click-selection`) that shift-clicks Builds queue rows, asserts the bulk selection count, asserts `window.getSelection()` stays empty, and captures the generated screenshot.
 <!-- SECTION:NOTES:END -->
