@@ -1,9 +1,11 @@
 ---
 id: TASK-371
 title: Fix Builds view shift-click multi-select text highlighting
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - gpt-5.5
 created_date: '2026-06-27 03:41'
+updated_date: '2026-06-27 03:43'
 labels:
   - builds
   - ui
@@ -85,3 +87,9 @@ Low-medium: likely a localized UI interaction fix, but careless CSS could preven
 - [ ] #4 Nested buttons, links, and controls in build rows/cards remain usable and do not accidentally trigger unwanted range selection.
 - [ ] #5 Manual verification or a targeted UI interaction test covers the shift-click behavior.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-371-fix-builds-shift-click-text-highlighting
+<!-- SECTION:NOTES:END -->
