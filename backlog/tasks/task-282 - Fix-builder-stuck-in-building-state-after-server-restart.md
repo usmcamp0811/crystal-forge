@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@openai-gpt-5.5'
 created_date: '2026-04-20 19:22'
-updated_date: '2026-06-27 03:05'
+updated_date: '2026-06-27 03:20'
 labels:
   - bug
   - builder
@@ -77,22 +77,23 @@ High: incorrect state transition logic could duplicate work or regress queue beh
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Review findings addressed and pushed in commit `668e90df`.
+Re-review UTF-8 byte-safety finding addressed and pushed in commit `c94b369c`.
 
-Fixes:
-- Disabled builders are now treated as invalid owners during orphan recovery: jobs owned by builders with `status = 'active'` and `enabled = false` are requeued.
-- Recovery log append now preserves the 10 MiB build log ceiling by truncating existing logs before appending the recovery reason.
-- Added DB-backed tests for the disabled-builder orphan case and recovery log truncation.
+Fix:
+- Recovery truncation no longer uses the byte budget directly as the `RIGHT(text, n)` character count.
+- It now retains at most one quarter of the remaining byte budget before appending the recovery line, which is conservative for UTF-8 because code points are at most 4 bytes.
+- Added inline SQL comment documenting the byte-vs-character guard.
+- Updated the log-limit regression test to seed multibyte `é` data and continue asserting `OCTET_LENGTH(logs) <= 10 * 1024 * 1024`.
 
 Verification rerun:
-- `test_requeue_orphaned_building_jobs_treats_disabled_active_builder_as_orphaned` ✅
 - `test_requeue_orphaned_building_jobs_preserves_log_size_limit` ✅
-- original startup/runtime/stale race recovery tests ✅
-- `nix develop -c rustfmt --edition 2024 --check packages/default/src/queries/builders.rs packages/default/src/server/mod.rs` ✅
+- `test_requeue_orphaned_building_jobs_treats_disabled_active_builder_as_orphaned` ✅
+- `nix develop -c rustfmt --edition 2024 --check packages/default/src/queries/builders.rs` ✅
+- `git diff --check` ✅
 - `nix develop -c env SQLX_OFFLINE=true cargo check --manifest-path packages/default/Cargo.toml` ✅
 - `nix build .#packages.x86_64-linux.server --no-link` ✅
 
-GitLab pipeline #2633355744 is running for MR !287.
+New MR pipeline #2633379861 is running.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
