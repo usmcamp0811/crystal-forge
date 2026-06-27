@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-06-27 03:41'
-updated_date: '2026-06-27 04:02'
+updated_date: '2026-06-27 04:47'
 labels:
   - builds
   - ui
@@ -18,6 +18,7 @@ references:
   - packages/web-ui/src/views/builds.rs
   - packages/web-ui/src/components
   - checks/web-ui/tests/integration-test.js
+  - TASK-371.1
 modified_files:
   - packages/web-ui/src/components/builds/build_queue_pane.rs
   - packages/web-ui/assets/app.css
@@ -86,29 +87,27 @@ Low-medium: likely a localized UI interaction fix, but careless CSS could preven
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Shift-click multi-select in the Builds view no longer highlights/selects row or card text.
-- [ ] #2 Existing single-select and shift-click range/multi-select behavior continues to work.
-- [ ] #3 The fix is scoped to Builds view selectable items or their shared selection component and does not globally disable text selection across the app.
-- [ ] #4 Nested buttons, links, and controls in build rows/cards remain usable and do not accidentally trigger unwanted range selection.
-- [ ] #5 Manual verification or a targeted UI interaction test covers the shift-click behavior.
+- [x] #1 Shift-click multi-select in the Builds view no longer highlights/selects row or card text.
+- [x] #2 Existing single-select and shift-click range/multi-select behavior continues to work.
+- [x] #3 The fix is scoped to Builds view selectable items or their shared selection component and does not globally disable text selection across the app.
+- [x] #4 Nested buttons, links, and controls in build rows/cards remain usable and do not accidentally trigger unwanted range selection.
+- [x] #5 Manual verification or a targeted UI interaction test covers the shift-click behavior.
 <!-- AC:END -->
-
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-1. Update `packages/web-ui/src/components/builds/build_queue_pane.rs` so shift-click row selection prevents the browser default text-selection behavior.
-2. Add a scoped class/style only to Builds queue selectable rows, avoiding global `user-select: none`.
-3. Preserve existing nested action button behavior, which already stops propagation.
-4. Verify with targeted frontend formatting/check commands and inspect whether a web-ui interaction check can cover this.
-5. Add a targeted `checks/web-ui/tests/integration-test.js` step for the existing web-ui screenshot check so the MR can include the Builds shift-click selection screenshot and the check can assert no browser text selection remains.
-<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-371-fix-builds-shift-click-text-highlighting
+Implemented scoped Builds queue fix: added `prevent_default()` for shift-click mousedown/click on cancellable queue rows and scoped `user-select: none` to `.q-queue-table .q-row.selectable` only.
 
-User approved implementation plan on 2026-06-26.
+Added web-ui check step `15i-builds-shift-click-selection` to ci_fast screenshots. It shift-clicks two build queue rows, asserts `2 selected`, asserts `window.getSelection()` remains empty, and produces `15i-builds-shift-click-selection.png`.
 
-Implementation expanded within TASK-371 verification scope to add a targeted `web-ui` check step (`15i-builds-shift-click-selection`) that shift-clicks Builds queue rows, asserts the bulk selection count, asserts `window.getSelection()` stays empty, and captures the generated screenshot.
+Verification results:
+- PASS `nix develop -c rustfmt --edition 2024 --check packages/web-ui/src/components/builds/build_queue_pane.rs`
+- PASS `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`
+- PASS `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml`
+- PASS `nix develop -c node --check checks/web-ui/tests/integration-test.js`
+- PASS `nix build .#checks.x86_64-linux.web-ui --print-out-paths` -> `/nix/store/vj8bclimmfmz06ca8g69c3cqi0y6q57j-vm-test-run-crystal-forge-web-ui-mega-integration`
+- Screenshot artifact present: `result/screenshots/15i-builds-shift-click-selection.png`
+
+Package-wide `cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check` remains blocked by pre-existing unrelated formatting drift in `packages/web-ui/src/export/mod.rs` and `packages/web-ui/src/views/compliance.rs`; follow-up TASK-371.1 created in Backlog.
 <!-- SECTION:NOTES:END -->
