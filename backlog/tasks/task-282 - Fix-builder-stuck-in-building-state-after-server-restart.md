@@ -1,11 +1,11 @@
 ---
 id: TASK-282
 title: Fix builder stuck in "building" state after server restart
-status: To Do
+status: In Progress
 assignee:
-  - openai-gpt-5.4
+  - '@openai-gpt-5.5'
 created_date: '2026-04-20 19:22'
-updated_date: '2026-06-10 02:53'
+updated_date: '2026-06-26 01:21'
 labels:
   - bug
   - builder
@@ -70,20 +70,10 @@ High: incorrect state transition logic could duplicate work or regress queue beh
 - [ ] #7 Targeted integration tests cover startup orphan recovery and runtime builder-loss recovery.
 <!-- AC:END -->
 
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-1) Map current build state machine and identify all transitions into/out of `building`.
-2) Implement startup reconciliation that re-queues orphaned `building` jobs.
-3) Implement runtime recovery path when builder connection/process dies while jobs are `building`.
-4) Add targeted tests for startup and runtime recovery behavior.
-5) Run scoped verification commands for affected packages/tests.
-<!-- SECTION:PLAN:END -->
-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Sprint-ready grooming applied based on explicit product decisions: orphaned building jobs should reset to queued; include runtime crash/liveness detection scope.
+LOCK: openai-gpt-5.5 on reckless in ~/code/crystal-forge/TASK-282-builder-stuck-building-recovery
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
