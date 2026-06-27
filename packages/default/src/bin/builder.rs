@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
 
     if cfg.server.execution_mode.is_mock() {
         anyhow::bail!(
-            "server.execution_mode=mock requires builder API mode. Set builder.enable_api_mode=true with builder_id/private_key_path/server_url"
+            "server.execution_mode=mock requires builder API mode. Set builder.enable_api_mode=true with private_key_path/server_url"
         );
     }
 
@@ -116,7 +116,7 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
     info!("Initializing API client...");
     let api_client = BuilderApiClient::new(builder_config).await?;
 
-    let builder_id = builder_config.require_builder_id()?;
+    let builder_id = api_client.builder_id();
     info!("✅ Builder ID: {}", builder_id);
     info!(
         "✅ Derived Public Key (base64): {}",

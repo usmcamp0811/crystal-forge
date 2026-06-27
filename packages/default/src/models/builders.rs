@@ -154,6 +154,19 @@ pub struct UpdateBuilderPublicKeyRequest {
     pub public_key: String, // base64-encoded Ed25519 public key
 }
 
+/// Request for a builder to resolve its server-assigned ID from its public key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveBuilderIdRequest {
+    /// Base64-encoded Ed25519 public key derived from the builder's local private key.
+    pub public_key: String,
+}
+
+/// Response returned when a builder public key has been registered/approved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveBuilderIdResponse {
+    pub builder_id: Uuid,
+}
+
 /// Request to update builder environment assignments
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateBuilderEnvironmentsRequest {

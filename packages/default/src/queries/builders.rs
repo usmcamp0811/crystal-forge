@@ -9,7 +9,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::models::builders::{
-    BuildJob, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderStatus, BuilderSummary,
+    BuildJob, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderSummary,
     BuilderWithEnvironments, CreateBuilderRequest, ReportMetricsRequest, UpdateBuilderRequest,
 };
 use crate::models::public_key::PublicKey;
@@ -111,6 +111,23 @@ pub async fn get_builder_by_id(pool: &PgPool, builder_id: &Uuid) -> Result<Optio
         .fetch_optional(pool)
         .await
         .context("Failed to fetch builder by ID")?;
+
+    Ok(builder.map(Builder::with_public_key_fingerprint))
+}
+
+/// Get a builder by its registered public key.
+pub async fn get_builder_by_public_key(
+    pool: &PgPool,
+    public_key_base64: &str,
+) -> Result<Option<Builder>> {
+    let public_key = PublicKey::from_base64(public_key_base64, "builder")
+        .context("Invalid public key format")?;
+
+    let builder = sqlx::query_as::<_, Builder>("SELECT * FROM builders WHERE public_key = $1")
+        .bind(public_key.to_base64())
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch builder by public key")?;
 
     Ok(builder.map(Builder::with_public_key_fingerprint))
 }
@@ -1387,6 +1404,7 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::builders::BuilderStatus;
     use crate::test_utils::db::test_pool;
     use base64::Engine;
     use chrono::{Duration, Utc};
@@ -1959,6 +1977,50 @@ mod tests {
 
         assert_eq!(fetched.id, builder.id);
         assert_eq!(fetched.name, builder.name);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_get_builder_by_public_key_resolves_registered_builder() {
+        let pool = test_pool().await;
+
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let public_key_base64 = base64::engine::general_purpose::STANDARD
+            .encode(signing_key.verifying_key().to_bytes());
+
+        let request = CreateBuilderRequest {
+            name: "public-key-lookup-builder".to_string(),
+            host: Some("public-key-lookup-builder.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
+            public_key: Some(public_key_base64.clone()),
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: None,
+            enabled: Some(true),
+            environment_ids: vec![],
+        };
+
+        let (builder, _private_key) = create_builder(&pool, &request)
+            .await
+            .expect("Failed to create builder");
+
+        let fetched = get_builder_by_public_key(&pool, &public_key_base64)
+            .await
+            .expect("Failed to fetch builder by public key")
+            .expect("Builder should resolve by registered public key");
+
+        assert_eq!(fetched.id, builder.id);
+
+        let unregistered_key = base64::engine::general_purpose::STANDARD.encode(
+            ed25519_dalek::SigningKey::generate(&mut rand::thread_rng())
+                .verifying_key()
+                .to_bytes(),
+        );
+        let missing = get_builder_by_public_key(&pool, &unregistered_key)
+            .await
+            .expect("Failed to query unregistered public key");
+
+        assert!(missing.is_none());
     }
 
     #[tokio::test]
