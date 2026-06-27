@@ -12,12 +12,15 @@ use axum::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::api::models::{ApiError, CreateComplianceBundleRequest, UpdateComplianceBundleRequest};
+use crate::api::models::{
+    ApiError, CreateComplianceBundleRequest, SystemComplianceBundle,
+    SystemComplianceBundlesResponse, UpdateComplianceBundleRequest,
+};
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
     BundleValidationError, create_bundle as create_bundle_row,
     delete_bundle as delete_bundle_row, get_system_evidence, list_bundle_systems, list_bundles,
-    update_bundle as update_bundle_row,
+    list_system_bundles, update_bundle as update_bundle_row,
 };
 
 /// `GET /api/v1/compliance/bundles`
@@ -49,6 +52,43 @@ pub async fn get_compliance_bundle_systems(
         Ok(Some(response)) => (StatusCode::OK, Json(response)).into_response(),
         Ok(None) => not_found(),
         Err(_) => internal_error("Failed to load compliance systems"),
+    }
+}
+
+/// `GET /api/v1/systems/:system_id/compliance`
+/// Returns all compliance bundles applicable to the specified system with rollups.
+/// 
+/// This endpoint uses set-based queries to avoid N+1 database patterns.
+/// All-or-nothing behavior: infrastructure failures return 500.
+///
+/// Returns 404 if the system does not exist.
+pub async fn get_system_compliance_bundles(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    if authenticated_user_roles(&pool, &headers).await.is_none() {
+        return forbidden();
+    }
+
+    match list_system_bundles(&pool, system_id).await {
+        Ok(Some(bundle_rollup_pairs)) => {
+            let bundles = bundle_rollup_pairs
+                .into_iter()
+                .map(|(bundle, rollup)| SystemComplianceBundle { bundle, rollup })
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(SystemComplianceBundlesResponse {
+                    system_id,
+                    bundles,
+                }),
+            )
+                .into_response()
+        }
+        Ok(None) => not_found(),
+        Err(_) => internal_error("Failed to load system compliance bundles"),
     }
 }
 

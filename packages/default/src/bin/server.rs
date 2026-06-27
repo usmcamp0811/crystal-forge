@@ -352,6 +352,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/compliance/bundles/:id/systems/:system_id/evidence",
             get(compliance::get_compliance_system_evidence),
         )
+        .route(
+            "/api/v1/systems/:system_id/compliance",
+            get(compliance::get_system_compliance_bundles),
+        )
         // Deployment policies CRUD endpoints
         .route(
             "/api/v1/deployment-policies",
