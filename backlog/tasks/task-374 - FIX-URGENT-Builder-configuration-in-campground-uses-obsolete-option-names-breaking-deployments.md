@@ -1,10 +1,11 @@
 ---
 id: TASK-374
 title: 'HOTFIX: Fix builder API-mode NixOS module/runtime contract'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - gpt-5.5
 created_date: '2026-06-27 16:04'
-updated_date: '2026-06-27 20:08'
+updated_date: '2026-06-27 20:09'
 labels:
   - bug
   - hotfix
@@ -83,5 +84,5 @@ None known.
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Human explicitly selected this as a super-high-priority hotfix after webb deployment proved the Crystal Forge API-mode builder path still falls back to legacy database mode.
+LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-374-builder-api-mode-hotfix
 <!-- SECTION:NOTES:END -->
