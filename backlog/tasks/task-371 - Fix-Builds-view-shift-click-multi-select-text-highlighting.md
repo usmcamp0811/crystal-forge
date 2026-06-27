@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-06-27 03:41'
-updated_date: '2026-06-27 04:01'
+updated_date: '2026-06-27 04:02'
 labels:
   - builds
   - ui
@@ -102,3 +102,13 @@ Low-medium: likely a localized UI interaction fix, but careless CSS could preven
 4. Verify with targeted frontend formatting/check commands and inspect whether a web-ui interaction check can cover this.
 5. Add a targeted `checks/web-ui/tests/integration-test.js` step for the existing web-ui screenshot check so the MR can include the Builds shift-click selection screenshot and the check can assert no browser text selection remains.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-371-fix-builds-shift-click-text-highlighting
+
+User approved implementation plan on 2026-06-26.
+
+Implementation expanded within TASK-371 verification scope to add a targeted `web-ui` check step (`15i-builds-shift-click-selection`) that shift-clicks Builds queue rows, asserts the bulk selection count, asserts `window.getSelection()` stays empty, and captures the generated screenshot.
+<!-- SECTION:NOTES:END -->
