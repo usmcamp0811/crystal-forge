@@ -528,7 +528,8 @@ pub async fn mark_stale_builders_offline(pool: &PgPool, timeout_seconds: i64) ->
 /// A job is considered orphaned when it is `building` and:
 /// - `builder_id` is NULL, or
 /// - the referenced builder row is missing, or
-/// - the referenced builder is not `active` (e.g. offline/inactive).
+/// - the referenced builder is not `active` (e.g. offline/inactive), or
+/// - the referenced builder is disabled and should not accept work.
 pub async fn requeue_orphaned_building_jobs(pool: &PgPool) -> Result<Vec<BuildJob>> {
     requeue_orphaned_building_jobs_with_reason(pool, "builder recovery").await
 }
@@ -545,7 +546,10 @@ pub async fn requeue_orphaned_building_jobs_with_reason(
         SET status = 'queued',
             builder_id = NULL,
             started_at = NULL,
-            logs = COALESCE(logs, '') || E'\n\nRecovery: re-queued from building by ' || $1,
+            logs = RIGHT(
+                COALESCE(logs, ''),
+                10 * 1024 * 1024 - OCTET_LENGTH(E'\n\nRecovery: re-queued from building by ' || $1)
+            ) || E'\n\nRecovery: re-queued from building by ' || $1,
             updated_at = now()
         WHERE bj.status = 'building'
           AND (
@@ -556,7 +560,7 @@ pub async fn requeue_orphaned_building_jobs_with_reason(
                 OR EXISTS (
                     SELECT 1 FROM builders b
                     WHERE b.id = bj.builder_id
-                      AND b.status <> 'active'
+                      AND (b.status <> 'active' OR NOT b.enabled)
                 )
           )
         RETURNING bj.*
@@ -2448,6 +2452,112 @@ mod tests {
                 .contains("runtime builder liveness recovery"),
             "runtime recovery should record an explicit reason in job logs"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_requeue_orphaned_building_jobs_treats_disabled_active_builder_as_orphaned() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+
+        let builder = create_active_test_builder(&pool, "disabled-active-requeue-builder").await;
+        sqlx::query("UPDATE builders SET enabled = false, status = 'active' WHERE id = $1")
+            .bind(builder.id)
+            .execute(&pool)
+            .await
+            .expect("Failed to disable active builder");
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/requeue-disabled-active.git",
+            "requeue-disabled-active",
+            &format!("requeuedisabledactive{}", Uuid::new_v4().simple()),
+            now,
+            "drv-requeue-disabled-active",
+            1.0,
+            now,
+        )
+        .await;
+        assign_job_to_builder(&pool, &job_id, &builder.id)
+            .await
+            .expect("disabled active builder owns building job in test setup");
+
+        let recovered =
+            requeue_orphaned_building_jobs_with_reason(&pool, "runtime builder liveness recovery")
+                .await
+                .expect("recovery should succeed");
+
+        assert!(
+            recovered.iter().any(|job| job.id == job_id),
+            "disabled active builder job should be recovered"
+        );
+
+        let row = get_build_job_by_id(&pool, &job_id)
+            .await
+            .expect("job fetch should succeed")
+            .expect("job should exist");
+        assert_eq!(row.status, "queued");
+        assert_eq!(row.builder_id, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_requeue_orphaned_building_jobs_preserves_log_size_limit() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+        const MAX_LOG_BYTES: i64 = 10 * 1024 * 1024;
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/requeue-log-limit.git",
+            "requeue-log-limit",
+            &format!("requeueloglimit{}", Uuid::new_v4().simple()),
+            now,
+            "drv-requeue-log-limit",
+            1.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, job_id, "building").await;
+        sqlx::query(
+            r#"
+            UPDATE build_jobs
+            SET builder_id = NULL,
+                logs = repeat('x', $2::int)
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .bind(MAX_LOG_BYTES)
+        .execute(&pool)
+        .await
+        .expect("Failed to seed near-limit logs");
+
+        let recovered =
+            requeue_orphaned_building_jobs_with_reason(&pool, "startup builder recovery")
+                .await
+                .expect("recovery should succeed");
+        assert!(recovered.iter().any(|job| job.id == job_id));
+
+        let (log_bytes, has_reason): (i64, bool) = sqlx::query_as(
+            r#"
+            SELECT
+                OCTET_LENGTH(COALESCE(logs, ''))::bigint,
+                COALESCE(logs, '') LIKE '%startup builder recovery%'
+            FROM build_jobs
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("Failed to fetch recovered log length");
+
+        assert!(
+            log_bytes <= MAX_LOG_BYTES,
+            "recovery log append must preserve the 10 MiB limit, got {log_bytes} bytes"
+        );
+        assert!(has_reason, "recovery reason should still be appended");
     }
 
     #[tokio::test]
