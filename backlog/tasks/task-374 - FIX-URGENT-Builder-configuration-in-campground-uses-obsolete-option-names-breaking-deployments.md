@@ -1,11 +1,11 @@
 ---
 id: TASK-374
 title: 'HOTFIX: Fix builder API-mode NixOS module/runtime contract'
-status: In Progress
+status: Review
 assignee:
   - gpt-5.5
 created_date: '2026-06-27 16:04'
-updated_date: '2026-06-27 21:13'
+updated_date: '2026-06-27 21:18'
 labels:
   - bug
   - hotfix
@@ -18,6 +18,7 @@ references:
   - /home/mcamp/code/campground/systems/x86_64-linux/webb/default.nix
   - >-
     /home/mcamp/code/campground/fmf-flake/modules/nixos/services/crystal-forge/default.nix
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/288'
 modified_files:
   - modules/nixos/crystal-forge/default.nix
   - packages/default/src/config/builder.rs
@@ -92,14 +93,13 @@ None known.
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Rebased hotfix worktree changes onto current origin/dev (6daa90c4) by resetting the task branch to origin/dev and reapplying the WIP patch; working tree now has only TASK-374 scoped changes.
+MR opened and task moved to Review: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/288
 
-Verification after rebase:
-- `nix develop -c rustfmt --edition 2024 packages/default/src/config/builder.rs packages/default/src/builder/api_client.rs packages/default/src/handlers/api/builders.rs packages/default/src/queries/builders.rs packages/default/src/bin/builder.rs packages/default/src/bin/server.rs packages/default/src/models/builders.rs && git diff --check` passed.
-- `SQLX_OFFLINE=true nix develop -c cargo check --bins` passed with pre-existing warnings.
-- `SQLX_OFFLINE=true nix develop -c cargo test builder --lib` passed: 59 passed, 0 failed, 28 ignored.
-- NixOS module evaluation for `services.crystal-forge.build.enable = true` showed `apiModeDefault = true`, builder API private key path `/var/lib/crystal-forge/builder-api.key`, server URL set, empty `builderAfter`/`builderWants`, and no `runuser` in preStart.
-- Built/realized the generated config script and inspected generated TOML; it contains `[builder] enable_api_mode = true`, `private_key_path = "/var/lib/crystal-forge/builder-api.key"`, and `server_url = "https://cf.example.invalid"`.
-
-Also accidentally triggered a package build while realizing the config script; it completed successfully and ran package tests in the Nix build log, but this was not the declared primary verification command.
+Commit: 30f40d15 fix: make builder API mode self-register by public key
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implemented API-first builder deployment for NixOS and public-key-based builder ID resolution. Builders now default to API mode, generate/consume the correct runtime config, avoid PostgreSQL dependencies in API mode, and can resolve their server-side UUID after operator public-key registration. Opened MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/288
+<!-- SECTION:FINAL_SUMMARY:END -->
