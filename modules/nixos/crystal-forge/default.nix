@@ -285,6 +285,9 @@
       ${lib.optionalString (includeBuilderApiKeySetup && cfg.build.enable && cfg.build.api_mode && cfg.build.api_key_file == null) ''
         BUILDER_API_KEY_PATH="/var/lib/crystal-forge/builder-api.key"
 
+        # cf-keygen uses path.with_extension("pub"), so builder-api.key -> builder-api.pub
+        BUILDER_API_PUB_PATH="''${BUILDER_API_KEY_PATH%.key}.pub"
+
         if [ ! -f "$BUILDER_API_KEY_PATH" ]; then
           echo "Generating builder API key for Crystal Forge API mode..."
           ${pkgs.crystal-forge.default.server}/bin/cf-keygen -y -f "$BUILDER_API_KEY_PATH"
@@ -295,7 +298,7 @@
           echo ""
           echo "Register this builder in the Crystal Forge UI with the following public key:"
           echo ""
-          cat "$BUILDER_API_KEY_PATH.pub"
+          cat "$BUILDER_API_PUB_PATH"
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         fi
@@ -304,9 +307,9 @@
         chown crystal-forge:crystal-forge "$BUILDER_API_KEY_PATH"
         chmod 600 "$BUILDER_API_KEY_PATH"
 
-        if [ -f "$BUILDER_API_KEY_PATH.pub" ]; then
-          chown crystal-forge:crystal-forge "$BUILDER_API_KEY_PATH.pub"
-          chmod 644 "$BUILDER_API_KEY_PATH.pub"
+        if [ -f "$BUILDER_API_PUB_PATH" ]; then
+          chown crystal-forge:crystal-forge "$BUILDER_API_PUB_PATH"
+          chmod 644 "$BUILDER_API_PUB_PATH"
         fi
       ''}
 
@@ -1960,15 +1963,6 @@ in {
           echo "ATTIC_TOKEN: ''${ATTIC_TOKEN:+SET}"
         fi
 
-        # Test attic configuration as the crystal-forge user
-        echo "Testing Attic configuration..."
-        ${pkgs.util-linux}/bin/runuser -u crystal-forge -- env \
-          HOME="/var/lib/crystal-forge" \
-          XDG_CONFIG_HOME="/var/lib/crystal-forge/.config" \
-          ATTIC_SERVER_URL="''${ATTIC_SERVER_URL:-}" \
-          ATTIC_TOKEN="''${ATTIC_TOKEN:-}" \
-          ATTIC_REMOTE_NAME="''${ATTIC_REMOTE_NAME:-}" \
-          attic login list || echo "Attic configuration test failed"
       '';
 
       # Splice arbitrary unit properties (e.g., IOWeight=100, TasksMax=3000) parsed above
