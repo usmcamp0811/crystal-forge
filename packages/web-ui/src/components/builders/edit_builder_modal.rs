@@ -14,7 +14,7 @@ use crate::theme;
 mod edit_builder_modal_actions;
 use edit_builder_modal_actions::{
     apply_builder_public_key, build_update_request, delete_builder_permanently,
-    submit_builder_update,
+    public_key_update_for_save, submit_builder_update,
 };
 
 fn memory_mb_to_gib_string(value: Option<i32>) -> String {
@@ -123,12 +123,11 @@ pub fn EditBuilderModal(
             max_concurrent_jobs().as_str(),
         );
 
-        let next_public_key = rotated_public_key().trim().to_string();
-        let should_update_public_key = !next_public_key.is_empty() && next_public_key != current_public_key();
+        let public_key_update = public_key_update_for_save(&current_public_key(), &rotated_public_key());
 
         match submit_builder_update(&builder_id, &update_request, selected_environments()).await {
             Ok(_) => {
-                if should_update_public_key {
+                if let Some(next_public_key) = public_key_update {
                     match apply_builder_public_key(&builder_id, next_public_key).await {
                         Ok(_) => on_success.call(()),
                         Err(message) => {
