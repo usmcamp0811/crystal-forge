@@ -1,7 +1,7 @@
 ---
 id: TASK-375
 title: Add missing builder resolve-id API endpoint
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-06-28 02:11'
 updated_date: '2026-06-28 02:14'
@@ -56,3 +56,9 @@ Verification Plan:
 - [ ] #3 The endpoint rejects unknown, disabled, or invalidly signed builder requests without exposing direct database access to builder processes.
 - [ ] #4 The builder remains API-only and does not reintroduce legacy direct-database fallback.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-375-fix-cf-keygen-pub-path
+<!-- SECTION:NOTES:END -->
