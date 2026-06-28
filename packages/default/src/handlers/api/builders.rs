@@ -798,7 +798,7 @@ pub async fn get_next_job(
     Path(builder_id): Path<Uuid>,
     headers: axum::http::HeaderMap,
     body: Bytes,
-) -> Result<Json<BuildJob>, StatusCode> {
+) -> Result<Json<crate::models::builders::NextJobResponse>, StatusCode> {
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/next-job", builder_id);
     let verified = authenticate_builder_request(&headers, body, "GET", &path, &state.pool).await?;
@@ -834,14 +834,83 @@ pub async fn get_next_job(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    if let Some(job) = job {
-        // Job successfully claimed (already marked as 'building')
-        Ok(Json(job))
-    } else {
-        // Either no jobs available OR builder at capacity
-        // Return 404 NOT_FOUND so builder knows to wait
-        Err(StatusCode::NOT_FOUND)
+    let Some(job) = job else {
+        // Either no jobs available OR builder at capacity.
+        // Return 404 NOT_FOUND so builder knows to wait.
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    // Embed the derivation build payload so the remote builder needs no DB access.
+    let derivation = crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to load derivation {} for claimed job {}: {}",
+                job.derivation_id,
+                job.id,
+                e
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let payload = crate::models::builders::BuildJobDerivation {
+        id: derivation.id,
+        derivation_name: derivation.derivation_name.clone(),
+        derivation_type: match derivation.derivation_type {
+            crate::derivations::DerivationType::NixOS => "nixos".to_string(),
+            crate::derivations::DerivationType::Package => "package".to_string(),
+        },
+        derivation_path: derivation.derivation_path.clone(),
+        store_path: derivation.store_path.clone(),
+    };
+
+    Ok(Json(crate::models::builders::NextJobResponse {
+        job,
+        derivation: payload,
+    }))
+}
+
+/// POST /api/v1/builders/:id/jobs/:job_id/progress - Build progress heartbeat
+///
+/// HTTP fallback for the WebSocket progress frame. Updates the derivation's
+/// build heartbeat/progress fields so the UI can show live build status.
+pub async fn build_progress(
+    State(state): State<CFState>,
+    Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, StatusCode> {
+    let path = format!("/api/v1/builders/{}/jobs/{}/progress", builder_id, job_id);
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
+
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
     }
+
+    let request: crate::models::builders::BuildProgressRequest =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if job.builder_id != Some(builder_id) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    crate::queries::derivations::update_build_heartbeat(
+        &state.pool,
+        request.derivation_id,
+        request.elapsed_seconds,
+        request.current_target.as_deref(),
+        request.last_activity_seconds,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::ACCEPTED)
 }
 
 #[derive(Debug, Deserialize)]
@@ -882,7 +951,17 @@ pub async fn start_job(
     Ok(StatusCode::ACCEPTED)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CompleteJobRequest {
+    #[serde(default)]
+    pub output_path: Option<String>,
+}
+
 /// POST /api/v1/builders/:id/jobs/:job_id/complete - Mark job as complete
+///
+/// In addition to closing the build job, the server performs the derivation
+/// completion (store path + status) and queues a cache-push job. This keeps all
+/// database writes server-side so API builders never need a DB connection.
 pub async fn complete_job(
     State(state): State<CFState>,
     Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
@@ -891,11 +970,19 @@ pub async fn complete_job(
 ) -> Result<StatusCode, StatusCode> {
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/jobs/{}/complete", builder_id, job_id);
-    let verified = authenticate_builder_request(&headers, body, "POST", &path, &state.pool).await?;
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
 
     if verified.builder_id != builder_id {
         return Err(StatusCode::FORBIDDEN);
     }
+
+    // Output path is optional for backwards compatibility but expected from API builders.
+    let request: CompleteJobRequest = if body.is_empty() {
+        CompleteJobRequest { output_path: None }
+    } else {
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?
+    };
 
     // Verify the job is assigned to this builder
     let job = builders::get_build_job_by_id(&state.pool, &job_id)
@@ -905,6 +992,49 @@ pub async fn complete_job(
 
     if job.builder_id != Some(builder_id) {
         return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Perform derivation completion + cache-push queueing server-side.
+    if let Some(ref store_path) = request.output_path {
+        if let Err(e) = crate::queries::derivations::mark_target_build_complete(
+            &state.pool,
+            job.derivation_id,
+            store_path,
+        )
+        .await
+        {
+            tracing::error!(
+                "Failed to mark derivation {} complete for job {}: {}",
+                job.derivation_id,
+                job_id,
+                e
+            );
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        let cache_destination = crate::queries::cache_destinations::list_cache_destinations(
+            &state.pool,
+            true,
+        )
+        .await
+        .ok()
+        .and_then(|dests| dests.into_iter().next().map(|d| d.name));
+
+        if let Err(e) = crate::queries::cache_push::create_cache_push_job(
+            &state.pool,
+            job.derivation_id,
+            store_path,
+            cache_destination.as_deref(),
+        )
+        .await
+        {
+            tracing::warn!(
+                "Failed to queue cache push for derivation {} (job {}): {}",
+                job.derivation_id,
+                job_id,
+                e
+            );
+        }
     }
 
     // Mark job as complete
@@ -981,6 +1111,44 @@ pub async fn fail_job(
     if updated_job.status == "queued" {
         Ok(StatusCode::OK) // Job re-queued for retry
     } else {
+        // Permanent failure: record the derivation-level failure server-side so
+        // API builders never touch the database directly.
+        match crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+            .await
+        {
+            Ok(derivation) => {
+                let err = anyhow::anyhow!(
+                    request
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "build failed".to_string())
+                );
+                if let Err(e) = crate::queries::derivations::handle_derivation_failure(
+                    &state.pool,
+                    &derivation,
+                    "build",
+                    &err,
+                )
+                .await
+                {
+                    tracing::error!(
+                        "Failed to record derivation {} failure for job {}: {}",
+                        job.derivation_id,
+                        job_id,
+                        e
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to load derivation {} to record failure for job {}: {}",
+                    job.derivation_id,
+                    job_id,
+                    e
+                );
+            }
+        }
+
         cleanup_build_log_channel(&state, job_id).await;
         Ok(StatusCode::ACCEPTED) // Job permanently failed
     }
@@ -1144,6 +1312,15 @@ enum BuildStreamMessage {
         ram_total_mb: u64,
         timestamp: String,
     },
+    /// Builder -> server: live build progress (replaces DB heartbeat polling).
+    Progress {
+        derivation_id: i32,
+        elapsed_seconds: i32,
+        current_target: Option<String>,
+        last_activity_seconds: i32,
+    },
+    /// Server -> builder: the operator requested cancellation; stop the build.
+    CancelRequested,
     Error {
         message: String,
     },
@@ -1328,6 +1505,36 @@ async fn handle_log_stream(
                                 };
                                 record_build_stream_message(&state, job_id, &metrics_msg).await;
                                 let _ = broadcast_build_stream_message(&tx, &metrics_msg);
+                            }
+                            BuildStreamMessage::Progress {
+                                derivation_id,
+                                elapsed_seconds,
+                                current_target,
+                                last_activity_seconds,
+                            } => {
+                                if let Err(e) = crate::queries::derivations::update_build_heartbeat(
+                                    &state.pool,
+                                    derivation_id,
+                                    elapsed_seconds,
+                                    current_target.as_deref(),
+                                    last_activity_seconds,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to persist WS build progress for job {} (builder {}): {}",
+                                        job_id,
+                                        builder_id,
+                                        e
+                                    );
+                                }
+                            }
+                            BuildStreamMessage::CancelRequested => {
+                                let error = BuildStreamMessage::Error {
+                                    message: "builders cannot send cancel frames".to_string(),
+                                };
+                                let _ = send_build_stream_message(&mut socket, &error).await;
+                                break;
                             }
                             BuildStreamMessage::Error { .. } => {
                                 let error = BuildStreamMessage::Error {

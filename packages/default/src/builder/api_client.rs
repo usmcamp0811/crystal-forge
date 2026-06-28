@@ -1,6 +1,7 @@
 use crate::config::BuilderConfig;
 use crate::models::builders::{
-    BuildJob, ReportMetricsRequest, ResolveBuilderIdRequest, ResolveBuilderIdResponse,
+    BuildProgressRequest, NextJobResponse, ReportMetricsRequest, ResolveBuilderIdRequest,
+    ResolveBuilderIdResponse,
 };
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -30,6 +31,15 @@ pub enum BuildStreamMessage {
         ram_total_mb: u64,
         timestamp: String,
     },
+    /// Builder -> server: live build progress (WS primary path for the reporter).
+    Progress {
+        derivation_id: i32,
+        elapsed_seconds: i32,
+        current_target: Option<String>,
+        last_activity_seconds: i32,
+    },
+    /// Server -> builder: operator requested cancellation.
+    CancelRequested,
 }
 
 /// API client for builder-to-server communication
@@ -234,8 +244,9 @@ impl BuilderApiClient {
         Ok(())
     }
 
-    /// Get the next available job from the server
-    pub async fn get_next_job(&self) -> Result<Option<BuildJob>> {
+    /// Get the next available job from the server, including the embedded
+    /// derivation build payload so the builder needs no database access.
+    pub async fn get_next_job(&self) -> Result<Option<NextJobResponse>> {
         let path = format!("/api/v1/builders/{}/next-job", self.builder_id);
         let url = format!("{}{}", self.server_url, path);
         let body = Vec::new(); // Empty body for GET
@@ -265,12 +276,54 @@ impl BuilderApiClient {
             anyhow::bail!("Get next job failed with status {}: {}", status, error_text);
         }
 
-        let job: BuildJob = response
+        let next_job: NextJobResponse = response
             .json()
             .await
             .context("Failed to parse job response")?;
 
-        Ok(Some(job))
+        Ok(Some(next_job))
+    }
+
+    /// Report build progress to the server over HTTP (reporter fallback path).
+    pub async fn report_progress(
+        &self,
+        job_id: uuid::Uuid,
+        progress: &BuildProgressRequest,
+    ) -> Result<()> {
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/progress",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let body = serde_json::to_vec(progress)?;
+        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("X-Builder-ID", builder_id)
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .body(body)
+            .send()
+            .await
+            .context("Failed to report build progress")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!(
+                "Report progress failed with status {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        Ok(())
     }
 
     /// Start a job (mark it as in-progress)
@@ -388,6 +441,49 @@ impl BuilderApiClient {
 
         info!("Job {} marked as failed", job_id);
         Ok(())
+    }
+
+    /// Poll the current status of a job (HTTP fallback for cancel detection).
+    pub async fn get_job_status(&self, job_id: uuid::Uuid) -> Result<Option<String>> {
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/status",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let (builder_id, signature, timestamp) = self.sign_request("GET", &path, &[]);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("X-Builder-ID", builder_id)
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .send()
+            .await
+            .context("Failed to poll job status")?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!("Get job status failed with status {}: {}", status, error_text);
+        }
+
+        let value: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse job status response")?;
+
+        Ok(value
+            .get("status")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string()))
     }
 
     /// Notify the server that a cancelling job has been fully stopped.
@@ -554,6 +650,47 @@ impl BuilderApiClient {
             .await
             .context("Failed to send metrics")?;
         Ok(())
+    }
+}
+
+/// API-backed [`BuildReporter`] for remote builders.
+///
+/// Reports progress and checks cancellation entirely over the server API with no
+/// database access. Progress is sent via HTTP POST; cancellation is detected by
+/// polling the job status endpoint. This keeps remote builders fully DB-free.
+#[derive(Clone)]
+pub struct ApiBuildReporter {
+    client: BuilderApiClient,
+    job_id: Uuid,
+}
+
+impl ApiBuildReporter {
+    pub fn new(client: BuilderApiClient, job_id: Uuid) -> Self {
+        Self { client, job_id }
+    }
+}
+
+#[axum::async_trait]
+impl crate::derivations::reporter::BuildReporter for ApiBuildReporter {
+    async fn report_progress(
+        &self,
+        progress: &crate::derivations::reporter::BuildProgress,
+    ) -> Result<()> {
+        let request = BuildProgressRequest {
+            derivation_id: progress.derivation_id,
+            elapsed_seconds: progress.elapsed_seconds,
+            current_target: progress.current_target.clone(),
+            last_activity_seconds: progress.last_activity_seconds,
+        };
+        self.client.report_progress(self.job_id, &request).await
+    }
+
+    async fn is_cancelled(&self, job_id: Option<Uuid>) -> Result<bool> {
+        let Some(job_id) = job_id else {
+            return Ok(false);
+        };
+        let status = self.client.get_job_status(job_id).await?;
+        Ok(matches!(status.as_deref(), Some("cancelling")))
     }
 }
 
