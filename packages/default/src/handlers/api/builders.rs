@@ -13,7 +13,9 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
+use ed25519_dalek::{Signature, Verifier};
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -28,14 +30,137 @@ use crate::handlers::builder_request::{
 use crate::models::builders::{
     AppendLogsRequest, BuildJob, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary,
     BuilderWithEnvironments, CreateBuilderRequest, KeypairRegeneratedResponse,
-    ReportMetricsRequest, UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest,
-    UpdateBuilderRequest,
+    ReportMetricsRequest, ResolveBuilderIdRequest, ResolveBuilderIdResponse,
+    UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
 };
+use crate::models::public_key::PublicKey;
 use crate::queries::builders;
 
 // =============================================================================
 // BUILDER MANAGEMENT ENDPOINTS (Admin-only)
 // =============================================================================
+
+fn canonical_signature_payload(method: &str, path: &str, timestamp: &str, body: &[u8]) -> Vec<u8> {
+    let mut payload =
+        Vec::with_capacity(method.len() + path.len() + timestamp.len() + body.len() + 3);
+    payload.extend_from_slice(method.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(path.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(timestamp.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(body);
+    payload
+}
+
+/// POST /api/v1/builders/resolve-id - Resolve builder ID from signed public key proof.
+pub async fn resolve_builder_id(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<ResolveBuilderIdResponse>, (StatusCode, String)> {
+    let request: ResolveBuilderIdRequest = serde_json::from_slice(&body).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid resolve-id request".to_string(),
+        )
+    })?;
+
+    let public_key = PublicKey::from_base64(&request.public_key, "builder").map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid builder public key".to_string(),
+        )
+    })?;
+
+    let builder = builders::get_builder_by_public_key(&state.pool, &public_key)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to resolve builder by public key");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to resolve builder".to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "Unknown builder public key".to_string(),
+            )
+        })?;
+
+    if !builder.enabled {
+        tracing::warn!(builder_id = %builder.id, "builder resolve-id rejected: builder disabled");
+        return Err((StatusCode::UNAUTHORIZED, "Builder is disabled".to_string()));
+    }
+
+    let timestamp_str = headers
+        .get("X-Timestamp")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "Missing X-Timestamp header".to_string(),
+            )
+        })?;
+
+    let request_timestamp = chrono::DateTime::parse_from_rfc3339(timestamp_str)
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Invalid X-Timestamp header".to_string(),
+            )
+        })?
+        .with_timezone(&chrono::Utc);
+    let now = chrono::Utc::now();
+    const FRESHNESS_WINDOW_SECS: i64 = 5 * 60;
+    if (now - request_timestamp).num_seconds().abs() > FRESHNESS_WINDOW_SECS {
+        tracing::warn!(builder_id = %builder.id, "builder resolve-id rejected: stale timestamp");
+        return Err((StatusCode::UNAUTHORIZED, "Stale timestamp".to_string()));
+    }
+
+    let signature_header = headers
+        .get("X-Signature")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "Missing X-Signature header".to_string(),
+            )
+        })?;
+
+    let signature_bytes = general_purpose::STANDARD
+        .decode(signature_header)
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Invalid X-Signature header".to_string(),
+            )
+        })?;
+    let signature_array: [u8; 64] = signature_bytes.try_into().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid X-Signature length".to_string(),
+        )
+    })?;
+    let signature = Signature::from_bytes(&signature_array);
+
+    let signed_payload =
+        canonical_signature_payload("POST", "/api/v1/builders/resolve-id", timestamp_str, &body);
+    if builder
+        .public_key
+        .verifying_key()
+        .verify(&signed_payload, &signature)
+        .is_err()
+    {
+        tracing::warn!(builder_id = %builder.id, "builder resolve-id rejected: invalid signature");
+        return Err((StatusCode::UNAUTHORIZED, "Invalid signature".to_string()));
+    }
+
+    Ok(Json(ResolveBuilderIdResponse {
+        builder_id: builder.id,
+    }))
+}
 
 /// POST /api/v1/builders - Create a new builder (admin-only)
 ///

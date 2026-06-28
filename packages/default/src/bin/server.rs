@@ -421,6 +421,10 @@ async fn main() -> anyhow::Result<()> {
             get(builders::list_builders).post(builders::create_builder),
         )
         .route(
+            "/api/v1/builders/resolve-id",
+            post(builders::resolve_builder_id),
+        )
+        .route(
             "/api/v1/builders/:id",
             get(builders::get_builder)
                 .patch(builders::update_builder)

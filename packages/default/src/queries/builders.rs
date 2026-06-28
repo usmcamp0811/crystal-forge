@@ -115,6 +115,20 @@ pub async fn get_builder_by_id(pool: &PgPool, builder_id: &Uuid) -> Result<Optio
     Ok(builder.map(Builder::with_public_key_fingerprint))
 }
 
+/// Get a builder by its registered public key.
+pub async fn get_builder_by_public_key(
+    pool: &PgPool,
+    public_key: &PublicKey,
+) -> Result<Option<Builder>> {
+    let builder = sqlx::query_as::<_, Builder>("SELECT * FROM builders WHERE public_key = $1")
+        .bind(public_key)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch builder by public key")?;
+
+    Ok(builder.map(Builder::with_public_key_fingerprint))
+}
+
 /// Get a builder with its environment assignments
 pub async fn get_builder_with_environments(
     pool: &PgPool,
