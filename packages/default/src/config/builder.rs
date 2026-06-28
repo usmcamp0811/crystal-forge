@@ -28,9 +28,6 @@ pub struct BuilderConfig {
     /// (overrides the server-side setting if lower)
     pub max_concurrent_jobs: Option<i32>,
 
-    /// Enable API mode (if false, use legacy direct-database mode)
-    pub enable_api_mode: bool,
-
     /// Initial delay between builder-ID resolution retries when the server
     /// rejects the builder (e.g. the public key has not been registered yet or
     /// the builder is disabled). The delay grows exponentially up to
@@ -58,7 +55,6 @@ impl Default for BuilderConfig {
             poll_interval: Duration::from_secs(5),
             heartbeat_interval: Duration::from_secs(30),
             max_concurrent_jobs: None,
-            enable_api_mode: false, // Default to legacy mode for backward compatibility
             resolve_retry_interval: Duration::from_secs(10),
             resolve_retry_max_interval: Duration::from_secs(300),
             resolve_max_attempts: 0, // retry forever by default
@@ -71,8 +67,7 @@ impl BuilderConfig {
     ///
     /// Requires a private key path and server URL. builder_id is NOT required
     /// here — it is resolved dynamically from the server via the public key on
-    /// first connection. enable_api_mode is also not required: if the private
-    /// key path and server URL are set (via env or config) API mode is used.
+    /// first connection. The builder is API-only; these fields are required.
     pub fn is_api_mode_ready(&self) -> bool {
         self.private_key_path.is_some() && self.server_url.is_some()
     }

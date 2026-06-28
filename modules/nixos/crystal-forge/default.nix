@@ -952,29 +952,28 @@ in {
 
       api_mode = lib.mkOption {
         type = lib.types.bool;
-        default = false;
+        default = true;
         description = lib.mdDoc ''
-          Use builder API mode (recommended).
+          Use builder API mode.
 
-          When enabled, the builder authenticates to the Crystal Forge server
-          via API using a private key, rather than connecting directly to the
-          database (legacy mode).
+          Crystal Forge builders are API-only. The builder authenticates to
+          the Crystal Forge server using a private key and never connects
+          directly to the database.
 
-          **Benefits of API mode:**
+          **Benefits:**
           - No database credentials needed on builder machines
           - Better security isolation
           - Supports distributed builds across networks
           - Builder registration via server UI
 
-          **Default**: false (legacy mode for backward compatibility)
+          **Default**: true
 
-          **Migration**: Set to true to use API mode. After enabling, the
-          builder API key will be auto-generated and displayed in systemd
-          logs. Register the builder using the public key in the UI.
+          The builder API key will be auto-generated on first start unless
+          `api_key_file` is set. Register the builder using the public key in
+          the Crystal Forge UI.
 
-          **Deprecation**: Legacy database mode (false) is deprecated and
-          will be removed in a future release. New deployments should use
-          API mode (true).
+          Setting this to false is not supported. It is retained only to make
+          old configurations fail evaluation with a clear migration message.
         '';
       };
 
@@ -995,7 +994,7 @@ in {
           **Manual key provision:**
           Set this option to use a pre-existing key file.
 
-          **Note**: Only used when `api_mode = true`
+          **Note**: Builder API mode is required.
         '';
         example = "/run/secrets/crystal-forge-builder-key";
       };
@@ -1018,7 +1017,7 @@ in {
           - Same network: "http://crystal-forge.local:3000"
           - Remote: "https://crystal-forge.example.com"
 
-          **Note**: Only used when `api_mode = true`
+          **Note**: Builder API mode is required.
         '';
         example = "https://crystal-forge.example.com";
       };
@@ -1916,7 +1915,7 @@ in {
           NIX_CONFIG_DIR = "/dev/null";
           GC_MARKERS = "1";
         }
-        # Add Builder API mode environment variables
+        # Add required Builder API environment variables
         (lib.mkIf cfg.build.api_mode {
           CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH =
             if cfg.build.api_key_file != null
@@ -2252,28 +2251,24 @@ in {
       };
     };
 
-    warnings = lib.optional (cfg.build.enable && !cfg.build.api_mode) ''
-      Crystal Forge builder is using legacy database mode, which is deprecated.
-
-      Current configuration (api_mode = false) uses direct database access:
-      - Requires database credentials on builder machines
-      - Has weaker security isolation
-      - Does not support distributed builds across networks
-
-      Recommended migration to API mode:
-        1. Set: services.crystal-forge.build.api_mode = true;
-        2. Deploy the configuration (builder API key will be auto-generated)
-        3. Check systemd logs for the builder public key
-        4. Register the builder in Crystal Forge UI using the public key
-
-      Legacy database mode will be removed in a future release.
-      For more information, see the deployment documentation.
-    '';
-
     assertions = [
       {
         assertion = cfg.client.enable -> (cfg.client.private_key != null);
         message = "Crystal Forge client requires a private key file";
+      }
+      {
+        assertion = !cfg.build.enable || cfg.build.api_mode;
+        message = ''
+          Crystal Forge builders now require API mode.
+
+          Legacy direct-database builder mode has been removed. Set:
+
+            services.crystal-forge.build.api_mode = true;
+
+          The module will generate `/var/lib/crystal-forge/builder-api.key`
+          on first start unless `services.crystal-forge.build.api_key_file` is
+          set. Register the generated public key in the Crystal Forge UI.
+        '';
       }
       {
         assertion =
