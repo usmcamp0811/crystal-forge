@@ -108,9 +108,11 @@ pub(super) async fn build_worker(
                     tokio::time::timeout(build_timeout, run_mock_legacy_build(&derivation)).await
                 } else {
                     // Legacy worker path: no job_id available, cancel detection not supported here.
+                    let reporter =
+                        crate::derivations::reporter::PgPoolReporter::new(pool.clone());
                     tokio::time::timeout(
                         build_timeout,
-                        derivation.build(&pool, &build_config, None),
+                        derivation.build(&reporter, &build_config, None),
                     )
                     .await
                 };

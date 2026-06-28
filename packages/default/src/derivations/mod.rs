@@ -7,11 +7,13 @@ use tracing::error;
 pub mod build;
 pub mod cache;
 pub mod eval;
+pub mod reporter;
 pub mod utils;
 
 // Re-export everything for backward compatibility
 pub use build::*;
 pub use eval::*;
+pub use reporter::*;
 pub use utils::*;
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
