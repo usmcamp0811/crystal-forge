@@ -4,7 +4,7 @@ title: Add missing builder resolve-id API endpoint and UI key persistence
 status: In Progress
 assignee: []
 created_date: '2026-06-28 02:11'
-updated_date: '2026-06-28 02:50'
+updated_date: '2026-06-28 03:00'
 labels:
   - bug
   - builder
@@ -16,6 +16,7 @@ modified_files:
   - packages/default/src/handlers/api/builders.rs
   - packages/default/src/queries/builders.rs
   - packages/default/src/bin/server.rs
+  - packages/web-ui/src/components/builders/edit_builder_modal.rs
 priority: high
 ordinal: 5500
 ---
@@ -42,15 +43,14 @@ Impact Areas:
 - packages/default/src/handlers/api/builders.rs
 - packages/default/src/queries/builders.rs
 - packages/default/src/bin/server.rs
-- Builders UI edit/save flow
-- Frontend API client for builder updates if needed
+- packages/web-ui/src/components/builders/edit_builder_modal.rs
 
 Risk Level: medium
 
 Verification Plan:
 - SQLX_OFFLINE=true nix develop -c cargo check --bin server --bin builder
 - SQLX_OFFLINE=true nix develop -c cargo test builder::api_client::tests --lib
-- Targeted UI/client check for builder public key update save behavior where feasible.
+- nix develop -c cargo check --target wasm32-unknown-unknown from packages/web-ui
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
