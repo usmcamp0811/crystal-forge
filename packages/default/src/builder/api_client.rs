@@ -397,6 +397,45 @@ impl BuilderApiClient {
         Ok(())
     }
 
+    /// Download a Nix archive for the job's derivation closure from the server.
+    pub async fn download_derivation_archive(&self, job_id: uuid::Uuid) -> Result<bytes::Bytes> {
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/derivation-archive",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let body = Vec::new();
+        let (builder_id, signature, timestamp) = self.sign_request("GET", &path, &body);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("X-Builder-ID", builder_id)
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .send()
+            .await
+            .context("Failed to request derivation archive")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!(
+                "Download derivation archive failed with status {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        response
+            .bytes()
+            .await
+            .context("Failed to read derivation archive response")
+    }
+
     /// Start a job (mark it as in-progress)
     pub async fn start_job(&self, job_id: uuid::Uuid) -> Result<()> {
         let path = format!("/api/v1/builders/{}/jobs/{}/start", self.builder_id, job_id);

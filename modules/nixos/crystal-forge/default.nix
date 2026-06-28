@@ -319,6 +319,12 @@
   configScriptServer = makeConfigScript {
     destPath = serverConfigPath;
     includeServerStateSetup = true;
+    includeBuilderApiKeySetup = false;
+  };
+
+  configScriptBuilder = makeConfigScript {
+    destPath = serverConfigPath;
+    includeServerStateSetup = true;
     includeBuilderApiKeySetup = true;
   };
 
@@ -1939,7 +1945,7 @@ in {
 
       preStart = ''
         mkdir -p /run/crystal-forge
-        ${configScriptServer}
+        ${configScriptBuilder}
         mkdir -p /var/lib/crystal-forge/.config/attic
 
         # Ensure proper ownership - do this AFTER creating all directories

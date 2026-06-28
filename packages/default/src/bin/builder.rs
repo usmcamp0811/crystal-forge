@@ -4,9 +4,12 @@ use crystal_forge::config::CrystalForgeConfig;
 use crystal_forge::derivations::build::{BuildCancelledError, LogSink};
 use crystal_forge::models::builders::{BuildJobDerivation, NextJobResponse, ReportMetricsRequest};
 use std::hash::{Hash, Hasher};
+use std::path::Path;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::signal;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -270,6 +273,24 @@ async fn execute_build_job(
     // Send initial log message (via WebSocket if available, otherwise HTTP)
     let initial_log = format!("🔨 Starting build for {}\n", derivation.derivation_name);
     send_log_with_fallback(&client, job_id, &mut ws_shared, &initial_log).await;
+
+    if let Some(drv_path) = derivation.derivation_path.as_deref() {
+        if let Err(e) = ensure_derivation_available(&client, job_id, drv_path).await {
+            let message = format!(
+                "[crystal-forge] failed to import derivation archive for {}: {}\n",
+                drv_path, e
+            );
+            send_log_with_fallback(&client, job_id, &mut ws_shared, &message).await;
+            error!("❌ Job #{} cannot start build: {}", job_id, e);
+            if let Err(report_err) = client.fail_job(job_id, &e.to_string()).await {
+                error!(
+                    "❌ Failed to report job #{} derivation import failure: {}",
+                    job_id, report_err
+                );
+            }
+            return;
+        }
+    }
 
     // Spawn metrics reporting task if WebSocket is available
     let metrics_task = if let Some(ref ws) = ws_shared {
@@ -537,6 +558,49 @@ async fn execute_build_job(
     if let Some(task) = metrics_task {
         task.abort();
     }
+}
+
+async fn ensure_derivation_available(
+    client: &BuilderApiClient,
+    job_id: uuid::Uuid,
+    drv_path: &str,
+) -> anyhow::Result<()> {
+    if Path::new(drv_path).exists() {
+        return Ok(());
+    }
+
+    info!(
+        "📥 Derivation {} missing locally; downloading archive from server",
+        drv_path
+    );
+    let archive = client.download_derivation_archive(job_id).await?;
+
+    let mut child = tokio::process::Command::new("nix-store")
+        .arg("--import")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn nix-store --import: {e}"))?;
+
+    let Some(mut stdin) = child.stdin.take() else {
+        anyhow::bail!("failed to open stdin for nix-store --import");
+    };
+    stdin.write_all(&archive).await?;
+    drop(stdin);
+
+    let output = child.wait_with_output().await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("nix-store --import failed: {stderr}");
+    }
+
+    if !Path::new(drv_path).exists() {
+        anyhow::bail!("import completed but derivation path is still missing: {drv_path}");
+    }
+
+    info!("✅ Imported derivation archive for {}", drv_path);
+    Ok(())
 }
 
 async fn run_mock_build(

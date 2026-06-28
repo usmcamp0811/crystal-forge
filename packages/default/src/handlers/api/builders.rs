@@ -5,13 +5,14 @@
 //! 2. Builder Work Queue (Builder-authenticated): Job polling and status updates
 
 use axum::{
+    body::Body,
     Json,
     extract::{
         Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
@@ -19,6 +20,7 @@ use ed25519_dalek::{Signature, Verifier};
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use tokio::process::Command;
 
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{
@@ -916,6 +918,81 @@ pub async fn build_progress(
 pub struct JobStatusRequest {
     pub status: String,
     pub error_message: Option<String>,
+}
+
+/// GET /api/v1/builders/:id/jobs/:job_id/derivation-archive
+///
+/// Streams a Nix archive for the claimed job's `.drv` closure. Remote API
+/// builders import this before realizing server-evaluated derivations so they
+/// do not require a shared Nix store with the server.
+pub async fn download_job_derivation_archive(
+    State(state): State<CFState>,
+    Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    let path = format!(
+        "/api/v1/builders/{}/jobs/{}/derivation-archive",
+        builder_id, job_id
+    );
+    let verified = authenticate_builder_request(&headers, body, "GET", &path, &state.pool).await?;
+
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, "failed to load build job for derivation archive: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if job.builder_id != Some(builder_id) || job.status != "building" {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let derivation = crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, derivation_id = job.derivation_id, "failed to load derivation for archive: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let Some(drv_path) = derivation.derivation_path.as_deref() else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    if !drv_path.ends_with(".drv") {
+        tracing::warn!(job_id = %job_id, drv_path, "refusing to export non-.drv path");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let output = Command::new("nix-store")
+        .arg("--export")
+        .arg(drv_path)
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, drv_path, "failed to run nix-store --export: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::error!(job_id = %job_id, drv_path, stderr = %stderr, "nix-store --export failed");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-nix-archive")
+        .body(Body::from(output.stdout))
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, "failed to build derivation archive response: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/start - Mark job as started
