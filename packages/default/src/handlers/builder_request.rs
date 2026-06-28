@@ -181,7 +181,7 @@ async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     let allowed = match builder.status {
-        crate::models::builders::BuilderStatus::Active => builder.enabled || allow_non_active,
+        crate::models::builders::BuilderStatus::Active => true,
         crate::models::builders::BuilderStatus::Inactive => allow_non_active,
         crate::models::builders::BuilderStatus::Offline => allow_non_active,
         crate::models::builders::BuilderStatus::Draining => allow_non_active,
@@ -594,7 +594,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_active_but_disabled_builder_rejected_for_active_only_auth() {
+    async fn test_active_but_disabled_builder_allowed_for_active_only_auth() {
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
         let verifying_key = signing_key.verifying_key();
 
@@ -646,7 +646,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(result.unwrap_err(), StatusCode::UNAUTHORIZED);
+        assert!(result.is_ok());
     }
 
     #[tokio::test]

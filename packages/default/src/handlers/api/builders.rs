@@ -89,11 +89,6 @@ pub async fn resolve_builder_id(
             )
         })?;
 
-    if !builder.enabled {
-        tracing::warn!(builder_id = %builder.id, "builder resolve-id rejected: builder disabled");
-        return Err((StatusCode::UNAUTHORIZED, "Builder is disabled".to_string()));
-    }
-
     let timestamp_str = headers
         .get("X-Timestamp")
         .and_then(|value| value.to_str().ok())
@@ -813,6 +808,10 @@ pub async fn get_next_job(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+
+    if !builder.enabled {
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     // Get builder's environment assignments (empty = wildcard)
     let environment_ids = builders::get_builder_environment_ids(&state.pool, &builder_id)
