@@ -1,11 +1,10 @@
 use crystal_forge::builder::api_client::BuilderApiClient;
 use crystal_forge::builder::metrics::SystemMetrics;
-use crystal_forge::builder::{run_build_loop, run_cache_push_loop, run_cve_scan_loop};
+use crystal_forge::builder::{run_cache_push_loop, run_cve_scan_loop};
 use crystal_forge::config::CrystalForgeConfig;
 use crystal_forge::derivations::build::{BuildCancelledError, LogSink};
 use crystal_forge::models::builders::{BuildJob, ReportMetricsRequest};
 use crystal_forge::queries::derivations::get_derivation_by_id;
-use crystal_forge::server::memory_monitor_task;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -39,72 +38,19 @@ async fn main() -> anyhow::Result<()> {
         warn!("⚠️  Builder running in MOCK execution mode (dev-only)");
     }
 
-    // Check if API mode is enabled and configured
-    if builder_config.is_api_mode_ready() {
-        info!("🌐 Starting Crystal Forge Builder in API mode...");
-        return run_api_mode(&cfg).await;
-    }
-
-    if cfg.server.execution_mode.is_mock() {
+    // API mode is the only supported mode. If private_key_path and server_url
+    // are not set, fail immediately with a clear error — there is no DB fallback.
+    if !builder_config.is_api_mode_ready() {
         anyhow::bail!(
-            "server.execution_mode=mock requires builder API mode. Set builder.enable_api_mode=true with builder_id/private_key_path/server_url"
+            "Builder requires API mode configuration. \
+             Set CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH and \
+             CRYSTAL_FORGE__BUILDER__SERVER_URL (or equivalent TOML keys). \
+             Legacy direct-database mode has been removed."
         );
     }
 
-    // Fall back to legacy direct-database mode (deprecated)
-    warn!(
-        "⚠️  Starting builder in deprecated legacy direct-database mode. Migrate to builder API mode."
-    );
-    info!("💾 Starting Crystal Forge Builder in legacy database mode...");
-    CrystalForgeConfig::validate_db_connection().await?;
-
-    let pool = CrystalForgeConfig::db_pool().await?;
-
-    tokio::spawn(memory_monitor_task(pool.clone()));
-    sqlx::migrate!("./migrations").run(&pool).await?;
-
-    let cache_config = &cfg.cache;
-
-    let build_handle = tokio::spawn(run_build_loop(pool.clone()));
-    let cve_scan_handle = tokio::spawn(run_cve_scan_loop(pool.clone()));
-
-    if cache_config.push_after_build {
-        let cache_handle = tokio::spawn(run_cache_push_loop(pool.clone()));
-        info!("✅ Build, CVE scan, and cache push loops started");
-
-        tokio::select! {
-            result = build_handle => {
-                error!("Build loop exited unexpectedly: {:?}", result);
-            }
-            result = cve_scan_handle => {
-                error!("CVE scan loop exited unexpectedly: {:?}", result);
-            }
-            result = cache_handle => {
-                error!("Cache push loop exited unexpectedly: {:?}", result);
-            }
-            _ = signal::ctrl_c() => {
-                info!("Received shutdown signal");
-            }
-        }
-    } else {
-        info!("📤 Cache push disabled in configuration");
-        info!("✅ Build and CVE scan loops started");
-
-        tokio::select! {
-            result = build_handle => {
-                error!("Build loop exited unexpectedly: {:?}", result);
-            }
-            result = cve_scan_handle => {
-                error!("CVE scan loop exited unexpectedly: {:?}", result);
-            }
-            _ = signal::ctrl_c() => {
-                info!("Received shutdown signal");
-            }
-        }
-    }
-
-    info!("Shutting down Crystal Forge Builder...");
-    Ok(())
+    info!("🌐 Starting Crystal Forge Builder in API mode...");
+    run_api_mode(&cfg).await
 }
 
 /// Run builder in API mode (communicates with server via API instead of direct DB)
@@ -116,8 +62,7 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
     info!("Initializing API client...");
     let api_client = BuilderApiClient::new(builder_config).await?;
 
-    let builder_id = builder_config.require_builder_id()?;
-    info!("✅ Builder ID: {}", builder_id);
+    info!("✅ Builder ID: {}", api_client.builder_id());
     info!(
         "✅ Derived Public Key (base64): {}",
         api_client.public_key_base64()

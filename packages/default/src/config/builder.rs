@@ -47,12 +47,14 @@ impl Default for BuilderConfig {
 }
 
 impl BuilderConfig {
-    /// Check if API mode is configured and enabled
+    /// Check if API mode is configured and ready.
+    ///
+    /// Requires a private key path and server URL. builder_id is NOT required
+    /// here — it is resolved dynamically from the server via the public key on
+    /// first connection. enable_api_mode is also not required: if the private
+    /// key path and server URL are set (via env or config) API mode is used.
     pub fn is_api_mode_ready(&self) -> bool {
-        self.enable_api_mode
-            && self.builder_id.is_some()
-            && self.private_key_path.is_some()
-            && self.server_url.is_some()
+        self.private_key_path.is_some() && self.server_url.is_some()
     }
 
     /// Get the builder ID, or error if not configured

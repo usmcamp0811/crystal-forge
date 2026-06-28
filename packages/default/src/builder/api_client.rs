@@ -1,5 +1,7 @@
 use crate::config::BuilderConfig;
-use crate::models::builders::{BuildJob, ReportMetricsRequest};
+use crate::models::builders::{
+    BuildJob, ReportMetricsRequest, ResolveBuilderIdRequest, ResolveBuilderIdResponse,
+};
 use anyhow::{Context, Result};
 use base64::Engine;
 use chrono::Utc;
@@ -44,9 +46,12 @@ impl BuilderApiClient {
         self.builder_id
     }
 
-    /// Create a new API client from configuration
+    /// Create a new API client from configuration.
+    ///
+    /// If `builder_id` is not set in config, the builder ID is resolved
+    /// dynamically from the server by signing a bootstrap request with the
+    /// private key and calling `POST /api/v1/builders/resolve-id`.
     pub async fn new(config: &BuilderConfig) -> Result<Self> {
-        let builder_id = config.require_builder_id()?;
         let key_path = config.require_private_key_path()?;
         let server_url = config.require_server_url()?;
 
@@ -58,6 +63,11 @@ impl BuilderApiClient {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .context("Failed to create HTTP client")?;
+
+        let builder_id = match config.builder_id {
+            Some(builder_id) => builder_id,
+            None => Self::resolve_builder_id(&client, &server_url, &signing_key).await?,
+        };
 
         Ok(Self {
             client,
@@ -128,6 +138,68 @@ impl BuilderApiClient {
     pub fn public_key_base64(&self) -> String {
         base64::engine::general_purpose::STANDARD
             .encode(self.signing_key.verifying_key().to_bytes())
+    }
+
+    fn public_key_base64_for(signing_key: &SigningKey) -> String {
+        base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes())
+    }
+
+    pub(crate) fn sign_bootstrap_request(
+        signing_key: &SigningKey,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> (String, String) {
+        let timestamp = Utc::now().to_rfc3339();
+        let payload = Self::canonical_signature_payload(method, path, &timestamp, body);
+        let signature: Signature = signing_key.sign(&payload);
+
+        (
+            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+            timestamp,
+        )
+    }
+
+    async fn resolve_builder_id(
+        client: &Client,
+        server_url: &str,
+        signing_key: &SigningKey,
+    ) -> Result<Uuid> {
+        let path = "/api/v1/builders/resolve-id";
+        let url = format!("{}{}", server_url, path);
+        let body = serde_json::to_vec(&ResolveBuilderIdRequest {
+            public_key: Self::public_key_base64_for(signing_key),
+        })?;
+        let (signature, timestamp) = Self::sign_bootstrap_request(signing_key, "POST", path, &body);
+
+        let response = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .body(body)
+            .send()
+            .await
+            .context("Failed to resolve builder ID")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!(
+                "Builder ID resolution failed with status {}: {}. Register this builder's public key in Crystal Forge and ensure it is enabled.",
+                status,
+                error_text
+            );
+        }
+
+        let resolved: ResolveBuilderIdResponse = response
+            .json()
+            .await
+            .context("Failed to decode builder ID resolution response")?;
+        Ok(resolved.builder_id)
     }
 
     /// Send heartbeat and metrics to server
@@ -319,9 +391,6 @@ impl BuilderApiClient {
     }
 
     /// Notify the server that a cancelling job has been fully stopped.
-    ///
-    /// Transitions the job from `cancelling` → `cancelled` with `completed_at`.
-    /// Should be called after the nix process has been killed and final logs flushed.
     pub async fn finalize_cancelled_job(&self, job_id: uuid::Uuid) -> Result<()> {
         let path = format!(
             "/api/v1/builders/{}/jobs/{}/finalize-cancelled",
@@ -408,8 +477,7 @@ impl BuilderApiClient {
         format!("{}/api/v1/build-jobs/{}/logs/stream", base, job_id)
     }
 
-    /// Stream a log line via WebSocket
-    /// Returns a WebSocket stream that can be used to send log lines and metrics
+    /// Returns a WebSocket stream for streaming build logs and metrics
     pub async fn create_log_stream(
         &self,
         job_id: &Uuid,
@@ -542,6 +610,23 @@ mod tests {
         assert_eq!(id, builder_id.to_string());
         assert_eq!(sig.len(), 88); // 64 bytes Ed25519 signature as base64
         assert!(!ts.is_empty());
+    }
+
+    #[test]
+    fn test_bootstrap_signature_uses_public_key_identity_without_builder_id() {
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        let public_key = BuilderApiClient::public_key_base64_for(&key);
+        let body = serde_json::to_vec(&ResolveBuilderIdRequest { public_key }).unwrap();
+
+        let (signature, timestamp) = BuilderApiClient::sign_bootstrap_request(
+            &key,
+            "POST",
+            "/api/v1/builders/resolve-id",
+            &body,
+        );
+
+        assert_eq!(signature.len(), 88); // 64 bytes Ed25519 signature as base64
+        assert!(!timestamp.is_empty());
     }
 
     #[test]
