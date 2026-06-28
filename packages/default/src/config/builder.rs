@@ -30,6 +30,23 @@ pub struct BuilderConfig {
 
     /// Enable API mode (if false, use legacy direct-database mode)
     pub enable_api_mode: bool,
+
+    /// Initial delay between builder-ID resolution retries when the server
+    /// rejects the builder (e.g. the public key has not been registered yet or
+    /// the builder is disabled). The delay grows exponentially up to
+    /// `resolve_retry_max_interval`.
+    #[serde(with = "super::duration_serde")]
+    pub resolve_retry_interval: Duration,
+
+    /// Maximum delay between builder-ID resolution retries.
+    #[serde(with = "super::duration_serde")]
+    pub resolve_retry_max_interval: Duration,
+
+    /// Maximum number of builder-ID resolution attempts before the process
+    /// gives up and exits. `0` means retry forever (recommended) so a 401 at
+    /// startup never crashes the service or blocks a NixOS switch — it just
+    /// keeps logging until an admin registers/enables the builder.
+    pub resolve_max_attempts: u32,
 }
 
 impl Default for BuilderConfig {
@@ -42,6 +59,9 @@ impl Default for BuilderConfig {
             heartbeat_interval: Duration::from_secs(30),
             max_concurrent_jobs: None,
             enable_api_mode: false, // Default to legacy mode for backward compatibility
+            resolve_retry_interval: Duration::from_secs(10),
+            resolve_retry_max_interval: Duration::from_secs(300),
+            resolve_max_attempts: 0, // retry forever by default
         }
     }
 }

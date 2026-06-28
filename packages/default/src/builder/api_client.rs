@@ -61,6 +61,11 @@ impl BuilderApiClient {
     /// If `builder_id` is not set in config, the builder ID is resolved
     /// dynamically from the server by signing a bootstrap request with the
     /// private key and calling `POST /api/v1/builders/resolve-id`.
+    ///
+    /// Resolution is retried with exponential backoff so that a builder whose
+    /// public key has not yet been registered (or is currently disabled) does
+    /// not crash the service or block a NixOS switch. Each failed attempt is
+    /// logged with the builder's public key so an admin can register/enable it.
     pub async fn new(config: &BuilderConfig) -> Result<Self> {
         let key_path = config.require_private_key_path()?;
         let server_url = config.require_server_url()?;
@@ -76,7 +81,17 @@ impl BuilderApiClient {
 
         let builder_id = match config.builder_id {
             Some(builder_id) => builder_id,
-            None => Self::resolve_builder_id(&client, &server_url, &signing_key).await?,
+            None => {
+                Self::resolve_builder_id_with_retry(
+                    &client,
+                    &server_url,
+                    &signing_key,
+                    config.resolve_retry_interval,
+                    config.resolve_retry_max_interval,
+                    config.resolve_max_attempts,
+                )
+                .await?
+            }
         };
 
         Ok(Self {
@@ -85,6 +100,62 @@ impl BuilderApiClient {
             builder_id,
             signing_key,
         })
+    }
+
+    /// Resolve the builder ID, retrying with exponential backoff on failure.
+    ///
+    /// A failure here typically means the builder's public key is not yet
+    /// registered on the server, or the builder is currently disabled. Rather
+    /// than exiting (which would crash the service and fail a NixOS switch), we
+    /// keep retrying and logging so an administrator has time to register the
+    /// public key and enable the builder in the UI.
+    async fn resolve_builder_id_with_retry(
+        client: &Client,
+        server_url: &str,
+        signing_key: &SigningKey,
+        retry_interval: std::time::Duration,
+        max_interval: std::time::Duration,
+        max_attempts: u32,
+    ) -> Result<Uuid> {
+        let public_key = Self::public_key_base64_for(signing_key);
+        let mut delay = retry_interval.max(std::time::Duration::from_secs(1));
+        let mut attempt: u32 = 0;
+
+        loop {
+            attempt += 1;
+            match Self::resolve_builder_id(client, server_url, signing_key).await {
+                Ok(builder_id) => {
+                    if attempt > 1 {
+                        info!(
+                            "✅ Builder ID resolved after {} attempt(s): {}",
+                            attempt, builder_id
+                        );
+                    }
+                    return Ok(builder_id);
+                }
+                Err(e) => {
+                    if max_attempts != 0 && attempt >= max_attempts {
+                        anyhow::bail!(
+                            "Builder ID resolution failed after {} attempt(s): {}. \
+                             Public key: {}",
+                            attempt,
+                            e,
+                            public_key
+                        );
+                    }
+
+                    warn!(
+                        "⏳ Builder not ready yet (attempt {}): {}. \
+                         Register this builder's public key in Crystal Forge and ensure it is enabled. \
+                         Public key (base64): {}. Retrying in {:?}.",
+                        attempt, e, public_key, delay
+                    );
+
+                    tokio::time::sleep(delay).await;
+                    delay = std::cmp::min(delay.saturating_mul(2), max_interval);
+                }
+            }
+        }
     }
 
     /// Load Ed25519 private key from file
