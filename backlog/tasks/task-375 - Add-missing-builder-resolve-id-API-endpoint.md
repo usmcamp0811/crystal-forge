@@ -1,9 +1,10 @@
 ---
 id: TASK-375
 title: Add missing builder resolve-id API endpoint
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-06-28 02:11'
+updated_date: '2026-06-28 02:14'
 labels:
   - bug
   - builder
@@ -15,7 +16,7 @@ modified_files:
   - packages/default/src/builder/api_client.rs
   - packages/default/src/models/builders.rs
 priority: high
-ordinal: 0
+ordinal: 5500
 ---
 
 ## Description

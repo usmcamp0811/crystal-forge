@@ -4,6 +4,7 @@ title: Add builder WebSocket control channel for low-latency queue notifications
 status: To Do
 assignee: []
 created_date: '2026-06-27 03:25'
+updated_date: '2026-06-28 02:14'
 labels:
   - builder
   - websocket
@@ -21,7 +22,7 @@ references:
   - packages/default/src/builder/api_client.rs
   - packages/default/src/queue.rs
 priority: medium
-ordinal: 0
+ordinal: 1000
 ---
 
 ## Description
