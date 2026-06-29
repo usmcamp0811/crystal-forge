@@ -4,7 +4,7 @@ title: Add missing builder resolve-id API endpoint and UI key persistence
 status: In Progress
 assignee: []
 created_date: '2026-06-28 02:11'
-updated_date: '2026-06-29 03:48'
+updated_date: '2026-06-29 04:10'
 labels:
   - bug
   - builder
@@ -76,17 +76,19 @@ Verification Plan:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Fixed rollout config parse regression from reckless logs and pushed commit a51143bd (`fix: default missing agent start delay config`) to MR !289.
+Fixed remote API builder derivation import failure and pushed commit 88e5dfcd (`fix: export derivation requisites for API builders`) to MR !289.
 
-Root cause: `DeploymentConfig::default()` included `post_agent_start_deployment_delay`, but Serde did not use it for an existing `[deployment]` table missing that field. Existing generated config files therefore failed with `missing configuration field "deployment.post_agent_start_deployment_delay"`.
+Root cause from webb/blue-ridge logs: server exported only the top-level system `.drv`. `nix-store --import` validates referenced input derivations and failed because paths like `boot.json.drv` were absent on the remote builder.
 
 Fix:
-- Added field-level Serde default for `post_agent_start_deployment_delay`, defaulting to 60 seconds.
-- Added tests for missing and explicit values.
+- Derivation archive endpoint now runs `nix-store --query --requisites <drv>` on the server.
+- It exports the requested top-level drv plus its requisites via `nix-store --export`.
+- Remote builders should now import referenced input `.drv` paths before `nix-store --realise`.
+- Added a focused unit test for parsing/de-duplicating requisites while preserving the requested top-level drv.
 
 Verification before push:
-- `nix develop .#sqlx -c cargo test post_agent_start_deployment_delay --lib` passed (2 tests).
-- `nix develop .#sqlx -c cargo check --bin agent --bin server --bin builder` passed with existing warnings.
+- `nix develop .#sqlx -c cargo test derivation_archive_requisites_include_inputs_and_requested_drv --lib` passed (no failing tests reported; existing warnings only).
+- `nix develop .#sqlx -c cargo check --bin server --bin builder` passed with existing warnings.
 - `git diff --check --cached` passed.
 <!-- SECTION:NOTES:END -->
 
