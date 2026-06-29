@@ -4,7 +4,7 @@ title: Add missing builder resolve-id API endpoint and UI key persistence
 status: In Progress
 assignee: []
 created_date: '2026-06-28 02:11'
-updated_date: '2026-06-29 14:13'
+updated_date: '2026-06-29 19:50'
 labels:
   - bug
   - builder
@@ -79,20 +79,7 @@ Verification Plan:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Fixed invalid server `.drv` archive export for future API-builder jobs and pushed commit 768b3b7d (`fix: root evaluated drvs for API builders`) to MR !289.
-
-Root cause from reckless server logs: archive endpoint was now exporting requisites correctly, but the root system `.drv` itself was no longer valid in the server Nix store (`nix-store --export failed ... path ... is not valid`). A server cannot export a GC'd/invalid drv.
-
-Fix:
-- After real nix-eval dry-run completion records a `.drv`, Crystal Forge now creates a dedicated indirect GC root for that evaluated drv.
-- Archive endpoint now checks `nix-store --check-validity <drv>` before requisites/export and logs a clearer diagnostic if old queued jobs reference invalid drv paths.
-- Existing output build GC roots are unchanged and use a separate root path.
-
-Important operational note: this protects newly evaluated/queued jobs going forward. Already-queued jobs whose `.drv` was GC'd before this fix need to be re-evaluated/requeued so the server has a valid rooted drv to export.
-
-Verification before push:
-- `nix develop .#sqlx -c cargo check --bin server --bin builder` passed with existing warnings.
-- `git diff --check` and `git diff --check --cached` passed.
+LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-375-fix-cf-keygen-pub-path
 <!-- SECTION:NOTES:END -->
 
 ## Comments
