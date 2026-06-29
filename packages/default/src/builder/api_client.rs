@@ -19,6 +19,10 @@ use tokio_tungstenite::{
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+const DEFAULT_API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BuildStreamMessage {
@@ -75,7 +79,7 @@ impl BuilderApiClient {
             Self::load_private_key(&key_path).context("Failed to load builder private key")?;
 
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(DEFAULT_API_TIMEOUT)
             .build()
             .context("Failed to create HTTP client")?;
 
@@ -413,6 +417,7 @@ impl BuilderApiClient {
             .header("X-Builder-ID", builder_id)
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
+            .timeout(DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT)
             .send()
             .await
             .context("Failed to request derivation archive")?;
