@@ -38,6 +38,8 @@ use crate::models::builders::{
 use crate::models::public_key::PublicKey;
 use crate::queries::builders;
 
+const NIX_STORE_EXPORT_ARG_BYTES_LIMIT: usize = 128 * 1024;
+
 fn parse_derivation_requisites(stdout: &[u8], drv_path: &str) -> Vec<String> {
     let mut paths = Vec::new();
 
@@ -54,6 +56,34 @@ fn parse_derivation_requisites(stdout: &[u8], drv_path: &str) -> Vec<String> {
     }
 
     paths
+}
+
+fn chunk_derivation_archive_paths(paths: &[String], max_arg_bytes: usize) -> Vec<&[String]> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+
+    let max_arg_bytes = max_arg_bytes.max(1);
+    let mut chunks = Vec::new();
+    let mut chunk_start = 0;
+    let mut chunk_arg_bytes = 0;
+
+    for (index, path) in paths.iter().enumerate() {
+        // Account for the path plus one separator byte. This is conservative
+        // enough for argv/env overhead while keeping chunks comfortably below
+        // Linux ARG_MAX.
+        let path_arg_bytes = path.len() + 1;
+        if index > chunk_start && chunk_arg_bytes + path_arg_bytes > max_arg_bytes {
+            chunks.push(&paths[chunk_start..index]);
+            chunk_start = index;
+            chunk_arg_bytes = 0;
+        }
+
+        chunk_arg_bytes += path_arg_bytes;
+    }
+
+    chunks.push(&paths[chunk_start..]);
+    chunks
 }
 
 // =============================================================================
@@ -1028,26 +1058,50 @@ pub async fn download_job_derivation_archive(
         "exporting derivation requisites archive"
     );
 
-    let output = Command::new("nix-store")
-        .arg("--export")
-        .args(&archive_paths)
-        .output()
-        .await
-        .map_err(|e| {
-            tracing::error!(job_id = %job_id, drv_path, "failed to run nix-store --export: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let archive_chunks =
+        chunk_derivation_archive_paths(&archive_paths, NIX_STORE_EXPORT_ARG_BYTES_LIMIT);
+    let mut archive = Vec::new();
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!(job_id = %job_id, drv_path, path_count = archive_paths.len(), stderr = %stderr, "nix-store --export failed");
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    for (chunk_index, archive_chunk) in archive_chunks.iter().enumerate() {
+        let output = Command::new("nix-store")
+            .arg("--export")
+            .args(*archive_chunk)
+            .output()
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    job_id = %job_id,
+                    drv_path,
+                    chunk_index,
+                    chunk_count = archive_chunks.len(),
+                    chunk_path_count = archive_chunk.len(),
+                    "failed to run nix-store --export chunk: {e}"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::error!(
+                job_id = %job_id,
+                drv_path,
+                path_count = archive_paths.len(),
+                chunk_index,
+                chunk_count = archive_chunks.len(),
+                chunk_path_count = archive_chunk.len(),
+                stderr = %stderr,
+                "nix-store --export chunk failed"
+            );
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        archive.extend_from_slice(&output.stdout);
     }
 
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/x-nix-archive")
-        .body(Body::from(output.stdout))
+        .body(Body::from(archive))
         .map_err(|e| {
             tracing::error!(job_id = %job_id, "failed to build derivation archive response: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -1769,6 +1823,7 @@ mod tests {
     use axum::http::StatusCode;
 
     use super::BuildStreamMessage;
+    use super::chunk_derivation_archive_paths;
     use super::map_create_builder_error;
     use super::parse_derivation_requisites;
 
@@ -1789,6 +1844,36 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn derivation_archive_paths_are_chunked_under_argument_limit() {
+        let paths = vec![
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-first.drv".to_string(),
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-second.drv".to_string(),
+            "/nix/store/cccccccccccccccccccccccccccccccc-third.drv".to_string(),
+        ];
+
+        let chunks = chunk_derivation_archive_paths(&paths, 80);
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0], &paths[0..1]);
+        assert_eq!(chunks[1], &paths[1..2]);
+        assert_eq!(chunks[2], &paths[2..3]);
+    }
+
+    #[test]
+    fn derivation_archive_chunking_keeps_small_sets_together() {
+        let paths = vec![
+            "/nix/store/a.drv".to_string(),
+            "/nix/store/b.drv".to_string(),
+            "/nix/store/c.drv".to_string(),
+        ];
+
+        let chunks = chunk_derivation_archive_paths(&paths, 1024);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], paths.as_slice());
     }
 
     #[test]
