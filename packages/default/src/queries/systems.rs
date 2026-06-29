@@ -155,9 +155,7 @@ pub async fn get_by_id(pool: &PgPool, id: i32) -> Result<Option<System>> {
     Ok(system)
 }
 
-pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
-    let inserted = sqlx::query_as::<_, System>(
-        r#"
+const INSERT_SYSTEM_SQL: &str = r#"
     INSERT INTO systems (
         hostname,
         environment_id,
@@ -184,24 +182,28 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
         desired_target_set_at = CASE
             WHEN EXCLUDED.desired_target IS NULL THEN NULL
             WHEN systems.desired_target IS DISTINCT FROM EXCLUDED.desired_target THEN NOW()
+            WHEN EXCLUDED.deployment_policy = 'manual'
+                 AND systems.deployment_policy IS DISTINCT FROM 'manual' THEN NULL
             ELSE systems.desired_target_set_at
         END,
         deployment_policy = EXCLUDED.deployment_policy,
         updated_at = NOW()
     RETURNING *
-    "#,
-    )
-    .bind(&system.hostname)
-    .bind(system.environment_id)
-    .bind(system.is_active)
-    .bind(&system.public_key.to_base64())
-    .bind(system.flake_id)
-    .bind(&system.derivation)
-    .bind(&system.system_configuration_name)
-    .bind(&system.desired_target)
-    .bind(&system.deployment_policy)
-    .fetch_one(pool)
-    .await?;
+    "#;
+
+pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
+    let inserted = sqlx::query_as::<_, System>(INSERT_SYSTEM_SQL)
+        .bind(&system.hostname)
+        .bind(system.environment_id)
+        .bind(system.is_active)
+        .bind(&system.public_key.to_base64())
+        .bind(system.flake_id)
+        .bind(&system.derivation)
+        .bind(&system.system_configuration_name)
+        .bind(&system.desired_target)
+        .bind(&system.deployment_policy)
+        .fetch_one(pool)
+        .await?;
     Ok(inserted)
 }
 
@@ -1771,6 +1773,76 @@ mod tests {
             CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL
                 .contains("desired_target_set_at IS NOT DISTINCT FROM $3")
         );
+    }
+
+    #[test]
+    fn upsert_clears_target_freshness_when_entering_manual_without_target_change() {
+        assert!(INSERT_SYSTEM_SQL.contains(
+            "WHEN systems.desired_target IS DISTINCT FROM EXCLUDED.desired_target THEN NOW()"
+        ));
+        assert!(INSERT_SYSTEM_SQL.contains("WHEN EXCLUDED.deployment_policy = 'manual'"));
+        assert!(
+            INSERT_SYSTEM_SQL
+                .contains("AND systems.deployment_policy IS DISTINCT FROM 'manual' THEN NULL")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn stale_manual_target_clear_does_not_delete_concurrent_replacement() {
+        let pool = test_pool_from_env().await;
+        let hostname = format!("task375-stale-clear-{}", Uuid::new_v4());
+        let system = make_test_system(&pool, &hostname).await;
+
+        let stale_target = "/nix/store/stale-manual-target";
+        let replacement_target = "/nix/store/replacement-manual-target";
+        let stale_set_at = Utc::now() - ChronoDuration::hours(2);
+
+        sqlx::query(
+            "UPDATE systems
+             SET desired_target = $1,
+                 desired_target_set_at = $2,
+                 deployment_policy = 'manual',
+                 updated_at = NOW()
+             WHERE id = $3",
+        )
+        .bind(stale_target)
+        .bind(stale_set_at)
+        .bind(system.id)
+        .execute(&pool)
+        .await
+        .expect("seed stale target should succeed");
+
+        sqlx::query(
+            "UPDATE systems
+             SET desired_target = $1,
+                 desired_target_set_at = NOW(),
+                 updated_at = NOW()
+             WHERE id = $2",
+        )
+        .bind(replacement_target)
+        .bind(system.id)
+        .execute(&pool)
+        .await
+        .expect("replace target should succeed");
+
+        sqlx::query(CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL)
+            .bind(&hostname)
+            .bind(Some(stale_target.to_string()))
+            .bind(Some(stale_set_at))
+            .execute(&pool)
+            .await
+            .expect("guarded stale clear should succeed");
+
+        let remaining_target = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT desired_target FROM systems WHERE id = $1",
+        )
+        .bind(system.id)
+        .fetch_one(&pool)
+        .await
+        .expect("query remaining target should succeed");
+
+        assert_eq!(remaining_target.as_deref(), Some(replacement_target));
     }
 
     #[tokio::test]
