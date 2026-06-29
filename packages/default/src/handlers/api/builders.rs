@@ -987,6 +987,22 @@ pub async fn download_job_derivation_archive(
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    let validity_output = Command::new("nix-store")
+        .arg("--check-validity")
+        .arg(drv_path)
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, drv_path, "failed to run nix-store --check-validity: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !validity_output.status.success() {
+        let stderr = String::from_utf8_lossy(&validity_output.stderr);
+        tracing::error!(job_id = %job_id, drv_path, stderr = %stderr, "derivation path is not valid in server store; evaluated drvs must be rooted before API builders can import them");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     let requisites_output = Command::new("nix-store")
         .arg("--query")
         .arg("--requisites")

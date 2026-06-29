@@ -42,7 +42,7 @@ mod worker;
 // Re-export public functions
 pub use cache_worker::{process_cache_pushes, run_cache_push_loop, run_cache_push_workers};
 pub use cve_worker::run_cve_scan_loop;
-pub use worker::{create_gc_root, get_gc_root_path, remove_gc_root};
+pub use worker::{create_drv_gc_root, create_gc_root, get_gc_root_path, remove_gc_root};
 
 use crate::config::CrystalForgeConfig;
 use crate::log::{WorkerState, WorkerStatus, get_build_status};

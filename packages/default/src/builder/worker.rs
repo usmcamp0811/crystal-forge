@@ -12,6 +12,7 @@ use crate::queries::cache_push::create_cache_push_job;
 use crate::queries::derivations::{handle_derivation_failure, mark_target_build_complete};
 use anyhow::Result;
 use sqlx::PgPool;
+use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
@@ -381,6 +382,43 @@ pub async fn get_gc_root_path(derivation_id: i32) -> String {
     }
 
     format!("{}/derivation-{}", gc_root_dir, derivation_id)
+}
+
+pub async fn get_drv_gc_root_path(derivation_id: i32) -> String {
+    format!("{}-drv", get_gc_root_path(derivation_id).await)
+}
+
+/// Create a GC root for a server-evaluated `.drv` so API builders can download
+/// the derivation archive later even if regular Nix GC runs before the job is
+/// claimed.
+pub async fn create_drv_gc_root(drv_path: &str, derivation_id: i32) -> Result<bool> {
+    let validity = Command::new("nix-store")
+        .arg("--check-validity")
+        .arg(drv_path)
+        .output()
+        .await?;
+
+    if !validity.status.success() {
+        let stderr = String::from_utf8_lossy(&validity.stderr);
+        warn!(
+            "Cannot create GC root for invalid derivation path {} (id={}): {}",
+            drv_path,
+            derivation_id,
+            stderr.trim()
+        );
+        return Ok(false);
+    }
+
+    let gc_root_path = get_drv_gc_root_path(derivation_id).await;
+    if let Err(e) = tokio::fs::remove_file(&gc_root_path).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(e.into());
+        }
+    }
+
+    tokio::fs::symlink(drv_path, &gc_root_path).await?;
+    debug!("Created derivation GC root: {} -> {}", gc_root_path, drv_path);
+    Ok(true)
 }
 
 /// Create a GC root to prevent garbage collection until cache push

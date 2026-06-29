@@ -573,6 +573,21 @@ pub async fn evaluate_with_nix_eval_jobs(
 
                                                 match mark_derivation_dry_run_complete(pool, deriv.id, &drv).await {
                                                     Ok(_) => {
+                                                        match crate::builder::create_drv_gc_root(&drv, deriv.id).await {
+                                                            Ok(true) => debug!(
+                                                                "📌 Rooted evaluated drv for {} (id={}, drv={})",
+                                                                system_name, deriv.id, drv
+                                                            ),
+                                                            Ok(false) => warn!(
+                                                                "⚠️  Evaluated drv for {} (id={}, drv={}) is not valid in the server store; remote builders may not be able to import it",
+                                                                system_name, deriv.id, drv
+                                                            ),
+                                                            Err(e) => warn!(
+                                                                "⚠️  Failed to create GC root for evaluated drv {} (id={}): {}",
+                                                                drv, deriv.id, e
+                                                            ),
+                                                        }
+
                                                         if let Some(expected_path) = expected_store_path.as_deref() {
                                                             if let Err(e) = set_expected_store_path(pool, deriv.id, expected_path).await {
                                                                 warn!(
