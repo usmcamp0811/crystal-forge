@@ -151,11 +151,11 @@ impl AgentDeploymentManager {
         info!("Received desired target: {}", desired_target);
 
         let uptime = self.started_at.elapsed();
-        if uptime < self.config.post_boot_deployment_delay {
+        if uptime < self.config.post_agent_start_deployment_delay {
             info!(
-                "Deferring deployment for {} until post-boot delay expires ({:?} remaining)",
+                "Deferring deployment for {} until post-agent-start delay expires ({:?} remaining)",
                 desired_target,
-                self.config.post_boot_deployment_delay - uptime
+                self.config.post_agent_start_deployment_delay - uptime
             );
             return Ok(DeploymentResult::NoDeploymentNeeded);
         }

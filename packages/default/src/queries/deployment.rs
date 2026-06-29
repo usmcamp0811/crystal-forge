@@ -41,7 +41,9 @@ pub async fn update_desired_target(
     sqlx::query(
         r#"
         UPDATE systems 
-        SET desired_target = $1, updated_at = NOW() 
+        SET desired_target = $1,
+            desired_target_set_at = CASE WHEN $1::text IS NULL THEN NULL ELSE NOW() END,
+            updated_at = NOW()
         WHERE hostname = $2
         "#,
     )

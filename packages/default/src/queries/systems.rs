@@ -169,9 +169,10 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
         created_at,
         updated_at,
         desired_target,
+        desired_target_set_at,
         deployment_policy
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8, $9)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8, CASE WHEN $8::text IS NULL THEN NULL ELSE NOW() END, $9)
     ON CONFLICT (hostname) DO UPDATE SET
         environment_id = EXCLUDED.environment_id,
         is_active = EXCLUDED.is_active,
@@ -180,6 +181,11 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
         derivation = EXCLUDED.derivation,
         system_configuration_name = EXCLUDED.system_configuration_name,
         desired_target = EXCLUDED.desired_target,
+        desired_target_set_at = CASE
+            WHEN EXCLUDED.desired_target IS NULL THEN NULL
+            WHEN systems.desired_target IS DISTINCT FROM EXCLUDED.desired_target THEN NOW()
+            ELSE systems.desired_target_set_at
+        END,
         deployment_policy = EXCLUDED.deployment_policy,
         updated_at = NOW()
     RETURNING *
@@ -218,15 +224,24 @@ pub async fn get_desired_target_by_hostname(
 struct AgentDesiredTargetRow {
     deployment_policy: String,
     desired_target: Option<String>,
-    updated_at: DateTime<Utc>,
+    desired_target_set_at: Option<DateTime<Utc>>,
 }
 
 const MANUAL_DESIRED_TARGET_MAX_AGE_MINUTES: i64 = 30;
 
+const CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL: &str = r#"
+UPDATE systems
+SET desired_target = NULL, desired_target_set_at = NULL, updated_at = NOW()
+WHERE hostname = $1
+  AND deployment_policy = 'manual'
+  AND desired_target IS NOT DISTINCT FROM $2
+  AND desired_target_set_at IS NOT DISTINCT FROM $3
+"#;
+
 fn should_send_desired_target_to_agent(
     deployment_policy: &str,
     desired_target: Option<&str>,
-    updated_at: DateTime<Utc>,
+    desired_target_set_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> bool {
     let Some(_) = desired_target else {
@@ -235,9 +250,11 @@ fn should_send_desired_target_to_agent(
 
     match deployment_policy {
         "auto_latest" | "pinned" => true,
-        "manual" => {
-            now - updated_at <= ChronoDuration::minutes(MANUAL_DESIRED_TARGET_MAX_AGE_MINUTES)
-        }
+        "manual" => desired_target_set_at
+            .map(|set_at| {
+                now - set_at <= ChronoDuration::minutes(MANUAL_DESIRED_TARGET_MAX_AGE_MINUTES)
+            })
+            .unwrap_or(false),
         _ => false,
     }
 }
@@ -247,7 +264,7 @@ pub async fn get_agent_desired_target_by_hostname(
     hostname: &str,
 ) -> Result<Option<String>> {
     let row = sqlx::query_as::<_, AgentDesiredTargetRow>(
-        "SELECT deployment_policy, desired_target, updated_at FROM systems WHERE hostname = $1",
+        "SELECT deployment_policy, desired_target, desired_target_set_at FROM systems WHERE hostname = $1",
     )
     .bind(hostname)
     .fetch_optional(pool)
@@ -261,19 +278,19 @@ pub async fn get_agent_desired_target_by_hostname(
     if should_send_desired_target_to_agent(
         &row.deployment_policy,
         row.desired_target.as_deref(),
-        row.updated_at,
+        row.desired_target_set_at,
         now,
     ) {
         return Ok(row.desired_target);
     }
 
     if row.deployment_policy == "manual" && row.desired_target.is_some() {
-        sqlx::query(
-            "UPDATE systems SET desired_target = NULL, updated_at = NOW() WHERE hostname = $1 AND deployment_policy = 'manual'",
-        )
-        .bind(hostname)
-        .execute(pool)
-        .await?;
+        sqlx::query(CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL)
+            .bind(hostname)
+            .bind(&row.desired_target)
+            .bind(row.desired_target_set_at)
+            .execute(pool)
+            .await?;
     }
 
     Ok(None)
@@ -371,11 +388,15 @@ pub async fn update_system_desired_target(
     system_id: Uuid,
     target_commit: &str,
 ) -> Result<()> {
-    sqlx::query("UPDATE systems SET desired_target = $1, updated_at = NOW() WHERE id = $2")
-        .bind(target_commit)
-        .bind(system_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE systems
+         SET desired_target = $1, desired_target_set_at = NOW(), updated_at = NOW()
+         WHERE id = $2",
+    )
+    .bind(target_commit)
+    .bind(system_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1693,13 +1714,13 @@ mod tests {
         assert!(should_send_desired_target_to_agent(
             "auto_latest",
             Some("/nix/store/latest"),
-            now - ChronoDuration::days(30),
+            None,
             now,
         ));
         assert!(should_send_desired_target_to_agent(
             "pinned",
             Some("/nix/store/pinned"),
-            now - ChronoDuration::days(30),
+            None,
             now,
         ));
     }
@@ -1711,7 +1732,19 @@ mod tests {
         assert!(!should_send_desired_target_to_agent(
             "manual",
             Some("/nix/store/stale"),
-            now - ChronoDuration::minutes(MANUAL_DESIRED_TARGET_MAX_AGE_MINUTES + 1),
+            Some(now - ChronoDuration::minutes(MANUAL_DESIRED_TARGET_MAX_AGE_MINUTES + 1,)),
+            now,
+        ));
+    }
+
+    #[test]
+    fn agent_desired_target_policy_suppresses_manual_target_without_target_timestamp() {
+        let now = Utc::now();
+
+        assert!(!should_send_desired_target_to_agent(
+            "manual",
+            Some("/nix/store/legacy-manual-target"),
+            None,
             now,
         ));
     }
@@ -1723,9 +1756,21 @@ mod tests {
         assert!(should_send_desired_target_to_agent(
             "manual",
             Some("/nix/store/fresh"),
-            now - ChronoDuration::minutes(1),
+            Some(now - ChronoDuration::minutes(1)),
             now,
         ));
+    }
+
+    #[test]
+    fn stale_manual_target_clear_is_guarded_against_concurrent_replacement() {
+        assert!(
+            CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL
+                .contains("desired_target IS NOT DISTINCT FROM $2")
+        );
+        assert!(
+            CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL
+                .contains("desired_target_set_at IS NOT DISTINCT FROM $3")
+        );
     }
 
     #[tokio::test]
