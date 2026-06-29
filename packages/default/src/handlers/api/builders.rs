@@ -38,6 +38,24 @@ use crate::models::builders::{
 use crate::models::public_key::PublicKey;
 use crate::queries::builders;
 
+fn parse_derivation_requisites(stdout: &[u8], drv_path: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+
+    for line in String::from_utf8_lossy(stdout).lines() {
+        let path = line.trim();
+        if path.is_empty() || paths.iter().any(|existing| existing == path) {
+            continue;
+        }
+        paths.push(path.to_string());
+    }
+
+    if !paths.iter().any(|path| path == drv_path) {
+        paths.insert(0, drv_path.to_string());
+    }
+
+    paths
+}
+
 // =============================================================================
 // BUILDER MANAGEMENT ENDPOINTS (Admin-only)
 // =============================================================================
@@ -969,9 +987,34 @@ pub async fn download_job_derivation_archive(
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    let requisites_output = Command::new("nix-store")
+        .arg("--query")
+        .arg("--requisites")
+        .arg(drv_path)
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, drv_path, "failed to run nix-store --query --requisites: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !requisites_output.status.success() {
+        let stderr = String::from_utf8_lossy(&requisites_output.stderr);
+        tracing::error!(job_id = %job_id, drv_path, stderr = %stderr, "nix-store --query --requisites failed");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let archive_paths = parse_derivation_requisites(&requisites_output.stdout, drv_path);
+    tracing::debug!(
+        job_id = %job_id,
+        drv_path,
+        path_count = archive_paths.len(),
+        "exporting derivation requisites archive"
+    );
+
     let output = Command::new("nix-store")
         .arg("--export")
-        .arg(drv_path)
+        .args(&archive_paths)
         .output()
         .await
         .map_err(|e| {
@@ -981,7 +1024,7 @@ pub async fn download_job_derivation_archive(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!(job_id = %job_id, drv_path, stderr = %stderr, "nix-store --export failed");
+        tracing::error!(job_id = %job_id, drv_path, path_count = archive_paths.len(), stderr = %stderr, "nix-store --export failed");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -1711,6 +1754,26 @@ mod tests {
 
     use super::BuildStreamMessage;
     use super::map_create_builder_error;
+    use super::parse_derivation_requisites;
+
+    #[test]
+    fn derivation_archive_requisites_include_inputs_and_requested_drv() {
+        let drv_path = "/nix/store/top-system.drv";
+        let stdout = b"/nix/store/input-boot-json.drv\n/nix/store/source-path\n/nix/store/input-boot-json.drv\n";
+
+        let paths = parse_derivation_requisites(stdout, drv_path);
+
+        assert_eq!(paths[0], drv_path);
+        assert!(paths.contains(&"/nix/store/input-boot-json.drv".to_string()));
+        assert!(paths.contains(&"/nix/store/source-path".to_string()));
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| path.as_str() == "/nix/store/input-boot-json.drv")
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn build_stream_requires_explicit_type_discriminator() {
