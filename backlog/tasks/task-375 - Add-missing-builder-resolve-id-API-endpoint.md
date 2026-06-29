@@ -4,7 +4,7 @@ title: Add missing builder resolve-id API endpoint and UI key persistence
 status: In Progress
 assignee: []
 created_date: '2026-06-28 02:11'
-updated_date: '2026-06-29 04:10'
+updated_date: '2026-06-29 14:13'
 labels:
   - bug
   - builder
@@ -26,6 +26,9 @@ modified_files:
   - modules/nixos/crystal-forge/default.nix
   - packages/default/src/queries/deployment.rs
   - packages/default/migrations/0144_add_desired_target_set_at.sql
+  - packages/default/src/builder/worker.rs
+  - packages/default/src/builder/mod.rs
+  - packages/default/src/models/evaluate_with_policies.rs
 priority: high
 ordinal: 5500
 ---
@@ -76,20 +79,20 @@ Verification Plan:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Fixed remote API builder derivation import failure and pushed commit 88e5dfcd (`fix: export derivation requisites for API builders`) to MR !289.
+Fixed invalid server `.drv` archive export for future API-builder jobs and pushed commit 768b3b7d (`fix: root evaluated drvs for API builders`) to MR !289.
 
-Root cause from webb/blue-ridge logs: server exported only the top-level system `.drv`. `nix-store --import` validates referenced input derivations and failed because paths like `boot.json.drv` were absent on the remote builder.
+Root cause from reckless server logs: archive endpoint was now exporting requisites correctly, but the root system `.drv` itself was no longer valid in the server Nix store (`nix-store --export failed ... path ... is not valid`). A server cannot export a GC'd/invalid drv.
 
 Fix:
-- Derivation archive endpoint now runs `nix-store --query --requisites <drv>` on the server.
-- It exports the requested top-level drv plus its requisites via `nix-store --export`.
-- Remote builders should now import referenced input `.drv` paths before `nix-store --realise`.
-- Added a focused unit test for parsing/de-duplicating requisites while preserving the requested top-level drv.
+- After real nix-eval dry-run completion records a `.drv`, Crystal Forge now creates a dedicated indirect GC root for that evaluated drv.
+- Archive endpoint now checks `nix-store --check-validity <drv>` before requisites/export and logs a clearer diagnostic if old queued jobs reference invalid drv paths.
+- Existing output build GC roots are unchanged and use a separate root path.
+
+Important operational note: this protects newly evaluated/queued jobs going forward. Already-queued jobs whose `.drv` was GC'd before this fix need to be re-evaluated/requeued so the server has a valid rooted drv to export.
 
 Verification before push:
-- `nix develop .#sqlx -c cargo test derivation_archive_requisites_include_inputs_and_requested_drv --lib` passed (no failing tests reported; existing warnings only).
 - `nix develop .#sqlx -c cargo check --bin server --bin builder` passed with existing warnings.
-- `git diff --check --cached` passed.
+- `git diff --check` and `git diff --check --cached` passed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
