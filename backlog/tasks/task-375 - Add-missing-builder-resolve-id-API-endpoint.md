@@ -4,7 +4,7 @@ title: Add missing builder resolve-id API endpoint and UI key persistence
 status: In Progress
 assignee: []
 created_date: '2026-06-28 02:11'
-updated_date: '2026-06-28 04:52'
+updated_date: '2026-06-29 02:18'
 labels:
   - bug
   - builder
@@ -12,11 +12,18 @@ labels:
   - ui
 milestone: Builder API hotfix
 dependencies: []
+references:
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/289'
 modified_files:
   - packages/default/src/handlers/api/builders.rs
   - packages/default/src/queries/builders.rs
   - packages/default/src/bin/server.rs
   - packages/web-ui/src/components/builders/edit_builder_modal.rs
+  - packages/default/src/queries/systems.rs
+  - packages/default/src/handlers/agent/heartbeat.rs
+  - packages/default/src/config/deployment.rs
+  - packages/default/src/deployment/agent.rs
+  - modules/nixos/crystal-forge/default.nix
 priority: high
 ordinal: 5500
 ---
@@ -64,23 +71,18 @@ Verification Plan:
 - [ ] #7 Server exposes the endpoints required for remote builds (derivation payload, build progress heartbeat) and performs derivation completion/failure and cache-push queueing server-side.
 <!-- AC:END -->
 
-## Implementation Plan
+## Implementation Notes
 
-<!-- SECTION:PLAN:BEGIN -->
-Transport principle: WebSocket for responsiveness (live progress, instant cancel), HTTP for atomic source-of-truth + fallback.
+<!-- SECTION:NOTES:BEGIN -->
+Pushed commit 30101047 (`fix: suppress stale manual agent targets`) to MR !289. This suppresses stale `desired_target` values for manual-policy agents, preserves auto_latest/pinned convergence, allows fresh manual one-shot targets, clears stale manual targets server-side, and adds configurable agent post-boot deployment delay defaulting to 60s.
 
-1. Add BuildReporter trait abstracting in-build ops: report_progress(elapsed,target,last_activity) and is_cancelled(). Implement:
-   - PgPoolReporter (server/local worker): existing update_build_heartbeat + get_build_job_status.
-   - ApiBuildReporter (remote builder): WS-primary progress send + WS-received CancelRequested, HTTP fallback (append-logs progress / GET job-status poll) when WS down.
-2. Refactor Derivation::build_with_log_sink / run_streaming_build / build_with_direct_nix_store to take &dyn BuildReporter instead of &PgPool. Keep server worker.rs working via PgPoolReporter.
-3. Enrich next-job HTTP response to include full derivation build payload (derivation_path, type, name, id, store_path, etc.) so remote builder needs no DB read. Claim stays atomic HTTP.
-4. Extend BuildStreamMessage with builder->server Progress and server->builder CancelRequested; update the per-job log WS handler to persist progress (update_build_heartbeat) and to push CancelRequested when a job is cancelling.
-5. Server complete_job/fail_job/finalize handlers perform derivation completion/failure + cache-push queueing server-side (so builder never writes DB).
-6. Move cache-push loop + CVE scanning server-side; remove from remote builder.
-7. Rewrite bin/builder.rs to be DB-free: no db_pool(), no DB fallbacks; build via API payload + reporter; report results via HTTP.
-8. Keep heartbeat/liveness (TASK-282) and atomic /next-job semantics intact.
-9. Verify: SQLX_OFFLINE cargo check server+builder, targeted tests, web-ui check, then deploy to webb/reckless and confirm a real remote build runs with no DB connection.
-<!-- SECTION:PLAN:END -->
+Verification run:
+- `nix develop -c env SQLX_OFFLINE=true cargo test agent_desired_target_policy --lib` (passed: 3 tests)
+- `nix develop -c env SQLX_OFFLINE=true cargo check --bin agent --bin server` (passed with existing warnings)
+- `git diff --check` (passed)
+- Nix eval of `services.crystal-forge.deployment.post_boot_deployment_delay = 90` (returned 90)
+- `nix flake check` (passed)
+<!-- SECTION:NOTES:END -->
 
 ## Comments
 
