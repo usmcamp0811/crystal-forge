@@ -4,7 +4,7 @@ title: Add missing builder resolve-id API endpoint and UI key persistence
 status: In Progress
 assignee: []
 created_date: '2026-06-28 02:11'
-updated_date: '2026-06-29 20:47'
+updated_date: '2026-06-29 22:33'
 labels:
   - bug
   - builder
@@ -29,6 +29,7 @@ modified_files:
   - packages/default/src/builder/worker.rs
   - packages/default/src/builder/mod.rs
   - packages/default/src/models/evaluate_with_policies.rs
+  - packages/default/src/builder/api_client.rs
 priority: high
 ordinal: 5500
 ---
