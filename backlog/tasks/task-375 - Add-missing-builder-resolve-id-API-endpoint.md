@@ -4,7 +4,7 @@ title: Add missing builder resolve-id API endpoint and UI key persistence
 status: In Progress
 assignee: []
 created_date: '2026-06-28 02:11'
-updated_date: '2026-06-29 03:13'
+updated_date: '2026-06-29 03:26'
 labels:
   - bug
   - builder
@@ -76,21 +76,19 @@ Verification Plan:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Addressed re-review findings and pushed commit b6ef5a3f (`fix: track desired target freshness separately`) to MR !289.
+Addressed follow-up re-review finding and pushed commit e75c4c12 (`fix: clear target freshness when entering manual policy`) to MR !289.
 
 Changes:
-- Added `systems.desired_target_set_at` migration.
-- Manual desired-target freshness now uses `desired_target_set_at`, not generic `systems.updated_at`.
-- Existing manual desired targets are migrated with no freshness timestamp so they are suppressed until explicitly set again.
-- Desired-target writers set/clear `desired_target_set_at` with the target value.
-- Stale manual target clearing is guarded by hostname, target value, and target timestamp to avoid deleting a concurrently replaced request.
-- Renamed delay config/option to `post_agent_start_deployment_delay` to match process-start semantics.
+- `insert_system` upsert now clears `desired_target_set_at` when a system enters `manual` policy without changing the desired target.
+- If the target value changes in the same request, freshness is still set to `NOW()` so explicit manual requests remain possible.
+- Added a focused unit test for the manual-policy transition guard.
+- Added an ignored DB-backed regression test proving guarded stale clear does not delete a concurrently replaced target.
 
 Verification before push:
-- `nix develop .#sqlx -c cargo sqlx prepare` passed against the local process-compose DB target; no tracked SQLx metadata changes were produced.
 - `nix develop .#sqlx -c cargo test agent_desired_target_policy --lib` passed (4 focused tests).
+- `nix develop .#sqlx -c cargo test upsert_clears_target_freshness_when_entering_manual_without_target_change --lib` passed.
+- Applied local migration with `nix develop .#sqlx -c sqlx migrate run`, then `nix develop .#sqlx -c cargo test stale_manual_target_clear_does_not_delete_concurrent_replacement --lib -- --ignored` passed.
 - `nix develop .#sqlx -c cargo check --bin agent --bin server` passed with existing warnings.
-- Nix eval for `services.crystal-forge.deployment.post_agent_start_deployment_delay = 90` returned `90`.
 - `git diff --check --cached` passed.
 
 Per user request, broader CI checks are left to run on the pushed MR branch.
