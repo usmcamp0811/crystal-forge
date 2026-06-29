@@ -4,7 +4,7 @@ title: Add missing builder resolve-id API endpoint and UI key persistence
 status: In Progress
 assignee: []
 created_date: '2026-06-28 02:11'
-updated_date: '2026-06-29 19:50'
+updated_date: '2026-06-29 20:46'
 labels:
   - bug
   - builder
@@ -79,7 +79,17 @@ Verification Plan:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-375-fix-cf-keygen-pub-path
+Pushed commit 98e74f89 to MR !289: chunks large derivation archive exports into bounded nix-store --export invocations to avoid ARG_MAX failures for API builders.
+
+Verification completed locally:
+- `git diff --check` passed.
+- `nix develop .#sqlx -c cargo test --manifest-path packages/default/Cargo.toml derivation_archive --lib` passed: 3 tests passed.
+
+Verification not completed locally:
+- `cargo check --manifest-path packages/default/Cargo.toml --bin server --bin builder` repeatedly interrupted because the host restarted/crashed during the check, including with `CARGO_BUILD_JOBS=1`, `nice`, and `ionice`.
+- Targeted `rustfmt --check packages/default/src/handlers/api/builders.rs` reported broader existing rustfmt drift in unrelated sections of the file; no whole-file rustfmt was applied to avoid scope churn.
+
+Task remains In Progress pending compile verification/CI/deployment validation.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
