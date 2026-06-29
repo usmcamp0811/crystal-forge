@@ -4,7 +4,7 @@ title: Add missing builder resolve-id API endpoint and UI key persistence
 status: In Progress
 assignee: []
 created_date: '2026-06-28 02:11'
-updated_date: '2026-06-29 02:18'
+updated_date: '2026-06-29 03:13'
 labels:
   - bug
   - builder
@@ -24,6 +24,8 @@ modified_files:
   - packages/default/src/config/deployment.rs
   - packages/default/src/deployment/agent.rs
   - modules/nixos/crystal-forge/default.nix
+  - packages/default/src/queries/deployment.rs
+  - packages/default/migrations/0144_add_desired_target_set_at.sql
 priority: high
 ordinal: 5500
 ---
@@ -74,14 +76,24 @@ Verification Plan:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Pushed commit 30101047 (`fix: suppress stale manual agent targets`) to MR !289. This suppresses stale `desired_target` values for manual-policy agents, preserves auto_latest/pinned convergence, allows fresh manual one-shot targets, clears stale manual targets server-side, and adds configurable agent post-boot deployment delay defaulting to 60s.
+Addressed re-review findings and pushed commit b6ef5a3f (`fix: track desired target freshness separately`) to MR !289.
 
-Verification run:
-- `nix develop -c env SQLX_OFFLINE=true cargo test agent_desired_target_policy --lib` (passed: 3 tests)
-- `nix develop -c env SQLX_OFFLINE=true cargo check --bin agent --bin server` (passed with existing warnings)
-- `git diff --check` (passed)
-- Nix eval of `services.crystal-forge.deployment.post_boot_deployment_delay = 90` (returned 90)
-- `nix flake check` (passed)
+Changes:
+- Added `systems.desired_target_set_at` migration.
+- Manual desired-target freshness now uses `desired_target_set_at`, not generic `systems.updated_at`.
+- Existing manual desired targets are migrated with no freshness timestamp so they are suppressed until explicitly set again.
+- Desired-target writers set/clear `desired_target_set_at` with the target value.
+- Stale manual target clearing is guarded by hostname, target value, and target timestamp to avoid deleting a concurrently replaced request.
+- Renamed delay config/option to `post_agent_start_deployment_delay` to match process-start semantics.
+
+Verification before push:
+- `nix develop .#sqlx -c cargo sqlx prepare` passed against the local process-compose DB target; no tracked SQLx metadata changes were produced.
+- `nix develop .#sqlx -c cargo test agent_desired_target_policy --lib` passed (4 focused tests).
+- `nix develop .#sqlx -c cargo check --bin agent --bin server` passed with existing warnings.
+- Nix eval for `services.crystal-forge.deployment.post_agent_start_deployment_delay = 90` returned `90`.
+- `git diff --check --cached` passed.
+
+Per user request, broader CI checks are left to run on the pushed MR branch.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
