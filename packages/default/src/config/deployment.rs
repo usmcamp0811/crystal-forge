@@ -33,6 +33,8 @@ pub struct DeploymentConfig {
     pub cache_public_key: Option<String>,
     #[serde(with = "duration_serde")]
     pub deployment_poll_interval: Duration,
+    #[serde(with = "duration_serde")]
+    pub post_boot_deployment_delay: Duration,
 
     /// Deployment policies that systems must satisfy
     #[serde(default)]
@@ -61,6 +63,7 @@ impl Default for DeploymentConfig {
             cache_url: None,
             cache_public_key: None,
             deployment_poll_interval: Duration::from_secs(60),
+            post_boot_deployment_delay: Duration::from_secs(60),
             policies: vec![
                 // Default: require CF agent
                 DeploymentPolicy::RequireCrystalForgeAgent { strict: false },

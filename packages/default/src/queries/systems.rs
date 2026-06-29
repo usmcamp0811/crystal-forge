@@ -1,5 +1,6 @@
 use crate::models::systems::System;
 use anyhow::Result;
+use chrono::Duration as ChronoDuration;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use std::collections::BTreeSet;
@@ -211,6 +212,71 @@ pub async fn get_desired_target_by_hostname(
 
     // Handle the nested Option from fetch_optional + nullable column
     Ok(result.flatten())
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct AgentDesiredTargetRow {
+    deployment_policy: String,
+    desired_target: Option<String>,
+    updated_at: DateTime<Utc>,
+}
+
+const MANUAL_DESIRED_TARGET_MAX_AGE_MINUTES: i64 = 30;
+
+fn should_send_desired_target_to_agent(
+    deployment_policy: &str,
+    desired_target: Option<&str>,
+    updated_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(_) = desired_target else {
+        return false;
+    };
+
+    match deployment_policy {
+        "auto_latest" | "pinned" => true,
+        "manual" => {
+            now - updated_at <= ChronoDuration::minutes(MANUAL_DESIRED_TARGET_MAX_AGE_MINUTES)
+        }
+        _ => false,
+    }
+}
+
+pub async fn get_agent_desired_target_by_hostname(
+    pool: &PgPool,
+    hostname: &str,
+) -> Result<Option<String>> {
+    let row = sqlx::query_as::<_, AgentDesiredTargetRow>(
+        "SELECT deployment_policy, desired_target, updated_at FROM systems WHERE hostname = $1",
+    )
+    .bind(hostname)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let now = Utc::now();
+    if should_send_desired_target_to_agent(
+        &row.deployment_policy,
+        row.desired_target.as_deref(),
+        row.updated_at,
+        now,
+    ) {
+        return Ok(row.desired_target);
+    }
+
+    if row.deployment_policy == "manual" && row.desired_target.is_some() {
+        sqlx::query(
+            "UPDATE systems SET desired_target = NULL, updated_at = NOW() WHERE hostname = $1 AND deployment_policy = 'manual'",
+        )
+        .bind(hostname)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(None)
 }
 
 pub async fn get_desired_target_by_id(pool: &PgPool, system_id: i32) -> Result<Option<String>> {
@@ -1618,6 +1684,48 @@ mod tests {
                 "view must keep identity field: {required}"
             );
         }
+    }
+
+    #[test]
+    fn agent_desired_target_policy_allows_auto_latest_and_pinned() {
+        let now = Utc::now();
+
+        assert!(should_send_desired_target_to_agent(
+            "auto_latest",
+            Some("/nix/store/latest"),
+            now - ChronoDuration::days(30),
+            now,
+        ));
+        assert!(should_send_desired_target_to_agent(
+            "pinned",
+            Some("/nix/store/pinned"),
+            now - ChronoDuration::days(30),
+            now,
+        ));
+    }
+
+    #[test]
+    fn agent_desired_target_policy_suppresses_stale_manual_target() {
+        let now = Utc::now();
+
+        assert!(!should_send_desired_target_to_agent(
+            "manual",
+            Some("/nix/store/stale"),
+            now - ChronoDuration::minutes(MANUAL_DESIRED_TARGET_MAX_AGE_MINUTES + 1),
+            now,
+        ));
+    }
+
+    #[test]
+    fn agent_desired_target_policy_allows_fresh_manual_target() {
+        let now = Utc::now();
+
+        assert!(should_send_desired_target_to_agent(
+            "manual",
+            Some("/nix/store/fresh"),
+            now - ChronoDuration::minutes(1),
+            now,
+        ));
     }
 
     #[tokio::test]

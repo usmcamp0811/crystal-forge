@@ -58,7 +58,8 @@
       || !cfg.deployment.dry_run_first
       || cfg.deployment.fallback_to_local_build
       || cfg.deployment.deployment_timeout_minutes != 60
-      || cfg.deployment.deployment_poll_interval != "15m") {
+      || cfg.deployment.deployment_poll_interval != "15m"
+      || cfg.deployment.post_boot_deployment_delay != 60) {
       deployment =
         {
           max_deployment_age_minutes = cfg.deployment.max_deployment_age_minutes;
@@ -66,6 +67,7 @@
           fallback_to_local_build = cfg.deployment.fallback_to_local_build;
           deployment_timeout_minutes = cfg.deployment.deployment_timeout_minutes;
           deployment_poll_interval = cfg.deployment.deployment_poll_interval;
+          post_boot_deployment_delay = cfg.deployment.post_boot_deployment_delay;
           require_sigs = cfg.deployment.require_sigs;
           strategy = cfg.deployment.deployment_strategy;
         }
@@ -1192,6 +1194,15 @@ in {
         type = lib.types.str;
         default = "15m";
         description = "Interval between deployment polling checks";
+      };
+      post_boot_deployment_delay = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 60;
+        description = lib.mdDoc ''
+          Seconds after agent startup before it may execute a server-requested
+          deployment. This gives freshly booted systems time to settle before
+          running switch-to-configuration.
+        '';
       };
       require_sigs = lib.mkOption {
         type = lib.types.bool;
