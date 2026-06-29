@@ -4,7 +4,7 @@ title: Add missing builder resolve-id API endpoint and UI key persistence
 status: In Progress
 assignee: []
 created_date: '2026-06-28 02:11'
-updated_date: '2026-06-29 03:26'
+updated_date: '2026-06-29 03:48'
 labels:
   - bug
   - builder
@@ -76,22 +76,18 @@ Verification Plan:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Addressed follow-up re-review finding and pushed commit e75c4c12 (`fix: clear target freshness when entering manual policy`) to MR !289.
+Fixed rollout config parse regression from reckless logs and pushed commit a51143bd (`fix: default missing agent start delay config`) to MR !289.
 
-Changes:
-- `insert_system` upsert now clears `desired_target_set_at` when a system enters `manual` policy without changing the desired target.
-- If the target value changes in the same request, freshness is still set to `NOW()` so explicit manual requests remain possible.
-- Added a focused unit test for the manual-policy transition guard.
-- Added an ignored DB-backed regression test proving guarded stale clear does not delete a concurrently replaced target.
+Root cause: `DeploymentConfig::default()` included `post_agent_start_deployment_delay`, but Serde did not use it for an existing `[deployment]` table missing that field. Existing generated config files therefore failed with `missing configuration field "deployment.post_agent_start_deployment_delay"`.
+
+Fix:
+- Added field-level Serde default for `post_agent_start_deployment_delay`, defaulting to 60 seconds.
+- Added tests for missing and explicit values.
 
 Verification before push:
-- `nix develop .#sqlx -c cargo test agent_desired_target_policy --lib` passed (4 focused tests).
-- `nix develop .#sqlx -c cargo test upsert_clears_target_freshness_when_entering_manual_without_target_change --lib` passed.
-- Applied local migration with `nix develop .#sqlx -c sqlx migrate run`, then `nix develop .#sqlx -c cargo test stale_manual_target_clear_does_not_delete_concurrent_replacement --lib -- --ignored` passed.
-- `nix develop .#sqlx -c cargo check --bin agent --bin server` passed with existing warnings.
+- `nix develop .#sqlx -c cargo test post_agent_start_deployment_delay --lib` passed (2 tests).
+- `nix develop .#sqlx -c cargo check --bin agent --bin server --bin builder` passed with existing warnings.
 - `git diff --check --cached` passed.
-
-Per user request, broader CI checks are left to run on the pushed MR branch.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
