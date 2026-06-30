@@ -39,6 +39,7 @@ use crate::models::public_key::PublicKey;
 use crate::queries::builders;
 
 const NIX_STORE_EXPORT_ARG_BYTES_LIMIT: usize = 128 * 1024;
+const ATTIC_PUSH_PATH_CHUNK_SIZE: usize = 200;
 
 fn parse_derivation_requisites(stdout: &[u8], drv_path: &str) -> Vec<String> {
     let mut paths = Vec::new();
@@ -84,6 +85,96 @@ fn chunk_derivation_archive_paths(paths: &[String], max_arg_bytes: usize) -> Vec
 
     chunks.push(&paths[chunk_start..]);
     chunks
+}
+
+async fn push_derivation_requisites_to_attic_cache(
+    pool: &sqlx::PgPool,
+    archive_paths: &[String],
+) -> Result<bool, StatusCode> {
+    let destinations = crate::queries::cache_destinations::list_cache_destinations(pool, true)
+        .await
+        .map_err(|e| {
+            tracing::warn!("failed to load cache destinations for derivation closure publish: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let Some(destination) = destinations
+        .into_iter()
+        .find(|destination| destination.cache_type.eq_ignore_ascii_case("Attic"))
+    else {
+        tracing::debug!(
+            "no enabled Attic cache destination configured for derivation closure publish"
+        );
+        return Ok(false);
+    };
+
+    let Some(cache_name) = destination.attic_cache_name.as_deref() else {
+        tracing::warn!(
+            cache_destination = %destination.name,
+            "enabled Attic cache destination is missing attic_cache_name"
+        );
+        return Ok(false);
+    };
+
+    let remote = std::env::var("ATTIC_REMOTE_NAME").unwrap_or_else(|_| "local".to_string());
+    let cache_ref = if cache_name.contains(':') {
+        cache_name.to_string()
+    } else {
+        format!("{remote}:{cache_name}")
+    };
+    let attic_jobs = destination.attic_jobs.unwrap_or(5).max(1).to_string();
+    let ignore_upstream_filter = destination
+        .attic_ignore_upstream_cache_filter
+        .unwrap_or(true);
+
+    for (chunk_index, chunk) in archive_paths.chunks(ATTIC_PUSH_PATH_CHUNK_SIZE).enumerate() {
+        let mut command = Command::new("attic");
+        command.arg("push").arg(&cache_ref).args(chunk);
+
+        if ignore_upstream_filter {
+            command.arg("--ignore-upstream-cache-filter");
+        }
+
+        command.arg("--jobs").arg(&attic_jobs);
+        command.env("HOME", "/var/lib/crystal-forge");
+        command.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+
+        if let Some(token) = destination.attic_token.as_deref() {
+            command.env("ATTIC_TOKEN", token);
+        }
+
+        tracing::info!(
+            cache_destination = %destination.name,
+            cache_ref = %cache_ref,
+            chunk_index,
+            chunk_path_count = chunk.len(),
+            "publishing derivation requisite closure chunk to Attic cache"
+        );
+
+        let output = command.output().await.map_err(|e| {
+            tracing::warn!(
+                cache_destination = %destination.name,
+                cache_ref = %cache_ref,
+                chunk_index,
+                "failed to run attic push for derivation closure: {e}"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(
+                cache_destination = %destination.name,
+                cache_ref = %cache_ref,
+                chunk_index,
+                stderr = %stderr,
+                "attic push failed while publishing derivation closure"
+            );
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    Ok(true)
 }
 
 // =============================================================================
@@ -1106,6 +1197,102 @@ pub async fn download_job_derivation_archive(
             tracing::error!(job_id = %job_id, "failed to build derivation archive response: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })
+}
+
+/// POST /api/v1/builders/:id/jobs/:job_id/publish-derivation-closure
+///
+/// Publishes the evaluated derivation requisite closure to the configured Attic
+/// cache so API builders can fetch it through normal Nix substituters instead
+/// of downloading a large archive through the Crystal Forge server.
+pub async fn publish_job_derivation_closure(
+    State(state): State<CFState>,
+    Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, StatusCode> {
+    let path = format!(
+        "/api/v1/builders/{}/jobs/{}/publish-derivation-closure",
+        builder_id, job_id
+    );
+    let verified = authenticate_builder_request(&headers, body, "POST", &path, &state.pool).await?;
+
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, "failed to load build job for derivation closure publish: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if job.builder_id != Some(builder_id) || job.status != "building" {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let derivation = crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, derivation_id = job.derivation_id, "failed to load derivation for closure publish: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let Some(drv_path) = derivation.derivation_path.as_deref() else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    if !drv_path.ends_with(".drv") {
+        tracing::warn!(job_id = %job_id, drv_path, "refusing to publish non-.drv path");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let validity_output = Command::new("nix-store")
+        .arg("--check-validity")
+        .arg(drv_path)
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, drv_path, "failed to run nix-store --check-validity before closure publish: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !validity_output.status.success() {
+        let stderr = String::from_utf8_lossy(&validity_output.stderr);
+        tracing::error!(job_id = %job_id, drv_path, stderr = %stderr, "derivation path is not valid in server store; cannot publish closure");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let requisites_output = Command::new("nix-store")
+        .arg("--query")
+        .arg("--requisites")
+        .arg(drv_path)
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, drv_path, "failed to run nix-store --query --requisites before closure publish: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !requisites_output.status.success() {
+        let stderr = String::from_utf8_lossy(&requisites_output.stderr);
+        tracing::error!(job_id = %job_id, drv_path, stderr = %stderr, "nix-store --query --requisites failed before closure publish");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let archive_paths = parse_derivation_requisites(&requisites_output.stdout, drv_path);
+    tracing::info!(
+        job_id = %job_id,
+        drv_path,
+        path_count = archive_paths.len(),
+        "publishing derivation requisite closure to cache"
+    );
+
+    match push_derivation_requisites_to_attic_cache(&state.pool, &archive_paths).await? {
+        true => Ok(StatusCode::NO_CONTENT),
+        false => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/start - Mark job as started

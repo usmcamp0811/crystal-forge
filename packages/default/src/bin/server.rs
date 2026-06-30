@@ -498,6 +498,10 @@ async fn main() -> anyhow::Result<()> {
             get(builders::download_job_derivation_archive),
         )
         .route(
+            "/api/v1/builders/:id/jobs/:job_id/publish-derivation-closure",
+            post(builders::publish_job_derivation_closure),
+        )
+        .route(
             "/api/v1/builders/:id/jobs/:job_id/complete",
             post(builders::complete_job),
         )

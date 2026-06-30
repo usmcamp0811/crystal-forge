@@ -570,6 +570,27 @@ async fn ensure_derivation_available(
     }
 
     info!(
+        "📤 Derivation {} missing locally; asking server to publish closure to cache",
+        drv_path
+    );
+
+    match client.publish_derivation_closure(job_id).await {
+        Ok(()) => {
+            info!(
+                "✅ Server published derivation closure for {}; continuing with Nix substituters",
+                drv_path
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            warn!(
+                "⚠️  Server cache publish unavailable for {}; falling back to archive download: {}",
+                drv_path, e
+            );
+        }
+    }
+
+    info!(
         "📥 Derivation {} missing locally; downloading archive from server",
         drv_path
     );

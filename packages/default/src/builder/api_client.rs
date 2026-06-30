@@ -441,6 +441,44 @@ impl BuilderApiClient {
             .context("Failed to read derivation archive response")
     }
 
+    /// Ask the server to publish the job's derivation closure to the configured
+    /// binary cache so the builder can fetch it through normal Nix substituters.
+    pub async fn publish_derivation_closure(&self, job_id: uuid::Uuid) -> Result<()> {
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/publish-derivation-closure",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let body = Vec::new();
+        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("X-Builder-ID", builder_id)
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .timeout(DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT)
+            .send()
+            .await
+            .context("Failed to request derivation closure publish")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!(
+                "Publish derivation closure failed with status {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        Ok(())
+    }
+
     /// Start a job (mark it as in-progress)
     pub async fn start_job(&self, job_id: uuid::Uuid) -> Result<()> {
         let path = format!("/api/v1/builders/{}/jobs/{}/start", self.builder_id, job_id);
