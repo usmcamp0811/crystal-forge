@@ -1,6 +1,7 @@
 use crate::config::BuilderConfig;
 use crate::models::builders::{
-    BuildJob, ReportMetricsRequest, ResolveBuilderIdRequest, ResolveBuilderIdResponse,
+    BuildProgressRequest, NextJobResponse, ReportMetricsRequest, ResolveBuilderIdRequest,
+    ResolveBuilderIdResponse,
 };
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -18,6 +19,10 @@ use tokio_tungstenite::{
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+const DEFAULT_API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BuildStreamMessage {
@@ -30,6 +35,15 @@ pub enum BuildStreamMessage {
         ram_total_mb: u64,
         timestamp: String,
     },
+    /// Builder -> server: live build progress (WS primary path for the reporter).
+    Progress {
+        derivation_id: i32,
+        elapsed_seconds: i32,
+        current_target: Option<String>,
+        last_activity_seconds: i32,
+    },
+    /// Server -> builder: operator requested cancellation.
+    CancelRequested,
 }
 
 /// API client for builder-to-server communication
@@ -46,7 +60,16 @@ impl BuilderApiClient {
         self.builder_id
     }
 
-    /// Create a new API client from configuration
+    /// Create a new API client from configuration.
+    ///
+    /// If `builder_id` is not set in config, the builder ID is resolved
+    /// dynamically from the server by signing a bootstrap request with the
+    /// private key and calling `POST /api/v1/builders/resolve-id`.
+    ///
+    /// Resolution is retried with exponential backoff so that a builder whose
+    /// public key has not yet been registered (or is currently disabled) does
+    /// not crash the service or block a NixOS switch. Each failed attempt is
+    /// logged with the builder's public key so an admin can register/enable it.
     pub async fn new(config: &BuilderConfig) -> Result<Self> {
         let key_path = config.require_private_key_path()?;
         let server_url = config.require_server_url()?;
@@ -56,13 +79,23 @@ impl BuilderApiClient {
             Self::load_private_key(&key_path).context("Failed to load builder private key")?;
 
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(DEFAULT_API_TIMEOUT)
             .build()
             .context("Failed to create HTTP client")?;
 
         let builder_id = match config.builder_id {
             Some(builder_id) => builder_id,
-            None => Self::resolve_builder_id(&client, &server_url, &signing_key).await?,
+            None => {
+                Self::resolve_builder_id_with_retry(
+                    &client,
+                    &server_url,
+                    &signing_key,
+                    config.resolve_retry_interval,
+                    config.resolve_retry_max_interval,
+                    config.resolve_max_attempts,
+                )
+                .await?
+            }
         };
 
         Ok(Self {
@@ -71,6 +104,62 @@ impl BuilderApiClient {
             builder_id,
             signing_key,
         })
+    }
+
+    /// Resolve the builder ID, retrying with exponential backoff on failure.
+    ///
+    /// A failure here typically means the builder's public key is not yet
+    /// registered on the server, or the builder is currently disabled. Rather
+    /// than exiting (which would crash the service and fail a NixOS switch), we
+    /// keep retrying and logging so an administrator has time to register the
+    /// public key and enable the builder in the UI.
+    async fn resolve_builder_id_with_retry(
+        client: &Client,
+        server_url: &str,
+        signing_key: &SigningKey,
+        retry_interval: std::time::Duration,
+        max_interval: std::time::Duration,
+        max_attempts: u32,
+    ) -> Result<Uuid> {
+        let public_key = Self::public_key_base64_for(signing_key);
+        let mut delay = retry_interval.max(std::time::Duration::from_secs(1));
+        let mut attempt: u32 = 0;
+
+        loop {
+            attempt += 1;
+            match Self::resolve_builder_id(client, server_url, signing_key).await {
+                Ok(builder_id) => {
+                    if attempt > 1 {
+                        info!(
+                            "✅ Builder ID resolved after {} attempt(s): {}",
+                            attempt, builder_id
+                        );
+                    }
+                    return Ok(builder_id);
+                }
+                Err(e) => {
+                    if max_attempts != 0 && attempt >= max_attempts {
+                        anyhow::bail!(
+                            "Builder ID resolution failed after {} attempt(s): {}. \
+                             Public key: {}",
+                            attempt,
+                            e,
+                            public_key
+                        );
+                    }
+
+                    warn!(
+                        "⏳ Builder not ready yet (attempt {}): {}. \
+                         Register this builder's public key in Crystal Forge and ensure it is enabled. \
+                         Public key (base64): {}. Retrying in {:?}.",
+                        attempt, e, public_key, delay
+                    );
+
+                    tokio::time::sleep(delay).await;
+                    delay = std::cmp::min(delay.saturating_mul(2), max_interval);
+                }
+            }
+        }
     }
 
     /// Load Ed25519 private key from file
@@ -230,8 +319,9 @@ impl BuilderApiClient {
         Ok(())
     }
 
-    /// Get the next available job from the server
-    pub async fn get_next_job(&self) -> Result<Option<BuildJob>> {
+    /// Get the next available job from the server, including the embedded
+    /// derivation build payload so the builder needs no database access.
+    pub async fn get_next_job(&self) -> Result<Option<NextJobResponse>> {
         let path = format!("/api/v1/builders/{}/next-job", self.builder_id);
         let url = format!("{}{}", self.server_url, path);
         let body = Vec::new(); // Empty body for GET
@@ -261,12 +351,132 @@ impl BuilderApiClient {
             anyhow::bail!("Get next job failed with status {}: {}", status, error_text);
         }
 
-        let job: BuildJob = response
+        let next_job: NextJobResponse = response
             .json()
             .await
             .context("Failed to parse job response")?;
 
-        Ok(Some(job))
+        Ok(Some(next_job))
+    }
+
+    /// Report build progress to the server over HTTP (reporter fallback path).
+    pub async fn report_progress(
+        &self,
+        job_id: uuid::Uuid,
+        progress: &BuildProgressRequest,
+    ) -> Result<()> {
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/progress",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let body = serde_json::to_vec(progress)?;
+        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("X-Builder-ID", builder_id)
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .body(body)
+            .send()
+            .await
+            .context("Failed to report build progress")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!(
+                "Report progress failed with status {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Download a Nix archive for the job's derivation closure from the server.
+    pub async fn download_derivation_archive(&self, job_id: uuid::Uuid) -> Result<bytes::Bytes> {
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/derivation-archive",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let body = Vec::new();
+        let (builder_id, signature, timestamp) = self.sign_request("GET", &path, &body);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("X-Builder-ID", builder_id)
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .timeout(DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT)
+            .send()
+            .await
+            .context("Failed to request derivation archive")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!(
+                "Download derivation archive failed with status {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        response
+            .bytes()
+            .await
+            .context("Failed to read derivation archive response")
+    }
+
+    /// Ask the server to publish the job's derivation closure to the configured
+    /// binary cache so the builder can fetch it through normal Nix substituters.
+    pub async fn publish_derivation_closure(&self, job_id: uuid::Uuid) -> Result<()> {
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/publish-derivation-closure",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let body = Vec::new();
+        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("X-Builder-ID", builder_id)
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .timeout(DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT)
+            .send()
+            .await
+            .context("Failed to request derivation closure publish")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!(
+                "Publish derivation closure failed with status {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        Ok(())
     }
 
     /// Start a job (mark it as in-progress)
@@ -346,12 +556,14 @@ impl BuilderApiClient {
     pub async fn fail_job(&self, job_id: uuid::Uuid, error_message: &str) -> Result<()> {
         #[derive(Serialize)]
         struct FailRequest {
+            status: &'static str,
             error_message: String,
         }
 
         let path = format!("/api/v1/builders/{}/jobs/{}/fail", self.builder_id, job_id);
         let url = format!("{}{}", self.server_url, path);
         let request = FailRequest {
+            status: "failed",
             error_message: error_message.to_string(),
         };
         let body = serde_json::to_vec(&request)?;
@@ -386,10 +598,54 @@ impl BuilderApiClient {
         Ok(())
     }
 
+    /// Poll the current status of a job (HTTP fallback for cancel detection).
+    pub async fn get_job_status(&self, job_id: uuid::Uuid) -> Result<Option<String>> {
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/status",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let (builder_id, signature, timestamp) = self.sign_request("GET", &path, &[]);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("X-Builder-ID", builder_id)
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .send()
+            .await
+            .context("Failed to poll job status")?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!(
+                "Get job status failed with status {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        let value: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse job status response")?;
+
+        Ok(value
+            .get("status")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string()))
+    }
+
     /// Notify the server that a cancelling job has been fully stopped.
-    ///
-    /// Transitions the job from `cancelling` → `cancelled` with `completed_at`.
-    /// Should be called after the nix process has been killed and final logs flushed.
     pub async fn finalize_cancelled_job(&self, job_id: uuid::Uuid) -> Result<()> {
         let path = format!(
             "/api/v1/builders/{}/jobs/{}/finalize-cancelled",
@@ -476,8 +732,7 @@ impl BuilderApiClient {
         format!("{}/api/v1/build-jobs/{}/logs/stream", base, job_id)
     }
 
-    /// Stream a log line via WebSocket
-    /// Returns a WebSocket stream that can be used to send log lines and metrics
+    /// Returns a WebSocket stream for streaming build logs and metrics
     pub async fn create_log_stream(
         &self,
         job_id: &Uuid,
@@ -554,6 +809,47 @@ impl BuilderApiClient {
             .await
             .context("Failed to send metrics")?;
         Ok(())
+    }
+}
+
+/// API-backed [`BuildReporter`] for remote builders.
+///
+/// Reports progress and checks cancellation entirely over the server API with no
+/// database access. Progress is sent via HTTP POST; cancellation is detected by
+/// polling the job status endpoint. This keeps remote builders fully DB-free.
+#[derive(Clone)]
+pub struct ApiBuildReporter {
+    client: BuilderApiClient,
+    job_id: Uuid,
+}
+
+impl ApiBuildReporter {
+    pub fn new(client: BuilderApiClient, job_id: Uuid) -> Self {
+        Self { client, job_id }
+    }
+}
+
+#[axum::async_trait]
+impl crate::derivations::reporter::BuildReporter for ApiBuildReporter {
+    async fn report_progress(
+        &self,
+        progress: &crate::derivations::reporter::BuildProgress,
+    ) -> Result<()> {
+        let request = BuildProgressRequest {
+            derivation_id: progress.derivation_id,
+            elapsed_seconds: progress.elapsed_seconds,
+            current_target: progress.current_target.clone(),
+            last_activity_seconds: progress.last_activity_seconds,
+        };
+        self.client.report_progress(self.job_id, &request).await
+    }
+
+    async fn is_cancelled(&self, job_id: Option<Uuid>) -> Result<bool> {
+        let Some(job_id) = job_id else {
+            return Ok(false);
+        };
+        let status = self.client.get_job_status(job_id).await?;
+        Ok(matches!(status.as_deref(), Some("cancelling")))
     }
 }
 

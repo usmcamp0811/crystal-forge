@@ -5,7 +5,7 @@ use crate::models::agent_heartbeats::AgentHeartbeat;
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::{get_caches_for_environment, get_global_caches};
 use crate::queries::systems::{
-    deactivate_duplicate_active_systems_by_public_key, get_desired_target_by_hostname,
+    deactivate_duplicate_active_systems_by_public_key, get_agent_desired_target_by_hostname,
 };
 use crate::queries::{agent_heartbeat::insert_agent_heartbeat, system_states::insert_system_state};
 use axum::response::Response;
@@ -158,9 +158,11 @@ pub async fn log(
         }
     }
 
-    // Fetch desired target for this system
+    // Fetch desired target for this system. Manual systems only receive fresh,
+    // explicit one-shot targets; stale manual targets are suppressed so agents
+    // cannot revert hosts after an out-of-band/manual nixos-rebuild.
     let desired_target =
-        match get_desired_target_by_hostname(&pool, &agent_request.system.hostname).await {
+        match get_agent_desired_target_by_hostname(&pool, &agent_request.system.hostname).await {
             Ok(target) => target,
             Err(e) => {
                 debug!("❌ Failed to fetch desired target: {e:?}");

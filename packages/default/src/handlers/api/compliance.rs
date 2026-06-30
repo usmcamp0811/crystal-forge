@@ -57,7 +57,7 @@ pub async fn get_compliance_bundle_systems(
 
 /// `GET /api/v1/systems/:system_id/compliance`
 /// Returns all compliance bundles applicable to the specified system with rollups.
-/// 
+///
 /// This endpoint uses set-based queries to avoid N+1 database patterns.
 /// All-or-nothing behavior: infrastructure failures return 500.
 ///

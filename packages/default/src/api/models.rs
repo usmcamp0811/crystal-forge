@@ -1038,7 +1038,7 @@ pub struct ComplianceBundleSystemsResponse {
 
 /// Response for GET /api/v1/systems/:system_id/compliance
 /// Returns bundles applicable to the system with their rollups.
-/// 
+///
 /// This endpoint is all-or-nothing: infrastructure failures (database errors,
 /// missing policies) fail the entire request. Individual bundle computation
 /// uses deterministic logic with no fallible operations.

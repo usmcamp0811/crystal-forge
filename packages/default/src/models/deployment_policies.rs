@@ -350,8 +350,9 @@ impl DeploymentPolicy {
         match self {
             DeploymentPolicy::RequireCrystalForgeAgent { .. } => (
                 "cfAgentEnabled".to_string(),
-                "(cfg.config.services.crystal-forge.enable or false) && \
-                 (cfg.config.services.crystal-forge.client.enable or false)"
+                "(cfg.config.systemd.services.crystal-forge-agent.enable or false) || \
+                 ((cfg.config.services.crystal-forge.enable or false) && \
+                  (cfg.config.services.crystal-forge.client.enable or false))"
                     .to_string(),
             ),
             DeploymentPolicy::RequirePackages { packages, .. } => {
@@ -733,8 +734,24 @@ mod tests {
         let policy = DeploymentPolicy::RequireCrystalForgeAgent { strict: false };
         let (field_name, expr) = policy.to_nix_expression();
         assert_eq!(field_name, "cfAgentEnabled");
+        assert!(expr.contains("systemd.services.crystal-forge-agent.enable"));
         assert!(expr.contains("services.crystal-forge.enable"));
         assert!(expr.contains("services.crystal-forge.client.enable"));
+    }
+
+    #[test]
+    fn crystal_forge_agent_policy_expression_checks_systemd_service() {
+        let policy = DeploymentPolicy::RequireCrystalForgeAgent { strict: true };
+        let (_, expr) = policy.to_nix_expression();
+
+        assert!(
+            expr.starts_with("(cfg.config.systemd.services.crystal-forge-agent.enable or false)"),
+            "cf agent policy should use the realized systemd service as the primary signal"
+        );
+        assert!(
+            expr.contains("||"),
+            "cf agent policy should retain compatibility with legacy service options"
+        );
     }
 
     #[test]
@@ -768,6 +785,7 @@ mod tests {
         let expr = build_nix_eval_expression("github:user/repo", &policies);
         assert!(expr.contains("cfAgentEnabled"));
         assert!(expr.contains("hasRequiredPackages"));
+        assert!(expr.contains("systemd.services.crystal-forge-agent.enable"));
         assert!(expr.contains("services.crystal-forge"));
     }
 

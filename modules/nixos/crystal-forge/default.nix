@@ -59,7 +59,8 @@
       || !cfg.deployment.dry_run_first
       || cfg.deployment.fallback_to_local_build
       || cfg.deployment.deployment_timeout_minutes != 60
-      || cfg.deployment.deployment_poll_interval != "15m") {
+      || cfg.deployment.deployment_poll_interval != "15m"
+      || cfg.deployment.post_agent_start_deployment_delay != 60) {
       deployment =
         {
           max_deployment_age_minutes = cfg.deployment.max_deployment_age_minutes;
@@ -67,6 +68,7 @@
           fallback_to_local_build = cfg.deployment.fallback_to_local_build;
           deployment_timeout_minutes = cfg.deployment.deployment_timeout_minutes;
           deployment_poll_interval = cfg.deployment.deployment_poll_interval;
+          post_agent_start_deployment_delay = cfg.deployment.post_agent_start_deployment_delay;
           require_sigs = cfg.deployment.require_sigs;
           strategy = cfg.deployment.deployment_strategy;
         }
@@ -297,6 +299,9 @@
       ${lib.optionalString (includeBuilderApiKeySetup && cfg.build.enable && cfg.build.api_mode && cfg.build.api_key_file == null) ''
         BUILDER_API_KEY_PATH="/var/lib/crystal-forge/builder-api.key"
 
+        # cf-keygen uses path.with_extension("pub"), so builder-api.key -> builder-api.pub
+        BUILDER_API_PUB_PATH="''${BUILDER_API_KEY_PATH%.key}.pub"
+
         if [ ! -f "$BUILDER_API_KEY_PATH" ]; then
           echo "Generating builder API key for Crystal Forge API mode..."
           ${pkgs.crystal-forge.default.server}/bin/cf-keygen -y -f "$BUILDER_API_KEY_PATH"
@@ -307,7 +312,7 @@
           echo ""
           echo "Register this builder in the Crystal Forge UI with the following public key:"
           echo ""
-          cat "$BUILDER_API_KEY_PATH.pub"
+          cat "$BUILDER_API_PUB_PATH"
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         fi
@@ -316,9 +321,9 @@
         chown crystal-forge:crystal-forge "$BUILDER_API_KEY_PATH"
         chmod 600 "$BUILDER_API_KEY_PATH"
 
-        if [ -f "$BUILDER_API_KEY_PATH.pub" ]; then
-          chown crystal-forge:crystal-forge "$BUILDER_API_KEY_PATH.pub"
-          chmod 644 "$BUILDER_API_KEY_PATH.pub"
+        if [ -f "$BUILDER_API_PUB_PATH" ]; then
+          chown crystal-forge:crystal-forge "$BUILDER_API_PUB_PATH"
+          chmod 644 "$BUILDER_API_PUB_PATH"
         fi
       ''}
 
@@ -326,6 +331,12 @@
     '';
 
   configScriptServer = makeConfigScript {
+    destPath = serverConfigPath;
+    includeServerStateSetup = true;
+    includeBuilderApiKeySetup = false;
+  };
+
+  configScriptBuilder = makeConfigScript {
     destPath = serverConfigPath;
     includeServerStateSetup = true;
     includeBuilderApiKeySetup = true;
@@ -961,31 +972,28 @@ in {
 
       api_mode = lib.mkOption {
         type = lib.types.bool;
-        default = false;
+        default = true;
         description = lib.mdDoc ''
           Use builder API mode.
 
-          When enabled, the builder authenticates to the Crystal Forge server
-          via API using a private key, rather than connecting directly to the
-          database. This is the recommended mode for distributed builder hosts.
+          Crystal Forge builders are API-only. The builder authenticates to
+          the Crystal Forge server using a private key and never connects
+          directly to the database.
 
-          **Benefits of API mode:**
+          **Benefits:**
           - No database credentials needed on builder machines
           - Better security isolation
           - Supports distributed builds across networks
           - Builder registration via server UI
 
-          **Default**: false, to preserve compatibility for existing combined
-          server/builder deployments where `build.enable` follows
-          `server.enable`. New distributed builder hosts should set this to
-          `true` explicitly.
+          **Default**: true
 
-          When API mode is enabled without `api_key_file`, the builder API key
-          will be auto-generated and displayed in systemd logs. Register the
-          builder using the public key in the UI.
+          The builder API key will be auto-generated on first start unless
+          `api_key_file` is set. Register the builder using the public key in
+          the Crystal Forge UI.
 
-          **Deprecation**: Legacy database mode (`false`) is deprecated and
-          should only be used for temporary migration/testing.
+          Setting this to false is not supported. It is retained only to make
+          old configurations fail evaluation with a clear migration message.
         '';
       };
 
@@ -1006,7 +1014,7 @@ in {
           **Manual key provision:**
           Set this option to use a pre-existing key file.
 
-          **Note**: Only used when `api_mode = true`
+          **Note**: Builder API mode is required.
         '';
         example = "/run/secrets/crystal-forge-builder-key";
       };
@@ -1029,7 +1037,7 @@ in {
           - Same network: "http://crystal-forge.local:3000"
           - Remote: "https://crystal-forge.example.com"
 
-          **Note**: Only used when `api_mode = true`
+          **Note**: Builder API mode is required.
         '';
         example = "https://crystal-forge.example.com";
       };
@@ -1198,6 +1206,15 @@ in {
         type = lib.types.str;
         default = "15m";
         description = "Interval between deployment polling checks";
+      };
+      post_agent_start_deployment_delay = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 60;
+        description = lib.mdDoc ''
+          Seconds after the Crystal Forge agent process starts before it may
+          execute a server-requested deployment. This gives freshly started or
+          restarted agents time to settle before running switch-to-configuration.
+        '';
       };
       require_sigs = lib.mkOption {
         type = lib.types.bool;
@@ -1933,7 +1950,7 @@ in {
           NIX_CONFIG_DIR = "/dev/null";
           GC_MARKERS = "1";
         }
-        # Add Builder API mode environment variables
+        # Add required Builder API environment variables
         (lib.mkIf cfg.build.api_mode {
           CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH =
             if cfg.build.api_key_file != null
@@ -1957,7 +1974,7 @@ in {
 
       preStart = ''
         mkdir -p /run/crystal-forge
-        ${configScriptServer}
+        ${configScriptBuilder}
         mkdir -p /var/lib/crystal-forge/.config/attic
 
         # Ensure proper ownership - do this AFTER creating all directories
@@ -2273,28 +2290,24 @@ in {
       };
     };
 
-    warnings = lib.optional (cfg.build.enable && !cfg.build.api_mode) ''
-      Crystal Forge builder is using legacy database mode, which is deprecated.
-
-      Current configuration (api_mode = false) uses direct database access:
-      - Requires database credentials on builder machines
-      - Has weaker security isolation
-      - Does not support distributed builds across networks
-
-      Recommended migration to API mode:
-        1. Set: services.crystal-forge.build.api_mode = true;
-        2. Deploy the configuration (builder API key will be auto-generated)
-        3. Check systemd logs for the builder public key
-        4. Register the builder in Crystal Forge UI using the public key
-
-      Legacy database mode will be removed in a future release.
-      For more information, see the deployment documentation.
-    '';
-
     assertions = [
       {
         assertion = cfg.client.enable -> (cfg.client.private_key != null);
         message = "Crystal Forge client requires a private key file";
+      }
+      {
+        assertion = !cfg.build.enable || cfg.build.api_mode;
+        message = ''
+          Crystal Forge builders now require API mode.
+
+          Legacy direct-database builder mode has been removed. Set:
+
+            services.crystal-forge.build.api_mode = true;
+
+          The module will generate `/var/lib/crystal-forge/builder-api.key`
+          on first start unless `services.crystal-forge.build.api_key_file` is
+          set. Register the generated public key in the Crystal Forge UI.
+        '';
       }
       {
         assertion =

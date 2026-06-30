@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
@@ -79,6 +80,7 @@ pub struct AgentDeploymentManager {
     current_target: Option<String>,
     deployment_lock: Arc<Semaphore>,
     runtime_caches: Vec<RuntimeCacheConfig>,
+    started_at: Instant,
 }
 
 impl AgentDeploymentManager {
@@ -88,6 +90,7 @@ impl AgentDeploymentManager {
             current_target: None,
             deployment_lock: Arc::new(Semaphore::new(1)),
             runtime_caches: Vec::new(),
+            started_at: Instant::now(),
         }
     }
 
@@ -146,6 +149,16 @@ impl AgentDeploymentManager {
         };
 
         info!("Received desired target: {}", desired_target);
+
+        let uptime = self.started_at.elapsed();
+        if uptime < self.config.post_agent_start_deployment_delay {
+            info!(
+                "Deferring deployment for {} until post-agent-start delay expires ({:?} remaining)",
+                desired_target,
+                self.config.post_agent_start_deployment_delay - uptime
+            );
+            return Ok(DeploymentResult::NoDeploymentNeeded);
+        }
 
         // Always check the actual running system, not just cached state
         // This handles agent restarts, manual switches, and detached deployments

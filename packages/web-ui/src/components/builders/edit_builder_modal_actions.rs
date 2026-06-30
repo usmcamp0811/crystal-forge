@@ -42,6 +42,15 @@ pub fn build_update_request(
     }
 }
 
+pub fn public_key_update_for_save(current_public_key: &str, edited_public_key: &str) -> Option<String> {
+    let next_public_key = edited_public_key.trim();
+    if next_public_key.is_empty() || next_public_key == current_public_key {
+        None
+    } else {
+        Some(next_public_key.to_string())
+    }
+}
+
 pub async fn submit_builder_update(
     builder_id: &Uuid,
     update_request: &UpdateBuilderRequest,
@@ -77,4 +86,29 @@ pub async fn delete_builder_permanently(builder_id: &Uuid) -> Result<(), String>
     api::client::delete_builder_permanently(builder_id)
         .await
         .map_err(|e| format!("Failed to delete builder: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::public_key_update_for_save;
+
+    #[test]
+    fn save_detects_changed_builder_public_key() {
+        let update = public_key_update_for_save("old-key", "new-key");
+
+        assert_eq!(update.as_deref(), Some("new-key"));
+    }
+
+    #[test]
+    fn save_trims_changed_builder_public_key() {
+        let update = public_key_update_for_save("old-key", "  new-key\n");
+
+        assert_eq!(update.as_deref(), Some("new-key"));
+    }
+
+    #[test]
+    fn save_skips_unchanged_or_empty_builder_public_key() {
+        assert_eq!(public_key_update_for_save("same-key", "same-key"), None);
+        assert_eq!(public_key_update_for_save("same-key", "   "), None);
+    }
 }

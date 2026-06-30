@@ -7,11 +7,13 @@ use tracing::error;
 pub mod build;
 pub mod cache;
 pub mod eval;
+pub mod reporter;
 pub mod utils;
 
 // Re-export everything for backward compatibility
 pub use build::*;
 pub use eval::*;
+pub use reporter::*;
 pub use utils::*;
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
@@ -94,6 +96,39 @@ impl ToString for DerivationType {
 }
 
 impl Derivation {
+    /// Construct a minimal `Derivation` from the API build payload delivered to
+    /// remote builders. Only the fields required to run and report a build are
+    /// populated; the rest default to empty/unknown. Remote builders never read
+    /// the database, so the full row is intentionally not available here.
+    pub fn from_build_payload(payload: &crate::models::builders::BuildJobDerivation) -> Self {
+        Derivation {
+            id: payload.id,
+            commit_id: None,
+            derivation_type: match payload.derivation_type.as_str() {
+                "package" => DerivationType::Package,
+                _ => DerivationType::NixOS,
+            },
+            derivation_name: payload.derivation_name.clone(),
+            derivation_path: payload.derivation_path.clone(),
+            scheduled_at: None,
+            completed_at: None,
+            started_at: None,
+            attempt_count: 0,
+            evaluation_duration_ms: None,
+            error_message: None,
+            pname: None,
+            version: None,
+            status_id: 0,
+            derivation_target: None,
+            build_elapsed_seconds: None,
+            build_current_target: None,
+            build_last_activity_seconds: None,
+            build_last_heartbeat: None,
+            cf_agent_enabled: None,
+            store_path: payload.store_path.clone(),
+        }
+    }
+
     /// Check if this derivation is safe for deployment
     /// (has Crystal Forge agent enabled and is a successful build)
     pub fn is_deployment_safe(&self) -> bool {
