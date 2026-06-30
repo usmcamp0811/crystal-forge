@@ -4,7 +4,7 @@ title: 'Remote builders: add verified source re-evaluation strategy'
 status: To Do
 assignee: []
 created_date: '2026-06-30 17:46'
-updated_date: '2026-06-30 20:36'
+updated_date: '2026-06-30 20:40'
 labels:
   - builder
   - remote-builds
@@ -37,7 +37,11 @@ Goal: add an explicit verified source re-evaluation strategy (`source_re_evaluat
 
 Key design point: compare the toplevel derivation path, not an evaluation blob or full closure. For an input-addressed derivation, matching `/nix/store/<hash>-...drv` transitively verifies the build plan graph the builder is about to build is the same plan the server authorized. This verifies derivation identity/build plan equality, not bit-for-bit output reproducibility.
 
-Recommended source delivery: avoid broad/reusable Git credentials on builders. Prefer a server-fetched immutable source archive or NAR/flake archive with hash, commit, flake target, lock metadata, and evaluator fingerprint. Builders should not need direct Postgres access, ambient source credentials, or mutable branch names.
+Required execution order: eval before build. The builder must first run the equivalent of `nix eval --raw .#nixosConfigurations.<host>.config.system.build.toplevel.drvPath`, compare that string to the server-provided expected `.drvPath`, and only then build the exact verified derivation, e.g. `nix build "$drv^*"`. Do not run a normal `nix build` first and inspect after the fact, because that cooks before checking and reintroduces a verification/execution gap.
+
+Server-side derivation identity should come from pure evaluation (`nix eval --raw ...drvPath`), not `nix build --dry-run`. A dry-run build resolves more information than needed; the strategy only needs the authoritative `.drvPath` string for comparison.
+
+Recommended source delivery: avoid broad/reusable Git credentials on builders. Prefer a server-fetched immutable source archive or NAR/flake archive with hash, commit, flake target, lock metadata, and evaluator fingerprint. Builders should not need direct Postgres access, ambient source credentials, or mutable branch names. Decide explicitly whether builders may fetch public flake inputs themselves or whether the server bundles inputs with `nix flake archive`; the tighter locked-down/GovCloud-friendly option is server-bundled inputs so builders need zero internet and zero Git credentials for evaluation.
 
 Non-Goals:
 - Do not make unverified source checkout a production strategy.
@@ -55,6 +59,7 @@ Architectural Constraints:
 - Source identity must be immutable: prefer source archive/NAR URL plus hash over branch names; include git commit, flake target, lock hash/metadata, and evaluator fingerprint for auditability.
 - Builder evaluation must use controlled Nix settings: no lockfile mutation, pure evaluation where feasible, explicit experimental features, recorded Nix version/evaluator fingerprint, and no ambient credentials.
 - Private source access should use short-lived/job-scoped source archives or tokens rather than long-lived Git credentials on every builder.
+- Source/input delivery mode must be explicit: either server-bundled flake inputs for locked-down builders, or builder-fetched public inputs where that is acceptable.
 - Mismatches must fail before build with a distinct `derivation_mismatch` error class/phase.
 - Fleet configuration should pin/record Nix versions across server and builders so normal evaluation does not drift silently.
 
@@ -74,6 +79,7 @@ Verification Plan:
 - Unit tests for derivation identity comparison and mismatch error classification.
 - Integration test where builder evaluates immutable source, matches expected `.drvPath`, builds the verified derivation, and reports success or build failure.
 - Integration test where expected `.drvPath` differs from locally evaluated `.drvPath`; job fails before build with `derivation_mismatch` before any build starts.
+- Test that builder performs eval/compare before build and builds the verified `.drv` path rather than invoking an unverified attr build first.
 - Source delivery/security test or config review confirming builders do not receive broad Git credentials and evaluation runs without ambient secret environment variables.
 - Test or assertion that lockfile mutation/impure evaluation is disabled or explicitly rejected for this strategy.
 - Targeted `nix develop` cargo checks/tests for changed crates; run heavier Nix checks only if Nix modules/packaging are modified.
@@ -82,17 +88,18 @@ Verification Plan:
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 A new explicit verified source strategy exists (`source_re_evaluate_verified` or agreed final name) and is not used as a silent fallback.
-- [ ] #2 Server job manifest includes immutable source identity, flake target, lock/source metadata, evaluator fingerprint fields, and expected toplevel `.drvPath`.
-- [ ] #3 Builder obtains immutable server-provided source without broad/reusable Git credentials and evaluates it with controlled Nix settings.
-- [ ] #4 Builder compares locally evaluated toplevel `.drvPath` to the server-expected `.drvPath` and refuses to build on mismatch.
-- [ ] #5 After a successful match, builder builds the verified derivation object and reports logs, progress, completion/failure, and output path through the API-only builder protocol.
-- [ ] #6 Derivation mismatch, source fetch failure, and evaluation failure are represented as distinct attempt phases/error classes and do not leave jobs stuck in `building`.
-- [ ] #7 Unverified source checkout support is absent or clearly limited to development/testing only; there is no hidden fallback between strategies.
-- [ ] #8 Operator documentation explains when to use verified source re-evaluation, its security requirements, Nix version/purity expectations, and the distinction between derivation identity verification and output reproducibility.
+- [ ] #2 Server derives the authoritative fingerprint using pure evaluation of the target `.drvPath` (`nix eval --raw ...drvPath` equivalent), not a dry-run build.
+- [ ] #3 Server job manifest includes immutable source identity, flake target, lock/source metadata, evaluator fingerprint fields, source/input delivery mode, and expected toplevel `.drvPath`.
+- [ ] #4 Builder obtains immutable server-provided source without broad/reusable Git credentials and evaluates it with controlled Nix settings.
+- [ ] #5 Builder compares locally evaluated toplevel `.drvPath` to the server-expected `.drvPath` before any build starts and refuses to build on mismatch.
+- [ ] #6 After a successful match, builder builds the exact verified derivation object and reports logs, progress, completion/failure, and output path through the API-only builder protocol.
+- [ ] #7 Derivation mismatch, source fetch failure, evaluation failure, and input/source availability failures are represented as distinct attempt phases/error classes and do not leave jobs stuck in `building`.
+- [ ] #8 Unverified source checkout support is absent or clearly limited to development/testing only; there is no hidden fallback between strategies.
+- [ ] #9 Operator documentation explains when to use verified source re-evaluation, source/input delivery options (`nix flake archive`/bundled inputs vs public input fetching), security requirements, Nix version/purity expectations, and the distinction between derivation identity verification and output reproducibility.
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Architecture refinement from post-TASK-375 discussion: prefer verified source re-evaluation mechanics over distributing a monolithic server-evaluated derivation closure as the common path. The server still evaluates first and records the expected toplevel `.drvPath`; the builder evaluates immutable server-provided source, compares its local `.drvPath` to the expected value, and builds only the verified derivation. Source should be delivered as a server-fetched immutable archive/NAR or equivalent short-lived job-scoped artifact so builders do not need broad Git credentials. This verifies build plan identity, not bit-for-bit output reproducibility.
+Additional refinement: server should use pure `nix eval --raw ...drvPath`, not `nix build --dry-run`, to get the authoritative fingerprint. Builder must also eval first, compare `.drvPath`, and only then build the exact verified derivation path (`$drv^*`) to avoid cooking before checking. Source/input delivery decision remains explicit: builder may fetch public flake inputs if allowed, but server-bundled `nix flake archive`/NAR input closure is preferred for locked-down builders with no internet or Git credentials.
 <!-- SECTION:NOTES:END -->
