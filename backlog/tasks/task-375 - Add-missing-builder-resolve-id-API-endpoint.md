@@ -1,11 +1,11 @@
 ---
 id: TASK-375
 title: Add missing builder resolve-id API endpoint and UI key persistence
-status: In Progress
+status: Done
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-28 02:11'
-updated_date: '2026-06-30 13:33'
+updated_date: '2026-06-30 21:06'
 labels:
   - bug
   - builder
@@ -71,14 +71,20 @@ Verification Plan:
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 POST /api/v1/builders/resolve-id exists on the server and no longer returns 405 for a valid signed builder request.
-- [ ] #2 The endpoint resolves a registered builder by public key and returns its builder ID using the existing ResolveBuilderIdResponse DTO.
-- [ ] #3 The endpoint rejects unknown, disabled, or invalidly signed builder requests without exposing direct database access to builder processes.
-- [ ] #4 The builder remains API-only and does not reintroduce legacy direct-database fallback.
-- [ ] #5 Changing a builder public key in the Builders UI and clicking Save persists the new key or surfaces a clear backend error.
-- [ ] #6 Remote builder executes real builds via API with no DB pool: it fetches derivation payload, streams logs, reports progress, honors cancellation, and reports completion/failure entirely over HTTP/WebSocket.
-- [ ] #7 Server exposes the endpoints required for remote builds (derivation payload, build progress heartbeat) and performs derivation completion/failure and cache-push queueing server-side.
+- [x] #1 POST /api/v1/builders/resolve-id exists on the server and no longer returns 405 for a valid signed builder request.
+- [x] #2 The endpoint resolves a registered builder by public key and returns its builder ID using the existing ResolveBuilderIdResponse DTO.
+- [x] #3 The endpoint rejects unknown, disabled, or invalidly signed builder requests without exposing direct database access to builder processes.
+- [x] #4 The builder remains API-only and does not reintroduce legacy direct-database fallback.
+- [x] #5 Changing a builder public key in the Builders UI and clicking Save persists the new key or surfaces a clear backend error.
+- [x] #6 Remote builder executes real builds via API with no DB pool: it fetches derivation payload, streams logs, reports progress, honors cancellation, and reports completion/failure entirely over HTTP/WebSocket.
+- [x] #7 Server exposes the endpoints required for remote builds (derivation payload, build progress heartbeat) and performs derivation completion/failure and cache-push queueing server-side.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+MR !289 verified as merged via `nix run nixpkgs#glab -- mr view 289`. Completed task worktree `/home/mcamp/code/crystal-forge/TASK-375-fix-cf-keygen-pub-path` was clean and has been removed/pruned. Marking TASK-375 Done to reconcile stale backlog state and unblock follow-up tasks.
+<!-- SECTION:NOTES:END -->
 
 ## Comments
 
@@ -89,3 +95,9 @@ created: 2026-06-28 02:50
 User requested folding the related Builders UI public-key persistence issue into TASK-375 because the API-mode rollout depends on registering the generated key from the UI.
 ---
 <!-- COMMENTS:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+MR !289 was verified merged. The stale TASK-375 worktree (`/home/mcamp/code/crystal-forge/TASK-375-fix-cf-keygen-pub-path`) was clean, removed with `git worktree remove`, and `git worktree prune` was run. TASK-375 is now marked Done to unblock follow-up tasks TASK-375.3 and TASK-375.4.
+<!-- SECTION:FINAL_SUMMARY:END -->
