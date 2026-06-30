@@ -286,6 +286,86 @@ pub struct AppendLogsRequest {
     pub logs: String,
 }
 
+/// Minimal derivation build payload delivered to API-mode builders so they can
+/// build without any direct database access.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildJobDerivation {
+    pub id: i32,
+    pub derivation_name: String,
+    /// "nixos" or "package"
+    pub derivation_type: String,
+    /// .drv path populated during the dry-run/eval phase.
+    pub derivation_path: Option<String>,
+    /// Resolved output store path, if already known.
+    pub store_path: Option<String>,
+}
+
+/// Response returned by GET /api/v1/builders/:id/next-job.
+///
+/// Embeds both the claimed job and the derivation build payload so the remote
+/// builder needs only a single round trip and no database connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NextJobResponse {
+    pub job: BuildJob,
+    pub derivation: BuildJobDerivation,
+}
+
+/// Build progress report sent by API builders (HTTP fallback for the WS frame).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildProgressRequest {
+    pub derivation_id: i32,
+    pub elapsed_seconds: i32,
+    pub current_target: Option<String>,
+    pub last_activity_seconds: i32,
+}
+
+/// A cache-push job handed to an API builder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachePushJobPayload {
+    pub id: Uuid,
+    pub derivation_id: i32,
+    pub derivation_name: String,
+    /// Path to push: store_path or derivation_path.
+    pub path: String,
+    /// Optional cache destination name for last-used bookkeeping.
+    pub cache_destination_name: Option<String>,
+}
+
+/// Result of a successful cache push reported by an API builder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachePushCompleteRequest {
+    pub duration_ms: Option<i32>,
+}
+
+/// Failure report for a cache push.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachePushFailRequest {
+    pub error_message: String,
+}
+
+/// A CVE scan target handed to an API builder, including the created scan id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveScanTarget {
+    pub scan_id: i32,
+    pub derivation_id: i32,
+    pub derivation_name: String,
+    pub store_path: String,
+}
+
+/// Raw vulnix output uploaded by an API builder for server-side parsing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveScanResultsRequest {
+    /// Raw vulnix JSON (stdout) for server-side parsing/persistence.
+    pub raw_output: String,
+    pub scan_duration_ms: Option<i32>,
+}
+
+/// Failure report for a CVE scan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveScanFailRequest {
+    pub error_message: String,
+}
+
 /// Response for builder creation with generated keypair
 /// WARNING: private_key is returned ONLY ONCE and never stored
 #[derive(Debug, Serialize, Deserialize)]

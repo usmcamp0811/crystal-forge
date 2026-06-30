@@ -1,14 +1,14 @@
-use crystal_forge::builder::api_client::BuilderApiClient;
+use crystal_forge::builder::api_client::{ApiBuildReporter, BuilderApiClient};
 use crystal_forge::builder::metrics::SystemMetrics;
-use crystal_forge::builder::{run_build_loop, run_cache_push_loop, run_cve_scan_loop};
 use crystal_forge::config::CrystalForgeConfig;
 use crystal_forge::derivations::build::{BuildCancelledError, LogSink};
-use crystal_forge::models::builders::{BuildJob, ReportMetricsRequest};
-use crystal_forge::queries::derivations::get_derivation_by_id;
-use crystal_forge::server::memory_monitor_task;
+use crystal_forge::models::builders::{BuildJobDerivation, NextJobResponse, ReportMetricsRequest};
 use std::hash::{Hash, Hasher};
+use std::path::Path;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::io::AsyncWriteExt;
 use tokio::signal;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -39,72 +39,19 @@ async fn main() -> anyhow::Result<()> {
         warn!("⚠️  Builder running in MOCK execution mode (dev-only)");
     }
 
-    // Check if API mode is enabled and configured
-    if builder_config.is_api_mode_ready() {
-        info!("🌐 Starting Crystal Forge Builder in API mode...");
-        return run_api_mode(&cfg).await;
-    }
-
-    if cfg.server.execution_mode.is_mock() {
+    // API mode is the only supported mode. If private_key_path and server_url
+    // are not set, fail immediately with a clear error — there is no DB fallback.
+    if !builder_config.is_api_mode_ready() {
         anyhow::bail!(
-            "server.execution_mode=mock requires builder API mode. Set builder.enable_api_mode=true with private_key_path/server_url"
+            "Builder requires API mode configuration. \
+             Set CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH and \
+             CRYSTAL_FORGE__BUILDER__SERVER_URL (or equivalent TOML keys). \
+             Legacy direct-database mode has been removed."
         );
     }
 
-    // Fall back to legacy direct-database mode (deprecated)
-    warn!(
-        "⚠️  Starting builder in deprecated legacy direct-database mode. Migrate to builder API mode."
-    );
-    info!("💾 Starting Crystal Forge Builder in legacy database mode...");
-    CrystalForgeConfig::validate_db_connection().await?;
-
-    let pool = CrystalForgeConfig::db_pool().await?;
-
-    tokio::spawn(memory_monitor_task(pool.clone()));
-    sqlx::migrate!("./migrations").run(&pool).await?;
-
-    let cache_config = &cfg.cache;
-
-    let build_handle = tokio::spawn(run_build_loop(pool.clone()));
-    let cve_scan_handle = tokio::spawn(run_cve_scan_loop(pool.clone()));
-
-    if cache_config.push_after_build {
-        let cache_handle = tokio::spawn(run_cache_push_loop(pool.clone()));
-        info!("✅ Build, CVE scan, and cache push loops started");
-
-        tokio::select! {
-            result = build_handle => {
-                error!("Build loop exited unexpectedly: {:?}", result);
-            }
-            result = cve_scan_handle => {
-                error!("CVE scan loop exited unexpectedly: {:?}", result);
-            }
-            result = cache_handle => {
-                error!("Cache push loop exited unexpectedly: {:?}", result);
-            }
-            _ = signal::ctrl_c() => {
-                info!("Received shutdown signal");
-            }
-        }
-    } else {
-        info!("📤 Cache push disabled in configuration");
-        info!("✅ Build and CVE scan loops started");
-
-        tokio::select! {
-            result = build_handle => {
-                error!("Build loop exited unexpectedly: {:?}", result);
-            }
-            result = cve_scan_handle => {
-                error!("CVE scan loop exited unexpectedly: {:?}", result);
-            }
-            _ = signal::ctrl_c() => {
-                info!("Received shutdown signal");
-            }
-        }
-    }
-
-    info!("Shutting down Crystal Forge Builder...");
-    Ok(())
+    info!("🌐 Starting Crystal Forge Builder in API mode...");
+    run_api_mode(&cfg).await
 }
 
 /// Run builder in API mode (communicates with server via API instead of direct DB)
@@ -136,22 +83,11 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
         run_heartbeat_loop(heartbeat_client, heartbeat_interval).await;
     });
 
-    // Spawn cache-push loop in API mode.
-    // Cache pushes run in the background while builds continue.
-    {
-        let cache_pool = crystal_forge::config::CrystalForgeConfig::db_pool().await?;
-        tokio::spawn(run_cache_push_loop(cache_pool));
-    }
-
-    // Spawn CVE scan loop in API mode.
-    // Scans completed derivations with vulnix on a configurable poll interval.
-    // run_cve_scan_loop exits early with a logged error if vulnix is not on PATH,
-    // which is safe — the builder continues operating normally.
-    {
-        let cve_pool = crystal_forge::config::CrystalForgeConfig::db_pool().await?;
-        tokio::spawn(run_cve_scan_loop(cve_pool));
-        info!("🔍 CVE scan loop started");
-    }
+    // Cache push and CVE scanning are handled via the server API in API mode and
+    // are queued/performed server-side. Remote builders do not open a database
+    // connection for these loops.
+    info!("📤 Cache push queued server-side on job completion (no builder DB pool)");
+    info!("🔍 CVE scanning handled server-side (no builder DB pool)");
 
     // Spawn job polling loop
     let poll_client = api_client.clone();
@@ -223,8 +159,6 @@ async fn run_api_job_loop(
     cache_config: crystal_forge::config::CacheConfig,
     execution_mode: crystal_forge::config::ExecutionMode,
 ) -> anyhow::Result<()> {
-    // Create DB pool once and share across all jobs
-    let pool = crystal_forge::config::CrystalForgeConfig::db_pool().await?;
     let mut ticker = tokio::time::interval(poll_interval);
 
     // Limit concurrent builds to builder.max_concurrent_jobs
@@ -243,7 +177,7 @@ async fn run_api_job_loop(
         }
 
         match client.get_next_job().await {
-            Ok(Some(job)) => {
+            Ok(Some(NextJobResponse { job, derivation })) => {
                 info!(
                     "📦 Received job #{} (derivation: {})",
                     job.id, job.derivation_id
@@ -262,15 +196,15 @@ async fn run_api_job_loop(
                 let job_client = client.clone();
                 let job_build_config = build_config.clone();
                 let job_cache_config = cache_config.clone();
-                let job_pool = pool.clone();
+                let job_id = job.id;
 
                 tokio::spawn(async move {
                     execute_build_job(
-                        job,
+                        job_id,
+                        derivation,
                         job_client,
                         job_build_config,
                         job_cache_config,
-                        job_pool,
                         execution_mode,
                     )
                     .await;
@@ -287,48 +221,39 @@ async fn run_api_job_loop(
     }
 }
 
-/// Execute a build job: fetch derivation, build it, report results
+/// Execute a build job entirely over the API: build the supplied derivation,
+/// stream logs, report progress/cancellation, and report results. No DB access.
 async fn execute_build_job(
-    job: BuildJob,
+    job_id: uuid::Uuid,
+    derivation_payload: BuildJobDerivation,
     client: BuilderApiClient,
     build_config: crystal_forge::config::BuildConfig,
     cache_config: crystal_forge::config::CacheConfig,
-    pool: sqlx::PgPool,
     execution_mode: crystal_forge::config::ExecutionMode,
 ) {
     info!(
         "🔨 Starting build for job #{} (derivation: {})",
-        job.id, job.derivation_id
+        job_id, derivation_payload.id
     );
 
-    // Fetch the derivation from database
-    let mut derivation = match get_derivation_by_id(&pool, job.derivation_id).await {
-        Ok(deriv) => deriv,
-        Err(e) => {
-            error!("❌ Failed to fetch derivation {}: {}", job.derivation_id, e);
-            fail_job_with_db_fallback(
-                &client,
-                &pool,
-                job.id,
-                &format!("Failed to fetch derivation: {}", e),
-            )
-            .await;
-            return;
-        }
-    };
+    // Build a Derivation from the API payload — no database read required.
+    let mut derivation =
+        crystal_forge::derivations::Derivation::from_build_payload(&derivation_payload);
+
+    // API-backed reporter: progress + cancel checks over HTTP (no DB pool).
+    let reporter = ApiBuildReporter::new(client.clone(), job_id);
 
     info!("📦 Building derivation: {}", derivation.derivation_name);
 
-    // Get build timeout from config
-    let build_timeout = std::cmp::min(
-        build_config.timeout,
-        std::time::Duration::from_secs(7200), // Max 2 hours
-    );
+    // Respect the configured build timeout for remote API builders. Nix itself
+    // receives build_config.timeout; the wrapper gets a small cleanup buffer so
+    // it can observe/report Nix's timeout rather than racing it.
+    let build_timeout = build_config.process_timeout();
 
     let start = std::time::Instant::now();
 
     // Try to connect WebSocket for real-time log streaming
-    let ws_stream = match client.create_log_stream(&job.id).await {
+    let ws_stream = match client.create_log_stream(&job_id).await {
         Ok(stream) => {
             info!("📡 WebSocket connected for real-time logs");
             Some(stream)
@@ -347,7 +272,25 @@ async fn execute_build_job(
 
     // Send initial log message (via WebSocket if available, otherwise HTTP)
     let initial_log = format!("🔨 Starting build for {}\n", derivation.derivation_name);
-    send_log_with_fallback(&client, job.id, &mut ws_shared, &initial_log).await;
+    send_log_with_fallback(&client, job_id, &mut ws_shared, &initial_log).await;
+
+    if let Some(drv_path) = derivation.derivation_path.as_deref() {
+        if let Err(e) = ensure_derivation_available(&client, job_id, drv_path).await {
+            let message = format!(
+                "[crystal-forge] failed to import derivation archive for {}: {}\n",
+                drv_path, e
+            );
+            send_log_with_fallback(&client, job_id, &mut ws_shared, &message).await;
+            error!("❌ Job #{} cannot start build: {}", job_id, e);
+            if let Err(report_err) = client.fail_job(job_id, &e.to_string()).await {
+                error!(
+                    "❌ Failed to report job #{} derivation import failure: {}",
+                    job_id, report_err
+                );
+            }
+            return;
+        }
+    }
 
     // Spawn metrics reporting task if WebSocket is available
     let metrics_task = if let Some(ref ws) = ws_shared {
@@ -392,7 +335,7 @@ async fn execute_build_job(
 
     // Clone references for the forwarding task
     let fwd_client = client.clone();
-    let fwd_job_id = job.id;
+    let fwd_job_id = job_id;
     let fwd_ws = ws_shared.clone();
 
     // Spawn log forwarding task - receives batched content from channel
@@ -408,7 +351,7 @@ async fn execute_build_job(
         // Mock path: drop log_tx immediately since mock build doesn't use it.
         // This ensures the forwarding task can exit cleanly.
         drop(log_tx);
-        let mock_result = run_mock_build(&mut derivation, &client, job.id, &mut ws_shared).await;
+        let mock_result = run_mock_build(&mut derivation, &client, job_id, &mut ws_shared).await;
         Ok(mock_result)
     } else {
         // Real path: create log_sink that sends to channel using try_send for backpressure.
@@ -430,7 +373,7 @@ async fn execute_build_job(
 
         tokio::time::timeout(
             build_timeout,
-            derivation.build_with_log_sink(&pool, &build_config, Some(job.id), Some(log_sink)),
+            derivation.build_with_log_sink(&reporter, &build_config, Some(job_id), Some(log_sink)),
         )
         .await
     };
@@ -441,17 +384,17 @@ async fn execute_build_job(
     match tokio::time::timeout(LOG_DRAIN_GRACE_PERIOD, &mut log_forward_task).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            warn!("log forwarding task failed for job {}: {}", job.id, e);
+            warn!("log forwarding task failed for job {}: {}", job_id, e);
         }
         Err(_) => {
             warn!(
                 "log drain grace period exceeded for job {}, aborting forwarder",
-                job.id
+                job_id
             );
             log_forward_task.abort();
             send_log_with_fallback(
                 &client,
-                job.id,
+                job_id,
                 &mut ws_shared,
                 "[crystal-forge] warning: log drain timed out; tail output may be truncated\n",
             )
@@ -465,7 +408,7 @@ async fn execute_build_job(
             "[crystal-forge] warning: dropped {} buffered log batch(es) due to backpressure\n",
             dropped_count
         );
-        send_log_with_fallback(&client, job.id, &mut ws_shared, &notice).await;
+        send_log_with_fallback(&client, job_id, &mut ws_shared, &notice).await;
     }
 
     match build_result {
@@ -474,7 +417,7 @@ async fn execute_build_job(
             let duration = start.elapsed();
             info!(
                 "✅ Job #{} completed in {:.1}s: {}",
-                job.id,
+                job_id,
                 duration.as_secs_f64(),
                 store_path
             );
@@ -486,8 +429,8 @@ async fn execute_build_job(
             );
             let output_msg = format!("   Output: {}\n", store_path);
 
-            send_log_with_fallback(&client, job.id, &mut ws_shared, &success_msg).await;
-            send_log_with_fallback(&client, job.id, &mut ws_shared, &output_msg).await;
+            send_log_with_fallback(&client, job_id, &mut ws_shared, &success_msg).await;
+            send_log_with_fallback(&client, job_id, &mut ws_shared, &output_msg).await;
 
             // Update derivation with store_path for signing
             derivation.store_path = Some(store_path.clone());
@@ -495,88 +438,43 @@ async fn execute_build_job(
             if execution_mode.is_mock() {
                 let _ = client
                     .append_logs(
-                        job.id,
+                        job_id,
                         "🧪 MOCK MODE: skipping signing and cache push for synthetic artifacts\n",
                     )
                     .await;
             } else {
-                // Sign the derivation
+                // Sign the derivation locally before reporting completion.
                 let _ = client
-                    .append_logs(job.id, "🔐 Signing derivation...\n")
+                    .append_logs(job_id, "🔐 Signing derivation...\n")
                     .await;
                 if let Err(e) = derivation.sign(&cache_config).await {
                     warn!(
                         "⚠️ Signing failed for job #{}, continuing anyway: {}",
-                        job.id, e
+                        job_id, e
                     );
                     let _ = client
-                        .append_logs(job.id, &format!("⚠️  Signing failed: {}\n", e))
+                        .append_logs(job_id, &format!("⚠️  Signing failed: {}\n", e))
                         .await;
                 } else {
-                    let _ = client.append_logs(job.id, "✅ Derivation signed\n").await;
-                }
-
-                // Always queue a cache push job in API mode. Cache push workers run
-                // concurrently in the background so builds are not blocked.
-                let _ = client
-                    .append_logs(job.id, "📤 Queuing cache push job...\n")
-                    .await;
-                if let Some(ref store_path) = derivation.store_path {
-                    if let Err(e) = crystal_forge::queries::cache_push::create_cache_push_job(
-                        &pool,
-                        derivation.id,
-                        store_path,
-                        cache_config.push_to.as_deref(),
-                    )
-                    .await
-                    {
-                        warn!(
-                            "⚠️ Cache queue failed for job #{}, continuing anyway: {}",
-                            job.id, e
-                        );
-                        let _ = client
-                            .append_logs(job.id, &format!("⚠️  Cache push queue failed: {}\n", e))
-                            .await;
-                    } else {
-                        let _ = client
-                            .append_logs(job.id, "✅ Cache push job queued\n")
-                            .await;
-                    }
+                    let _ = client.append_logs(job_id, "✅ Derivation signed\n").await;
                 }
             }
 
-            // Mark derivation as complete in database
-            match pool.begin().await {
-                Ok(mut tx) => {
-                    if let Err(e) = crystal_forge::queries::derivations::mark_target_build_complete(
-                        &mut *tx,
-                        derivation.id,
-                        &store_path,
-                    )
-                    .await
-                    {
-                        error!("❌ Failed to mark derivation complete: {}", e);
-                    } else if let Err(e) = tx.commit().await {
-                        error!("❌ Failed to commit transaction: {}", e);
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Failed to begin transaction: {}", e);
-                }
+            // Report success to the server. The server marks the derivation
+            // complete and queues the cache-push job (no builder DB access).
+            if let Err(e) = client.complete_job(job_id, &store_path).await {
+                error!("❌ Failed to report job #{} completion: {}", job_id, e);
             }
-
-            // Report success to server
-            complete_job_with_db_fallback(&client, &pool, job.id, &store_path).await;
         }
 
         // Build was cancelled by an operator (server set status to 'cancelling')
         Ok(Err(ref e)) if e.downcast_ref::<BuildCancelledError>().is_some() => {
-            info!("🛑 Job #{} cancelled by operator — finalizing", job.id);
+            info!("🛑 Job #{} cancelled by operator — finalizing", job_id);
 
             // Append cancellation notice to build log
             send_log_with_fallback(
                 &client,
-                job.id,
+                job_id,
                 &mut ws_shared,
                 "[crystal-forge] Build cancelled by operator — nix process stopped\n",
             )
@@ -585,7 +483,9 @@ async fn execute_build_job(
             // Call finalize-cancelled so the server sets completed_at and closes
             // the job cleanly.  If this fails we log and move on — the job will
             // remain in 'cancelling' until the next reconciliation.
-            finalize_cancelled_with_db_fallback(&client, &pool, job.id).await;
+            if let Err(e) = client.finalize_cancelled_job(job_id).await {
+                error!("❌ Failed to finalize cancelled job #{}: {}", job_id, e);
+            }
         }
 
         // Build failed within timeout
@@ -593,7 +493,7 @@ async fn execute_build_job(
             let duration = start.elapsed();
             error!(
                 "❌ Job #{} build failed after {:.1}s: {}",
-                job.id,
+                job_id,
                 duration.as_secs_f64(),
                 e
             );
@@ -601,42 +501,27 @@ async fn execute_build_job(
             // Send failure log
             send_log_with_fallback(
                 &client,
-                job.id,
+                job_id,
                 &mut ws_shared,
                 &format!("❌ Build failed after {:.1}s\n", duration.as_secs_f64()),
             )
             .await;
             send_log_with_fallback(
                 &client,
-                job.id,
+                job_id,
                 &mut ws_shared,
                 &format!("   Error: {}\n", e),
             )
             .await;
 
-            // Mark derivation as failed in database
-            match pool.begin().await {
-                Ok(mut tx) => {
-                    if let Err(e2) = crystal_forge::queries::derivations::handle_derivation_failure(
-                        &mut *tx,
-                        &derivation,
-                        "build",
-                        &e,
-                    )
-                    .await
-                    {
-                        error!("❌ Failed to mark derivation failed: {}", e2);
-                    } else if let Err(e2) = tx.commit().await {
-                        error!("❌ Failed to commit transaction: {}", e2);
-                    }
-                }
-                Err(e2) => {
-                    error!("❌ Failed to begin transaction: {}", e2);
-                }
+            // Report failure to the server, which records the derivation-level
+            // failure server-side (no builder DB access).
+            if let Err(report_err) = client.fail_job(job_id, &e.to_string()).await {
+                error!(
+                    "❌ Failed to report job #{} failure: {}",
+                    job_id, report_err
+                );
             }
-
-            // Report failure to server
-            fail_job_with_db_fallback(&client, &pool, job.id, &e.to_string()).await;
         }
 
         // Build timed out
@@ -648,42 +533,24 @@ async fn execute_build_job(
                 build_timeout.as_secs_f64()
             );
 
-            error!("⏱️ Job #{}: {}", job.id, timeout_msg);
+            error!("⏱️ Job #{}: {}", job_id, timeout_msg);
 
             // Send timeout log
             send_log_with_fallback(
                 &client,
-                job.id,
+                job_id,
                 &mut ws_shared,
                 &format!("⏱️  {}\n", timeout_msg),
             )
             .await;
 
-            let timeout_error = anyhow::anyhow!(timeout_msg.clone());
-
-            // Mark derivation as failed in database
-            match pool.begin().await {
-                Ok(mut tx) => {
-                    if let Err(e) = crystal_forge::queries::derivations::handle_derivation_failure(
-                        &mut *tx,
-                        &derivation,
-                        "build-timeout",
-                        &timeout_error,
-                    )
-                    .await
-                    {
-                        error!("❌ Failed to mark derivation timeout: {}", e);
-                    } else if let Err(e) = tx.commit().await {
-                        error!("❌ Failed to commit transaction: {}", e);
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Failed to begin transaction: {}", e);
-                }
+            // Report timeout failure to the server (server records derivation failure).
+            if let Err(report_err) = client.fail_job(job_id, &timeout_msg).await {
+                error!(
+                    "❌ Failed to report job #{} timeout failure: {}",
+                    job_id, report_err
+                );
             }
-
-            // Report timeout failure to server
-            fail_job_with_db_fallback(&client, &pool, job.id, &timeout_msg).await;
         }
     }
 
@@ -693,82 +560,68 @@ async fn execute_build_job(
     }
 }
 
-async fn fail_job_with_db_fallback(
+async fn ensure_derivation_available(
     client: &BuilderApiClient,
-    pool: &sqlx::PgPool,
     job_id: uuid::Uuid,
-    error_message: &str,
-) {
-    if let Err(e) = client.fail_job(job_id, error_message).await {
-        error!(
-            "❌ Failed to report job failure via API for {}: {}. Falling back to direct DB transition",
-            job_id, e
-        );
+    drv_path: &str,
+) -> anyhow::Result<()> {
+    if Path::new(drv_path).exists() {
+        return Ok(());
+    }
 
-        if let Err(e2) = crystal_forge::queries::builders::mark_job_failed_with_retry(
-            pool,
-            &job_id,
-            &client.builder_id(),
-            Some(error_message),
-        )
-        .await
-        {
-            error!(
-                "❌ DB fallback failed while marking job {} as failed: {}",
-                job_id, e2
+    info!(
+        "📤 Derivation {} missing locally; asking server to publish closure to cache",
+        drv_path
+    );
+
+    match client.publish_derivation_closure(job_id).await {
+        Ok(()) => {
+            info!(
+                "✅ Server published derivation closure for {}; continuing with Nix substituters",
+                drv_path
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            warn!(
+                "⚠️  Server cache publish unavailable for {}; falling back to archive download: {}",
+                drv_path, e
             );
         }
     }
-}
 
-async fn complete_job_with_db_fallback(
-    client: &BuilderApiClient,
-    pool: &sqlx::PgPool,
-    job_id: uuid::Uuid,
-    output_path: &str,
-) {
-    if let Err(e) = client.complete_job(job_id, output_path).await {
-        error!(
-            "❌ Failed to report job completion via API for {}: {}. Falling back to direct DB transition",
-            job_id, e
-        );
+    info!(
+        "📥 Derivation {} missing locally; downloading archive from server",
+        drv_path
+    );
+    let archive = client.download_derivation_archive(job_id).await?;
 
-        if let Err(e2) =
-            crystal_forge::queries::builders::mark_job_complete(pool, &job_id, &client.builder_id())
-                .await
-        {
-            error!(
-                "❌ DB fallback failed while marking job {} complete: {}",
-                job_id, e2
-            );
-        }
+    let mut child = tokio::process::Command::new("nix-store")
+        .arg("--import")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn nix-store --import: {e}"))?;
+
+    let Some(mut stdin) = child.stdin.take() else {
+        anyhow::bail!("failed to open stdin for nix-store --import");
+    };
+    stdin.write_all(&archive).await?;
+    drop(stdin);
+
+    let output = child.wait_with_output().await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("nix-store --import failed: {stderr}");
     }
-}
 
-async fn finalize_cancelled_with_db_fallback(
-    client: &BuilderApiClient,
-    pool: &sqlx::PgPool,
-    job_id: uuid::Uuid,
-) {
-    if let Err(e) = client.finalize_cancelled_job(job_id).await {
-        error!(
-            "❌ Failed to finalize cancelled job via API for {}: {}. Falling back to direct DB transition",
-            job_id, e
-        );
-
-        if let Err(e2) = crystal_forge::queries::builders::finalize_cancelled_job(
-            pool,
-            &job_id,
-            &client.builder_id(),
-        )
-        .await
-        {
-            error!(
-                "❌ DB fallback failed while finalizing cancelled job {}: {}",
-                job_id, e2
-            );
-        }
+    if !Path::new(drv_path).exists() {
+        anyhow::bail!("import completed but derivation path is still missing: {drv_path}");
     }
+
+    info!("✅ Imported derivation archive for {}", drv_path);
+    Ok(())
 }
 
 async fn run_mock_build(

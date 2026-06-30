@@ -1,11 +1,11 @@
 use super::Derivation;
+use super::reporter::{BuildProgress, BuildReporter};
 use super::utils::*;
 use crate::builder::get_gc_root_path;
 use crate::config::BuildConfig;
 use crate::config::CacheConfig;
 use anyhow::Context;
 use anyhow::{Result, anyhow, bail};
-use sqlx::PgPool;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -25,6 +25,12 @@ pub const LOG_BUFFER_SIZE_THRESHOLD: usize = 8 * 1024;
 
 /// Default time threshold for flushing log buffer (250ms)
 pub const LOG_BUFFER_TIME_THRESHOLD: Duration = Duration::from_millis(250);
+
+fn decode_log_segment(segment: Vec<u8>) -> String {
+    String::from_utf8_lossy(&segment)
+        .trim_end_matches('\r')
+        .to_string()
+}
 
 /// A buffer that accumulates log lines and flushes them based on size or time thresholds.
 ///
@@ -136,11 +142,11 @@ impl Derivation {
     /// In that case the returned error downcasts to [`BuildCancelledError`].
     pub async fn build(
         &mut self,
-        pool: &PgPool,
+        reporter: &dyn BuildReporter,
         build_config: &BuildConfig,
         job_id: Option<Uuid>,
     ) -> Result<String> {
-        self.build_with_log_sink(pool, build_config, job_id, None)
+        self.build_with_log_sink(reporter, build_config, job_id, None)
             .await
     }
 
@@ -154,7 +160,7 @@ impl Derivation {
     /// (8KB size or 250ms time) to avoid excessive calls during high-output builds.
     pub async fn build_with_log_sink(
         &mut self,
-        pool: &PgPool,
+        reporter: &dyn BuildReporter,
         build_config: &BuildConfig,
         job_id: Option<Uuid>,
         log_sink: Option<LogSink>,
@@ -211,7 +217,7 @@ impl Derivation {
         info!("  → About to spawn command for {}", drv_path);
 
         // Try to run with systemd
-        match Self::run_streaming_build(cmd, drv_path, self.id, pool, job_id, log_sink.clone())
+        match Self::run_streaming_build(cmd, drv_path, self.id, reporter, job_id, log_sink.clone())
             .await
         {
             Ok(output_path) => {
@@ -225,7 +231,7 @@ impl Derivation {
                     "⚠️  Systemd scope creation failed, falling back to direct execution: {}",
                     e
                 );
-                self.build_with_direct_nix_store(pool, drv_path, build_config, job_id, log_sink)
+                self.build_with_direct_nix_store(reporter, drv_path, build_config, job_id, log_sink)
                     .await
             }
             Err(e) => {
@@ -275,32 +281,42 @@ impl Derivation {
         let stdout = child.stdout.take().expect("Failed to capture stdout");
         let stderr = child.stderr.take().expect("Failed to capture stderr");
 
-        let mut stdout_reader = BufReader::new(stdout).lines();
-        let mut stderr_reader = BufReader::new(stderr).lines();
+        let mut stdout_reader = BufReader::new(stdout).split(b'\n');
+        let mut stderr_reader = BufReader::new(stderr).split(b'\n');
 
-        loop {
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+
+        while !stdout_done || !stderr_done {
             tokio::select! {
-                line_result = stdout_reader.next_line() => {
+                line_result = stdout_reader.next_segment(), if !stdout_done => {
                     match line_result {
-                        Ok(Some(line)) => {
+                        Ok(Some(segment)) => {
+                            let line = decode_log_segment(segment);
                             debug!("{} stdout: {}", operation_name, line);
                         }
-                        Ok(None) => break,
+                        Ok(None) => {
+                            stdout_done = true;
+                        }
                         Err(e) => {
                             error!("Error reading stdout: {}", e);
-                            break;
+                            stdout_done = true;
                         }
                     }
                 }
 
-                line_result = stderr_reader.next_line() => {
+                line_result = stderr_reader.next_segment(), if !stderr_done => {
                     match line_result {
-                        Ok(Some(line)) => {
+                        Ok(Some(segment)) => {
+                            let line = decode_log_segment(segment);
                             debug!("{} stderr: {}", operation_name, line);
                         }
-                        Ok(None) => {},
+                        Ok(None) => {
+                            stderr_done = true;
+                        }
                         Err(e) => {
                             error!("Error reading stderr: {}", e);
+                            stderr_done = true;
                         }
                     }
                 }
@@ -355,7 +371,7 @@ impl Derivation {
         mut cmd: Command,
         drv_path: &str,
         derivation_id: i32,
-        pool: &PgPool,
+        reporter: &dyn BuildReporter,
         job_id: Option<Uuid>,
         log_sink: Option<LogSink>,
     ) -> Result<String> {
@@ -381,8 +397,8 @@ impl Derivation {
         let stdout = child.stdout.take().expect("Failed to capture stdout");
         let stderr = child.stderr.take().expect("Failed to capture stderr");
 
-        let mut stdout_reader = BufReader::new(stdout).lines();
-        let mut stderr_reader = BufReader::new(stderr).lines();
+        let mut stdout_reader = BufReader::new(stdout).split(b'\n');
+        let mut stderr_reader = BufReader::new(stderr).split(b'\n');
 
         let mut heartbeat_interval = interval(Duration::from_secs(5));
         // Cancel-check runs every 15 s — infrequent enough to not hammer the DB.
@@ -397,7 +413,6 @@ impl Derivation {
         flush_interval.tick().await; // consume immediate tick
 
         let mut current_target: Option<String> = None;
-        let pool_clone = pool.clone();
         let mut last_output = Instant::now();
         let mut cancelled = false;
         let mut stdout_done = false;
@@ -406,9 +421,10 @@ impl Derivation {
         while !stdout_done || !stderr_done {
             tokio::select! {
                 // Read stdout
-                line_result = stdout_reader.next_line(), if !stdout_done => {
+                line_result = stdout_reader.next_segment(), if !stdout_done => {
                     match line_result {
-                        Ok(Some(line)) => {
+                        Ok(Some(segment)) => {
+                            let line = decode_log_segment(segment);
                             last_output = Instant::now();
                             info!("build stdout: {}", line);
                             if line.contains("building '") || line.contains("copying path '") {
@@ -432,9 +448,10 @@ impl Derivation {
                 }
 
                 // Read stderr
-                line_result = stderr_reader.next_line(), if !stderr_done => {
+                line_result = stderr_reader.next_segment(), if !stderr_done => {
                     match line_result {
-                        Ok(Some(line)) => {
+                        Ok(Some(segment)) => {
+                            let line = decode_log_segment(segment);
                             last_output = Instant::now();
                             debug!("build stderr: {}", line);
                             if line.contains("building '") || line.contains("copying path '") {
@@ -457,18 +474,19 @@ impl Derivation {
                     }
                 }
 
-                // Periodic derivation heartbeat (DB progress update)
+                // Periodic build progress report (DB heartbeat for the server worker,
+                // WS-primary/HTTP-fallback progress frame for remote API builders).
                 _ = heartbeat_interval.tick() => {
                     let elapsed = start_time.elapsed().as_secs() as i32;
                     let last_activity = last_output.elapsed().as_secs() as i32;
-                    if let Err(e) = Self::update_build_heartbeat(
-                        &pool_clone,
+                    let progress = BuildProgress {
                         derivation_id,
-                        elapsed,
-                        current_target.as_deref(),
-                        last_activity,
-                    ).await {
-                        warn!("Failed to update build heartbeat: {}", e);
+                        elapsed_seconds: elapsed,
+                        current_target: current_target.clone(),
+                        last_activity_seconds: last_activity,
+                    };
+                    if let Err(e) = reporter.report_progress(&progress).await {
+                        warn!("Failed to report build progress: {}", e);
                     }
                 }
 
@@ -484,13 +502,14 @@ impl Derivation {
                     }
                 }
 
-                // Cancel-check: poll the job's status in build_jobs every ~15 s.
-                // If an operator has set it to 'cancelling', kill the child and break.
+                // Cancel-check: ask the reporter whether the job is cancelling every ~15 s.
+                // For remote builders this is a WS-pushed flag (instant) with HTTP poll
+                // fallback; for the server worker it is a direct DB status read.
                 _ = cancel_check_interval.tick() => {
-                    if let Some(jid) = job_id {
-                        match crate::queries::builders::get_build_job_status(&pool_clone, &jid).await {
-                            Ok(Some(ref status)) if status == "cancelling" => {
-                                info!("🛑 Job {} marked cancelling — sending SIGTERM to build process", jid);
+                    if job_id.is_some() {
+                        match reporter.is_cancelled(job_id).await {
+                            Ok(true) => {
+                                info!("🛑 Job {:?} marked cancelling — sending SIGTERM to build process", job_id);
                                 // Send SIGTERM; if the process doesn't exit within 30 s we SIGKILL.
                                 let _ = child.start_kill(); // sends SIGKILL on tokio::process::Child
                                 // Give nix a brief window to flush output before we hard-kill.
@@ -499,9 +518,9 @@ impl Derivation {
                                 cancelled = true;
                                 break;
                             }
-                            Ok(_) => {} // still running normally
+                            Ok(false) => {} // still running normally
                             Err(e) => {
-                                warn!("Cancel-check DB query failed (non-fatal): {}", e);
+                                warn!("Cancel-check failed (non-fatal): {}", e);
                             }
                         }
                     }
@@ -534,30 +553,10 @@ impl Derivation {
         Ok(store_path)
     }
 
-    /// Update the database with build progress information.
-    ///
-    /// Delegates to [`crate::queries::derivations::update_build_heartbeat`].
-    async fn update_build_heartbeat(
-        pool: &PgPool,
-        derivation_id: i32,
-        elapsed_seconds: i32,
-        current_target: Option<&str>,
-        last_activity_seconds: i32,
-    ) -> Result<()> {
-        crate::queries::derivations::update_build_heartbeat(
-            pool,
-            derivation_id,
-            elapsed_seconds,
-            current_target,
-            last_activity_seconds,
-        )
-        .await
-    }
-
     /// Fallback: build directly without systemd isolation
     async fn build_with_direct_nix_store(
         &self,
-        pool: &PgPool,
+        reporter: &dyn BuildReporter,
         drv_path: &str,
         build_config: &BuildConfig,
         job_id: Option<Uuid>,
@@ -574,7 +573,7 @@ impl Derivation {
 
         build_config.apply_to_command(&mut cmd);
 
-        Self::run_streaming_build(cmd, drv_path, self.id, pool, job_id, log_sink).await
+        Self::run_streaming_build(cmd, drv_path, self.id, reporter, job_id, log_sink).await
     }
 
     /// Resolve a .drv path to its output store path
@@ -690,5 +689,12 @@ mod tests {
 
         let remaining = buffer.flush_remaining();
         assert!(remaining.is_none());
+    }
+
+    #[test]
+    fn decode_log_segment_replaces_invalid_utf8() {
+        let decoded = decode_log_segment(vec![b'o', b'k', b' ', 0xff, b'\r']);
+
+        assert_eq!(decoded, "ok �");
     }
 }

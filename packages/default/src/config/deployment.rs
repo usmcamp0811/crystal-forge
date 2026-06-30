@@ -33,6 +33,11 @@ pub struct DeploymentConfig {
     pub cache_public_key: Option<String>,
     #[serde(with = "duration_serde")]
     pub deployment_poll_interval: Duration,
+    #[serde(
+        default = "default_post_agent_start_deployment_delay",
+        with = "duration_serde"
+    )]
+    pub post_agent_start_deployment_delay: Duration,
 
     /// Deployment policies that systems must satisfy
     #[serde(default)]
@@ -50,6 +55,10 @@ pub struct DeploymentConfig {
     pub strategy: DeploymentStrategy,
 }
 
+fn default_post_agent_start_deployment_delay() -> Duration {
+    Duration::from_secs(60)
+}
+
 impl Default for DeploymentConfig {
     fn default() -> Self {
         Self {
@@ -61,6 +70,7 @@ impl Default for DeploymentConfig {
             cache_url: None,
             cache_public_key: None,
             deployment_poll_interval: Duration::from_secs(60),
+            post_agent_start_deployment_delay: default_post_agent_start_deployment_delay(),
             policies: vec![
                 // Default: require CF agent
                 DeploymentPolicy::RequireCrystalForgeAgent { strict: false },
@@ -105,5 +115,44 @@ mod tests {
     fn test_deployment_config_default_strategy() {
         let config = DeploymentConfig::default();
         assert_eq!(config.strategy, DeploymentStrategy::ImmediatePersist);
+    }
+
+    #[test]
+    fn post_agent_start_deployment_delay_defaults_when_missing() {
+        let json = r#"{
+            "max_deployment_age_minutes": 30,
+            "dry_run_first": true,
+            "fallback_to_local_build": false,
+            "deployment_timeout_minutes": 60,
+            "deployment_poll_interval": 900,
+            "require_sigs": true
+        }"#;
+
+        let config: DeploymentConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            config.post_agent_start_deployment_delay,
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn post_agent_start_deployment_delay_uses_configured_value() {
+        let json = r#"{
+            "max_deployment_age_minutes": 30,
+            "dry_run_first": true,
+            "fallback_to_local_build": false,
+            "deployment_timeout_minutes": 60,
+            "deployment_poll_interval": 900,
+            "post_agent_start_deployment_delay": 120,
+            "require_sigs": true
+        }"#;
+
+        let config: DeploymentConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            config.post_agent_start_deployment_delay,
+            Duration::from_secs(120)
+        );
     }
 }

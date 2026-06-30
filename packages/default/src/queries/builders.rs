@@ -118,13 +118,10 @@ pub async fn get_builder_by_id(pool: &PgPool, builder_id: &Uuid) -> Result<Optio
 /// Get a builder by its registered public key.
 pub async fn get_builder_by_public_key(
     pool: &PgPool,
-    public_key_base64: &str,
+    public_key: &PublicKey,
 ) -> Result<Option<Builder>> {
-    let public_key = PublicKey::from_base64(public_key_base64, "builder")
-        .context("Invalid public key format")?;
-
     let builder = sqlx::query_as::<_, Builder>("SELECT * FROM builders WHERE public_key = $1")
-        .bind(public_key.to_base64())
+        .bind(public_key)
         .fetch_optional(pool)
         .await
         .context("Failed to fetch builder by public key")?;
@@ -2004,7 +2001,9 @@ mod tests {
             .await
             .expect("Failed to create builder");
 
-        let fetched = get_builder_by_public_key(&pool, &public_key_base64)
+        let public_key = PublicKey::from_base64(&public_key_base64, "builder")
+            .expect("generated public key should parse");
+        let fetched = get_builder_by_public_key(&pool, &public_key)
             .await
             .expect("Failed to fetch builder by public key")
             .expect("Builder should resolve by registered public key");
@@ -2016,6 +2015,8 @@ mod tests {
                 .verifying_key()
                 .to_bytes(),
         );
+        let unregistered_key = PublicKey::from_base64(&unregistered_key, "builder")
+            .expect("generated public key should parse");
         let missing = get_builder_by_public_key(&pool, &unregistered_key)
             .await
             .expect("Failed to query unregistered public key");

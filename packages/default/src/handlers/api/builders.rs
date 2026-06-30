@@ -6,18 +6,20 @@
 
 use axum::{
     Json,
+    body::Body,
     extract::{
         Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
-use base64::engine::{Engine, general_purpose};
+use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
 use ed25519_dalek::{Signature, Verifier};
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::handlers::agent_request::CFState;
@@ -35,6 +37,325 @@ use crate::models::builders::{
 };
 use crate::models::public_key::PublicKey;
 use crate::queries::builders;
+
+const NIX_STORE_EXPORT_ARG_BYTES_LIMIT: usize = 128 * 1024;
+const ATTIC_PUSH_PATH_CHUNK_SIZE: usize = 200;
+
+fn parse_derivation_requisites(stdout: &[u8], drv_path: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+
+    for line in String::from_utf8_lossy(stdout).lines() {
+        let path = line.trim();
+        if path.is_empty() || paths.iter().any(|existing| existing == path) {
+            continue;
+        }
+        paths.push(path.to_string());
+    }
+
+    if !paths.iter().any(|path| path == drv_path) {
+        paths.insert(0, drv_path.to_string());
+    }
+
+    paths
+}
+
+fn chunk_derivation_archive_paths(paths: &[String], max_arg_bytes: usize) -> Vec<&[String]> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+
+    let max_arg_bytes = max_arg_bytes.max(1);
+    let mut chunks = Vec::new();
+    let mut chunk_start = 0;
+    let mut chunk_arg_bytes = 0;
+
+    for (index, path) in paths.iter().enumerate() {
+        // Account for the path plus one separator byte. This is conservative
+        // enough for argv/env overhead while keeping chunks comfortably below
+        // Linux ARG_MAX.
+        let path_arg_bytes = path.len() + 1;
+        if index > chunk_start && chunk_arg_bytes + path_arg_bytes > max_arg_bytes {
+            chunks.push(&paths[chunk_start..index]);
+            chunk_start = index;
+            chunk_arg_bytes = 0;
+        }
+
+        chunk_arg_bytes += path_arg_bytes;
+    }
+
+    chunks.push(&paths[chunk_start..]);
+    chunks
+}
+
+async fn resolve_cache_destinations_for_derivation(
+    pool: &sqlx::PgPool,
+    derivation: &crate::derivations::Derivation,
+) -> Result<Vec<crate::models::cache_destination::CacheDestination>, StatusCode> {
+    let environment_id = match derivation.commit_id {
+        Some(commit_id) => sqlx::query_scalar::<_, uuid::Uuid>(
+            r#"
+            SELECT s.environment_id
+            FROM systems s
+            JOIN commits c ON c.flake_id = s.flake_id
+            WHERE c.id = $1
+              AND s.environment_id IS NOT NULL
+              AND s.is_active = TRUE
+              AND (
+                    s.hostname = $2
+                    OR NULLIF(s.system_configuration_name, '') = $2
+                  )
+            ORDER BY CASE
+                WHEN NULLIF(s.system_configuration_name, '') = $2 THEN 0
+                ELSE 1
+            END
+            LIMIT 1
+            "#,
+        )
+        .bind(commit_id)
+        .bind(&derivation.derivation_name)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                derivation_id = derivation.id,
+                derivation_name = %derivation.derivation_name,
+                "failed to resolve derivation environment for cache selection: {e}"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?,
+        None => None,
+    };
+
+    let mut destinations = if let Some(environment_id) = environment_id {
+        let assigned = crate::queries::cache_destinations::filter_caches_by_environment(
+            pool,
+            Some(environment_id),
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                derivation_id = derivation.id,
+                environment_id = %environment_id,
+                "failed to load environment cache destinations for derivation closure publish: {e}"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .into_iter()
+        .filter(|destination| destination.enabled)
+        .collect::<Vec<_>>();
+
+        if assigned.is_empty() {
+            crate::queries::cache_destinations::get_global_caches(pool)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        derivation_id = derivation.id,
+                        environment_id = %environment_id,
+                        "failed to load global cache destinations for derivation closure publish: {e}"
+                    );
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+        } else {
+            assigned
+        }
+    } else {
+        crate::queries::cache_destinations::get_global_caches(pool)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    derivation_id = derivation.id,
+                    "failed to load global cache destinations for derivation closure publish: {e}"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+    };
+
+    destinations.retain(|destination| destination.enabled);
+    Ok(destinations)
+}
+
+fn apply_cache_destination_env(
+    command: &mut Command,
+    destination: &crate::models::cache_destination::CacheDestination,
+) {
+    if let Some(value) = destination.s3_access_key_id.as_deref() {
+        command.env("AWS_ACCESS_KEY_ID", value);
+    }
+    if let Some(value) = destination.s3_secret_access_key.as_deref() {
+        command.env("AWS_SECRET_ACCESS_KEY", value);
+    }
+    if let Some(value) = destination.s3_session_token.as_deref() {
+        command.env("AWS_SESSION_TOKEN", value);
+    }
+    if let Some(value) = destination.s3_region.as_deref() {
+        command.env("AWS_REGION", value);
+        command.env("AWS_DEFAULT_REGION", value);
+    }
+    if let Some(value) = destination.s3_profile.as_deref() {
+        command.env("AWS_PROFILE", value);
+    }
+    if let Some(value) = destination.s3_endpoint_url.as_deref() {
+        command.env("AWS_ENDPOINT_URL", value);
+        command.env("AWS_ENDPOINT_URL_S3", value);
+    }
+    if let Some(value) = destination.attic_token.as_deref() {
+        command.env("ATTIC_TOKEN", value);
+    }
+}
+
+async fn sign_derivation_requisites_for_cache(
+    destination: &crate::models::cache_destination::CacheDestination,
+    chunk: &[String],
+) -> Result<(), StatusCode> {
+    let Some(signing_key_path) = destination.signing_key_path.as_deref() else {
+        return Ok(());
+    };
+
+    let output = Command::new("nix")
+        .arg("store")
+        .arg("sign")
+        .arg("--recursive")
+        .arg("--key-file")
+        .arg(signing_key_path)
+        .args(chunk)
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                cache_destination = %destination.name,
+                "failed to run nix store sign for derivation closure: {e}"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(
+            cache_destination = %destination.name,
+            stderr = %stderr,
+            "nix store sign failed while publishing derivation closure"
+        );
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    Ok(())
+}
+
+async fn push_derivation_requisites_to_cache_destination(
+    destination: &crate::models::cache_destination::CacheDestination,
+    archive_paths: &[String],
+) -> Result<bool, StatusCode> {
+    let remote = std::env::var("ATTIC_REMOTE_NAME").unwrap_or_else(|_| "local".to_string());
+
+    for (chunk_index, chunk) in archive_paths.chunks(ATTIC_PUSH_PATH_CHUNK_SIZE).enumerate() {
+        sign_derivation_requisites_for_cache(destination, chunk).await?;
+
+        let mut command = if destination.cache_type.eq_ignore_ascii_case("Attic") {
+            let Some(cache_name) = destination.attic_cache_name.as_deref() else {
+                tracing::warn!(
+                    cache_destination = %destination.name,
+                    "assigned Attic cache destination is missing attic_cache_name"
+                );
+                return Ok(false);
+            };
+            let cache_ref = if cache_name.contains(':') {
+                cache_name.to_string()
+            } else {
+                format!("{remote}:{cache_name}")
+            };
+            let attic_jobs = destination.attic_jobs.unwrap_or(5).max(1).to_string();
+            let mut command = Command::new("attic");
+            command.arg("push").arg(&cache_ref).args(chunk);
+
+            if destination
+                .attic_ignore_upstream_cache_filter
+                .unwrap_or(true)
+            {
+                command.arg("--ignore-upstream-cache-filter");
+            }
+
+            command.arg("--jobs").arg(attic_jobs);
+            command
+        } else {
+            let Some(push_to) = destination.push_to.as_deref() else {
+                tracing::warn!(
+                    cache_destination = %destination.name,
+                    cache_type = %destination.cache_type,
+                    "assigned cache destination is missing push_to"
+                );
+                return Ok(false);
+            };
+            let mut command = Command::new("nix");
+            command.arg("copy").arg("--to").arg(push_to);
+
+            if destination.force_repush.unwrap_or(false) {
+                command.arg("--refresh");
+            }
+            if let Some(compression) = destination.compression.as_deref() {
+                command.arg("--compression").arg(compression);
+            }
+
+            command.args(chunk);
+            command
+        };
+
+        command.env("HOME", "/var/lib/crystal-forge");
+        command.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+        apply_cache_destination_env(&mut command, destination);
+
+        tracing::info!(
+            cache_destination = %destination.name,
+            cache_type = %destination.cache_type,
+            chunk_index,
+            chunk_path_count = chunk.len(),
+            "publishing derivation requisite closure chunk to assigned cache"
+        );
+
+        let output = command.output().await.map_err(|e| {
+            tracing::warn!(
+                cache_destination = %destination.name,
+                cache_type = %destination.cache_type,
+                chunk_index,
+                "failed to run cache publish for derivation closure: {e}"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(
+                cache_destination = %destination.name,
+                cache_type = %destination.cache_type,
+                chunk_index,
+                stderr = %stderr,
+                "cache publish failed while publishing derivation closure"
+            );
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    Ok(true)
+}
+
+async fn push_derivation_requisites_to_assigned_cache(
+    pool: &sqlx::PgPool,
+    derivation: &crate::derivations::Derivation,
+    archive_paths: &[String],
+) -> Result<bool, StatusCode> {
+    let destinations = resolve_cache_destinations_for_derivation(pool, derivation).await?;
+
+    if destinations.is_empty() {
+        tracing::debug!(
+            derivation_id = derivation.id,
+            derivation_name = %derivation.derivation_name,
+            "no assigned or global cache destination configured for derivation closure publish"
+        );
+        return Ok(false);
+    }
+
+    let destination = &destinations[0];
+    push_derivation_requisites_to_cache_destination(destination, archive_paths).await
+}
 
 // =============================================================================
 // BUILDER MANAGEMENT ENDPOINTS (Admin-only)
@@ -64,17 +385,24 @@ pub async fn resolve_builder_id(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<ResolveBuilderIdResponse>, (StatusCode, String)> {
-    let request = verify_builder_resolve_request(&headers, &body)?;
+    let (request, public_key) = verify_builder_resolve_request(&headers, &body)?;
 
-    let builder = builders::get_builder_by_public_key(&state.pool, &request.public_key)
+    let builder = builders::get_builder_by_public_key(&state.pool, &public_key)
         .await
-        .map_err(|_| {
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to resolve builder by public key");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to resolve builder".to_string(),
             )
         })?;
     let builder_id = builder_id_for_resolved_builder(builder)?;
+
+    tracing::debug!(
+        builder_id = %builder_id,
+        public_key = %request.public_key,
+        "resolved builder ID from public key"
+    );
 
     Ok(Json(ResolveBuilderIdResponse { builder_id }))
 }
@@ -98,7 +426,7 @@ fn builder_id_for_resolved_builder(builder: Option<Builder>) -> Result<Uuid, (St
 fn verify_builder_resolve_request(
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<ResolveBuilderIdRequest, (StatusCode, String)> {
+) -> Result<(ResolveBuilderIdRequest, PublicKey), (StatusCode, String)> {
     let request: ResolveBuilderIdRequest = serde_json::from_slice(body).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -162,7 +490,7 @@ fn verify_builder_resolve_request(
             )
         })?;
 
-    Ok(request)
+    Ok((request, public_key))
 }
 /// POST /api/v1/builders - Create a new builder (admin-only)
 ///
@@ -808,7 +1136,7 @@ pub async fn get_next_job(
     Path(builder_id): Path<Uuid>,
     headers: axum::http::HeaderMap,
     body: Bytes,
-) -> Result<Json<BuildJob>, StatusCode> {
+) -> Result<Json<crate::models::builders::NextJobResponse>, StatusCode> {
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/next-job", builder_id);
     let verified = authenticate_builder_request(&headers, body, "GET", &path, &state.pool).await?;
@@ -823,6 +1151,10 @@ pub async fn get_next_job(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+
+    if !builder.enabled {
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     // Get builder's environment assignments (empty = wildcard)
     let environment_ids = builders::get_builder_environment_ids(&state.pool, &builder_id)
@@ -844,20 +1176,347 @@ pub async fn get_next_job(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    if let Some(job) = job {
-        // Job successfully claimed (already marked as 'building')
-        Ok(Json(job))
-    } else {
-        // Either no jobs available OR builder at capacity
-        // Return 404 NOT_FOUND so builder knows to wait
-        Err(StatusCode::NOT_FOUND)
+    let Some(job) = job else {
+        // Either no jobs available OR builder at capacity.
+        // Return 404 NOT_FOUND so builder knows to wait.
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    // Embed the derivation build payload so the remote builder needs no DB access.
+    let derivation =
+        crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to load derivation {} for claimed job {}: {}",
+                    job.derivation_id,
+                    job.id,
+                    e
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+    let payload = crate::models::builders::BuildJobDerivation {
+        id: derivation.id,
+        derivation_name: derivation.derivation_name.clone(),
+        derivation_type: match derivation.derivation_type {
+            crate::derivations::DerivationType::NixOS => "nixos".to_string(),
+            crate::derivations::DerivationType::Package => "package".to_string(),
+        },
+        derivation_path: derivation.derivation_path.clone(),
+        store_path: derivation.store_path.clone(),
+    };
+
+    Ok(Json(crate::models::builders::NextJobResponse {
+        job,
+        derivation: payload,
+    }))
+}
+
+/// POST /api/v1/builders/:id/jobs/:job_id/progress - Build progress heartbeat
+///
+/// HTTP fallback for the WebSocket progress frame. Updates the derivation's
+/// build heartbeat/progress fields so the UI can show live build status.
+pub async fn build_progress(
+    State(state): State<CFState>,
+    Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, StatusCode> {
+    let path = format!("/api/v1/builders/{}/jobs/{}/progress", builder_id, job_id);
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
+
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
     }
+
+    let request: crate::models::builders::BuildProgressRequest =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if job.builder_id != Some(builder_id) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    crate::queries::derivations::update_build_heartbeat(
+        &state.pool,
+        request.derivation_id,
+        request.elapsed_seconds,
+        request.current_target.as_deref(),
+        request.last_activity_seconds,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::ACCEPTED)
 }
 
 #[derive(Debug, Deserialize)]
 pub struct JobStatusRequest {
-    pub status: String,
+    #[serde(default)]
+    pub status: Option<String>,
     pub error_message: Option<String>,
+}
+
+fn parse_job_status_request(body: &[u8]) -> Result<JobStatusRequest, serde_json::Error> {
+    if body.is_empty() {
+        return Ok(JobStatusRequest {
+            status: None,
+            error_message: None,
+        });
+    }
+
+    serde_json::from_slice(body)
+}
+
+fn fallback_job_status_request_for_invalid_details() -> JobStatusRequest {
+    JobStatusRequest {
+        status: None,
+        error_message: Some("builder reported failure with invalid failure details".to_string()),
+    }
+}
+
+/// GET /api/v1/builders/:id/jobs/:job_id/derivation-archive
+///
+/// Streams a Nix archive for the claimed job's `.drv` closure. Remote API
+/// builders import this before realizing server-evaluated derivations so they
+/// do not require a shared Nix store with the server.
+pub async fn download_job_derivation_archive(
+    State(state): State<CFState>,
+    Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    let path = format!(
+        "/api/v1/builders/{}/jobs/{}/derivation-archive",
+        builder_id, job_id
+    );
+    let verified = authenticate_builder_request(&headers, body, "GET", &path, &state.pool).await?;
+
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, "failed to load build job for derivation archive: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if job.builder_id != Some(builder_id) || job.status != "building" {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let derivation = crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, derivation_id = job.derivation_id, "failed to load derivation for archive: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let Some(drv_path) = derivation.derivation_path.as_deref() else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    if !drv_path.ends_with(".drv") {
+        tracing::warn!(job_id = %job_id, drv_path, "refusing to export non-.drv path");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let validity_output = Command::new("nix-store")
+        .arg("--check-validity")
+        .arg(drv_path)
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, drv_path, "failed to run nix-store --check-validity: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !validity_output.status.success() {
+        let stderr = String::from_utf8_lossy(&validity_output.stderr);
+        tracing::error!(job_id = %job_id, drv_path, stderr = %stderr, "derivation path is not valid in server store; evaluated drvs must be rooted before API builders can import them");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let requisites_output = Command::new("nix-store")
+        .arg("--query")
+        .arg("--requisites")
+        .arg(drv_path)
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, drv_path, "failed to run nix-store --query --requisites: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !requisites_output.status.success() {
+        let stderr = String::from_utf8_lossy(&requisites_output.stderr);
+        tracing::error!(job_id = %job_id, drv_path, stderr = %stderr, "nix-store --query --requisites failed");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let archive_paths = parse_derivation_requisites(&requisites_output.stdout, drv_path);
+    tracing::debug!(
+        job_id = %job_id,
+        drv_path,
+        path_count = archive_paths.len(),
+        "exporting derivation requisites archive"
+    );
+
+    let archive_chunks =
+        chunk_derivation_archive_paths(&archive_paths, NIX_STORE_EXPORT_ARG_BYTES_LIMIT);
+    let mut archive = Vec::new();
+
+    for (chunk_index, archive_chunk) in archive_chunks.iter().enumerate() {
+        let output = Command::new("nix-store")
+            .arg("--export")
+            .args(*archive_chunk)
+            .output()
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    job_id = %job_id,
+                    drv_path,
+                    chunk_index,
+                    chunk_count = archive_chunks.len(),
+                    chunk_path_count = archive_chunk.len(),
+                    "failed to run nix-store --export chunk: {e}"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::error!(
+                job_id = %job_id,
+                drv_path,
+                path_count = archive_paths.len(),
+                chunk_index,
+                chunk_count = archive_chunks.len(),
+                chunk_path_count = archive_chunk.len(),
+                stderr = %stderr,
+                "nix-store --export chunk failed"
+            );
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        archive.extend_from_slice(&output.stdout);
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-nix-archive")
+        .body(Body::from(archive))
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, "failed to build derivation archive response: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+/// POST /api/v1/builders/:id/jobs/:job_id/publish-derivation-closure
+///
+/// Publishes the evaluated derivation requisite closure to the configured Attic
+/// cache so API builders can fetch it through normal Nix substituters instead
+/// of downloading a large archive through the Crystal Forge server.
+pub async fn publish_job_derivation_closure(
+    State(state): State<CFState>,
+    Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, StatusCode> {
+    let path = format!(
+        "/api/v1/builders/{}/jobs/{}/publish-derivation-closure",
+        builder_id, job_id
+    );
+    let verified = authenticate_builder_request(&headers, body, "POST", &path, &state.pool).await?;
+
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, "failed to load build job for derivation closure publish: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if job.builder_id != Some(builder_id) || job.status != "building" {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let derivation = crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, derivation_id = job.derivation_id, "failed to load derivation for closure publish: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let Some(drv_path) = derivation.derivation_path.as_deref() else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    if !drv_path.ends_with(".drv") {
+        tracing::warn!(job_id = %job_id, drv_path, "refusing to publish non-.drv path");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let validity_output = Command::new("nix-store")
+        .arg("--check-validity")
+        .arg(drv_path)
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, drv_path, "failed to run nix-store --check-validity before closure publish: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !validity_output.status.success() {
+        let stderr = String::from_utf8_lossy(&validity_output.stderr);
+        tracing::error!(job_id = %job_id, drv_path, stderr = %stderr, "derivation path is not valid in server store; cannot publish closure");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let requisites_output = Command::new("nix-store")
+        .arg("--query")
+        .arg("--requisites")
+        .arg(drv_path)
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, drv_path, "failed to run nix-store --query --requisites before closure publish: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !requisites_output.status.success() {
+        let stderr = String::from_utf8_lossy(&requisites_output.stderr);
+        tracing::error!(job_id = %job_id, drv_path, stderr = %stderr, "nix-store --query --requisites failed before closure publish");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let archive_paths = parse_derivation_requisites(&requisites_output.stdout, drv_path);
+    tracing::info!(
+        job_id = %job_id,
+        drv_path,
+        path_count = archive_paths.len(),
+        "publishing derivation requisite closure to cache"
+    );
+
+    match push_derivation_requisites_to_assigned_cache(&state.pool, &derivation, &archive_paths)
+        .await?
+    {
+        true => Ok(StatusCode::NO_CONTENT),
+        false => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/start - Mark job as started
@@ -892,7 +1551,17 @@ pub async fn start_job(
     Ok(StatusCode::ACCEPTED)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CompleteJobRequest {
+    #[serde(default)]
+    pub output_path: Option<String>,
+}
+
 /// POST /api/v1/builders/:id/jobs/:job_id/complete - Mark job as complete
+///
+/// In addition to closing the build job, the server performs the derivation
+/// completion (store path + status) and queues a cache-push job. This keeps all
+/// database writes server-side so API builders never need a DB connection.
 pub async fn complete_job(
     State(state): State<CFState>,
     Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
@@ -901,11 +1570,19 @@ pub async fn complete_job(
 ) -> Result<StatusCode, StatusCode> {
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/jobs/{}/complete", builder_id, job_id);
-    let verified = authenticate_builder_request(&headers, body, "POST", &path, &state.pool).await?;
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
 
     if verified.builder_id != builder_id {
         return Err(StatusCode::FORBIDDEN);
     }
+
+    // Output path is optional for backwards compatibility but expected from API builders.
+    let request: CompleteJobRequest = if body.is_empty() {
+        CompleteJobRequest { output_path: None }
+    } else {
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?
+    };
 
     // Verify the job is assigned to this builder
     let job = builders::get_build_job_by_id(&state.pool, &job_id)
@@ -915,6 +1592,47 @@ pub async fn complete_job(
 
     if job.builder_id != Some(builder_id) {
         return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Perform derivation completion + cache-push queueing server-side.
+    if let Some(ref store_path) = request.output_path {
+        if let Err(e) = crate::queries::derivations::mark_target_build_complete(
+            &state.pool,
+            job.derivation_id,
+            store_path,
+        )
+        .await
+        {
+            tracing::error!(
+                "Failed to mark derivation {} complete for job {}: {}",
+                job.derivation_id,
+                job_id,
+                e
+            );
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        let cache_destination =
+            crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
+                .await
+                .ok()
+                .and_then(|dests| dests.into_iter().next().map(|d| d.name));
+
+        if let Err(e) = crate::queries::cache_push::create_cache_push_job(
+            &state.pool,
+            job.derivation_id,
+            store_path,
+            cache_destination.as_deref(),
+        )
+        .await
+        {
+            tracing::warn!(
+                "Failed to queue cache push for derivation {} (job {}): {}",
+                job.derivation_id,
+                job_id,
+                e
+            );
+        }
     }
 
     // Mark job as complete
@@ -955,9 +1673,17 @@ pub async fn fail_job(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Parse failure details
-    let request: JobStatusRequest =
-        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    // Parse failure details. Once the builder request is authenticated, a bad
+    // details payload must not keep a known-failed build stuck in `building`.
+    let request = parse_job_status_request(&body).unwrap_or_else(|e| {
+        tracing::warn!(
+            builder_id = %builder_id,
+            job_id = %job_id,
+            error = %e,
+            "builder fail request contained invalid JSON body; failing job with fallback message"
+        );
+        fallback_job_status_request_for_invalid_details()
+    });
 
     // Verify the job is assigned to this builder
     let job = builders::get_build_job_by_id(&state.pool, &job_id)
@@ -991,6 +1717,44 @@ pub async fn fail_job(
     if updated_job.status == "queued" {
         Ok(StatusCode::OK) // Job re-queued for retry
     } else {
+        // Permanent failure: record the derivation-level failure server-side so
+        // API builders never touch the database directly.
+        match crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+            .await
+        {
+            Ok(derivation) => {
+                let err = anyhow::anyhow!(
+                    request
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "build failed".to_string())
+                );
+                if let Err(e) = crate::queries::derivations::handle_derivation_failure(
+                    &state.pool,
+                    &derivation,
+                    "build",
+                    &err,
+                )
+                .await
+                {
+                    tracing::error!(
+                        "Failed to record derivation {} failure for job {}: {}",
+                        job.derivation_id,
+                        job_id,
+                        e
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to load derivation {} to record failure for job {}: {}",
+                    job.derivation_id,
+                    job_id,
+                    e
+                );
+            }
+        }
+
         cleanup_build_log_channel(&state, job_id).await;
         Ok(StatusCode::ACCEPTED) // Job permanently failed
     }
@@ -1154,6 +1918,15 @@ enum BuildStreamMessage {
         ram_total_mb: u64,
         timestamp: String,
     },
+    /// Builder -> server: live build progress (replaces DB heartbeat polling).
+    Progress {
+        derivation_id: i32,
+        elapsed_seconds: i32,
+        current_target: Option<String>,
+        last_activity_seconds: i32,
+    },
+    /// Server -> builder: the operator requested cancellation; stop the build.
+    CancelRequested,
     Error {
         message: String,
     },
@@ -1339,6 +2112,36 @@ async fn handle_log_stream(
                                 record_build_stream_message(&state, job_id, &metrics_msg).await;
                                 let _ = broadcast_build_stream_message(&tx, &metrics_msg);
                             }
+                            BuildStreamMessage::Progress {
+                                derivation_id,
+                                elapsed_seconds,
+                                current_target,
+                                last_activity_seconds,
+                            } => {
+                                if let Err(e) = crate::queries::derivations::update_build_heartbeat(
+                                    &state.pool,
+                                    derivation_id,
+                                    elapsed_seconds,
+                                    current_target.as_deref(),
+                                    last_activity_seconds,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to persist WS build progress for job {} (builder {}): {}",
+                                        job_id,
+                                        builder_id,
+                                        e
+                                    );
+                                }
+                            }
+                            BuildStreamMessage::CancelRequested => {
+                                let error = BuildStreamMessage::Error {
+                                    message: "builders cannot send cancel frames".to_string(),
+                                };
+                                let _ = send_build_stream_message(&mut socket, &error).await;
+                                break;
+                            }
                             BuildStreamMessage::Error { .. } => {
                                 let error = BuildStreamMessage::Error {
                                     message: "clients cannot send error frames".to_string(),
@@ -1441,10 +2244,15 @@ mod tests {
     use rand::rngs::OsRng;
     use uuid::Uuid;
 
-    use super::{
-        BuildStreamMessage, builder_id_for_resolved_builder, canonical_signature_payload,
-        map_create_builder_error, verify_builder_resolve_request,
-    };
+    use super::BuildStreamMessage;
+    use super::builder_id_for_resolved_builder;
+    use super::chunk_derivation_archive_paths;
+    use super::fallback_job_status_request_for_invalid_details;
+    use super::map_create_builder_error;
+    use super::parse_derivation_requisites;
+    use super::parse_job_status_request;
+    use super::canonical_signature_payload;
+    use super::verify_builder_resolve_request;
     use crate::builder::api_client::BuilderApiClient;
     use crate::models::builders::{Builder, BuilderStatus, ResolveBuilderIdRequest};
     use crate::models::public_key::PublicKey;
@@ -1499,6 +2307,55 @@ mod tests {
     }
 
     #[test]
+    fn derivation_archive_requisites_include_inputs_and_requested_drv() {
+        let drv_path = "/nix/store/top-system.drv";
+        let stdout = b"/nix/store/input-boot-json.drv\n/nix/store/source-path\n/nix/store/input-boot-json.drv\n";
+
+        let paths = parse_derivation_requisites(stdout, drv_path);
+
+        assert_eq!(paths[0], drv_path);
+        assert!(paths.contains(&"/nix/store/input-boot-json.drv".to_string()));
+        assert!(paths.contains(&"/nix/store/source-path".to_string()));
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| path.as_str() == "/nix/store/input-boot-json.drv")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn derivation_archive_paths_are_chunked_under_argument_limit() {
+        let paths = vec![
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-first.drv".to_string(),
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-second.drv".to_string(),
+            "/nix/store/cccccccccccccccccccccccccccccccc-third.drv".to_string(),
+        ];
+
+        let chunks = chunk_derivation_archive_paths(&paths, 80);
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0], &paths[0..1]);
+        assert_eq!(chunks[1], &paths[1..2]);
+        assert_eq!(chunks[2], &paths[2..3]);
+    }
+
+    #[test]
+    fn derivation_archive_chunking_keeps_small_sets_together() {
+        let paths = vec![
+            "/nix/store/a.drv".to_string(),
+            "/nix/store/b.drv".to_string(),
+            "/nix/store/c.drv".to_string(),
+        ];
+
+        let chunks = chunk_derivation_archive_paths(&paths, 1024);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], paths.as_slice());
+    }
+
+    #[test]
     fn build_stream_requires_explicit_type_discriminator() {
         let ambiguous_metrics_json =
             r#"{"cpu_percent":10.0,"ram_used_mb":100,"ram_total_mb":200,"timestamp":"t"}"#;
@@ -1511,12 +2368,44 @@ mod tests {
     }
 
     #[test]
+    fn job_status_request_accepts_failure_body_without_status() {
+        let parsed = parse_job_status_request(br#"{"error_message":"nix build failed"}"#)
+            .expect("failure body without status should remain accepted");
+
+        assert_eq!(parsed.status, None);
+        assert_eq!(parsed.error_message.as_deref(), Some("nix build failed"));
+    }
+
+    #[test]
+    fn job_status_request_accepts_empty_failure_body() {
+        let parsed = parse_job_status_request(b"")
+            .expect("empty failure body should still allow job failure reporting");
+
+        assert_eq!(parsed.status, None);
+        assert_eq!(parsed.error_message, None);
+    }
+
+    #[test]
+    fn invalid_job_status_details_fallback_preserves_failure_signal() {
+        let parsed = parse_job_status_request(b"not json");
+        assert!(parsed.is_err());
+
+        let fallback = fallback_job_status_request_for_invalid_details();
+
+        assert_eq!(fallback.status, None);
+        assert_eq!(
+            fallback.error_message.as_deref(),
+            Some("builder reported failure with invalid failure details")
+        );
+    }
+
+    #[test]
     fn resolve_builder_request_accepts_client_canonical_payload() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let timestamp = Utc::now().to_rfc3339();
         let (headers, body, public_key_base64) = signed_resolve_request(&signing_key, timestamp);
 
-        let request = verify_builder_resolve_request(&headers, &body)
+        let (request, _) = verify_builder_resolve_request(&headers, &body)
             .expect("signed bootstrap request should verify");
 
         assert_eq!(request.public_key, public_key_base64);
@@ -1548,7 +2437,7 @@ mod tests {
             HeaderValue::from_str(&signature).expect("valid signature header"),
         );
 
-        let request = verify_builder_resolve_request(&headers, &body)
+        let (request, _) = verify_builder_resolve_request(&headers, &body)
             .expect("server verifier should accept client-generated bootstrap signature");
 
         assert_eq!(request.public_key, public_key_base64);
