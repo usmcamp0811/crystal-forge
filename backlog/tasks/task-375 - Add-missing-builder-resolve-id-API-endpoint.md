@@ -3,9 +3,9 @@ id: TASK-375
 title: Add missing builder resolve-id API endpoint and UI key persistence
 status: In Progress
 assignee:
-  - gpt-5.5
+  - '@gpt-5.5'
 created_date: '2026-06-28 02:11'
-updated_date: '2026-06-30 13:11'
+updated_date: '2026-06-30 13:33'
 labels:
   - bug
   - builder
@@ -32,6 +32,7 @@ modified_files:
   - packages/default/src/models/evaluate_with_policies.rs
   - packages/default/src/builder/api_client.rs
   - packages/default/src/bin/builder.rs
+  - packages/default/src/derivations/build.rs
 priority: high
 ordinal: 5500
 ---
@@ -78,20 +79,6 @@ Verification Plan:
 - [ ] #6 Remote builder executes real builds via API with no DB pool: it fetches derivation payload, streams logs, reports progress, honors cancellation, and reports completion/failure entirely over HTTP/WebSocket.
 - [ ] #7 Server exposes the endpoints required for remote builds (derivation payload, build progress heartbeat) and performs derivation completion/failure and cache-push queueing server-side.
 <!-- AC:END -->
-
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-Patch remote build completion/failure reliability after production validation: inspect builder timeout/fail-job request payload and server fail-job handler validation; adjust DTO/handler/client mismatch causing HTTP 400 on timeout failure; make stderr log reader handle non-UTF8 bytes lossily or byte-safely instead of aborting; run targeted formatting/tests/checks in nix develop where feasible, avoiding known host-crashing heavy full cargo checks.
-<!-- SECTION:PLAN:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.5 on reckless/webb in /home/mcamp/code/crystal-forge/TASK-375-fix-cf-keygen-pub-path
-
-Production validation showed the API-only remote builder now reaches cache-first closure publishing and starts the Nix build, but TASK-375 remains incomplete because the remote build timed out and the builder failed to report the timeout to the server with HTTP 400. Next patch scope: make remote build failure/timeout reporting reliable and make build stderr capture tolerate non-UTF8 output so remote builder runs can complete/report cleanly.
-<!-- SECTION:NOTES:END -->
 
 ## Comments
 
