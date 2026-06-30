@@ -87,76 +87,236 @@ fn chunk_derivation_archive_paths(paths: &[String], max_arg_bytes: usize) -> Vec
     chunks
 }
 
-async fn push_derivation_requisites_to_attic_cache(
+async fn resolve_cache_destinations_for_derivation(
     pool: &sqlx::PgPool,
-    archive_paths: &[String],
-) -> Result<bool, StatusCode> {
-    let destinations = crate::queries::cache_destinations::list_cache_destinations(pool, true)
+    derivation: &crate::derivations::Derivation,
+) -> Result<Vec<crate::models::cache_destination::CacheDestination>, StatusCode> {
+    let environment_id = match derivation.commit_id {
+        Some(commit_id) => sqlx::query_scalar::<_, uuid::Uuid>(
+            r#"
+            SELECT s.environment_id
+            FROM systems s
+            JOIN commits c ON c.flake_id = s.flake_id
+            WHERE c.id = $1
+              AND s.environment_id IS NOT NULL
+              AND s.is_active = TRUE
+              AND (
+                    s.hostname = $2
+                    OR NULLIF(s.system_configuration_name, '') = $2
+                  )
+            ORDER BY CASE
+                WHEN NULLIF(s.system_configuration_name, '') = $2 THEN 0
+                ELSE 1
+            END
+            LIMIT 1
+            "#,
+        )
+        .bind(commit_id)
+        .bind(&derivation.derivation_name)
+        .fetch_optional(pool)
         .await
         .map_err(|e| {
-            tracing::warn!("failed to load cache destinations for derivation closure publish: {e}");
+            tracing::warn!(
+                derivation_id = derivation.id,
+                derivation_name = %derivation.derivation_name,
+                "failed to resolve derivation environment for cache selection: {e}"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?,
+        None => None,
+    };
+
+    let mut destinations = if let Some(environment_id) = environment_id {
+        let assigned = crate::queries::cache_destinations::filter_caches_by_environment(
+            pool,
+            Some(environment_id),
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                derivation_id = derivation.id,
+                environment_id = %environment_id,
+                "failed to load environment cache destinations for derivation closure publish: {e}"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .into_iter()
+        .filter(|destination| destination.enabled)
+        .collect::<Vec<_>>();
+
+        if assigned.is_empty() {
+            crate::queries::cache_destinations::get_global_caches(pool)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        derivation_id = derivation.id,
+                        environment_id = %environment_id,
+                        "failed to load global cache destinations for derivation closure publish: {e}"
+                    );
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+        } else {
+            assigned
+        }
+    } else {
+        crate::queries::cache_destinations::get_global_caches(pool)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    derivation_id = derivation.id,
+                    "failed to load global cache destinations for derivation closure publish: {e}"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+    };
+
+    destinations.retain(|destination| destination.enabled);
+    Ok(destinations)
+}
+
+fn apply_cache_destination_env(
+    command: &mut Command,
+    destination: &crate::models::cache_destination::CacheDestination,
+) {
+    if let Some(value) = destination.s3_access_key_id.as_deref() {
+        command.env("AWS_ACCESS_KEY_ID", value);
+    }
+    if let Some(value) = destination.s3_secret_access_key.as_deref() {
+        command.env("AWS_SECRET_ACCESS_KEY", value);
+    }
+    if let Some(value) = destination.s3_session_token.as_deref() {
+        command.env("AWS_SESSION_TOKEN", value);
+    }
+    if let Some(value) = destination.s3_region.as_deref() {
+        command.env("AWS_REGION", value);
+        command.env("AWS_DEFAULT_REGION", value);
+    }
+    if let Some(value) = destination.s3_profile.as_deref() {
+        command.env("AWS_PROFILE", value);
+    }
+    if let Some(value) = destination.s3_endpoint_url.as_deref() {
+        command.env("AWS_ENDPOINT_URL", value);
+        command.env("AWS_ENDPOINT_URL_S3", value);
+    }
+    if let Some(value) = destination.attic_token.as_deref() {
+        command.env("ATTIC_TOKEN", value);
+    }
+}
+
+async fn sign_derivation_requisites_for_cache(
+    destination: &crate::models::cache_destination::CacheDestination,
+    chunk: &[String],
+) -> Result<(), StatusCode> {
+    let Some(signing_key_path) = destination.signing_key_path.as_deref() else {
+        return Ok(());
+    };
+
+    let output = Command::new("nix")
+        .arg("store")
+        .arg("sign")
+        .arg("--recursive")
+        .arg("--key-file")
+        .arg(signing_key_path)
+        .args(chunk)
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                cache_destination = %destination.name,
+                "failed to run nix store sign for derivation closure: {e}"
+            );
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let Some(destination) = destinations
-        .into_iter()
-        .find(|destination| destination.cache_type.eq_ignore_ascii_case("Attic"))
-    else {
-        tracing::debug!(
-            "no enabled Attic cache destination configured for derivation closure publish"
-        );
-        return Ok(false);
-    };
-
-    let Some(cache_name) = destination.attic_cache_name.as_deref() else {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::warn!(
             cache_destination = %destination.name,
-            "enabled Attic cache destination is missing attic_cache_name"
+            stderr = %stderr,
+            "nix store sign failed while publishing derivation closure"
         );
-        return Ok(false);
-    };
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
+    Ok(())
+}
+
+async fn push_derivation_requisites_to_cache_destination(
+    destination: &crate::models::cache_destination::CacheDestination,
+    archive_paths: &[String],
+) -> Result<bool, StatusCode> {
     let remote = std::env::var("ATTIC_REMOTE_NAME").unwrap_or_else(|_| "local".to_string());
-    let cache_ref = if cache_name.contains(':') {
-        cache_name.to_string()
-    } else {
-        format!("{remote}:{cache_name}")
-    };
-    let attic_jobs = destination.attic_jobs.unwrap_or(5).max(1).to_string();
-    let ignore_upstream_filter = destination
-        .attic_ignore_upstream_cache_filter
-        .unwrap_or(true);
 
     for (chunk_index, chunk) in archive_paths.chunks(ATTIC_PUSH_PATH_CHUNK_SIZE).enumerate() {
-        let mut command = Command::new("attic");
-        command.arg("push").arg(&cache_ref).args(chunk);
+        sign_derivation_requisites_for_cache(destination, chunk).await?;
 
-        if ignore_upstream_filter {
-            command.arg("--ignore-upstream-cache-filter");
-        }
+        let mut command = if destination.cache_type.eq_ignore_ascii_case("Attic") {
+            let Some(cache_name) = destination.attic_cache_name.as_deref() else {
+                tracing::warn!(
+                    cache_destination = %destination.name,
+                    "assigned Attic cache destination is missing attic_cache_name"
+                );
+                return Ok(false);
+            };
+            let cache_ref = if cache_name.contains(':') {
+                cache_name.to_string()
+            } else {
+                format!("{remote}:{cache_name}")
+            };
+            let attic_jobs = destination.attic_jobs.unwrap_or(5).max(1).to_string();
+            let mut command = Command::new("attic");
+            command.arg("push").arg(&cache_ref).args(chunk);
 
-        command.arg("--jobs").arg(&attic_jobs);
+            if destination
+                .attic_ignore_upstream_cache_filter
+                .unwrap_or(true)
+            {
+                command.arg("--ignore-upstream-cache-filter");
+            }
+
+            command.arg("--jobs").arg(attic_jobs);
+            command
+        } else {
+            let Some(push_to) = destination.push_to.as_deref() else {
+                tracing::warn!(
+                    cache_destination = %destination.name,
+                    cache_type = %destination.cache_type,
+                    "assigned cache destination is missing push_to"
+                );
+                return Ok(false);
+            };
+            let mut command = Command::new("nix");
+            command.arg("copy").arg("--to").arg(push_to);
+
+            if destination.force_repush.unwrap_or(false) {
+                command.arg("--refresh");
+            }
+            if let Some(compression) = destination.compression.as_deref() {
+                command.arg("--compression").arg(compression);
+            }
+
+            command.args(chunk);
+            command
+        };
+
         command.env("HOME", "/var/lib/crystal-forge");
         command.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
-
-        if let Some(token) = destination.attic_token.as_deref() {
-            command.env("ATTIC_TOKEN", token);
-        }
+        apply_cache_destination_env(&mut command, destination);
 
         tracing::info!(
             cache_destination = %destination.name,
-            cache_ref = %cache_ref,
+            cache_type = %destination.cache_type,
             chunk_index,
             chunk_path_count = chunk.len(),
-            "publishing derivation requisite closure chunk to Attic cache"
+            "publishing derivation requisite closure chunk to assigned cache"
         );
 
         let output = command.output().await.map_err(|e| {
             tracing::warn!(
                 cache_destination = %destination.name,
-                cache_ref = %cache_ref,
+                cache_type = %destination.cache_type,
                 chunk_index,
-                "failed to run attic push for derivation closure: {e}"
+                "failed to run cache publish for derivation closure: {e}"
             );
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
@@ -165,16 +325,36 @@ async fn push_derivation_requisites_to_attic_cache(
             let stderr = String::from_utf8_lossy(&output.stderr);
             tracing::warn!(
                 cache_destination = %destination.name,
-                cache_ref = %cache_ref,
+                cache_type = %destination.cache_type,
                 chunk_index,
                 stderr = %stderr,
-                "attic push failed while publishing derivation closure"
+                "cache publish failed while publishing derivation closure"
             );
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     }
 
     Ok(true)
+}
+
+async fn push_derivation_requisites_to_assigned_cache(
+    pool: &sqlx::PgPool,
+    derivation: &crate::derivations::Derivation,
+    archive_paths: &[String],
+) -> Result<bool, StatusCode> {
+    let destinations = resolve_cache_destinations_for_derivation(pool, derivation).await?;
+
+    if destinations.is_empty() {
+        tracing::debug!(
+            derivation_id = derivation.id,
+            derivation_name = %derivation.derivation_name,
+            "no assigned or global cache destination configured for derivation closure publish"
+        );
+        return Ok(false);
+    }
+
+    let destination = &destinations[0];
+    push_derivation_requisites_to_cache_destination(destination, archive_paths).await
 }
 
 // =============================================================================
@@ -1289,7 +1469,9 @@ pub async fn publish_job_derivation_closure(
         "publishing derivation requisite closure to cache"
     );
 
-    match push_derivation_requisites_to_attic_cache(&state.pool, &archive_paths).await? {
+    match push_derivation_requisites_to_assigned_cache(&state.pool, &derivation, &archive_paths)
+        .await?
+    {
         true => Ok(StatusCode::NO_CONTENT),
         false => Err(StatusCode::NOT_FOUND),
     }
