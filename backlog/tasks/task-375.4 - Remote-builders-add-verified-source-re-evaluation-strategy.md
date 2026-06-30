@@ -1,10 +1,11 @@
 ---
 id: TASK-375.4
 title: 'Remote builders: add verified source re-evaluation strategy'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@gpt-5.5'
 created_date: '2026-06-30 17:46'
-updated_date: '2026-06-30 20:40'
+updated_date: '2026-06-30 21:08'
 labels:
   - builder
   - remote-builds
@@ -98,8 +99,22 @@ Verification Plan:
 - [ ] #9 Operator documentation explains when to use verified source re-evaluation, source/input delivery options (`nix flake archive`/bundled inputs vs public input fetching), security requirements, Nix version/purity expectations, and the distinction between derivation identity verification and output reproducibility.
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Inspect existing remote builder job manifest, builder API client, derivation payload, build attempt state, and Nix module configuration patterns.
+2. Add explicit execution strategy types and builder capability fields for `server_derivation` and verified source re-evaluation without silent fallback.
+3. Extend the build job manifest/API model with expected toplevel `.drvPath`, immutable source identity/source input delivery metadata, flake target, lock/source metadata, and evaluator fingerprint fields.
+4. Implement server-side pure derivation identity evaluation plumbing using the existing evaluation/derivation machinery where possible; do not use dry-run build for this identity.
+5. Implement builder-side verified source flow: obtain immutable source artifact metadata, eval locally before build, compare `.drvPath`, fail early with `derivation_mismatch` on mismatch, then build the exact verified derivation.
+6. Extend attempt phase/error reporting for source fetch, input/source availability, evaluation, and derivation mismatch failures so jobs do not remain stuck in `building`.
+7. Add focused unit/integration coverage for manifest serialization, strategy selection, drvPath comparison, mismatch-before-build behavior, and failure classification.
+8. Update operator documentation/config guidance for strategy selection, source/input delivery, Nix purity/version expectations, and the limits of derivation identity verification.
+9. Run targeted `nix develop` cargo checks/tests for changed crates; run heavier Nix checks only if Nix modules/packaging changes require it.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Additional refinement: server should use pure `nix eval --raw ...drvPath`, not `nix build --dry-run`, to get the authoritative fingerprint. Builder must also eval first, compare `.drvPath`, and only then build the exact verified derivation path (`$drv^*`) to avoid cooking before checking. Source/input delivery decision remains explicit: builder may fetch public flake inputs if allowed, but server-bundled `nix flake archive`/NAR input closure is preferred for locked-down builders with no internet or Git credentials.
+LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-375.4-verified-source-re-evaluation
 <!-- SECTION:NOTES:END -->
