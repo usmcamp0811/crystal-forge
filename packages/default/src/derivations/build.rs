@@ -26,6 +26,12 @@ pub const LOG_BUFFER_SIZE_THRESHOLD: usize = 8 * 1024;
 /// Default time threshold for flushing log buffer (250ms)
 pub const LOG_BUFFER_TIME_THRESHOLD: Duration = Duration::from_millis(250);
 
+fn decode_log_segment(segment: Vec<u8>) -> String {
+    String::from_utf8_lossy(&segment)
+        .trim_end_matches('\r')
+        .to_string()
+}
+
 /// A buffer that accumulates log lines and flushes them based on size or time thresholds.
 ///
 /// This prevents excessive DB/websocket writes when builds produce many output lines.
@@ -275,32 +281,42 @@ impl Derivation {
         let stdout = child.stdout.take().expect("Failed to capture stdout");
         let stderr = child.stderr.take().expect("Failed to capture stderr");
 
-        let mut stdout_reader = BufReader::new(stdout).lines();
-        let mut stderr_reader = BufReader::new(stderr).lines();
+        let mut stdout_reader = BufReader::new(stdout).split(b'\n');
+        let mut stderr_reader = BufReader::new(stderr).split(b'\n');
 
-        loop {
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+
+        while !stdout_done || !stderr_done {
             tokio::select! {
-                line_result = stdout_reader.next_line() => {
+                line_result = stdout_reader.next_segment(), if !stdout_done => {
                     match line_result {
-                        Ok(Some(line)) => {
+                        Ok(Some(segment)) => {
+                            let line = decode_log_segment(segment);
                             debug!("{} stdout: {}", operation_name, line);
                         }
-                        Ok(None) => break,
+                        Ok(None) => {
+                            stdout_done = true;
+                        }
                         Err(e) => {
                             error!("Error reading stdout: {}", e);
-                            break;
+                            stdout_done = true;
                         }
                     }
                 }
 
-                line_result = stderr_reader.next_line() => {
+                line_result = stderr_reader.next_segment(), if !stderr_done => {
                     match line_result {
-                        Ok(Some(line)) => {
+                        Ok(Some(segment)) => {
+                            let line = decode_log_segment(segment);
                             debug!("{} stderr: {}", operation_name, line);
                         }
-                        Ok(None) => {},
+                        Ok(None) => {
+                            stderr_done = true;
+                        }
                         Err(e) => {
                             error!("Error reading stderr: {}", e);
+                            stderr_done = true;
                         }
                     }
                 }
@@ -381,8 +397,8 @@ impl Derivation {
         let stdout = child.stdout.take().expect("Failed to capture stdout");
         let stderr = child.stderr.take().expect("Failed to capture stderr");
 
-        let mut stdout_reader = BufReader::new(stdout).lines();
-        let mut stderr_reader = BufReader::new(stderr).lines();
+        let mut stdout_reader = BufReader::new(stdout).split(b'\n');
+        let mut stderr_reader = BufReader::new(stderr).split(b'\n');
 
         let mut heartbeat_interval = interval(Duration::from_secs(5));
         // Cancel-check runs every 15 s — infrequent enough to not hammer the DB.
@@ -405,9 +421,10 @@ impl Derivation {
         while !stdout_done || !stderr_done {
             tokio::select! {
                 // Read stdout
-                line_result = stdout_reader.next_line(), if !stdout_done => {
+                line_result = stdout_reader.next_segment(), if !stdout_done => {
                     match line_result {
-                        Ok(Some(line)) => {
+                        Ok(Some(segment)) => {
+                            let line = decode_log_segment(segment);
                             last_output = Instant::now();
                             info!("build stdout: {}", line);
                             if line.contains("building '") || line.contains("copying path '") {
@@ -431,9 +448,10 @@ impl Derivation {
                 }
 
                 // Read stderr
-                line_result = stderr_reader.next_line(), if !stderr_done => {
+                line_result = stderr_reader.next_segment(), if !stderr_done => {
                     match line_result {
-                        Ok(Some(line)) => {
+                        Ok(Some(segment)) => {
+                            let line = decode_log_segment(segment);
                             last_output = Instant::now();
                             debug!("build stderr: {}", line);
                             if line.contains("building '") || line.contains("copying path '") {
@@ -671,5 +689,12 @@ mod tests {
 
         let remaining = buffer.flush_remaining();
         assert!(remaining.is_none());
+    }
+
+    #[test]
+    fn decode_log_segment_replaces_invalid_utf8() {
+        let decoded = decode_log_segment(vec![b'o', b'k', b' ', 0xff, b'\r']);
+
+        assert_eq!(decoded, "ok �");
     }
 }

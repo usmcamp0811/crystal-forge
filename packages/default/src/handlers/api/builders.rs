@@ -5,8 +5,8 @@
 //! 2. Builder Work Queue (Builder-authenticated): Job polling and status updates
 
 use axum::{
-    body::Body,
     Json,
+    body::Body,
     extract::{
         Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -19,8 +19,8 @@ use bytes::Bytes;
 use ed25519_dalek::{Signature, Verifier};
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use tokio::process::Command;
+use uuid::Uuid;
 
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{
@@ -588,11 +588,19 @@ fn map_create_builder_error(error: &anyhow::Error) -> (StatusCode, String) {
 }
 
 fn validate_builder_arch(arch: &str) -> Result<(), (StatusCode, String)> {
-    let valid_arches = ["x86_64-linux", "aarch64-linux", "aarch64-darwin", "x86_64-darwin"];
+    let valid_arches = [
+        "x86_64-linux",
+        "aarch64-linux",
+        "aarch64-darwin",
+        "x86_64-darwin",
+    ];
     if !valid_arches.contains(&arch) {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!("Invalid architecture. Must be one of: {}", valid_arches.join(", ")),
+            format!(
+                "Invalid architecture. Must be one of: {}",
+                valid_arches.join(", ")
+            ),
         ));
     }
 
@@ -1161,17 +1169,18 @@ pub async fn get_next_job(
     };
 
     // Embed the derivation build payload so the remote builder needs no DB access.
-    let derivation = crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to load derivation {} for claimed job {}: {}",
-                job.derivation_id,
-                job.id,
-                e
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let derivation =
+        crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to load derivation {} for claimed job {}: {}",
+                    job.derivation_id,
+                    job.id,
+                    e
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
     let payload = crate::models::builders::BuildJobDerivation {
         id: derivation.id,
@@ -1235,8 +1244,27 @@ pub async fn build_progress(
 
 #[derive(Debug, Deserialize)]
 pub struct JobStatusRequest {
-    pub status: String,
+    #[serde(default)]
+    pub status: Option<String>,
     pub error_message: Option<String>,
+}
+
+fn parse_job_status_request(body: &[u8]) -> Result<JobStatusRequest, serde_json::Error> {
+    if body.is_empty() {
+        return Ok(JobStatusRequest {
+            status: None,
+            error_message: None,
+        });
+    }
+
+    serde_json::from_slice(body)
+}
+
+fn fallback_job_status_request_for_invalid_details() -> JobStatusRequest {
+    JobStatusRequest {
+        status: None,
+        error_message: Some("builder reported failure with invalid failure details".to_string()),
+    }
 }
 
 /// GET /api/v1/builders/:id/jobs/:job_id/derivation-archive
@@ -1570,13 +1598,11 @@ pub async fn complete_job(
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
 
-        let cache_destination = crate::queries::cache_destinations::list_cache_destinations(
-            &state.pool,
-            true,
-        )
-        .await
-        .ok()
-        .and_then(|dests| dests.into_iter().next().map(|d| d.name));
+        let cache_destination =
+            crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
+                .await
+                .ok()
+                .and_then(|dests| dests.into_iter().next().map(|d| d.name));
 
         if let Err(e) = crate::queries::cache_push::create_cache_push_job(
             &state.pool,
@@ -1633,9 +1659,17 @@ pub async fn fail_job(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Parse failure details
-    let request: JobStatusRequest =
-        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    // Parse failure details. Once the builder request is authenticated, a bad
+    // details payload must not keep a known-failed build stuck in `building`.
+    let request = parse_job_status_request(&body).unwrap_or_else(|e| {
+        tracing::warn!(
+            builder_id = %builder_id,
+            job_id = %job_id,
+            error = %e,
+            "builder fail request contained invalid JSON body; failing job with fallback message"
+        );
+        fallback_job_status_request_for_invalid_details()
+    });
 
     // Verify the job is assigned to this builder
     let job = builders::get_build_job_by_id(&state.pool, &job_id)
@@ -2193,8 +2227,10 @@ mod tests {
 
     use super::BuildStreamMessage;
     use super::chunk_derivation_archive_paths;
+    use super::fallback_job_status_request_for_invalid_details;
     use super::map_create_builder_error;
     use super::parse_derivation_requisites;
+    use super::parse_job_status_request;
 
     #[test]
     fn derivation_archive_requisites_include_inputs_and_requested_drv() {
@@ -2254,6 +2290,38 @@ mod tests {
         assert!(
             parsed.is_err(),
             "untagged JSON should not be accepted as a valid stream frame"
+        );
+    }
+
+    #[test]
+    fn job_status_request_accepts_failure_body_without_status() {
+        let parsed = parse_job_status_request(br#"{"error_message":"nix build failed"}"#)
+            .expect("failure body without status should remain accepted");
+
+        assert_eq!(parsed.status, None);
+        assert_eq!(parsed.error_message.as_deref(), Some("nix build failed"));
+    }
+
+    #[test]
+    fn job_status_request_accepts_empty_failure_body() {
+        let parsed = parse_job_status_request(b"")
+            .expect("empty failure body should still allow job failure reporting");
+
+        assert_eq!(parsed.status, None);
+        assert_eq!(parsed.error_message, None);
+    }
+
+    #[test]
+    fn invalid_job_status_details_fallback_preserves_failure_signal() {
+        let parsed = parse_job_status_request(b"not json");
+        assert!(parsed.is_err());
+
+        let fallback = fallback_job_status_request_for_invalid_details();
+
+        assert_eq!(fallback.status, None);
+        assert_eq!(
+            fallback.error_message.as_deref(),
+            Some("builder reported failure with invalid failure details")
         );
     }
 

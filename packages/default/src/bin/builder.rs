@@ -8,8 +8,8 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::signal;
 use tokio::io::AsyncWriteExt;
+use tokio::signal;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -244,11 +244,10 @@ async fn execute_build_job(
 
     info!("📦 Building derivation: {}", derivation.derivation_name);
 
-    // Get build timeout from config
-    let build_timeout = std::cmp::min(
-        build_config.timeout,
-        std::time::Duration::from_secs(7200), // Max 2 hours
-    );
+    // Respect the configured build timeout for remote API builders. Nix itself
+    // receives build_config.timeout; the wrapper gets a small cleanup buffer so
+    // it can observe/report Nix's timeout rather than racing it.
+    let build_timeout = build_config.process_timeout();
 
     let start = std::time::Instant::now();
 

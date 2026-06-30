@@ -556,12 +556,14 @@ impl BuilderApiClient {
     pub async fn fail_job(&self, job_id: uuid::Uuid, error_message: &str) -> Result<()> {
         #[derive(Serialize)]
         struct FailRequest {
+            status: &'static str,
             error_message: String,
         }
 
         let path = format!("/api/v1/builders/{}/jobs/{}/fail", self.builder_id, job_id);
         let url = format!("{}{}", self.server_url, path);
         let request = FailRequest {
+            status: "failed",
             error_message: error_message.to_string(),
         };
         let body = serde_json::to_vec(&request)?;
@@ -625,7 +627,11 @@ impl BuilderApiClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".to_string());
-            anyhow::bail!("Get job status failed with status {}: {}", status, error_text);
+            anyhow::bail!(
+                "Get job status failed with status {}: {}",
+                status,
+                error_text
+            );
         }
 
         let value: serde_json::Value = response
