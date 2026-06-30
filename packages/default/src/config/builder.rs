@@ -7,7 +7,8 @@ use uuid::Uuid;
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct BuilderConfig {
-    /// Builder UUID (must match a builder registered in the server)
+    /// Optional builder UUID. If omitted in API mode, the builder resolves its
+    /// server-assigned ID from its local public key.
     pub builder_id: Option<Uuid>,
 
     /// Path to Ed25519 private key file for authentication
@@ -90,5 +91,21 @@ impl BuilderConfig {
         self.server_url
             .clone()
             .ok_or_else(|| anyhow::anyhow!("builder.server_url not configured"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_mode_ready_does_not_require_local_builder_id() {
+        let config = BuilderConfig {
+            private_key_path: Some(PathBuf::from("/var/lib/crystal-forge/builder-api.key")),
+            server_url: Some("https://crystal-forge.example.com".to_string()),
+            ..BuilderConfig::default()
+        };
+
+        assert!(config.is_api_mode_ready());
     }
 }

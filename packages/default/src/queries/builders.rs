@@ -9,7 +9,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::models::builders::{
-    BuildJob, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderStatus, BuilderSummary,
+    BuildJob, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderSummary,
     BuilderWithEnvironments, CreateBuilderRequest, ReportMetricsRequest, UpdateBuilderRequest,
 };
 use crate::models::public_key::PublicKey;
@@ -542,14 +542,34 @@ pub async fn mark_stale_builders_offline(pool: &PgPool, timeout_seconds: i64) ->
 /// A job is considered orphaned when it is `building` and:
 /// - `builder_id` is NULL, or
 /// - the referenced builder row is missing, or
-/// - the referenced builder is not `active` (e.g. offline/inactive).
+/// - the referenced builder is not `active` (e.g. offline/inactive), or
+/// - the referenced builder is disabled and should not accept work.
 pub async fn requeue_orphaned_building_jobs(pool: &PgPool) -> Result<Vec<BuildJob>> {
+    requeue_orphaned_building_jobs_with_reason(pool, "builder recovery").await
+}
+
+/// Re-queue orphaned jobs stuck in `building` and append an auditable reason to
+/// each recovered job's logs.
+pub async fn requeue_orphaned_building_jobs_with_reason(
+    pool: &PgPool,
+    reason: &str,
+) -> Result<Vec<BuildJob>> {
     let recovered = sqlx::query_as::<_, BuildJob>(
         r#"
         UPDATE build_jobs bj
         SET status = 'queued',
             builder_id = NULL,
             started_at = NULL,
+            logs = RIGHT(
+                COALESCE(logs, ''),
+                -- RIGHT(text, n) counts characters, not bytes. Divide the
+                -- remaining byte budget by 4 so retained UTF-8 text cannot
+                -- exceed the log byte ceiling even with 4-byte code points.
+                GREATEST(
+                    0,
+                    (10 * 1024 * 1024 - OCTET_LENGTH(E'\n\nRecovery: re-queued from building by ' || $1)) / 4
+                )
+            ) || E'\n\nRecovery: re-queued from building by ' || $1,
             updated_at = now()
         WHERE bj.status = 'building'
           AND (
@@ -560,12 +580,13 @@ pub async fn requeue_orphaned_building_jobs(pool: &PgPool) -> Result<Vec<BuildJo
                 OR EXISTS (
                     SELECT 1 FROM builders b
                     WHERE b.id = bj.builder_id
-                      AND b.status <> 'active'
+                      AND (b.status <> 'active' OR NOT b.enabled)
                 )
           )
         RETURNING bj.*
         "#,
     )
+    .bind(reason)
     .fetch_all(pool)
     .await
     .context("Failed to re-queue orphaned building jobs")?;
@@ -1380,14 +1401,19 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::builders::BuilderStatus;
     use crate::test_utils::db::test_pool;
     use base64::Engine;
     use chrono::{Duration, Utc};
     use sqlx::postgres::PgPoolOptions;
 
     async fn queue_test_pool() -> PgPool {
+        let database_url = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1/cf_test".to_string());
+
         PgPoolOptions::new()
-            .connect_lazy("postgres://postgres:postgres@127.0.0.1/cf_test")
+            .connect_lazy(&database_url)
             .expect("lazy queue test pool should construct")
     }
 
@@ -1396,10 +1422,11 @@ mod tests {
         let verifying_key = signing_key.verifying_key();
         let public_key_base64 =
             base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes());
+        let unique_name = format!("{}-{}", name, Uuid::new_v4());
 
         let request = CreateBuilderRequest {
-            name: name.to_string(),
-            host: Some(format!("{}.test.local", name)),
+            name: unique_name.clone(),
+            host: Some(format!("{}.test.local", unique_name)),
             arch: "x86_64-linux".to_string(),
             public_key: Some(public_key_base64),
             max_cpu_cores: None,
@@ -1435,7 +1462,7 @@ mod tests {
         priority_weight: f64,
         created_at: chrono::DateTime<chrono::Utc>,
     ) -> Uuid {
-        crate::queries::flakes::insert_flake(pool, flake_name, repo_url, "main", "all")
+        crate::queries::flakes::insert_flake(pool, flake_name, repo_url, "main", "all_configs")
             .await
             .expect("Failed to insert flake");
 
@@ -1951,6 +1978,54 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires running test database"]
+    async fn test_get_builder_by_public_key_resolves_registered_builder() {
+        let pool = test_pool().await;
+
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let public_key_base64 = base64::engine::general_purpose::STANDARD
+            .encode(signing_key.verifying_key().to_bytes());
+
+        let request = CreateBuilderRequest {
+            name: "public-key-lookup-builder".to_string(),
+            host: Some("public-key-lookup-builder.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
+            public_key: Some(public_key_base64.clone()),
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: None,
+            enabled: Some(true),
+            environment_ids: vec![],
+        };
+
+        let (builder, _private_key) = create_builder(&pool, &request)
+            .await
+            .expect("Failed to create builder");
+
+        let public_key = PublicKey::from_base64(&public_key_base64, "builder")
+            .expect("generated public key should parse");
+        let fetched = get_builder_by_public_key(&pool, &public_key)
+            .await
+            .expect("Failed to fetch builder by public key")
+            .expect("Builder should resolve by registered public key");
+
+        assert_eq!(fetched.id, builder.id);
+
+        let unregistered_key = base64::engine::general_purpose::STANDARD.encode(
+            ed25519_dalek::SigningKey::generate(&mut rand::thread_rng())
+                .verifying_key()
+                .to_bytes(),
+        );
+        let unregistered_key = PublicKey::from_base64(&unregistered_key, "builder")
+            .expect("generated public key should parse");
+        let missing = get_builder_by_public_key(&pool, &unregistered_key)
+            .await
+            .expect("Failed to query unregistered public key");
+
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
     async fn test_builder_heartbeat() {
         let pool = test_pool().await;
 
@@ -2103,7 +2178,10 @@ mod tests {
         let (builder, _) = create_builder(&pool, &request)
             .await
             .expect("Failed to create builder");
-        assert!(!builder.public_key_fingerprint.is_empty(), "create fingerprint must be set");
+        assert!(
+            !builder.public_key_fingerprint.is_empty(),
+            "create fingerprint must be set"
+        );
 
         // Rotate to a new keypair
         let new_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
@@ -2114,7 +2192,10 @@ mod tests {
             .await
             .expect("Failed to rotate public key");
 
-        assert!(!updated.public_key_fingerprint.is_empty(), "rotation response fingerprint must be set");
+        assert!(
+            !updated.public_key_fingerprint.is_empty(),
+            "rotation response fingerprint must be set"
+        );
         assert_ne!(
             builder.public_key_fingerprint, updated.public_key_fingerprint,
             "fingerprint must change after key rotation"
@@ -2265,7 +2346,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires running test database"]
     async fn test_requeue_orphaned_building_jobs_keeps_active_builder_jobs() {
-        let pool = test_pool().await;
+        let pool = queue_test_pool().await;
         let now = Utc::now();
 
         let active_builder = create_active_test_builder(&pool, "requeue-active-builder").await;
@@ -2333,9 +2414,10 @@ mod tests {
             .await
             .expect("Failed to assign stale job to stale builder");
 
-        let recovered = requeue_orphaned_building_jobs(&pool)
-            .await
-            .expect("Failed to recover orphaned jobs");
+        let recovered =
+            requeue_orphaned_building_jobs_with_reason(&pool, "startup builder recovery")
+                .await
+                .expect("Failed to recover orphaned jobs");
 
         let recovered_ids: std::collections::HashSet<Uuid> =
             recovered.iter().map(|job| job.id).collect();
@@ -2355,6 +2437,19 @@ mod tests {
             .expect("orphan job should exist");
         assert_eq!(orphan_status, "queued");
 
+        let orphan_row = get_build_job_by_id(&pool, &orphan_job)
+            .await
+            .expect("orphan job fetch should succeed")
+            .expect("orphan job should exist");
+        assert!(
+            orphan_row
+                .logs
+                .as_deref()
+                .unwrap_or_default()
+                .contains("startup builder recovery"),
+            "recovered job logs should include recovery reason"
+        );
+
         let stale_status = get_build_job_status(&pool, &stale_job)
             .await
             .expect("stale job status lookup should succeed")
@@ -2365,7 +2460,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires running test database"]
     async fn test_mark_stale_builders_offline_then_requeue_building_jobs() {
-        let pool = test_pool().await;
+        let pool = queue_test_pool().await;
         let now = Utc::now();
 
         let builder = create_active_test_builder(&pool, "stale-offline-requeue-builder").await;
@@ -2402,9 +2497,10 @@ mod tests {
             .expect("Failed to mark stale builders offline");
         assert_eq!(marked, 1, "expected one stale builder to be marked offline");
 
-        let recovered = requeue_orphaned_building_jobs(&pool)
-            .await
-            .expect("Failed to requeue stale-builder jobs");
+        let recovered =
+            requeue_orphaned_building_jobs_with_reason(&pool, "runtime builder liveness recovery")
+                .await
+                .expect("Failed to requeue stale-builder jobs");
         assert_eq!(recovered.len(), 1, "expected one recovered job");
         assert_eq!(recovered[0].id, job_id);
 
@@ -2413,12 +2509,130 @@ mod tests {
             .expect("status lookup should succeed")
             .expect("job should exist");
         assert_eq!(status, "queued");
+
+        let row = get_build_job_by_id(&pool, &job_id)
+            .await
+            .expect("job fetch should succeed")
+            .expect("job should exist");
+        assert!(
+            row.logs
+                .as_deref()
+                .unwrap_or_default()
+                .contains("runtime builder liveness recovery"),
+            "runtime recovery should record an explicit reason in job logs"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_requeue_orphaned_building_jobs_treats_disabled_active_builder_as_orphaned() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+
+        let builder = create_active_test_builder(&pool, "disabled-active-requeue-builder").await;
+        sqlx::query("UPDATE builders SET enabled = false, status = 'active' WHERE id = $1")
+            .bind(builder.id)
+            .execute(&pool)
+            .await
+            .expect("Failed to disable active builder");
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/requeue-disabled-active.git",
+            "requeue-disabled-active",
+            &format!("requeuedisabledactive{}", Uuid::new_v4().simple()),
+            now,
+            "drv-requeue-disabled-active",
+            1.0,
+            now,
+        )
+        .await;
+        assign_job_to_builder(&pool, &job_id, &builder.id)
+            .await
+            .expect("disabled active builder owns building job in test setup");
+
+        let recovered =
+            requeue_orphaned_building_jobs_with_reason(&pool, "runtime builder liveness recovery")
+                .await
+                .expect("recovery should succeed");
+
+        assert!(
+            recovered.iter().any(|job| job.id == job_id),
+            "disabled active builder job should be recovered"
+        );
+
+        let row = get_build_job_by_id(&pool, &job_id)
+            .await
+            .expect("job fetch should succeed")
+            .expect("job should exist");
+        assert_eq!(row.status, "queued");
+        assert_eq!(row.builder_id, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_requeue_orphaned_building_jobs_preserves_log_size_limit() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+        const MAX_LOG_BYTES: i64 = 10 * 1024 * 1024;
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/requeue-log-limit.git",
+            "requeue-log-limit",
+            &format!("requeueloglimit{}", Uuid::new_v4().simple()),
+            now,
+            "drv-requeue-log-limit",
+            1.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, job_id, "building").await;
+        sqlx::query(
+            r#"
+            UPDATE build_jobs
+            SET builder_id = NULL,
+                logs = repeat('é', ($2 / 2)::int)
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .bind(MAX_LOG_BYTES)
+        .execute(&pool)
+        .await
+        .expect("Failed to seed near-limit logs");
+
+        let recovered =
+            requeue_orphaned_building_jobs_with_reason(&pool, "startup builder recovery")
+                .await
+                .expect("recovery should succeed");
+        assert!(recovered.iter().any(|job| job.id == job_id));
+
+        let (log_bytes, has_reason): (i64, bool) = sqlx::query_as(
+            r#"
+            SELECT
+                OCTET_LENGTH(COALESCE(logs, ''))::bigint,
+                COALESCE(logs, '') LIKE '%startup builder recovery%'
+            FROM build_jobs
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("Failed to fetch recovered log length");
+
+        assert!(
+            log_bytes <= MAX_LOG_BYTES,
+            "recovery log append must preserve the 10 MiB limit, got {log_bytes} bytes"
+        );
+        assert!(has_reason, "recovery reason should still be appended");
     }
 
     #[tokio::test]
     #[ignore = "requires running test database"]
     async fn test_late_stale_builder_completion_does_not_clobber_requeued_job() {
-        let pool = test_pool().await;
+        let pool = queue_test_pool().await;
         let now = Utc::now();
 
         let builder_a = create_active_test_builder(&pool, "late-builder-a").await;
@@ -2478,7 +2692,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires running test database"]
     async fn test_late_stale_builder_failure_does_not_clobber_requeued_job() {
-        let pool = test_pool().await;
+        let pool = queue_test_pool().await;
         let now = Utc::now();
 
         let builder_a = create_active_test_builder(&pool, "late-fail-builder-a").await;

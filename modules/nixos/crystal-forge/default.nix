@@ -18,7 +18,8 @@
 
   # Build the raw config first (your existing baseConfig logic, unchanged)
   baseConfigRaw =
-    {
+    {}
+    // lib.optionalAttrs (cfg.server.enable || (cfg.build.enable && !cfg.build.api_mode)) {
       database = {
         host = cfg.database.host;
         port = cfg.database.port;
@@ -126,6 +127,17 @@
         }
         // lib.optionalAttrs (cfg.build.systemd_properties != []) {
           systemd_properties = cfg.build.systemd_properties;
+        };
+    }
+    // lib.optionalAttrs cfg.build.enable {
+      builder =
+        {enable_api_mode = cfg.build.api_mode;}
+        // lib.optionalAttrs cfg.build.api_mode {
+          private_key_path =
+            if cfg.build.api_key_file != null
+            then toString cfg.build.api_key_file
+            else "/var/lib/crystal-forge/builder-api.key";
+          server_url = cfg.build.server_url;
         };
     }
     // lib.optionalAttrs (cfg.auth.ssh_key_path
@@ -1910,8 +1922,14 @@ in {
     in {
       description = "Crystal Forge Builder";
       wantedBy = ["multi-user.target"];
-      after = lib.optional cfg.local-database "postgresql.service";
-      wants = lib.optional cfg.local-database "postgresql.service";
+      after =
+        lib.optional
+        (cfg.local-database && !cfg.build.api_mode)
+        "postgresql.service";
+      wants =
+        lib.optional
+        (cfg.local-database && !cfg.build.api_mode)
+        "postgresql.service";
 
       path = with pkgs;
         [nix git vulnix systemd nix-fast-build nix-eval-jobs]
@@ -1979,6 +1997,10 @@ in {
           echo "ATTIC_TOKEN: ''${ATTIC_TOKEN:+SET}"
         fi
 
+        # Test attic configuration directly in the service context. The builder
+        # service already runs as crystal-forge.
+        echo "Testing Attic configuration..."
+        attic login list || echo "Attic configuration test failed"
       '';
 
       # Splice arbitrary unit properties (e.g., IOWeight=100, TasksMax=3000) parsed above

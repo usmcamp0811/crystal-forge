@@ -22,17 +22,15 @@ let
   testDir = ./tests;
   CF_TEST_SERVER_PORT = 3000;
 
-  keyPair = pkgs.runCommand "agent-keypair" { } ''
-    mkdir -p $out
-    ${pkgs.crystal-forge.default.cf-keygen}/bin/cf-keygen -f $out/agent.key
-  '';
+  # Use fixed test keys to avoid cf-keygen CI flakiness
+  # Keys embedded directly to avoid path resolution issues in Nix build context
   keyPath = pkgs.runCommand "agent.key" { } ''
     mkdir -p $out
-    cp ${keyPair}/agent.key $out/
+    echo "+/GIbrjuyb3Hf2es5w+vWSlDUhEsAIojiyyfgskC7QA=" > $out/agent.key
   '';
   pubPath = pkgs.runCommand "agent.pub" { } ''
     mkdir -p $out
-    cp ${keyPair}/agent.pub $out/
+    echo "DpOiy7W+DqZEg3KR0fvP5Q8k4FR4K1NB+qyYQLxhnFc=" > $out/agent.pub
   '';
   derivation-paths = lib.crystal-forge.derivation-paths pkgs;
   systemBuildClosure = pkgs.closureInfo {

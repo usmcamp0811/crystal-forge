@@ -797,6 +797,19 @@ pub struct ComplianceBundleSystemsResponse {
     pub totals: ComplianceRollupTotals,
 }
 
+/// Response for GET /api/v1/systems/:system_id/compliance
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemComplianceBundlesResponse {
+    pub system_id: Uuid,
+    pub bundles: Vec<SystemComplianceBundle>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemComplianceBundle {
+    pub bundle: ComplianceBundleSummary,
+    pub rollup: ComplianceSystemRollup,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ComplianceRollupTotals {
     pub system_count: i64,
