@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-30 17:46'
-updated_date: '2026-06-30 21:08'
+updated_date: '2026-07-01 00:41'
 labels:
   - builder
   - remote-builds
@@ -24,6 +24,9 @@ modified_files:
   - packages/default/src/handlers/api/builders.rs
   - packages/default/src/queries/builders.rs
   - modules/nixos/crystal-forge/default.nix
+  - packages/default/src/config/builder.rs
+  - packages/default/src/derivations/mod.rs
+  - docs/multi-builder-api.md
 parent_task_id: TASK-375
 priority: high
 ordinal: 5520
@@ -99,22 +102,8 @@ Verification Plan:
 - [ ] #9 Operator documentation explains when to use verified source re-evaluation, source/input delivery options (`nix flake archive`/bundled inputs vs public input fetching), security requirements, Nix version/purity expectations, and the distinction between derivation identity verification and output reproducibility.
 <!-- AC:END -->
 
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-1. Inspect existing remote builder job manifest, builder API client, derivation payload, build attempt state, and Nix module configuration patterns.
-2. Add explicit execution strategy types and builder capability fields for `server_derivation` and verified source re-evaluation without silent fallback.
-3. Extend the build job manifest/API model with expected toplevel `.drvPath`, immutable source identity/source input delivery metadata, flake target, lock/source metadata, and evaluator fingerprint fields.
-4. Implement server-side pure derivation identity evaluation plumbing using the existing evaluation/derivation machinery where possible; do not use dry-run build for this identity.
-5. Implement builder-side verified source flow: obtain immutable source artifact metadata, eval locally before build, compare `.drvPath`, fail early with `derivation_mismatch` on mismatch, then build the exact verified derivation.
-6. Extend attempt phase/error reporting for source fetch, input/source availability, evaluation, and derivation mismatch failures so jobs do not remain stuck in `building`.
-7. Add focused unit/integration coverage for manifest serialization, strategy selection, drvPath comparison, mismatch-before-build behavior, and failure classification.
-8. Update operator documentation/config guidance for strategy selection, source/input delivery, Nix purity/version expectations, and the limits of derivation identity verification.
-9. Run targeted `nix develop` cargo checks/tests for changed crates; run heavier Nix checks only if Nix modules/packaging changes require it.
-<!-- SECTION:PLAN:END -->
-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-375.4-verified-source-re-evaluation
+Implementation progress: added explicit remote build strategy/source delivery DTOs, expected `.drvPath`, source identity, evaluator fingerprint, and failure phase fields to the builder job manifest. Added builder config capability gating (`supported_execution_strategies`) defaulting to `server_derivation` only, so verified source jobs are opt-in and cannot silently fall back. Added builder-side verified source helper flow: evaluate source `.drvPath`, compare before build, then build verified derivation; mismatches/fetch/eval failures report explicit phases. Updated API failure request parsing to preserve failure phase in recorded error messages. Updated multi-builder docs with strategy semantics and opt-in config. No heavy cargo/Nix verification has been run yet per user request; only `git diff --check` and `git status --porcelain` were run successfully.
 <!-- SECTION:NOTES:END -->
