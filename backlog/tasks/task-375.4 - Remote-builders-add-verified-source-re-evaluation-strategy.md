@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-30 17:46'
-updated_date: '2026-07-01 00:41'
+updated_date: '2026-07-01 02:09'
 labels:
   - builder
   - remote-builds
@@ -25,6 +25,7 @@ modified_files:
   - packages/default/src/queries/builders.rs
   - modules/nixos/crystal-forge/default.nix
   - packages/default/src/config/builder.rs
+  - packages/default/src/config/server.rs
   - packages/default/src/derivations/mod.rs
   - docs/multi-builder-api.md
 parent_task_id: TASK-375
@@ -100,10 +101,17 @@ Verification Plan:
 - [ ] #7 Derivation mismatch, source fetch failure, evaluation failure, and input/source availability failures are represented as distinct attempt phases/error classes and do not leave jobs stuck in `building`.
 - [ ] #8 Unverified source checkout support is absent or clearly limited to development/testing only; there is no hidden fallback between strategies.
 - [ ] #9 Operator documentation explains when to use verified source re-evaluation, source/input delivery options (`nix flake archive`/bundled inputs vs public input fetching), security requirements, Nix version/purity expectations, and the distinction between derivation identity verification and output reproducibility.
+- [ ] #10 Builder source acquisition uses a local mirror/snapshot model: server serves enough metadata/artifact information for the builder to keep a local flake copy at the authorized commit, and colocated server/builder deployments can share the same configured mirror root without duplicate checkouts.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Refinement: model source delivery as server-managed flake mirror/snapshot sync. Locate existing server local flake checkout/mirror path logic, add manifest fields for source mirror/snapshot identity and optional shared local path, and make builder-side source resolution prefer an up-to-date local mirror path before falling back to public input fetching or archive-style delivery.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Implementation progress: added explicit remote build strategy/source delivery DTOs, expected `.drvPath`, source identity, evaluator fingerprint, and failure phase fields to the builder job manifest. Added builder config capability gating (`supported_execution_strategies`) defaulting to `server_derivation` only, so verified source jobs are opt-in and cannot silently fall back. Added builder-side verified source helper flow: evaluate source `.drvPath`, compare before build, then build verified derivation; mismatches/fetch/eval failures report explicit phases. Updated API failure request parsing to preserve failure phase in recorded error messages. Updated multi-builder docs with strategy semantics and opt-in config. No heavy cargo/Nix verification has been run yet per user request; only `git diff --check` and `git status --porcelain` were run successfully.
+Design refinement from user: source delivery should be modeled around the same local flake repository mirror concept the server already uses. The server should serve source/mirror metadata or snapshots to builders, and builders should maintain their own local copy up to date. If server and builder are colocated, both can be configured to use/share the same local mirror root to avoid duplicate checkouts. Implementation should prefer reusable mirror/snapshot sync semantics over treating source delivery as only a one-off archive URL.
 <!-- SECTION:NOTES:END -->
