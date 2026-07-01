@@ -1,11 +1,11 @@
 ---
 id: TASK-375.4
 title: 'Remote builders: add verified source re-evaluation strategy'
-status: Review
+status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-30 17:46'
-updated_date: '2026-07-01 03:17'
+updated_date: '2026-07-01 04:07'
 labels:
   - builder
   - remote-builds
@@ -110,6 +110,8 @@ Verification Plan:
 
 <!-- SECTION:PLAN:BEGIN -->
 Refinement: implement source workspace metadata around a bare mirror plus detached worktree at the authorized commit. Add manifest fields/config for mirror/worktree roots and cleanup behavior. Builder source acquisition should resolve/create a detached commit worktree, verify HEAD equals the job commit, eval from that path, and schedule/remove the worktree after build and cache push reporting complete.
+
+User decision: make `source_re_evaluate_verified` the DEFAULT strategy (server default + builder default capability), keeping `server_derivation` available but non-default. This requires the builder to self-manage its local mirror: create the bare mirror from repo_url if missing and fetch the authorized commit before adding the detached worktree, so a fresh builder does not fail with source_fetch. Update config/module defaults, docs, and tests accordingly.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -118,6 +120,8 @@ Refinement: implement source workspace metadata around a bare mirror plus detach
 Further design refinement: use Git mirror/worktree semantics for verified source acquisition. Maintain a shared bare mirror per flake/repo and create detached worktrees at exact authorized commit SHAs for evaluation/build. Colocated server and builder can point at the same mirror/worktree roots; remote builders keep equivalent local mirrors from server-provided source metadata/artifacts. Builders must verify worktree HEAD equals the manifest commit before eval. Worktrees should be cleaned up after build completion and cache-push/reporting lifecycle is done.
 
 Opened MR !290 (https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/290) into dev and moved task to Review. Implementation complete: explicit verified source re-evaluation strategy with mirror+detached-worktree source delivery, eval-before-build drvPath verification, distinct failure phases, opt-in builder capability + server strategy config, and NixOS module options. Verification run in repo devshell: targeted cargo tests pass (builder bin 9, models::builders 4, config::builder 2, config::server 4, handlers::api::builders::tests 20); rustfmt --check clean on changed files; devshell package build (checkPhase) succeeds; NixOS module parses. nix flake check intentionally deferred to CI (touches NixOS module).
+
+Making verified source the default. Adding builder-side mirror bootstrap/fetch (git clone --bare / git fetch of the exact commit) into ensure_source_worktree so a fresh builder can populate its mirror from the repo URL without a pre-seeded mirror. server_derivation remains selectable.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
