@@ -231,6 +231,62 @@ mod tests {
             BuilderStatus::Inactive
         );
     }
+
+    #[test]
+    fn build_job_derivation_defaults_to_server_derivation_strategy() {
+        let json = r#"{
+            "id": 42,
+            "derivation_name": "host-a",
+            "derivation_type": "nixos",
+            "derivation_path": "/nix/store/server-host-a.drv",
+            "store_path": null
+        }"#;
+
+        let payload: BuildJobDerivation = serde_json::from_str(json).expect("payload should parse");
+        assert_eq!(
+            payload.execution_strategy,
+            RemoteBuildExecutionStrategy::ServerDerivation
+        );
+        assert_eq!(payload.source_input_delivery, SourceInputDeliveryMode::None);
+        assert_eq!(payload.expected_drv_path, None);
+    }
+
+    #[test]
+    fn verified_source_strategy_serializes_as_snake_case() {
+        let payload = BuildJobDerivation {
+            id: 42,
+            derivation_name: "host-a".to_string(),
+            derivation_type: "nixos".to_string(),
+            derivation_path: None,
+            store_path: None,
+            execution_strategy: RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            source: Some(VerifiedSourceIdentity {
+                repo_url: "https://gitlab.com/example/private.git".to_string(),
+                commit_hash: "abc123".to_string(),
+                flake_target: "nixosConfigurations.host-a.config.system.build.toplevel".to_string(),
+                mirror_id: Some("repo-test".to_string()),
+                mirror_path: Some("/var/lib/crystal-forge/flake-mirrors/repo-test.git".to_string()),
+                worktree_path: Some(
+                    "/var/lib/crystal-forge/flake-worktrees/repo-test/abc123".to_string(),
+                ),
+                lock_hash: Some("sha256-lock".to_string()),
+                archive_url: Some("file:///tmp/source".to_string()),
+                archive_sha256: Some("sha256-source".to_string()),
+            }),
+            source_input_delivery: SourceInputDeliveryMode::ServerBundledArchive,
+            expected_drv_path: Some("/nix/store/server-host-a.drv".to_string()),
+            evaluator: Some(EvaluatorFingerprint {
+                nix_version: "2.28.0".to_string(),
+                pure_eval: true,
+                lockfile_mutation_allowed: false,
+            }),
+        };
+
+        let value = serde_json::to_value(payload).expect("payload should serialize");
+        assert_eq!(value["execution_strategy"], "source_re_evaluate_verified");
+        assert_eq!(value["source_input_delivery"], "server_bundled_archive");
+        assert_eq!(value["expected_drv_path"], "/nix/store/server-host-a.drv");
+    }
 }
 
 // =============================================================================
@@ -298,6 +354,111 @@ pub struct BuildJobDerivation {
     pub derivation_path: Option<String>,
     /// Resolved output store path, if already known.
     pub store_path: Option<String>,
+    /// Explicit remote build execution strategy. Defaults to the current
+    /// server-authoritative derivation flow for older servers/clients.
+    #[serde(default)]
+    pub execution_strategy: RemoteBuildExecutionStrategy,
+    /// Source metadata used by verified source re-evaluation. This is optional
+    /// for `server_derivation` jobs and required for verified source jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<VerifiedSourceIdentity>,
+    /// How the builder should obtain flake inputs for local evaluation.
+    #[serde(default)]
+    pub source_input_delivery: SourceInputDeliveryMode,
+    /// Server-authorized toplevel derivation identity. For current
+    /// `server_derivation` jobs this is the same as `derivation_path`; for
+    /// verified source jobs the builder compares its local eval result to this
+    /// string before building.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_drv_path: Option<String>,
+    /// Server-recorded evaluator fingerprint for audit/debugging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluator: Option<EvaluatorFingerprint>,
+}
+
+/// Explicit remote build execution strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteBuildExecutionStrategy {
+    /// Server evaluates and provides the authoritative `.drv` path.
+    #[default]
+    ServerDerivation,
+    /// Builder evaluates immutable source locally and must match the server's
+    /// expected `.drvPath` before building.
+    SourceReEvaluateVerified,
+}
+
+/// Source/input delivery mode for verified source re-evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceInputDeliveryMode {
+    /// Not applicable for the current job strategy.
+    #[default]
+    None,
+    /// Server provides a self-contained source/input archive or NAR.
+    ServerBundledArchive,
+    /// Builder uses or creates a detached local Git worktree from a local mirror
+    /// at the authorized commit. Colocated server/builder deployments may share
+    /// these roots.
+    LocalGitWorktree,
+    /// Builder may fetch public flake inputs itself. Builders still must not
+    /// receive broad private Git credentials.
+    BuilderFetchPublicInputs,
+}
+
+/// Immutable source identity for verified source re-evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedSourceIdentity {
+    pub repo_url: String,
+    pub commit_hash: String,
+    pub flake_target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_sha256: Option<String>,
+}
+
+/// Evaluator fingerprint recorded in the job manifest for auditability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluatorFingerprint {
+    pub nix_version: String,
+    #[serde(default)]
+    pub pure_eval: bool,
+    #[serde(default)]
+    pub lockfile_mutation_allowed: bool,
+}
+
+/// Distinct pre-build/build failure phases reported by API builders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildFailurePhase {
+    SourceFetch,
+    SourceInputAvailability,
+    Evaluation,
+    DerivationMismatch,
+    PathMaterialization,
+    Build,
+}
+
+impl std::fmt::Display for BuildFailurePhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuildFailurePhase::SourceFetch => write!(f, "source_fetch"),
+            BuildFailurePhase::SourceInputAvailability => write!(f, "source_input_availability"),
+            BuildFailurePhase::Evaluation => write!(f, "evaluation"),
+            BuildFailurePhase::DerivationMismatch => write!(f, "derivation_mismatch"),
+            BuildFailurePhase::PathMaterialization => write!(f, "path_materialization"),
+            BuildFailurePhase::Build => write!(f, "build"),
+        }
+    }
 }
 
 /// Response returned by GET /api/v1/builders/:id/next-job.

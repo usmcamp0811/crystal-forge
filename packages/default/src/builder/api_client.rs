@@ -1,7 +1,7 @@
 use crate::config::BuilderConfig;
 use crate::models::builders::{
-    BuildProgressRequest, NextJobResponse, ReportMetricsRequest, ResolveBuilderIdRequest,
-    ResolveBuilderIdResponse,
+    BuildFailurePhase, BuildProgressRequest, NextJobResponse, ReportMetricsRequest,
+    ResolveBuilderIdRequest, ResolveBuilderIdResponse,
 };
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -554,9 +554,21 @@ impl BuilderApiClient {
 
     /// Fail a job with an error message
     pub async fn fail_job(&self, job_id: uuid::Uuid, error_message: &str) -> Result<()> {
+        self.fail_job_with_phase(job_id, BuildFailurePhase::Build, error_message)
+            .await
+    }
+
+    /// Fail a job with an explicit remote-build phase classification.
+    pub async fn fail_job_with_phase(
+        &self,
+        job_id: uuid::Uuid,
+        phase: BuildFailurePhase,
+        error_message: &str,
+    ) -> Result<()> {
         #[derive(Serialize)]
         struct FailRequest {
             status: &'static str,
+            failure_phase: String,
             error_message: String,
         }
 
@@ -564,6 +576,7 @@ impl BuilderApiClient {
         let url = format!("{}{}", self.server_url, path);
         let request = FailRequest {
             status: "failed",
+            failure_phase: phase.to_string(),
             error_message: error_message.to_string(),
         };
         let body = serde_json::to_vec(&request)?;
@@ -594,7 +607,7 @@ impl BuilderApiClient {
             );
         }
 
-        info!("Job {} marked as failed", job_id);
+        info!("Job {} marked as failed during {}", job_id, phase);
         Ok(())
     }
 

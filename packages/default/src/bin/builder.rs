@@ -2,9 +2,12 @@ use crystal_forge::builder::api_client::{ApiBuildReporter, BuilderApiClient};
 use crystal_forge::builder::metrics::SystemMetrics;
 use crystal_forge::config::CrystalForgeConfig;
 use crystal_forge::derivations::build::{BuildCancelledError, LogSink};
-use crystal_forge::models::builders::{BuildJobDerivation, NextJobResponse, ReportMetricsRequest};
+use crystal_forge::models::builders::{
+    BuildFailurePhase, BuildJobDerivation, NextJobResponse, RemoteBuildExecutionStrategy,
+    ReportMetricsRequest, SourceInputDeliveryMode, VerifiedSourceIdentity,
+};
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -111,6 +114,14 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
             build_config.clone(),
             cache_config.clone(),
             cfg.server.execution_mode,
+            RemoteBuildRuntime {
+                supported_execution_strategies: builder_config
+                    .supported_execution_strategies
+                    .clone(),
+                source_mirror_root: builder_config.source_mirror_root.clone(),
+                source_worktree_root: builder_config.source_worktree_root.clone(),
+                cleanup_source_worktrees: builder_config.cleanup_source_worktrees,
+            },
         ) => {
             error!("Job loop exited unexpectedly: {:?}", result);
         }
@@ -121,6 +132,16 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
 
     info!("Shutting down API mode builder...");
     Ok(())
+}
+
+/// Builder-side configuration for remote build strategy selection and verified
+/// source workspace management.
+#[derive(Debug, Clone)]
+struct RemoteBuildRuntime {
+    supported_execution_strategies: Vec<RemoteBuildExecutionStrategy>,
+    source_mirror_root: PathBuf,
+    source_worktree_root: PathBuf,
+    cleanup_source_worktrees: bool,
 }
 
 /// Heartbeat loop - sends metrics to server periodically
@@ -158,6 +179,7 @@ async fn run_api_job_loop(
     build_config: crystal_forge::config::BuildConfig,
     cache_config: crystal_forge::config::CacheConfig,
     execution_mode: crystal_forge::config::ExecutionMode,
+    remote_runtime: RemoteBuildRuntime,
 ) -> anyhow::Result<()> {
     let mut ticker = tokio::time::interval(poll_interval);
 
@@ -189,6 +211,27 @@ async fn run_api_job_loop(
                     continue;
                 }
 
+                if !remote_runtime
+                    .supported_execution_strategies
+                    .contains(&derivation.execution_strategy)
+                {
+                    let message = format!(
+                        "builder does not support execution strategy {:?}",
+                        derivation.execution_strategy
+                    );
+                    error!("❌ Job #{} rejected: {}", job.id, message);
+                    if let Err(report_err) = client
+                        .fail_job_with_phase(job.id, BuildFailurePhase::Build, &message)
+                        .await
+                    {
+                        error!(
+                            "❌ Failed to report job #{} unsupported strategy: {}",
+                            job.id, report_err
+                        );
+                    }
+                    continue;
+                }
+
                 // Acquire semaphore permit for this build
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
 
@@ -196,6 +239,7 @@ async fn run_api_job_loop(
                 let job_client = client.clone();
                 let job_build_config = build_config.clone();
                 let job_cache_config = cache_config.clone();
+                let job_remote_runtime = remote_runtime.clone();
                 let job_id = job.id;
 
                 tokio::spawn(async move {
@@ -206,6 +250,7 @@ async fn run_api_job_loop(
                         job_build_config,
                         job_cache_config,
                         execution_mode,
+                        job_remote_runtime,
                     )
                     .await;
                     drop(permit); // Release semaphore when build completes
@@ -223,18 +268,412 @@ async fn run_api_job_loop(
 
 /// Execute a build job entirely over the API: build the supplied derivation,
 /// stream logs, report progress/cancellation, and report results. No DB access.
+#[derive(Debug)]
+struct PreBuildFailure {
+    phase: BuildFailurePhase,
+    message: String,
+}
+
+fn expected_drv_path(payload: &BuildJobDerivation) -> Result<&str, PreBuildFailure> {
+    payload
+        .expected_drv_path
+        .as_deref()
+        .or(payload.derivation_path.as_deref())
+        .filter(|drv| drv.ends_with(".drv"))
+        .ok_or_else(|| PreBuildFailure {
+            phase: BuildFailurePhase::Evaluation,
+            message: "verified source job is missing expected .drvPath".to_string(),
+        })
+}
+
+fn source_flake_ref(
+    source: &VerifiedSourceIdentity,
+    delivery: SourceInputDeliveryMode,
+    mirror_root: &Path,
+    worktree_root: &Path,
+) -> Result<String, PreBuildFailure> {
+    if delivery == SourceInputDeliveryMode::LocalGitWorktree {
+        return source_workspace_paths(source, mirror_root, worktree_root)
+            .map(|(_, worktree_path)| worktree_path)
+            .map(|path| path.to_string_lossy().to_string());
+    }
+
+    if let Some(archive_url) = source.archive_url.as_deref() {
+        return Ok(archive_url
+            .strip_prefix("file://")
+            .unwrap_or(archive_url)
+            .to_string());
+    }
+
+    match delivery {
+        SourceInputDeliveryMode::BuilderFetchPublicInputs => Ok(format!(
+            "git+{}?rev={}",
+            source.repo_url, source.commit_hash
+        )),
+        SourceInputDeliveryMode::LocalGitWorktree => {
+            unreachable!("handled before archive fallback")
+        }
+        SourceInputDeliveryMode::ServerBundledArchive => Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: "server-bundled source delivery selected but archive_url is missing"
+                .to_string(),
+        }),
+        SourceInputDeliveryMode::None => Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: "verified source job is missing source delivery metadata".to_string(),
+        }),
+    }
+}
+
+fn source_workspace_paths(
+    source: &VerifiedSourceIdentity,
+    mirror_root: &Path,
+    worktree_root: &Path,
+) -> Result<(PathBuf, PathBuf), PreBuildFailure> {
+    if let Some(path) = source.worktree_path.as_deref() {
+        let mirror_path = source
+            .mirror_path
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| mirror_root.join("external-source.git"));
+        return Ok((mirror_path, PathBuf::from(path)));
+    }
+
+    let mirror_id = source
+        .mirror_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: "local git worktree delivery is missing mirror_id".to_string(),
+        })?;
+
+    let mirror_path = source
+        .mirror_path
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| mirror_root.join(format!("{mirror_id}.git")));
+
+    Ok((
+        mirror_path,
+        worktree_root.join(mirror_id).join(&source.commit_hash),
+    ))
+}
+
+async fn ensure_source_worktree(
+    source: &VerifiedSourceIdentity,
+    mirror_root: &Path,
+    worktree_root: &Path,
+) -> Result<PathBuf, PreBuildFailure> {
+    let (mirror_path, worktree_path) = source_workspace_paths(source, mirror_root, worktree_root)?;
+
+    if worktree_path.exists() {
+        verify_worktree_head(&worktree_path, &source.commit_hash).await?;
+        return Ok(worktree_path);
+    }
+
+    if !mirror_path.exists() {
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: format!(
+                "local source mirror is missing for {} at {}",
+                source.repo_url,
+                mirror_path.display()
+            ),
+        });
+    }
+
+    if let Some(parent) = worktree_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| PreBuildFailure {
+                phase: BuildFailurePhase::SourceFetch,
+                message: format!(
+                    "failed to create source worktree parent {}: {e}",
+                    parent.display()
+                ),
+            })?;
+    }
+
+    let output = tokio::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&mirror_path)
+        .arg("worktree")
+        .arg("add")
+        .arg("--detach")
+        .arg(&worktree_path)
+        .arg(&source.commit_hash)
+        .output()
+        .await
+        .map_err(|e| PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: format!("failed to spawn git worktree add: {e}"),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: format!("git worktree add failed: {stderr}"),
+        });
+    }
+
+    verify_worktree_head(&worktree_path, &source.commit_hash).await?;
+    Ok(worktree_path)
+}
+
+async fn verify_worktree_head(
+    worktree_path: &Path,
+    expected_commit: &str,
+) -> Result<(), PreBuildFailure> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .output()
+        .await
+        .map_err(|e| PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: format!(
+                "failed to inspect source worktree {}: {e}",
+                worktree_path.display()
+            ),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: format!(
+                "git rev-parse failed for {}: {stderr}",
+                worktree_path.display()
+            ),
+        });
+    }
+
+    let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if actual == expected_commit {
+        Ok(())
+    } else {
+        Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: format!(
+                "source worktree {} is at {}, expected {}",
+                worktree_path.display(),
+                actual,
+                expected_commit
+            ),
+        })
+    }
+}
+
+fn cleanup_candidate_worktree(
+    payload: &BuildJobDerivation,
+    mirror_root: &Path,
+    worktree_root: &Path,
+) -> Option<PathBuf> {
+    if payload.execution_strategy != RemoteBuildExecutionStrategy::SourceReEvaluateVerified
+        || payload.source_input_delivery != SourceInputDeliveryMode::LocalGitWorktree
+    {
+        return None;
+    }
+
+    let source = payload.source.as_ref()?;
+    let (_, worktree_path) = source_workspace_paths(source, mirror_root, worktree_root).ok()?;
+    if worktree_path.starts_with(worktree_root) {
+        Some(worktree_path)
+    } else {
+        None
+    }
+}
+
+async fn cleanup_source_worktree(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+
+    let cwd = path.parent().unwrap_or_else(|| Path::new("/"));
+    let status = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .arg("worktree")
+        .arg("remove")
+        .arg("--force")
+        .arg(path)
+        .status()
+        .await;
+
+    match status {
+        Ok(status) if status.success() => {
+            info!("🧹 Removed source worktree {}", path.display());
+        }
+        Ok(status) => {
+            warn!(
+                "source worktree cleanup command exited with status {} for {}",
+                status,
+                path.display()
+            );
+        }
+        Err(e) => {
+            warn!(
+                "failed to run source worktree cleanup for {}: {}",
+                path.display(),
+                e
+            );
+        }
+    }
+}
+
+fn drv_path_eval_attr(source_ref: &str, flake_target: &str) -> String {
+    let attr = flake_target
+        .strip_suffix(".drvPath")
+        .unwrap_or(flake_target);
+    format!("{source_ref}#{attr}.drvPath")
+}
+
+fn verify_drv_identity(expected: &str, actual: &str) -> Result<(), PreBuildFailure> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(PreBuildFailure {
+            phase: BuildFailurePhase::DerivationMismatch,
+            message: format!(
+                "builder evaluated drvPath {actual}, expected server-authorized drvPath {expected}"
+            ),
+        })
+    }
+}
+
+async fn evaluate_verified_source_drv(
+    source: &VerifiedSourceIdentity,
+    delivery: SourceInputDeliveryMode,
+    mirror_root: &Path,
+    worktree_root: &Path,
+) -> Result<String, PreBuildFailure> {
+    let source_ref = if delivery == SourceInputDeliveryMode::LocalGitWorktree {
+        ensure_source_worktree(source, mirror_root, worktree_root)
+            .await?
+            .to_string_lossy()
+            .to_string()
+    } else {
+        source_flake_ref(source, delivery, mirror_root, worktree_root)?
+    };
+    let eval_attr = drv_path_eval_attr(&source_ref, &source.flake_target);
+
+    let output = tokio::process::Command::new("nix")
+        .arg("eval")
+        .arg("--raw")
+        .arg("--no-write-lock-file")
+        .arg("--option")
+        .arg("allow-import-from-derivation")
+        .arg("false")
+        .arg(&eval_attr)
+        .output()
+        .await
+        .map_err(|e| PreBuildFailure {
+            phase: BuildFailurePhase::Evaluation,
+            message: format!("failed to spawn nix eval for {eval_attr}: {e}"),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::Evaluation,
+            message: format!("nix eval failed for {eval_attr}: {stderr}"),
+        });
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn verify_source_build_plan(
+    payload: &BuildJobDerivation,
+    mirror_root: &Path,
+    worktree_root: &Path,
+) -> Result<String, PreBuildFailure> {
+    let expected = expected_drv_path(payload)?.to_string();
+    let source = payload.source.as_ref().ok_or_else(|| PreBuildFailure {
+        phase: BuildFailurePhase::SourceFetch,
+        message: "verified source job is missing immutable source identity".to_string(),
+    })?;
+    let actual = evaluate_verified_source_drv(
+        source,
+        payload.source_input_delivery,
+        mirror_root,
+        worktree_root,
+    )
+    .await?;
+    verify_drv_identity(&expected, &actual)?;
+    Ok(actual)
+}
+
 async fn execute_build_job(
     job_id: uuid::Uuid,
-    derivation_payload: BuildJobDerivation,
+    mut derivation_payload: BuildJobDerivation,
     client: BuilderApiClient,
     build_config: crystal_forge::config::BuildConfig,
     cache_config: crystal_forge::config::CacheConfig,
     execution_mode: crystal_forge::config::ExecutionMode,
+    remote_runtime: RemoteBuildRuntime,
 ) {
     info!(
         "🔨 Starting build for job #{} (derivation: {})",
         job_id, derivation_payload.id
     );
+
+    let source_mirror_root = remote_runtime.source_mirror_root.as_path();
+    let source_worktree_root = remote_runtime.source_worktree_root.as_path();
+
+    let cleanup_worktree = remote_runtime
+        .cleanup_source_worktrees
+        .then(|| {
+            cleanup_candidate_worktree(
+                &derivation_payload,
+                source_mirror_root,
+                source_worktree_root,
+            )
+        })
+        .flatten();
+
+    if derivation_payload.execution_strategy
+        == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
+    {
+        match verify_source_build_plan(
+            &derivation_payload,
+            source_mirror_root,
+            source_worktree_root,
+        )
+        .await
+        {
+            Ok(verified_drv_path) => {
+                info!(
+                    "✅ Verified source re-evaluation matched server drvPath: {}",
+                    verified_drv_path
+                );
+                derivation_payload.derivation_path = Some(verified_drv_path);
+            }
+            Err(failure) => {
+                error!(
+                    "❌ Job #{} failed before build during {}: {}",
+                    job_id, failure.phase, failure.message
+                );
+                if let Err(report_err) = client
+                    .fail_job_with_phase(job_id, failure.phase, &failure.message)
+                    .await
+                {
+                    error!(
+                        "❌ Failed to report job #{} pre-build failure: {}",
+                        job_id, report_err
+                    );
+                }
+                if let Some(path) = cleanup_worktree.as_deref() {
+                    cleanup_source_worktree(path).await;
+                }
+                return;
+            }
+        }
+    }
 
     // Build a Derivation from the API payload — no database read required.
     let mut derivation =
@@ -282,7 +721,14 @@ async fn execute_build_job(
             );
             send_log_with_fallback(&client, job_id, &mut ws_shared, &message).await;
             error!("❌ Job #{} cannot start build: {}", job_id, e);
-            if let Err(report_err) = client.fail_job(job_id, &e.to_string()).await {
+            if let Err(report_err) = client
+                .fail_job_with_phase(
+                    job_id,
+                    BuildFailurePhase::PathMaterialization,
+                    &e.to_string(),
+                )
+                .await
+            {
                 error!(
                     "❌ Failed to report job #{} derivation import failure: {}",
                     job_id, report_err
@@ -558,6 +1004,10 @@ async fn execute_build_job(
     if let Some(task) = metrics_task {
         task.abort();
     }
+
+    if let Some(path) = cleanup_worktree.as_deref() {
+        cleanup_source_worktree(path).await;
+    }
 }
 
 async fn ensure_derivation_available(
@@ -764,7 +1214,27 @@ fn is_local_db_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{mock_store_path, should_mock_build_fail};
+    use super::{
+        cleanup_candidate_worktree, drv_path_eval_attr, mock_store_path, should_mock_build_fail,
+        source_flake_ref, source_workspace_paths, verify_drv_identity,
+    };
+    use crystal_forge::models::builders::{
+        BuildFailurePhase, SourceInputDeliveryMode, VerifiedSourceIdentity,
+    };
+
+    fn source(archive_url: Option<&str>) -> VerifiedSourceIdentity {
+        VerifiedSourceIdentity {
+            repo_url: "https://gitlab.com/example/private.git".to_string(),
+            commit_hash: "0123456789abcdef".to_string(),
+            flake_target: "nixosConfigurations.host.config.system.build.toplevel".to_string(),
+            mirror_id: Some("repo-test".to_string()),
+            mirror_path: None,
+            worktree_path: None,
+            lock_hash: Some("sha256-lock".to_string()),
+            archive_url: archive_url.map(str::to_string),
+            archive_sha256: Some("sha256-source".to_string()),
+        }
+    }
 
     #[test]
     fn mock_store_path_is_deterministic_and_sanitized() {
@@ -782,5 +1252,125 @@ mod tests {
     fn mock_build_fail_pattern_is_deterministic() {
         assert!(should_mock_build_fail("myflake-control-0"));
         assert!(!should_mock_build_fail("myflake-worker-0"));
+    }
+
+    #[test]
+    fn source_flake_ref_prefers_server_archive_without_file_scheme() {
+        let source = source(Some("file:///tmp/source-archive"));
+        let flake_ref = source_flake_ref(
+            &source,
+            SourceInputDeliveryMode::ServerBundledArchive,
+            std::path::Path::new("/mirrors"),
+            std::path::Path::new("/worktrees"),
+        )
+        .expect("server archive source should be accepted");
+        assert_eq!(flake_ref, "/tmp/source-archive");
+    }
+
+    #[test]
+    fn server_bundled_source_requires_archive_url() {
+        let source = source(None);
+        let failure = source_flake_ref(
+            &source,
+            SourceInputDeliveryMode::ServerBundledArchive,
+            std::path::Path::new("/mirrors"),
+            std::path::Path::new("/worktrees"),
+        )
+        .expect_err("missing archive_url should fail before build");
+        assert_eq!(failure.phase, BuildFailurePhase::SourceFetch);
+    }
+
+    #[test]
+    fn public_input_mode_builds_pinned_git_ref() {
+        let source = source(None);
+        let flake_ref = source_flake_ref(
+            &source,
+            SourceInputDeliveryMode::BuilderFetchPublicInputs,
+            std::path::Path::new("/mirrors"),
+            std::path::Path::new("/worktrees"),
+        )
+        .expect("public input mode should produce a pinned git ref");
+        assert_eq!(
+            flake_ref,
+            "git+https://gitlab.com/example/private.git?rev=0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn drv_path_eval_attr_appends_drv_path_once() {
+        assert_eq!(
+            drv_path_eval_attr(
+                "/tmp/source",
+                "nixosConfigurations.host.config.system.build.toplevel"
+            ),
+            "/tmp/source#nixosConfigurations.host.config.system.build.toplevel.drvPath"
+        );
+        assert_eq!(
+            drv_path_eval_attr(
+                "/tmp/source",
+                "nixosConfigurations.host.config.system.build.toplevel.drvPath"
+            ),
+            "/tmp/source#nixosConfigurations.host.config.system.build.toplevel.drvPath"
+        );
+    }
+
+    #[test]
+    fn drv_identity_mismatch_is_pre_build_failure() {
+        let failure = verify_drv_identity(
+            "/nix/store/server-nixos-system-host.drv",
+            "/nix/store/builder-nixos-system-host.drv",
+        )
+        .expect_err("mismatch must fail before build");
+        assert_eq!(failure.phase, BuildFailurePhase::DerivationMismatch);
+        assert!(
+            failure
+                .message
+                .contains("expected server-authorized drvPath")
+        );
+    }
+
+    #[test]
+    fn local_git_worktree_paths_are_derived_from_mirror_id_and_commit() {
+        let source = source(None);
+        let (mirror, worktree) = source_workspace_paths(
+            &source,
+            std::path::Path::new("/mirrors"),
+            std::path::Path::new("/worktrees"),
+        )
+        .expect("paths should resolve");
+
+        assert_eq!(mirror, std::path::PathBuf::from("/mirrors/repo-test.git"));
+        assert_eq!(
+            worktree,
+            std::path::PathBuf::from("/worktrees/repo-test/0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn cleanup_candidate_is_limited_to_configured_worktree_root() {
+        let payload = crystal_forge::models::builders::BuildJobDerivation {
+            id: 1,
+            derivation_name: "host".to_string(),
+            derivation_type: "nixos".to_string(),
+            derivation_path: None,
+            store_path: None,
+            execution_strategy: crystal_forge::models::builders::RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            source: Some(source(None)),
+            source_input_delivery: SourceInputDeliveryMode::LocalGitWorktree,
+            expected_drv_path: Some("/nix/store/server-host.drv".to_string()),
+            evaluator: None,
+        };
+
+        let cleanup = cleanup_candidate_worktree(
+            &payload,
+            std::path::Path::new("/mirrors"),
+            std::path::Path::new("/worktrees"),
+        )
+        .expect("worktree under configured root should be cleaned");
+
+        assert_eq!(
+            cleanup,
+            std::path::PathBuf::from("/worktrees/repo-test/0123456789abcdef")
+        );
     }
 }

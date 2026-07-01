@@ -4,6 +4,91 @@
 
 The Multi-Builder API enables distributed builder deployments with centralized management through the Crystal Forge server. Builders authenticate via Ed25519 signatures and communicate exclusively through REST API endpoints.
 
+## Remote Build Execution Strategies
+
+Crystal Forge remote builders use explicit execution strategies. The scheduler must not silently fall back between strategies; a builder should only receive jobs for strategies it is configured to support.
+
+Builder-side capability is opt-in through `builder.supported_execution_strategies`. The default is only:
+
+```toml
+[builder]
+supported_execution_strategies = ["server_derivation"]
+```
+
+To allow verified source jobs, configure the builder explicitly:
+
+```toml
+[builder]
+supported_execution_strategies = ["server_derivation", "source_re_evaluate_verified"]
+source_mirror_root = "/var/lib/crystal-forge/flake-mirrors"
+source_worktree_root = "/var/lib/crystal-forge/flake-worktrees"
+cleanup_source_worktrees = true
+```
+
+### `server_derivation` default
+
+`server_derivation` is the current production default. The server evaluates the flake, records the authoritative `.drv` path, and sends that derivation identity to the API-only builder. The builder realizes/builds the supplied `.drv` and reports logs, progress, completion, or failure through the builder API. Builders do not access Postgres directly.
+
+This mode keeps evaluation fully server-authoritative, but it requires the builder to materialize the server-evaluated `.drv` and its input closure through configured substituters or Crystal Forge transport before the real build can start. Materialization failures should be reported as `path_materialization` failures rather than leaving the job stuck in `building`.
+
+### `source_re_evaluate_verified`
+
+`source_re_evaluate_verified` is the verified source strategy. It keeps the server authoritative while avoiding monolithic derivation-closure transfer as the common path.
+
+Flow:
+
+1. The server evaluates the target with the equivalent of:
+
+   ```bash
+   nix eval --raw .#nixosConfigurations.<host>.config.system.build.toplevel.drvPath
+   ```
+
+   The resulting `.drvPath` is the server-authorized build-plan fingerprint. The server does not need `nix build --dry-run` for this identity.
+
+2. The server sends a job manifest containing immutable source identity, flake target, source/input delivery mode, evaluator fingerprint, and the expected server `.drvPath`.
+
+3. The builder obtains the immutable source without broad/reusable Git credentials. The preferred operational model is a local Git mirror plus detached worktree:
+
+   ```text
+   /var/lib/crystal-forge/flake-mirrors/<mirror-id>.git
+   /var/lib/crystal-forge/flake-worktrees/<mirror-id>/<commit-sha>
+   ```
+
+   The server serves enough source metadata or snapshot data for the builder to keep its local mirror current. The builder creates or reuses a detached worktree at the exact authorized commit. If server and builder are colocated, both may point at the same mirror/worktree roots to avoid duplicate clones.
+
+   Locked-down deployments can still choose a server-bundled source/input archive (for example, a `nix flake archive`/NAR-style artifact). For public inputs, a deployment may allow the builder to fetch public flake inputs itself.
+
+4. The builder verifies the local worktree HEAD equals the manifest commit, then evaluates before building:
+
+   ```bash
+   drv=$(nix eval --raw <source>#nixosConfigurations.<host>.config.system.build.toplevel.drvPath)
+   ```
+
+5. The builder compares `$drv` to the server-provided expected `.drvPath`. A mismatch fails before any build starts with `derivation_mismatch`.
+
+6. If the strings match, the builder builds the exact verified derivation object:
+
+   ```bash
+   nix build "$drv^*"
+   ```
+
+   The important property is eval → compare → build, not build → inspect.
+
+This strategy verifies derivation identity/build-plan equality. It does not prove bit-for-bit output reproducibility; output reproducibility is a separate concern.
+
+Recommended controls:
+
+- Keep source identity immutable: commit hash, lock/source metadata, and archive hash where available.
+- Prefer detached worktrees from a local mirror over mutable branch checkouts.
+- Verify the worktree `HEAD` equals the manifest commit before evaluation.
+- Clean up job/commit worktrees after build completion and cache-push/reporting lifecycle is complete.
+- Prefer server-bundled inputs for locked-down or GovCloud-style builders with no internet egress.
+- Do not place broad private Git credentials on every builder.
+- Record or pin the Nix version/evaluator fingerprint across server and builders.
+- Disable lockfile mutation and avoid impure evaluation for this strategy.
+
+Expected pre-build failure phases include `source_fetch`, `source_input_availability`, `evaluation`, `derivation_mismatch`, and `path_materialization`.
+
 ## Architecture
 
 ### Components

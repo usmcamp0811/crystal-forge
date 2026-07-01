@@ -31,9 +31,11 @@ use crate::handlers::builder_request::{
 };
 use crate::models::builders::{
     AppendLogsRequest, BuildJob, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary,
-    BuilderWithEnvironments, CreateBuilderRequest, KeypairRegeneratedResponse,
-    ReportMetricsRequest, ResolveBuilderIdRequest, ResolveBuilderIdResponse,
+    BuilderWithEnvironments, CreateBuilderRequest, EvaluatorFingerprint,
+    KeypairRegeneratedResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest,
+    ResolveBuilderIdRequest, ResolveBuilderIdResponse, SourceInputDeliveryMode,
     UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
+    VerifiedSourceIdentity,
 };
 use crate::models::public_key::PublicKey;
 use crate::queries::builders;
@@ -172,6 +174,83 @@ async fn resolve_cache_destinations_for_derivation(
 
     destinations.retain(|destination| destination.enabled);
     Ok(destinations)
+}
+
+async fn verified_source_identity_for_derivation(
+    pool: &sqlx::PgPool,
+    derivation: &crate::derivations::Derivation,
+) -> Option<VerifiedSourceIdentity> {
+    let commit_id = derivation.commit_id?;
+    let commit = match crate::queries::commits::get_commit_by_id(pool, commit_id).await {
+        Ok(commit) => commit,
+        Err(e) => {
+            tracing::debug!(
+                derivation_id = derivation.id,
+                commit_id,
+                "failed to load commit for verified source identity: {e}"
+            );
+            return None;
+        }
+    };
+
+    let flake = match crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await {
+        Ok(flake) => flake,
+        Err(e) => {
+            tracing::debug!(
+                derivation_id = derivation.id,
+                flake_id = commit.flake_id,
+                "failed to load flake for verified source identity: {e}"
+            );
+            return None;
+        }
+    };
+
+    let mirror_id = source_mirror_id(&flake.repo_url);
+
+    Some(VerifiedSourceIdentity {
+        repo_url: flake.repo_url,
+        commit_hash: commit.git_commit_hash,
+        flake_target: source_flake_target_for_derivation(derivation),
+        mirror_id: Some(mirror_id),
+        mirror_path: None,
+        worktree_path: None,
+        lock_hash: None,
+        archive_url: None,
+        archive_sha256: None,
+    })
+}
+
+fn current_evaluator_fingerprint() -> EvaluatorFingerprint {
+    EvaluatorFingerprint {
+        nix_version: std::env::var("NIX_VERSION").unwrap_or_else(|_| "unknown".to_string()),
+        pure_eval: true,
+        lockfile_mutation_allowed: false,
+    }
+}
+
+fn source_flake_target_for_derivation(derivation: &crate::derivations::Derivation) -> String {
+    derivation
+        .derivation_target
+        .as_deref()
+        .and_then(|target| target.split_once('#').map(|(_, attr)| attr.to_string()))
+        .or_else(|| derivation.derivation_target.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "nixosConfigurations.{}.config.system.build.toplevel",
+                derivation.derivation_name
+            )
+        })
+}
+
+fn source_mirror_id(repo_url: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(repo_url.as_bytes());
+    let short = digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("repo-{short}")
 }
 
 fn apply_cache_destination_env(
@@ -1196,6 +1275,16 @@ pub async fn get_next_job(
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
 
+    let execution_strategy = state.server_config.remote_build_execution_strategy;
+    let source = verified_source_identity_for_derivation(&state.pool, &derivation).await;
+    let expected_drv_path = derivation.derivation_path.clone();
+    let source_input_delivery = match execution_strategy {
+        RemoteBuildExecutionStrategy::ServerDerivation => SourceInputDeliveryMode::None,
+        RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
+            SourceInputDeliveryMode::LocalGitWorktree
+        }
+    };
+
     let payload = crate::models::builders::BuildJobDerivation {
         id: derivation.id,
         derivation_name: derivation.derivation_name.clone(),
@@ -1205,6 +1294,11 @@ pub async fn get_next_job(
         },
         derivation_path: derivation.derivation_path.clone(),
         store_path: derivation.store_path.clone(),
+        execution_strategy,
+        source,
+        source_input_delivery,
+        expected_drv_path,
+        evaluator: Some(current_evaluator_fingerprint()),
     };
 
     Ok(Json(crate::models::builders::NextJobResponse {
@@ -1260,6 +1354,8 @@ pub async fn build_progress(
 pub struct JobStatusRequest {
     #[serde(default)]
     pub status: Option<String>,
+    #[serde(default)]
+    pub failure_phase: Option<String>,
     pub error_message: Option<String>,
 }
 
@@ -1267,6 +1363,7 @@ fn parse_job_status_request(body: &[u8]) -> Result<JobStatusRequest, serde_json:
     if body.is_empty() {
         return Ok(JobStatusRequest {
             status: None,
+            failure_phase: None,
             error_message: None,
         });
     }
@@ -1277,7 +1374,16 @@ fn parse_job_status_request(body: &[u8]) -> Result<JobStatusRequest, serde_json:
 fn fallback_job_status_request_for_invalid_details() -> JobStatusRequest {
     JobStatusRequest {
         status: None,
+        failure_phase: Some("build".to_string()),
         error_message: Some("builder reported failure with invalid failure details".to_string()),
+    }
+}
+
+fn format_failure_message(request: &JobStatusRequest) -> Option<String> {
+    let message = request.error_message.clone()?;
+    match request.failure_phase.as_deref() {
+        Some(phase) if !phase.trim().is_empty() => Some(format!("[{phase}] {message}")),
+        _ => Some(message),
     }
 }
 
@@ -1695,12 +1801,14 @@ pub async fn fail_job(
         return Err(StatusCode::FORBIDDEN);
     }
 
+    let failure_message = format_failure_message(&request);
+
     // Mark job as failed with retry logic
     let updated_job = builders::mark_job_failed_with_retry(
         &state.pool,
         &job_id,
         &builder_id,
-        request.error_message.as_deref(),
+        failure_message.as_deref(),
     )
     .await
     .map_err(|err| {
@@ -1724,8 +1832,7 @@ pub async fn fail_job(
         {
             Ok(derivation) => {
                 let err = anyhow::anyhow!(
-                    request
-                        .error_message
+                    failure_message
                         .clone()
                         .unwrap_or_else(|| "build failed".to_string())
                 );
@@ -2246,12 +2353,13 @@ mod tests {
 
     use super::BuildStreamMessage;
     use super::builder_id_for_resolved_builder;
+    use super::canonical_signature_payload;
     use super::chunk_derivation_archive_paths;
     use super::fallback_job_status_request_for_invalid_details;
+    use super::format_failure_message;
     use super::map_create_builder_error;
     use super::parse_derivation_requisites;
     use super::parse_job_status_request;
-    use super::canonical_signature_payload;
     use super::verify_builder_resolve_request;
     use crate::builder::api_client::BuilderApiClient;
     use crate::models::builders::{Builder, BuilderStatus, ResolveBuilderIdRequest};
@@ -2373,7 +2481,23 @@ mod tests {
             .expect("failure body without status should remain accepted");
 
         assert_eq!(parsed.status, None);
+        assert_eq!(parsed.failure_phase, None);
         assert_eq!(parsed.error_message.as_deref(), Some("nix build failed"));
+    }
+
+    #[test]
+    fn job_status_request_accepts_failure_phase() {
+        let parsed = parse_job_status_request(
+            br#"{"failure_phase":"derivation_mismatch","error_message":"drv mismatch"}"#,
+        )
+        .expect("failure body with phase should parse");
+
+        assert_eq!(parsed.status, None);
+        assert_eq!(parsed.failure_phase.as_deref(), Some("derivation_mismatch"));
+        assert_eq!(
+            format_failure_message(&parsed).as_deref(),
+            Some("[derivation_mismatch] drv mismatch")
+        );
     }
 
     #[test]
@@ -2382,6 +2506,7 @@ mod tests {
             .expect("empty failure body should still allow job failure reporting");
 
         assert_eq!(parsed.status, None);
+        assert_eq!(parsed.failure_phase, None);
         assert_eq!(parsed.error_message, None);
     }
 
@@ -2393,6 +2518,7 @@ mod tests {
         let fallback = fallback_job_status_request_for_invalid_details();
 
         assert_eq!(fallback.status, None);
+        assert_eq!(fallback.failure_phase.as_deref(), Some("build"));
         assert_eq!(
             fallback.error_message.as_deref(),
             Some("builder reported failure with invalid failure details")
