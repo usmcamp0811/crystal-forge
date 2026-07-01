@@ -1,11 +1,11 @@
 ---
 id: TASK-375.4
 title: 'Remote builders: add verified source re-evaluation strategy'
-status: In Progress
+status: Review
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-30 17:46'
-updated_date: '2026-07-01 04:07'
+updated_date: '2026-07-01 04:52'
 labels:
   - builder
   - remote-builds
@@ -93,35 +93,23 @@ Verification Plan:
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A new explicit verified source strategy exists (`source_re_evaluate_verified` or agreed final name) and is not used as a silent fallback.
-- [ ] #2 Server derives the authoritative fingerprint using pure evaluation of the target `.drvPath` (`nix eval --raw ...drvPath` equivalent), not a dry-run build.
-- [ ] #3 Server job manifest includes immutable source identity, flake target, lock/source metadata, evaluator fingerprint fields, source/input delivery mode, and expected toplevel `.drvPath`.
-- [ ] #4 Builder obtains immutable server-provided source without broad/reusable Git credentials and evaluates it with controlled Nix settings.
-- [ ] #5 Builder compares locally evaluated toplevel `.drvPath` to the server-expected `.drvPath` before any build starts and refuses to build on mismatch.
-- [ ] #6 After a successful match, builder builds the exact verified derivation object and reports logs, progress, completion/failure, and output path through the API-only builder protocol.
-- [ ] #7 Derivation mismatch, source fetch failure, evaluation failure, and input/source availability failures are represented as distinct attempt phases/error classes and do not leave jobs stuck in `building`.
-- [ ] #8 Unverified source checkout support is absent or clearly limited to development/testing only; there is no hidden fallback between strategies.
-- [ ] #9 Operator documentation explains when to use verified source re-evaluation, source/input delivery options (`nix flake archive`/bundled inputs vs public input fetching), security requirements, Nix version/purity expectations, and the distinction between derivation identity verification and output reproducibility.
-- [ ] #10 Builder source acquisition uses a local mirror/snapshot model: server serves enough metadata/artifact information for the builder to keep a local flake copy at the authorized commit, and colocated server/builder deployments can share the same configured mirror root without duplicate checkouts.
-- [ ] #11 Verified source mode uses detached Git worktrees at exact commit SHAs from a local mirror/worktree root, verifies the worktree HEAD matches the manifest commit before eval, and cleans up job/commit worktrees after build completion and cache-push/reporting lifecycle completes.
+- [x] #1 A new explicit verified source strategy exists (`source_re_evaluate_verified` or agreed final name) and is not used as a silent fallback.
+- [x] #2 Server derives the authoritative fingerprint using pure evaluation of the target `.drvPath` (`nix eval --raw ...drvPath` equivalent), not a dry-run build.
+- [x] #3 Server job manifest includes immutable source identity, flake target, lock/source metadata, evaluator fingerprint fields, source/input delivery mode, and expected toplevel `.drvPath`.
+- [x] #4 Builder obtains immutable server-provided source without broad/reusable Git credentials and evaluates it with controlled Nix settings.
+- [x] #5 Builder compares locally evaluated toplevel `.drvPath` to the server-expected `.drvPath` before any build starts and refuses to build on mismatch.
+- [x] #6 After a successful match, builder builds the exact verified derivation object and reports logs, progress, completion/failure, and output path through the API-only builder protocol.
+- [x] #7 Derivation mismatch, source fetch failure, evaluation failure, and input/source availability failures are represented as distinct attempt phases/error classes and do not leave jobs stuck in `building`.
+- [x] #8 Unverified source checkout support is absent or clearly limited to development/testing only; there is no hidden fallback between strategies.
+- [x] #9 Operator documentation explains when to use verified source re-evaluation, source/input delivery options (`nix flake archive`/bundled inputs vs public input fetching), security requirements, Nix version/purity expectations, and the distinction between derivation identity verification and output reproducibility.
+- [x] #10 Builder source acquisition uses a local mirror/snapshot model: server serves enough metadata/artifact information for the builder to keep a local flake copy at the authorized commit, and colocated server/builder deployments can share the same configured mirror root without duplicate checkouts.
+- [x] #11 Verified source mode uses detached Git worktrees at exact commit SHAs from a local mirror/worktree root, verifies the worktree HEAD matches the manifest commit before eval, and cleans up job/commit worktrees after build completion and cache-push/reporting lifecycle completes.
 <!-- AC:END -->
-
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-Refinement: implement source workspace metadata around a bare mirror plus detached worktree at the authorized commit. Add manifest fields/config for mirror/worktree roots and cleanup behavior. Builder source acquisition should resolve/create a detached commit worktree, verify HEAD equals the job commit, eval from that path, and schedule/remove the worktree after build and cache push reporting complete.
-
-User decision: make `source_re_evaluate_verified` the DEFAULT strategy (server default + builder default capability), keeping `server_derivation` available but non-default. This requires the builder to self-manage its local mirror: create the bare mirror from repo_url if missing and fetch the authorized commit before adding the detached worktree, so a fresh builder does not fail with source_fetch. Update config/module defaults, docs, and tests accordingly.
-<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Further design refinement: use Git mirror/worktree semantics for verified source acquisition. Maintain a shared bare mirror per flake/repo and create detached worktrees at exact authorized commit SHAs for evaluation/build. Colocated server and builder can point at the same mirror/worktree roots; remote builders keep equivalent local mirrors from server-provided source metadata/artifacts. Builders must verify worktree HEAD equals the manifest commit before eval. Worktrees should be cleaned up after build completion and cache-push/reporting lifecycle is done.
-
-Opened MR !290 (https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/290) into dev and moved task to Review. Implementation complete: explicit verified source re-evaluation strategy with mirror+detached-worktree source delivery, eval-before-build drvPath verification, distinct failure phases, opt-in builder capability + server strategy config, and NixOS module options. Verification run in repo devshell: targeted cargo tests pass (builder bin 9, models::builders 4, config::builder 2, config::server 4, handlers::api::builders::tests 20); rustfmt --check clean on changed files; devshell package build (checkPhase) succeeds; NixOS module parses. nix flake check intentionally deferred to CI (touches NixOS module).
-
-Making verified source the default. Adding builder-side mirror bootstrap/fetch (git clone --bare / git fetch of the exact commit) into ensure_source_worktree so a fresh builder can populate its mirror from the repo URL without a pre-seeded mirror. server_derivation remains selectable.
+Pushed follow-up commit ede184dc to MR !290 making `source_re_evaluate_verified` the default server strategy and default builder capability. Added builder mirror bootstrap/fetch so fresh builders clone/fetch their bare mirror from the repository URL before detached worktree creation. Updated NixOS defaults, docs, and tests. Verification passed with targeted cargo tests, rustfmt check, NixOS module parse, and devshell package realization/checkPhase. MR description updated with current defaults and verification results.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
@@ -137,15 +125,15 @@ MR !290 opened for review/testing. Note: end-to-end verified-source build agains
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Implemented the explicit `source_re_evaluate_verified` remote build strategy alongside the `server_derivation` default.
+Implemented explicit verified source re-evaluation remote builds and made them the default path.
 
-Server: `next-job` now emits an explicit execution strategy plus source identity (repo/commit/flake target/mirror id), expected toplevel `.drvPath`, evaluator fingerprint, and source-input delivery mode, all derived from existing commit/flake records (no schema change). The default strategy is configurable via `server.remote_build_execution_strategy` and defaults to `server_derivation`. Fail reporting now carries an optional `failure_phase` so distinct pre-build failures are preserved.
+Server/API: job manifests now carry explicit execution strategy, immutable source identity, flake target, source/input delivery mode, evaluator fingerprint, and expected toplevel `.drvPath`. The server default is now `source_re_evaluate_verified`, while `server_derivation` remains selectable explicitly with no hidden fallback.
 
-Builder: added opt-in `supported_execution_strategies` capability (defaults to server_derivation only, no silent fallback). Verified source flow acquires source via a bare Git mirror + detached worktree at the authorized commit, verifies worktree HEAD == manifest commit, runs pure `nix eval --raw ...drvPath`, compares to the server-authorized `.drvPath`, and only builds the exact verified derivation. Distinct failure phases (source_fetch/evaluation/derivation_mismatch/path_materialization) are reported so jobs never stay stuck in `building`. Worktrees under the configured worktree root are cleaned up after the build/reporting lifecycle.
+Builder: default capabilities now include verified source first and `server_derivation` second. Verified source acquisition self-manages a bare local Git mirror: it clones from `repo_url` when missing, fetches if the authorized commit is absent, creates/reuses a detached worktree at the exact commit SHA, verifies worktree `HEAD`, evaluates `.drvPath` before any build, compares against the server-authorized `.drvPath`, and then builds the exact verified derivation object. Distinct failure phases are reported for source fetch, evaluation, derivation mismatch, and path materialization. Worktree cleanup remains scoped to configured worktree roots after reporting/cache-push lifecycle.
 
-Config/module/docs: NixOS module exposes strategy selection and mirror/worktree roots; docs/multi-builder-api.md documents the flow, delivery options, and the derivation-identity-vs-output-reproducibility distinction.
+Config/docs/tests: NixOS module defaults now use verified source mode and builder support for both strategies by default. Operator docs explain verified source as default, how to force `server_derivation`, mirror/worktree roots, cleanup, and the derivation-identity vs output-reproducibility distinction. Added a Git-backed unit test for mirror clone/fetch behavior that skips gracefully when `git` is unavailable in the Nix build sandbox.
 
-Verification (repo devshell): targeted cargo tests pass (builder bin 9, models::builders 4, config::builder 2, config::server 4, handlers::api::builders::tests 20); rustfmt --check clean on changed files; devshell package build (checkPhase) succeeds; NixOS module parses. nix flake check deferred to CI because the change touches a NixOS module.
+Verification run in the repo devshell: `SQLX_OFFLINE=true cargo test --bin builder` (10 passed), `cargo test --lib config::builder` (2 passed), `cargo test --lib config::server` (4 passed), `cargo test --lib models::builders` (4 passed), `cargo test --lib handlers::api::builders::tests` (20 passed), rustfmt check on changed Rust files (clean), `nix-instantiate --parse modules/nixos/crystal-forge/default.nix` (OK), and `nix develop` package realization/checkPhase completed successfully after fixing the sandbox test behavior. `nix flake check` was not run locally per user direction and is left to CI.
 
-MR: !290 (https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/290).
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/290
 <!-- SECTION:FINAL_SUMMARY:END -->
