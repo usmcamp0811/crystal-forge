@@ -1051,19 +1051,21 @@ in {
 
       remote_execution_strategy = lib.mkOption {
         type = lib.types.enum ["server_derivation" "source_re_evaluate_verified"];
-        default = "server_derivation";
+        default = "source_re_evaluate_verified";
         description = lib.mdDoc ''
           Default remote build execution strategy for API builders.
 
-          - `server_derivation` (default): the server evaluates and provides the
-            authoritative `.drv`; the builder realizes it.
-          - `source_re_evaluate_verified`: the server records the expected
-            toplevel `.drvPath`; the builder evaluates immutable source from a
-            local Git worktree and only builds when its locally evaluated
+          - `source_re_evaluate_verified` (default): the server records the
+            expected toplevel `.drvPath`; the builder evaluates immutable source
+            from a local Git worktree (created from a bare mirror at the exact
+            authorized commit) and only builds when its locally evaluated
             `.drvPath` matches the server-authorized value.
+          - `server_derivation`: the server evaluates and provides the
+            authoritative `.drv`; the builder realizes it via cache/closure
+            transport.
 
-          When set to `source_re_evaluate_verified`, builders must advertise
-          support for that strategy via `supported_execution_strategies`.
+          Builders must advertise support for whichever strategy is selected via
+          `supported_execution_strategies`.
         '';
       };
 
@@ -1071,12 +1073,12 @@ in {
         type = lib.types.listOf (
           lib.types.enum ["server_derivation" "source_re_evaluate_verified"]
         );
-        default = ["server_derivation"];
+        default = ["source_re_evaluate_verified" "server_derivation"];
         description = lib.mdDoc ''
           Remote build strategies this builder will accept. Jobs using a strategy
           not listed here are rejected explicitly (no silent fallback).
         '';
-        example = ["server_derivation" "source_re_evaluate_verified"];
+        example = ["source_re_evaluate_verified" "server_derivation"];
       };
 
       source_mirror_root = lib.mkOption {

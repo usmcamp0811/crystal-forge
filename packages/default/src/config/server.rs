@@ -103,10 +103,15 @@ pub struct ServerConfig {
     pub allow_private_cache_test_targets: bool,
 
     /// Default remote build execution strategy for API builders.
-    /// Defaults to `server_derivation`; verified source re-evaluation must be
-    /// selected explicitly and builders must advertise support for it.
-    #[serde(default)]
+    /// Defaults to `source_re_evaluate_verified`; set to `server_derivation`
+    /// to fall back to server-evaluated derivation transport. Builders must
+    /// advertise support for whichever strategy is selected.
+    #[serde(default = "default_remote_build_execution_strategy")]
     pub remote_build_execution_strategy: RemoteBuildExecutionStrategy,
+}
+
+fn default_remote_build_execution_strategy() -> RemoteBuildExecutionStrategy {
+    RemoteBuildExecutionStrategy::SourceReEvaluateVerified
 }
 
 // Default value functions for serde
@@ -163,7 +168,7 @@ impl Default for ServerConfig {
             failed_build_log_retention_days: default_failed_build_log_retention_days(),
             commit_cache_retention_days: default_commit_cache_retention_days(),
             allow_private_cache_test_targets: false,
-            remote_build_execution_strategy: RemoteBuildExecutionStrategy::ServerDerivation,
+            remote_build_execution_strategy: default_remote_build_execution_strategy(),
         }
     }
 }
@@ -251,11 +256,11 @@ mod tests {
     }
 
     #[test]
-    fn remote_build_strategy_defaults_to_server_derivation() {
+    fn remote_build_strategy_defaults_to_verified_source() {
         let cfg = ServerConfig::default();
         assert_eq!(
             cfg.remote_build_execution_strategy,
-            RemoteBuildExecutionStrategy::ServerDerivation
+            RemoteBuildExecutionStrategy::SourceReEvaluateVerified
         );
     }
 

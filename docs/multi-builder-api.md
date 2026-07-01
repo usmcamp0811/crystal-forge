@@ -6,28 +6,32 @@ The Multi-Builder API enables distributed builder deployments with centralized m
 
 ## Remote Build Execution Strategies
 
-Crystal Forge remote builders use explicit execution strategies. The scheduler must not silently fall back between strategies; a builder should only receive jobs for strategies it is configured to support.
+Crystal Forge remote builders use explicit execution strategies. The scheduler must not silently fall back between strategies; a builder only receives jobs for strategies it is configured to support.
 
-Builder-side capability is opt-in through `builder.supported_execution_strategies`. The default is only:
+**`source_re_evaluate_verified` is the default strategy** on both the server (`server.remote_build_execution_strategy`) and the builder (`builder.supported_execution_strategies`). `server_derivation` remains available and can be selected explicitly.
 
-```toml
-[builder]
-supported_execution_strategies = ["server_derivation"]
-```
-
-To allow verified source jobs, configure the builder explicitly:
+Default builder configuration (no changes required for verified source builds):
 
 ```toml
 [builder]
-supported_execution_strategies = ["server_derivation", "source_re_evaluate_verified"]
+supported_execution_strategies = ["source_re_evaluate_verified", "server_derivation"]
 source_mirror_root = "/var/lib/crystal-forge/flake-mirrors"
 source_worktree_root = "/var/lib/crystal-forge/flake-worktrees"
 cleanup_source_worktrees = true
 ```
 
-### `server_derivation` default
+To force the older server-evaluated derivation transport, set the server default:
 
-`server_derivation` is the current production default. The server evaluates the flake, records the authoritative `.drv` path, and sends that derivation identity to the API-only builder. The builder realizes/builds the supplied `.drv` and reports logs, progress, completion, or failure through the builder API. Builders do not access Postgres directly.
+```toml
+[server]
+remote_build_execution_strategy = "server_derivation"
+```
+
+The builder self-manages its local mirror: if the bare mirror is missing it is created with `git clone --bare` from the repository URL, and if the authorized commit is not present the mirror is fetched. A fresh builder therefore does not require a pre-seeded mirror; it only needs read access to the repository URL. Colocated server/builder deployments may still share the same mirror/worktree roots to avoid duplicate clones.
+
+### `server_derivation`
+
+`server_derivation` keeps evaluation fully server-authoritative on the server side. The server evaluates the flake, records the authoritative `.drv` path, and sends that derivation identity to the API-only builder. The builder realizes/builds the supplied `.drv` and reports logs, progress, completion, or failure through the builder API. Builders do not access Postgres directly.
 
 This mode keeps evaluation fully server-authoritative, but it requires the builder to materialize the server-evaluated `.drv` and its input closure through configured substituters or Crystal Forge transport before the real build can start. Materialization failures should be reported as `path_materialization` failures rather than leaving the job stuck in `building`.
 

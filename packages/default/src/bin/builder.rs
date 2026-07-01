@@ -360,6 +360,103 @@ fn source_workspace_paths(
     ))
 }
 
+/// Ensure a bare mirror exists at `mirror_path` and contains `commit_hash`.
+///
+/// If the mirror is missing it is created (`git clone --bare`). If the requested
+/// commit is not present, the mirror is fetched. This lets a fresh builder
+/// populate its local source copy directly from the repository URL without a
+/// pre-seeded mirror, while still building from the exact authorized commit.
+async fn ensure_mirror_has_commit(
+    mirror_path: &Path,
+    repo_url: &str,
+    commit_hash: &str,
+) -> Result<(), PreBuildFailure> {
+    let source_fetch = |message: String| PreBuildFailure {
+        phase: BuildFailurePhase::SourceFetch,
+        message,
+    };
+
+    if !mirror_path.exists() {
+        if let Some(parent) = mirror_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                source_fetch(format!(
+                    "failed to create mirror parent {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+
+        let output = tokio::process::Command::new("git")
+            .arg("clone")
+            .arg("--bare")
+            .arg(repo_url)
+            .arg(mirror_path)
+            .output()
+            .await
+            .map_err(|e| source_fetch(format!("failed to spawn git clone --bare: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(source_fetch(format!(
+                "git clone --bare failed for {repo_url}: {stderr}"
+            )));
+        }
+    }
+
+    // If the commit is already present, no fetch is required.
+    let has_commit = tokio::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(mirror_path)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{commit_hash}^{{commit}}"))
+        .output()
+        .await
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+
+    if has_commit {
+        return Ok(());
+    }
+
+    let output = tokio::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(mirror_path)
+        .arg("fetch")
+        .arg("--prune")
+        .arg(repo_url)
+        .arg("+refs/*:refs/*")
+        .output()
+        .await
+        .map_err(|e| source_fetch(format!("failed to spawn git fetch: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(source_fetch(format!(
+            "git fetch failed for {repo_url}: {stderr}"
+        )));
+    }
+
+    let has_commit_after = tokio::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(mirror_path)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{commit_hash}^{{commit}}"))
+        .output()
+        .await
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+
+    if has_commit_after {
+        Ok(())
+    } else {
+        Err(source_fetch(format!(
+            "commit {commit_hash} not found in mirror for {repo_url} after fetch"
+        )))
+    }
+}
+
 async fn ensure_source_worktree(
     source: &VerifiedSourceIdentity,
     mirror_root: &Path,
@@ -372,16 +469,7 @@ async fn ensure_source_worktree(
         return Ok(worktree_path);
     }
 
-    if !mirror_path.exists() {
-        return Err(PreBuildFailure {
-            phase: BuildFailurePhase::SourceFetch,
-            message: format!(
-                "local source mirror is missing for {} at {}",
-                source.repo_url,
-                mirror_path.display()
-            ),
-        });
-    }
+    ensure_mirror_has_commit(&mirror_path, &source.repo_url, &source.commit_hash).await?;
 
     if let Some(parent) = worktree_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -1215,8 +1303,8 @@ fn is_local_db_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_candidate_worktree, drv_path_eval_attr, mock_store_path, should_mock_build_fail,
-        source_flake_ref, source_workspace_paths, verify_drv_identity,
+        cleanup_candidate_worktree, drv_path_eval_attr, ensure_mirror_has_commit, mock_store_path,
+        should_mock_build_fail, source_flake_ref, source_workspace_paths, verify_drv_identity,
     };
     use crystal_forge::models::builders::{
         BuildFailurePhase, SourceInputDeliveryMode, VerifiedSourceIdentity,
@@ -1372,5 +1460,88 @@ mod tests {
             cleanup,
             std::path::PathBuf::from("/worktrees/repo-test/0123456789abcdef")
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_mirror_clones_and_fetches_authorized_commits() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let source_repo = temp.path().join("source");
+        let mirror_path = temp.path().join("mirror.git");
+
+        git(temp.path(), &["init", source_repo.to_str().unwrap()]);
+        git(
+            &source_repo,
+            &["config", "user.email", "builder@example.invalid"],
+        );
+        git(&source_repo, &["config", "user.name", "Builder Test"]);
+
+        std::fs::write(source_repo.join("flake.nix"), "{ outputs = { self }: {}; }")
+            .expect("fixture file should be written");
+        git(&source_repo, &["add", "flake.nix"]);
+        git(&source_repo, &["commit", "-m", "initial"]);
+        let first_commit = git_stdout(&source_repo, &["rev-parse", "HEAD"]);
+
+        ensure_mirror_has_commit(&mirror_path, source_repo.to_str().unwrap(), &first_commit)
+            .await
+            .expect("missing mirror should be cloned with the requested commit");
+        assert!(mirror_path.exists());
+
+        std::fs::write(source_repo.join("README.md"), "second commit")
+            .expect("fixture file should be written");
+        git(&source_repo, &["add", "README.md"]);
+        git(&source_repo, &["commit", "-m", "second"]);
+        let second_commit = git_stdout(&source_repo, &["rev-parse", "HEAD"]);
+
+        ensure_mirror_has_commit(&mirror_path, source_repo.to_str().unwrap(), &second_commit)
+            .await
+            .expect("existing mirror should fetch the requested missing commit");
+
+        git(
+            temp.path(),
+            &[
+                "--git-dir",
+                mirror_path.to_str().unwrap(),
+                "cat-file",
+                "-e",
+                &format!("{second_commit}^{{commit}}"),
+            ],
+        );
+    }
+
+    fn git(cwd: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .expect("git should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .expect("git should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 }
