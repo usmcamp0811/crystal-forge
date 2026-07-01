@@ -229,7 +229,7 @@ fn current_evaluator_fingerprint() -> EvaluatorFingerprint {
 }
 
 fn source_flake_target_for_derivation(derivation: &crate::derivations::Derivation) -> String {
-    derivation
+    let target = derivation
         .derivation_target
         .as_deref()
         .and_then(|target| target.split_once('#').map(|(_, attr)| attr.to_string()))
@@ -239,7 +239,18 @@ fn source_flake_target_for_derivation(derivation: &crate::derivations::Derivatio
                 "nixosConfigurations.{}.config.system.build.toplevel",
                 derivation.derivation_name
             )
-        })
+        });
+
+    if matches!(
+        derivation.derivation_type,
+        crate::derivations::DerivationType::NixOS
+    ) && target.starts_with("nixosConfigurations.")
+        && !target.contains(".config.system.build.toplevel")
+    {
+        format!("{target}.config.system.build.toplevel")
+    } else {
+        target
+    }
 }
 
 fn source_mirror_id(repo_url: &str) -> String {
@@ -2360,8 +2371,10 @@ mod tests {
     use super::map_create_builder_error;
     use super::parse_derivation_requisites;
     use super::parse_job_status_request;
+    use super::source_flake_target_for_derivation;
     use super::verify_builder_resolve_request;
     use crate::builder::api_client::BuilderApiClient;
+    use crate::derivations::{Derivation, DerivationType};
     use crate::models::builders::{Builder, BuilderStatus, ResolveBuilderIdRequest};
     use crate::models::public_key::PublicKey;
 
@@ -2414,6 +2427,36 @@ mod tests {
         }
     }
 
+    fn test_derivation(
+        derivation_type: DerivationType,
+        name: &str,
+        target: Option<&str>,
+    ) -> Derivation {
+        Derivation {
+            id: 1,
+            commit_id: Some(1),
+            derivation_type,
+            derivation_name: name.to_string(),
+            derivation_path: None,
+            scheduled_at: None,
+            completed_at: None,
+            started_at: None,
+            attempt_count: 0,
+            evaluation_duration_ms: None,
+            error_message: None,
+            pname: None,
+            version: None,
+            status_id: 1,
+            derivation_target: target.map(str::to_string),
+            build_elapsed_seconds: None,
+            build_current_target: None,
+            build_last_activity_seconds: None,
+            build_last_heartbeat: None,
+            cf_agent_enabled: None,
+            store_path: None,
+        }
+    }
+
     #[test]
     fn derivation_archive_requisites_include_inputs_and_requested_drv() {
         let drv_path = "/nix/store/top-system.drv";
@@ -2461,6 +2504,36 @@ mod tests {
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0], paths.as_slice());
+    }
+
+    #[test]
+    fn verified_source_target_expands_nixos_configuration_to_toplevel() {
+        let derivation = test_derivation(
+            DerivationType::NixOS,
+            "webb",
+            Some("nixosConfigurations.webb"),
+        );
+
+        assert_eq!(
+            source_flake_target_for_derivation(&derivation),
+            "nixosConfigurations.webb.config.system.build.toplevel"
+        );
+    }
+
+    #[test]
+    fn verified_source_target_preserves_full_nixos_toplevel_target() {
+        let derivation = test_derivation(
+            DerivationType::NixOS,
+            "webb",
+            Some(
+                "git+ssh://git@example.invalid/repo#nixosConfigurations.webb.config.system.build.toplevel",
+            ),
+        );
+
+        assert_eq!(
+            source_flake_target_for_derivation(&derivation),
+            "nixosConfigurations.webb.config.system.build.toplevel"
+        );
     }
 
     #[test]

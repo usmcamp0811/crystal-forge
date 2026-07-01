@@ -556,11 +556,17 @@ async fn verify_worktree_head(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CleanupSourceWorktree {
+    mirror_path: PathBuf,
+    worktree_path: PathBuf,
+}
+
 fn cleanup_candidate_worktree(
     payload: &BuildJobDerivation,
     mirror_root: &Path,
     worktree_root: &Path,
-) -> Option<PathBuf> {
+) -> Option<CleanupSourceWorktree> {
     if payload.execution_strategy != RemoteBuildExecutionStrategy::SourceReEvaluateVerified
         || payload.source_input_delivery != SourceInputDeliveryMode::LocalGitWorktree
     {
@@ -568,23 +574,27 @@ fn cleanup_candidate_worktree(
     }
 
     let source = payload.source.as_ref()?;
-    let (_, worktree_path) = source_workspace_paths(source, mirror_root, worktree_root).ok()?;
+    let (mirror_path, worktree_path) =
+        source_workspace_paths(source, mirror_root, worktree_root).ok()?;
     if worktree_path.starts_with(worktree_root) {
-        Some(worktree_path)
+        Some(CleanupSourceWorktree {
+            mirror_path,
+            worktree_path,
+        })
     } else {
         None
     }
 }
 
-async fn cleanup_source_worktree(path: &Path) {
+async fn cleanup_source_worktree(cleanup: &CleanupSourceWorktree) {
+    let path = cleanup.worktree_path.as_path();
     if !path.exists() {
         return;
     }
 
-    let cwd = path.parent().unwrap_or_else(|| Path::new("/"));
     let status = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(cwd)
+        .arg("--git-dir")
+        .arg(&cleanup.mirror_path)
         .arg("worktree")
         .arg("remove")
         .arg("--force")
@@ -755,8 +765,8 @@ async fn execute_build_job(
                         job_id, report_err
                     );
                 }
-                if let Some(path) = cleanup_worktree.as_deref() {
-                    cleanup_source_worktree(path).await;
+                if let Some(cleanup) = cleanup_worktree.as_ref() {
+                    cleanup_source_worktree(cleanup).await;
                 }
                 return;
             }
@@ -1093,8 +1103,8 @@ async fn execute_build_job(
         task.abort();
     }
 
-    if let Some(path) = cleanup_worktree.as_deref() {
-        cleanup_source_worktree(path).await;
+    if let Some(cleanup) = cleanup_worktree.as_ref() {
+        cleanup_source_worktree(cleanup).await;
     }
 }
 
@@ -1457,7 +1467,11 @@ mod tests {
         .expect("worktree under configured root should be cleaned");
 
         assert_eq!(
-            cleanup,
+            cleanup.mirror_path,
+            std::path::PathBuf::from("/mirrors/repo-test.git")
+        );
+        assert_eq!(
+            cleanup.worktree_path,
             std::path::PathBuf::from("/worktrees/repo-test/0123456789abcdef")
         );
     }
