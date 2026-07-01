@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-30 17:46'
-updated_date: '2026-07-01 04:52'
+updated_date: '2026-07-01 20:08'
 labels:
   - builder
   - remote-builds
@@ -109,7 +109,7 @@ Verification Plan:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Pushed follow-up commit ede184dc to MR !290 making `source_re_evaluate_verified` the default server strategy and default builder capability. Added builder mirror bootstrap/fetch so fresh builders clone/fetch their bare mirror from the repository URL before detached worktree creation. Updated NixOS defaults, docs, and tests. Verification passed with targeted cargo tests, rustfmt check, NixOS module parse, and devshell package realization/checkPhase. MR description updated with current defaults and verification results.
+User deployment showed verified source evaluation failing because the builder was evaluating `nixosConfigurations.<host>.drvPath`; root cause was manifest target normalization preserving `derivation_target = nixosConfigurations.<host>` without adding `.config.system.build.toplevel`. Pushed c3ba9e7b to MR !290 to normalize NixOS targets and clean worktrees via the bare mirror git-dir. Targeted tests and rustfmt passed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
@@ -125,15 +125,5 @@ MR !290 opened for review/testing. Note: end-to-end verified-source build agains
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Implemented explicit verified source re-evaluation remote builds and made them the default path.
-
-Server/API: job manifests now carry explicit execution strategy, immutable source identity, flake target, source/input delivery mode, evaluator fingerprint, and expected toplevel `.drvPath`. The server default is now `source_re_evaluate_verified`, while `server_derivation` remains selectable explicitly with no hidden fallback.
-
-Builder: default capabilities now include verified source first and `server_derivation` second. Verified source acquisition self-manages a bare local Git mirror: it clones from `repo_url` when missing, fetches if the authorized commit is absent, creates/reuses a detached worktree at the exact commit SHA, verifies worktree `HEAD`, evaluates `.drvPath` before any build, compares against the server-authorized `.drvPath`, and then builds the exact verified derivation object. Distinct failure phases are reported for source fetch, evaluation, derivation mismatch, and path materialization. Worktree cleanup remains scoped to configured worktree roots after reporting/cache-push lifecycle.
-
-Config/docs/tests: NixOS module defaults now use verified source mode and builder support for both strategies by default. Operator docs explain verified source as default, how to force `server_derivation`, mirror/worktree roots, cleanup, and the derivation-identity vs output-reproducibility distinction. Added a Git-backed unit test for mirror clone/fetch behavior that skips gracefully when `git` is unavailable in the Nix build sandbox.
-
-Verification run in the repo devshell: `SQLX_OFFLINE=true cargo test --bin builder` (10 passed), `cargo test --lib config::builder` (2 passed), `cargo test --lib config::server` (4 passed), `cargo test --lib models::builders` (4 passed), `cargo test --lib handlers::api::builders::tests` (20 passed), rustfmt check on changed Rust files (clean), `nix-instantiate --parse modules/nixos/crystal-forge/default.nix` (OK), and `nix develop` package realization/checkPhase completed successfully after fixing the sandbox test behavior. `nix flake check` was not run locally per user direction and is left to CI.
-
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/290
+Review fix c3ba9e7b: fixed verified source NixOS target normalization so manifests evaluate `nixosConfigurations.<host>.config.system.build.toplevel.drvPath` instead of `nixosConfigurations.<host>.drvPath`. Also fixed detached worktree cleanup to invoke `git worktree remove` through the configured bare mirror `--git-dir`, avoiding `fatal: not a git repository` cleanup warnings. Verification: `SQLX_OFFLINE=true cargo test --bin builder` passed (10 tests), `SQLX_OFFLINE=true cargo test --lib handlers::api::builders::tests` passed (22 tests), and rustfmt check passed for changed files.
 <!-- SECTION:FINAL_SUMMARY:END -->
