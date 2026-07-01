@@ -1,11 +1,11 @@
 ---
 id: TASK-375.4
 title: 'Remote builders: add verified source re-evaluation strategy'
-status: In Progress
+status: Review
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-30 17:46'
-updated_date: '2026-07-01 02:11'
+updated_date: '2026-07-01 03:17'
 labels:
   - builder
   - remote-builds
@@ -17,6 +17,7 @@ dependencies:
   - TASK-375
 references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/289'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/290'
 modified_files:
   - packages/default/src/models/builders.rs
   - packages/default/src/builder/api_client.rs
@@ -115,4 +116,32 @@ Refinement: implement source workspace metadata around a bare mirror plus detach
 
 <!-- SECTION:NOTES:BEGIN -->
 Further design refinement: use Git mirror/worktree semantics for verified source acquisition. Maintain a shared bare mirror per flake/repo and create detached worktrees at exact authorized commit SHAs for evaluation/build. Colocated server and builder can point at the same mirror/worktree roots; remote builders keep equivalent local mirrors from server-provided source metadata/artifacts. Builders must verify worktree HEAD equals the manifest commit before eval. Worktrees should be cleaned up after build completion and cache-push/reporting lifecycle is done.
+
+Opened MR !290 (https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/290) into dev and moved task to Review. Implementation complete: explicit verified source re-evaluation strategy with mirror+detached-worktree source delivery, eval-before-build drvPath verification, distinct failure phases, opt-in builder capability + server strategy config, and NixOS module options. Verification run in repo devshell: targeted cargo tests pass (builder bin 9, models::builders 4, config::builder 2, config::server 4, handlers::api::builders::tests 20); rustfmt --check clean on changed files; devshell package build (checkPhase) succeeds; NixOS module parses. nix flake check intentionally deferred to CI (touches NixOS module).
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: gpt-5.5
+created: 2026-07-01 03:17
+---
+MR !290 opened for review/testing. Note: end-to-end verified-source build against a live server/builder is recommended during review since it requires a populated mirror at the authorized commit. nix flake check left to CI.
+---
+<!-- COMMENTS:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implemented the explicit `source_re_evaluate_verified` remote build strategy alongside the `server_derivation` default.
+
+Server: `next-job` now emits an explicit execution strategy plus source identity (repo/commit/flake target/mirror id), expected toplevel `.drvPath`, evaluator fingerprint, and source-input delivery mode, all derived from existing commit/flake records (no schema change). The default strategy is configurable via `server.remote_build_execution_strategy` and defaults to `server_derivation`. Fail reporting now carries an optional `failure_phase` so distinct pre-build failures are preserved.
+
+Builder: added opt-in `supported_execution_strategies` capability (defaults to server_derivation only, no silent fallback). Verified source flow acquires source via a bare Git mirror + detached worktree at the authorized commit, verifies worktree HEAD == manifest commit, runs pure `nix eval --raw ...drvPath`, compares to the server-authorized `.drvPath`, and only builds the exact verified derivation. Distinct failure phases (source_fetch/evaluation/derivation_mismatch/path_materialization) are reported so jobs never stay stuck in `building`. Worktrees under the configured worktree root are cleaned up after the build/reporting lifecycle.
+
+Config/module/docs: NixOS module exposes strategy selection and mirror/worktree roots; docs/multi-builder-api.md documents the flow, delivery options, and the derivation-identity-vs-output-reproducibility distinction.
+
+Verification (repo devshell): targeted cargo tests pass (builder bin 9, models::builders 4, config::builder 2, config::server 4, handlers::api::builders::tests 20); rustfmt --check clean on changed files; devshell package build (checkPhase) succeeds; NixOS module parses. nix flake check deferred to CI because the change touches a NixOS module.
+
+MR: !290 (https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/290).
+<!-- SECTION:FINAL_SUMMARY:END -->
