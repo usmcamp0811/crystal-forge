@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-30 17:46'
-updated_date: '2026-07-01 02:09'
+updated_date: '2026-07-01 02:11'
 labels:
   - builder
   - remote-builds
@@ -102,16 +102,17 @@ Verification Plan:
 - [ ] #8 Unverified source checkout support is absent or clearly limited to development/testing only; there is no hidden fallback between strategies.
 - [ ] #9 Operator documentation explains when to use verified source re-evaluation, source/input delivery options (`nix flake archive`/bundled inputs vs public input fetching), security requirements, Nix version/purity expectations, and the distinction between derivation identity verification and output reproducibility.
 - [ ] #10 Builder source acquisition uses a local mirror/snapshot model: server serves enough metadata/artifact information for the builder to keep a local flake copy at the authorized commit, and colocated server/builder deployments can share the same configured mirror root without duplicate checkouts.
+- [ ] #11 Verified source mode uses detached Git worktrees at exact commit SHAs from a local mirror/worktree root, verifies the worktree HEAD matches the manifest commit before eval, and cleans up job/commit worktrees after build completion and cache-push/reporting lifecycle completes.
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Refinement: model source delivery as server-managed flake mirror/snapshot sync. Locate existing server local flake checkout/mirror path logic, add manifest fields for source mirror/snapshot identity and optional shared local path, and make builder-side source resolution prefer an up-to-date local mirror path before falling back to public input fetching or archive-style delivery.
+Refinement: implement source workspace metadata around a bare mirror plus detached worktree at the authorized commit. Add manifest fields/config for mirror/worktree roots and cleanup behavior. Builder source acquisition should resolve/create a detached commit worktree, verify HEAD equals the job commit, eval from that path, and schedule/remove the worktree after build and cache push reporting complete.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Design refinement from user: source delivery should be modeled around the same local flake repository mirror concept the server already uses. The server should serve source/mirror metadata or snapshots to builders, and builders should maintain their own local copy up to date. If server and builder are colocated, both can be configured to use/share the same local mirror root to avoid duplicate checkouts. Implementation should prefer reusable mirror/snapshot sync semantics over treating source delivery as only a one-off archive URL.
+Further design refinement: use Git mirror/worktree semantics for verified source acquisition. Maintain a shared bare mirror per flake/repo and create detached worktrees at exact authorized commit SHAs for evaluation/build. Colocated server and builder can point at the same mirror/worktree roots; remote builders keep equivalent local mirrors from server-provided source metadata/artifacts. Builders must verify worktree HEAD equals the manifest commit before eval. Worktrees should be cleaned up after build completion and cache-push/reporting lifecycle is done.
 <!-- SECTION:NOTES:END -->
