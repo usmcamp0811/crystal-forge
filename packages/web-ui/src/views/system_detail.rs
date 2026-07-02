@@ -1005,12 +1005,11 @@ pub fn SystemDetailView(id: String) -> Element {
                     let system_id = system.id;
                     let hostname = system.hostname.clone();
                     let nav = nav.clone();
-                    let toast_message = toast_message.clone();
                     move |_| {
                         let system_id = system_id;
                         let hostname = hostname.clone();
                         let nav = nav.clone();
-                        let toast_message = toast_message.clone();
+                        let mut toast_message = toast_message;
                         spawn(async move {
                             match crate::api::client::deactivate_system(&system_id).await {
                                 Ok(_) => {
@@ -3281,7 +3280,6 @@ fn ConfigTab(system: SystemDetail) -> Element {
     }
 }
 
-#[component]
 /// Kind of history timeline event, mirroring the design reference's event model.
 #[derive(Debug, Clone, PartialEq)]
 enum HistoryEventKind {
