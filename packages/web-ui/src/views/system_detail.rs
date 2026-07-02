@@ -2828,14 +2828,14 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         if !*tail.read() {
             return;
         }
-        
+
         spawn(async move {
             loop {
                 gloo_timers::future::TimeoutFuture::new(2200).await;
                 if !*tail.read() {
                     break;
                 }
-                
+
                 let now = chrono::Utc::now();
                 let variants = vec![
                     "heartbeat received (next in 60s)",
@@ -2843,7 +2843,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                     "policy: auto_latest — passed",
                 ];
                 let message = variants[now.timestamp() as usize % variants.len()];
-                
+
                 tail_lines.with_mut(|lines| {
                     let ts_str = now.format("%H:%M:%S").to_string();
                     lines.push((ts_str, "info".to_string(), message.to_string()));
@@ -2898,8 +2898,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                         let selector = format!("[data-ev=\"{event_id_scroll}\"]");
                         if let Ok(Some(el)) = container.query_selector(&selector) {
                             if let Ok(html_el) = el.dyn_into::<web_sys::HtmlElement>() {
-                                let target = (html_el.offset_top()
-                                    - container.client_height() / 2
+                                let target = (html_el.offset_top() - container.client_height() / 2
                                     + html_el.offset_height())
                                 .max(0);
                                 container.set_scroll_top(target);
@@ -2964,33 +2963,120 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
 
             match kind {
                 HistoryEventKind::Restart => {
-                    push(0, "info", "systemd: reached target multi-user.target".into(), false);
-                    push(2, "info", format!("agent: boot recorded — {short_msg}"), true);
+                    push(
+                        0,
+                        "info",
+                        "systemd: reached target multi-user.target".into(),
+                        false,
+                    );
+                    push(
+                        2,
+                        "info",
+                        format!("agent: boot recorded — {short_msg}"),
+                        true,
+                    );
                     push(4, "info", "heartbeat received (next in 60s)".into(), false);
                 }
                 HistoryEventKind::LocalRebuildMatched => {
-                    push(0, "warn", "agent: out-of-band activation detected".into(), false);
-                    push(2, "info", format!("local: nixos-rebuild switch by {} — {short_msg}", entry.actor), false);
-                    push(5, "info", format!("agent: generation activated out of band (store-path {store_short})"), true);
-                    push(7, "info", format!("reconcile: store-path matches pushed commit {sha} — config is tracked"), false);
+                    push(
+                        0,
+                        "warn",
+                        "agent: out-of-band activation detected".into(),
+                        false,
+                    );
+                    push(
+                        2,
+                        "info",
+                        format!(
+                            "local: nixos-rebuild switch by {} — {short_msg}",
+                            entry.actor
+                        ),
+                        false,
+                    );
+                    push(
+                        5,
+                        "info",
+                        format!(
+                            "agent: generation activated out of band (store-path {store_short})"
+                        ),
+                        true,
+                    );
+                    push(
+                        7,
+                        "info",
+                        format!(
+                            "reconcile: store-path matches pushed commit {sha} — config is tracked"
+                        ),
+                        false,
+                    );
                 }
                 HistoryEventKind::LocalRebuildUntracked => {
-                    push(0, "warn", "agent: out-of-band activation detected".into(), false);
-                    push(2, "info", format!("local: nixos-rebuild switch by {} — {short_msg}", entry.actor), false);
-                    push(5, "warn", format!("agent: generation activated locally — no flake commit (store-path {store_short})"), true);
-                    push(7, "warn", "drift: running config no longer maps to a tracked flake revision".into(), false);
+                    push(
+                        0,
+                        "warn",
+                        "agent: out-of-band activation detected".into(),
+                        false,
+                    );
+                    push(
+                        2,
+                        "info",
+                        format!(
+                            "local: nixos-rebuild switch by {} — {short_msg}",
+                            entry.actor
+                        ),
+                        false,
+                    );
+                    push(
+                        5,
+                        "warn",
+                        format!(
+                            "agent: generation activated locally — no flake commit (store-path {store_short})"
+                        ),
+                        true,
+                    );
+                    push(
+                        7,
+                        "warn",
+                        "drift: running config no longer maps to a tracked flake revision".into(),
+                        false,
+                    );
                 }
                 HistoryEventKind::DeployFailed => {
-                    push(0, "info", format!("deploy: evaluating configuration @ {sha}"), false);
+                    push(
+                        0,
+                        "info",
+                        format!("deploy: evaluating configuration @ {sha}"),
+                        false,
+                    );
                     push(4, "error", format!("activation failed: {short_msg}"), true);
-                    push(6, "warn", "deploy: rolled back to previous generation".into(), false);
+                    push(
+                        6,
+                        "warn",
+                        "deploy: rolled back to previous generation".into(),
+                        false,
+                    );
                 }
                 HistoryEventKind::Deploy => {
-                    push(0, "info", format!("deploy: evaluating configuration @ {sha}"), false);
-                    push(2, "info", "eval: success — derivations resolved, building".into(), false);
+                    push(
+                        0,
+                        "info",
+                        format!("deploy: evaluating configuration @ {sha}"),
+                        false,
+                    );
+                    push(
+                        2,
+                        "info",
+                        "eval: success — derivations resolved, building".into(),
+                        false,
+                    );
                     push(5, "info", "build: completed".into(), false);
                     push(7, "info", "deploy: activating configuration".into(), false);
-                    push(9, "info", format!("deploy: generation activated ({sha})"), true);
+                    push(
+                        9,
+                        "info",
+                        format!("deploy: generation activated ({sha})"),
+                        true,
+                    );
                 }
             }
         }
@@ -3002,7 +3088,12 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                 LogLevel::Warn => "warn",
                 LogLevel::Error => "error",
             };
-            combined.push((entry.timestamp, level.to_string(), entry.message.clone(), None));
+            combined.push((
+                entry.timestamp,
+                level.to_string(),
+                entry.message.clone(),
+                None,
+            ));
         }
 
         // Add live tail lines (synthesized timestamps).
@@ -3022,22 +3113,23 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
     // Filter by log level
     let filtered_lines: Vec<_> = all_lines
         .iter()
-        .filter(|(_, level, _, _)| {
-            match filter.read().as_str() {
-                "info" => level == "info",
-                "warn" => level == "warn",
-                "error" => level == "error",
-                _ => true,
-            }
+        .filter(|(_, level, _, _)| match filter.read().as_str() {
+            "info" => level == "info",
+            "warn" => level == "warn",
+            "error" => level == "error",
+            _ => true,
         })
         .collect();
 
     // Compute day separators
     let today = chrono::Utc::now().date_naive();
     let yesterday = today.pred_opt().unwrap_or(today);
-    
+
     let mut previous_day: Option<chrono::NaiveDate> = None;
-    let log_rows: Vec<(Option<String>, &(chrono::DateTime<Utc>, String, String, Option<String>))> = filtered_lines
+    let log_rows: Vec<(
+        Option<String>,
+        &(chrono::DateTime<Utc>, String, String, Option<String>),
+    )> = filtered_lines
         .into_iter()
         .map(|entry| {
             let day = entry.0.date_naive();
@@ -3060,7 +3152,11 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
 
     // Local timezone abbreviation (fallback to "local" if unavailable)
     let local_tz_abbr = "local"; // In Rust/WASM we don't have easy access to timezone names
-    let tz_label = if *use_utc.read() { "UTC" } else { local_tz_abbr };
+    let tz_label = if *use_utc.read() {
+        "UTC"
+    } else {
+        local_tz_abbr
+    };
 
     rsx! {
         section {
@@ -3071,7 +3167,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                 h2 { "Live logs" }
                 div {
                     class: "sd-logs-controls",
-                    
+
                     // Timezone toggle
                     div {
                         class: "seg seg-tz",
@@ -3087,7 +3183,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                             "UTC"
                         }
                     }
-                    
+
                     // Level filter
                     div {
                         class: "seg",
@@ -3105,7 +3201,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                             }
                         }
                     }
-                    
+
                     // Tail toggle
                     label {
                         class: "sd-toggle",
@@ -3119,14 +3215,14 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                         }
                         span { "tail" }
                     }
-                    
+
                     // Clear button
                     button {
                         class: "btn btn-ghost xs focus-ring",
                         onclick: move |_| tail_lines.set(Vec::new()),
                         "Clear"
                     }
-                    
+
                     // Download button (placeholder)
                     button {
                         class: "btn btn-ghost xs focus-ring",
@@ -3135,7 +3231,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                     }
                 }
             }
-            
+
             // Timezone info bar
             div {
                 class: "sd-log-tzbar",
@@ -3143,16 +3239,16 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                 " Timestamps shown in "
                 strong { "{tz_label}" }
             }
-            
+
             // Log stream
             pre {
                 class: "sd-log-stream",
                 id: "{log_stream_id}",
-                
+
                 for (day_label, entry) in log_rows {
                     {
                         let (timestamp, level, message, event_id) = entry;
-                        
+
                         // Format timestamp based on timezone preference
                         let ts_str = if *use_utc.read() {
                             timestamp.format("%H:%M:%S").to_string()
@@ -3167,19 +3263,19 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                                 timestamp.format("%H:%M:%S").to_string()
                             }
                         };
-                        
+
                         let level_class = match level.as_str() {
                             "info" => "sd-log-line sd-log-info",
                             "warn" => "sd-log-line sd-log-warn",
                             "error" => "sd-log-line sd-log-error",
                             _ => "sd-log-line sd-log-info",
                         };
-                        
+
                         let is_highlighted = event_id.is_some() && highlighted_event.read().as_ref() == event_id.as_ref();
                         let highlight_class = if is_highlighted { " sd-log-hl" } else { "" };
-                        
+
                         let lvl_upper = level.to_uppercase();
-                        
+
                         rsx! {
                             if let Some(label) = day_label {
                                 div {
@@ -3200,7 +3296,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                         }
                     }
                 }
-                
+
                 // Tail caret
                 if *tail.read() {
                     div { class: "sd-log-caret", "▍" }
@@ -3342,7 +3438,8 @@ fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
     }
     // Out-of-band: activation by a host-local actor (root@host / user@host) rather than
     // an operator or CI bot pushing through Crystal Forge.
-    let is_local = actor.contains('@') || reason.contains("nixos-rebuild") || reason.contains("local");
+    let is_local =
+        actor.contains('@') || reason.contains("nixos-rebuild") || reason.contains("local");
     if is_local {
         // Matched (reconciled) when we still have a commit anchor; untracked otherwise.
         if entry.commit_hash.is_some() {
@@ -3377,9 +3474,10 @@ fn build_history_events(
             .to_string();
 
         // Match a commit record (for the rollback action + rich commit link).
-        let commit = entry.commit_hash.as_ref().and_then(|hash| {
-            commits.iter().find(|c| &c.hash == hash).cloned()
-        });
+        let commit = entry
+            .commit_hash
+            .as_ref()
+            .and_then(|hash| commits.iter().find(|c| &c.hash == hash).cloned());
 
         let is_gen_changing = !matches!(kind, HistoryEventKind::Restart);
         let (generation, prev_generation) = if is_gen_changing {
@@ -3398,7 +3496,10 @@ fn build_history_events(
             None
         } else {
             let newer = entries[idx - 1].timestamp;
-            let secs = newer.signed_duration_since(entry.timestamp).num_seconds().max(0);
+            let secs = newer
+                .signed_duration_since(entry.timestamp)
+                .num_seconds()
+                .max(0);
             if secs > 0 {
                 Some(format_duration_compact(secs))
             } else {
