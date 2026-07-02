@@ -330,6 +330,15 @@ fn source_workspace_paths(
     mirror_root: &Path,
     worktree_root: &Path,
 ) -> Result<(PathBuf, PathBuf), PreBuildFailure> {
+    source_workspace_paths_for_job(source, mirror_root, worktree_root, None)
+}
+
+fn source_workspace_paths_for_job(
+    source: &VerifiedSourceIdentity,
+    mirror_root: &Path,
+    worktree_root: &Path,
+    job_id: Option<uuid::Uuid>,
+) -> Result<(PathBuf, PathBuf), PreBuildFailure> {
     if let Some(path) = source.worktree_path.as_deref() {
         let mirror_path = source
             .mirror_path
@@ -354,10 +363,58 @@ fn source_workspace_paths(
         .map(PathBuf::from)
         .unwrap_or_else(|| mirror_root.join(format!("{mirror_id}.git")));
 
-    Ok((
-        mirror_path,
-        worktree_root.join(mirror_id).join(&source.commit_hash),
-    ))
+    let worktree_path = match job_id {
+        Some(job_id) => worktree_root
+            .join(mirror_id)
+            .join(&source.commit_hash)
+            .join(job_id.to_string()),
+        None => worktree_root.join(mirror_id).join(&source.commit_hash),
+    };
+
+    Ok((mirror_path, worktree_path))
+}
+
+struct MirrorLock {
+    path: PathBuf,
+}
+
+impl Drop for MirrorLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+async fn acquire_mirror_lock(mirror_path: &Path) -> Result<MirrorLock, PreBuildFailure> {
+    let lock_path = mirror_path.with_extension("git.lock");
+    if let Some(parent) = lock_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| PreBuildFailure {
+                phase: BuildFailurePhase::SourceFetch,
+                message: format!(
+                    "failed to create source mirror lock parent {}: {e}",
+                    parent.display()
+                ),
+            })?;
+    }
+
+    loop {
+        match tokio::fs::create_dir(&lock_path).await {
+            Ok(()) => return Ok(MirrorLock { path: lock_path }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(e) => {
+                return Err(PreBuildFailure {
+                    phase: BuildFailurePhase::SourceFetch,
+                    message: format!(
+                        "failed to acquire source mirror lock {}: {e}",
+                        lock_path.display()
+                    ),
+                });
+            }
+        }
+    }
 }
 
 /// Ensure a bare mirror exists at `mirror_path` and contains `commit_hash`.
@@ -371,12 +428,18 @@ async fn ensure_mirror_has_commit(
     repo_url: &str,
     commit_hash: &str,
 ) -> Result<(), PreBuildFailure> {
+    let _lock = acquire_mirror_lock(mirror_path).await?;
     let source_fetch = |message: String| PreBuildFailure {
         phase: BuildFailurePhase::SourceFetch,
         message,
     };
 
     if !mirror_path.exists() {
+        info!(
+            "🪞 Source mirror missing; cloning {} into {}",
+            repo_url,
+            mirror_path.display()
+        );
         if let Some(parent) = mirror_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 source_fetch(format!(
@@ -387,6 +450,7 @@ async fn ensure_mirror_has_commit(
         }
 
         let output = tokio::process::Command::new("git")
+            .kill_on_drop(true)
             .arg("clone")
             .arg("--bare")
             .arg(repo_url)
@@ -401,10 +465,13 @@ async fn ensure_mirror_has_commit(
                 "git clone --bare failed for {repo_url}: {stderr}"
             )));
         }
+
+        info!("✅ Source mirror cloned at {}", mirror_path.display());
     }
 
     // If the commit is already present, no fetch is required.
     let has_commit = tokio::process::Command::new("git")
+        .kill_on_drop(true)
         .arg("--git-dir")
         .arg(mirror_path)
         .arg("cat-file")
@@ -416,10 +483,22 @@ async fn ensure_mirror_has_commit(
         .unwrap_or(false);
 
     if has_commit {
+        info!(
+            "✅ Source mirror {} already has commit {}",
+            mirror_path.display(),
+            commit_hash
+        );
         return Ok(());
     }
 
+    info!(
+        "🔄 Fetching authorized commit {} into source mirror {}",
+        commit_hash,
+        mirror_path.display()
+    );
+
     let output = tokio::process::Command::new("git")
+        .kill_on_drop(true)
         .arg("--git-dir")
         .arg(mirror_path)
         .arg("fetch")
@@ -438,6 +517,7 @@ async fn ensure_mirror_has_commit(
     }
 
     let has_commit_after = tokio::process::Command::new("git")
+        .kill_on_drop(true)
         .arg("--git-dir")
         .arg(mirror_path)
         .arg("cat-file")
@@ -449,6 +529,11 @@ async fn ensure_mirror_has_commit(
         .unwrap_or(false);
 
     if has_commit_after {
+        info!(
+            "✅ Source mirror {} fetched commit {}",
+            mirror_path.display(),
+            commit_hash
+        );
         Ok(())
     } else {
         Err(source_fetch(format!(
@@ -461,15 +546,23 @@ async fn ensure_source_worktree(
     source: &VerifiedSourceIdentity,
     mirror_root: &Path,
     worktree_root: &Path,
+    job_id: uuid::Uuid,
 ) -> Result<PathBuf, PreBuildFailure> {
-    let (mirror_path, worktree_path) = source_workspace_paths(source, mirror_root, worktree_root)?;
+    let (mirror_path, worktree_path) =
+        source_workspace_paths_for_job(source, mirror_root, worktree_root, Some(job_id))?;
 
     if worktree_path.exists() {
+        info!("🌳 Reusing source worktree {}", worktree_path.display());
         verify_worktree_head(&worktree_path, &source.commit_hash).await?;
         return Ok(worktree_path);
     }
 
     ensure_mirror_has_commit(&mirror_path, &source.repo_url, &source.commit_hash).await?;
+    info!(
+        "🌳 Creating detached source worktree {} at commit {}",
+        worktree_path.display(),
+        source.commit_hash
+    );
 
     if let Some(parent) = worktree_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -484,6 +577,7 @@ async fn ensure_source_worktree(
     }
 
     let output = tokio::process::Command::new("git")
+        .kill_on_drop(true)
         .arg("--git-dir")
         .arg(&mirror_path)
         .arg("worktree")
@@ -507,6 +601,7 @@ async fn ensure_source_worktree(
     }
 
     verify_worktree_head(&worktree_path, &source.commit_hash).await?;
+    info!("✅ Source worktree ready at {}", worktree_path.display());
     Ok(worktree_path)
 }
 
@@ -515,6 +610,7 @@ async fn verify_worktree_head(
     expected_commit: &str,
 ) -> Result<(), PreBuildFailure> {
     let output = tokio::process::Command::new("git")
+        .kill_on_drop(true)
         .arg("-C")
         .arg(worktree_path)
         .arg("rev-parse")
@@ -566,6 +662,7 @@ fn cleanup_candidate_worktree(
     payload: &BuildJobDerivation,
     mirror_root: &Path,
     worktree_root: &Path,
+    job_id: uuid::Uuid,
 ) -> Option<CleanupSourceWorktree> {
     if payload.execution_strategy != RemoteBuildExecutionStrategy::SourceReEvaluateVerified
         || payload.source_input_delivery != SourceInputDeliveryMode::LocalGitWorktree
@@ -575,7 +672,7 @@ fn cleanup_candidate_worktree(
 
     let source = payload.source.as_ref()?;
     let (mirror_path, worktree_path) =
-        source_workspace_paths(source, mirror_root, worktree_root).ok()?;
+        source_workspace_paths_for_job(source, mirror_root, worktree_root, Some(job_id)).ok()?;
     if worktree_path.starts_with(worktree_root) {
         Some(CleanupSourceWorktree {
             mirror_path,
@@ -648,9 +745,10 @@ async fn evaluate_verified_source_drv(
     delivery: SourceInputDeliveryMode,
     mirror_root: &Path,
     worktree_root: &Path,
+    job_id: uuid::Uuid,
 ) -> Result<String, PreBuildFailure> {
     let source_ref = if delivery == SourceInputDeliveryMode::LocalGitWorktree {
-        ensure_source_worktree(source, mirror_root, worktree_root)
+        ensure_source_worktree(source, mirror_root, worktree_root, job_id)
             .await?
             .to_string_lossy()
             .to_string()
@@ -658,8 +756,10 @@ async fn evaluate_verified_source_drv(
         source_flake_ref(source, delivery, mirror_root, worktree_root)?
     };
     let eval_attr = drv_path_eval_attr(&source_ref, &source.flake_target);
+    info!("🔎 Evaluating verified source drvPath: {}", eval_attr);
 
     let output = tokio::process::Command::new("nix")
+        .kill_on_drop(true)
         .arg("eval")
         .arg("--raw")
         .arg("--no-write-lock-file")
@@ -682,13 +782,16 @@ async fn evaluate_verified_source_drv(
         });
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let drv_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    info!("✅ Builder evaluated verified source drvPath: {}", drv_path);
+    Ok(drv_path)
 }
 
 async fn verify_source_build_plan(
     payload: &BuildJobDerivation,
     mirror_root: &Path,
     worktree_root: &Path,
+    job_id: uuid::Uuid,
 ) -> Result<String, PreBuildFailure> {
     let expected = expected_drv_path(payload)?.to_string();
     let source = payload.source.as_ref().ok_or_else(|| PreBuildFailure {
@@ -700,6 +803,7 @@ async fn verify_source_build_plan(
         payload.source_input_delivery,
         mirror_root,
         worktree_root,
+        job_id,
     )
     .await?;
     verify_drv_identity(&expected, &actual)?;
@@ -722,6 +826,7 @@ async fn execute_build_job(
 
     let source_mirror_root = remote_runtime.source_mirror_root.as_path();
     let source_worktree_root = remote_runtime.source_worktree_root.as_path();
+    let build_timeout = build_config.process_timeout();
 
     let cleanup_worktree = remote_runtime
         .cleanup_source_worktrees
@@ -730,6 +835,7 @@ async fn execute_build_job(
                 &derivation_payload,
                 source_mirror_root,
                 source_worktree_root,
+                job_id,
             )
         })
         .flatten();
@@ -737,13 +843,58 @@ async fn execute_build_job(
     if derivation_payload.execution_strategy
         == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
     {
-        match verify_source_build_plan(
-            &derivation_payload,
-            source_mirror_root,
-            source_worktree_root,
-        )
-        .await
-        {
+        info!(
+            "🔐 Verifying source build plan before build (timeout: {:?})",
+            build_timeout
+        );
+        let verification = {
+            let verification_future = verify_source_build_plan(
+                &derivation_payload,
+                source_mirror_root,
+                source_worktree_root,
+                job_id,
+            );
+            tokio::pin!(verification_future);
+            let timeout = tokio::time::sleep(build_timeout);
+            tokio::pin!(timeout);
+            let mut cancel_poll = tokio::time::interval(std::time::Duration::from_secs(5));
+
+            loop {
+                tokio::select! {
+                    result = &mut verification_future => break result,
+                    _ = &mut timeout => {
+                        break Err(PreBuildFailure {
+                            phase: BuildFailurePhase::Evaluation,
+                            message: format!(
+                                "verified source pre-build evaluation timed out after {:?}",
+                                build_timeout
+                            ),
+                        });
+                    }
+                    _ = cancel_poll.tick() => {
+                        match client.get_job_status(job_id).await {
+                            Ok(Some(status)) if status == "cancelling" => {
+                                warn!("🛑 Job #{} cancelled during verified source pre-build phase", job_id);
+                                if let Err(err) = client.finalize_cancelled_job(job_id).await {
+                                    error!("❌ Failed to finalize cancelled job #{}: {}", job_id, err);
+                                }
+                                if let Some(cleanup) = cleanup_worktree.as_ref() {
+                                    cleanup_source_worktree(cleanup).await;
+                                }
+                                return;
+                            }
+                            Ok(_) => {}
+                            Err(err) => warn!(
+                                "⚠️ Failed to poll cancellation during verified source pre-build phase for job #{}: {}",
+                                job_id, err
+                            ),
+                        }
+                    }
+                }
+            }
+        };
+
+        match verification {
             Ok(verified_drv_path) => {
                 info!(
                     "✅ Verified source re-evaluation matched server drvPath: {}",
@@ -785,8 +936,6 @@ async fn execute_build_job(
     // Respect the configured build timeout for remote API builders. Nix itself
     // receives build_config.timeout; the wrapper gets a small cleanup buffer so
     // it can observe/report Nix's timeout rather than racing it.
-    let build_timeout = build_config.process_timeout();
-
     let start = std::time::Instant::now();
 
     // Try to connect WebSocket for real-time log streaming
@@ -1314,7 +1463,8 @@ fn is_local_db_host(host: &str) -> bool {
 mod tests {
     use super::{
         cleanup_candidate_worktree, drv_path_eval_attr, ensure_mirror_has_commit, mock_store_path,
-        should_mock_build_fail, source_flake_ref, source_workspace_paths, verify_drv_identity,
+        should_mock_build_fail, source_flake_ref, source_workspace_paths,
+        source_workspace_paths_for_job, verify_drv_identity,
     };
     use crystal_forge::models::builders::{
         BuildFailurePhase, SourceInputDeliveryMode, VerifiedSourceIdentity,
@@ -1445,7 +1595,31 @@ mod tests {
     }
 
     #[test]
+    fn local_git_worktree_paths_can_be_scoped_to_job_id() {
+        let source = source(None);
+        let job_id = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555")
+            .expect("uuid should parse");
+        let (mirror, worktree) = source_workspace_paths_for_job(
+            &source,
+            std::path::Path::new("/mirrors"),
+            std::path::Path::new("/worktrees"),
+            Some(job_id),
+        )
+        .expect("paths should resolve");
+
+        assert_eq!(mirror, std::path::PathBuf::from("/mirrors/repo-test.git"));
+        assert_eq!(
+            worktree,
+            std::path::PathBuf::from(
+                "/worktrees/repo-test/0123456789abcdef/11111111-2222-3333-4444-555555555555"
+            )
+        );
+    }
+
+    #[test]
     fn cleanup_candidate_is_limited_to_configured_worktree_root() {
+        let job_id = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555")
+            .expect("uuid should parse");
         let payload = crystal_forge::models::builders::BuildJobDerivation {
             id: 1,
             derivation_name: "host".to_string(),
@@ -1463,6 +1637,7 @@ mod tests {
             &payload,
             std::path::Path::new("/mirrors"),
             std::path::Path::new("/worktrees"),
+            job_id,
         )
         .expect("worktree under configured root should be cleaned");
 
@@ -1472,7 +1647,9 @@ mod tests {
         );
         assert_eq!(
             cleanup.worktree_path,
-            std::path::PathBuf::from("/worktrees/repo-test/0123456789abcdef")
+            std::path::PathBuf::from(
+                "/worktrees/repo-test/0123456789abcdef/11111111-2222-3333-4444-555555555555"
+            )
         );
     }
 

@@ -75,10 +75,7 @@ impl Default for BuilderConfig {
             resolve_retry_interval: Duration::from_secs(10),
             resolve_retry_max_interval: Duration::from_secs(300),
             resolve_max_attempts: 0, // retry forever by default
-            supported_execution_strategies: vec![
-                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
-                RemoteBuildExecutionStrategy::ServerDerivation,
-            ],
+            supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
             source_mirror_root: PathBuf::from("/var/lib/crystal-forge/flake-mirrors"),
             source_worktree_root: PathBuf::from("/var/lib/crystal-forge/flake-worktrees"),
             cleanup_source_worktrees: true,
@@ -137,14 +134,14 @@ mod tests {
     }
 
     #[test]
-    fn default_builder_supports_verified_source_and_server_derivation() {
+    fn default_builder_supports_only_server_derivation() {
         let config = BuilderConfig::default();
 
+        assert!(config.supports_execution_strategy(RemoteBuildExecutionStrategy::ServerDerivation));
         assert!(
-            config.supports_execution_strategy(
+            !config.supports_execution_strategy(
                 RemoteBuildExecutionStrategy::SourceReEvaluateVerified
             )
         );
-        assert!(config.supports_execution_strategy(RemoteBuildExecutionStrategy::ServerDerivation));
     }
 }

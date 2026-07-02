@@ -376,6 +376,27 @@ pub struct BuildJobDerivation {
     pub evaluator: Option<EvaluatorFingerprint>,
 }
 
+/// Signed request body for GET /api/v1/builders/:id/next-job.
+///
+/// Older builders send an empty body; the server treats those as protocol v1
+/// builders that support only `server_derivation` so they never receive newer
+/// source-verified jobs by accident.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NextJobRequest {
+    #[serde(default = "default_builder_protocol_version")]
+    pub protocol_version: u32,
+    #[serde(default = "default_supported_execution_strategies")]
+    pub supported_execution_strategies: Vec<RemoteBuildExecutionStrategy>,
+}
+
+fn default_builder_protocol_version() -> u32 {
+    1
+}
+
+fn default_supported_execution_strategies() -> Vec<RemoteBuildExecutionStrategy> {
+    vec![RemoteBuildExecutionStrategy::ServerDerivation]
+}
+
 /// Explicit remote build execution strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

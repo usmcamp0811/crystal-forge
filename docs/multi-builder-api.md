@@ -8,26 +8,29 @@ The Multi-Builder API enables distributed builder deployments with centralized m
 
 Crystal Forge remote builders use explicit execution strategies. The scheduler must not silently fall back between strategies; a builder only receives jobs for strategies it is configured to support.
 
-**`source_re_evaluate_verified` is the default strategy** on both the server (`server.remote_build_execution_strategy`) and the builder (`builder.supported_execution_strategies`). `server_derivation` remains available and can be selected explicitly.
+`server_derivation` remains the default strategy. `source_re_evaluate_verified` is explicit opt-in until source archive/scoped credential delivery is available for private flakes.
 
-Default builder configuration (no changes required for verified source builds):
+Default builder configuration:
 
 ```toml
 [builder]
-supported_execution_strategies = ["source_re_evaluate_verified", "server_derivation"]
+supported_execution_strategies = ["server_derivation"]
 source_mirror_root = "/var/lib/crystal-forge/flake-mirrors"
 source_worktree_root = "/var/lib/crystal-forge/flake-worktrees"
 cleanup_source_worktrees = true
 ```
 
-To force the older server-evaluated derivation transport, set the server default:
+To enable verified source jobs, configure both the server strategy and builder capability explicitly, and ensure the builder has safe source access:
 
 ```toml
 [server]
-remote_build_execution_strategy = "server_derivation"
+remote_build_execution_strategy = "source_re_evaluate_verified"
+
+[builder]
+supported_execution_strategies = ["server_derivation", "source_re_evaluate_verified"]
 ```
 
-The builder self-manages its local mirror: if the bare mirror is missing it is created with `git clone --bare` from the repository URL, and if the authorized commit is not present the mirror is fetched. A fresh builder therefore does not require a pre-seeded mirror; it only needs read access to the repository URL. Colocated server/builder deployments may still share the same mirror/worktree roots to avoid duplicate clones.
+The builder self-manages its local mirror: if the bare mirror is missing it is created with `git clone --bare` from the repository URL, and if the authorized commit is not present the mirror is fetched. A fresh builder therefore does not require a pre-seeded mirror, but it does need read access to the repository URL. Colocated server/builder deployments may still share the same mirror root to avoid duplicate clones. Per-job worktrees are created below the configured worktree root and cleaned independently.
 
 ### `server_derivation`
 
@@ -53,12 +56,12 @@ Flow:
 
 3. The builder obtains the immutable source without broad/reusable Git credentials. The preferred operational model is a local Git mirror plus detached worktree:
 
-   ```text
-   /var/lib/crystal-forge/flake-mirrors/<mirror-id>.git
-   /var/lib/crystal-forge/flake-worktrees/<mirror-id>/<commit-sha>
-   ```
+    ```text
+    /var/lib/crystal-forge/flake-mirrors/<mirror-id>.git
+    /var/lib/crystal-forge/flake-worktrees/<mirror-id>/<commit-sha>/<job-id>
+    ```
 
-   The server serves enough source metadata or snapshot data for the builder to keep its local mirror current. The builder creates or reuses a detached worktree at the exact authorized commit. If server and builder are colocated, both may point at the same mirror/worktree roots to avoid duplicate clones.
+    The server serves enough source metadata or snapshot data for the builder to keep its local mirror current. The builder creates a detached per-job worktree at the exact authorized commit. If server and builder are colocated, both may point at the same mirror root to avoid duplicate clone storage; job worktrees remain builder-managed and are cleaned independently.
 
    Locked-down deployments can still choose a server-bundled source/input archive (for example, a `nix flake archive`/NAR-style artifact). For public inputs, a deployment may allow the builder to fetch public flake inputs itself.
 

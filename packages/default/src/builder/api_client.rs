@@ -1,7 +1,8 @@
 use crate::config::BuilderConfig;
 use crate::models::builders::{
-    BuildFailurePhase, BuildProgressRequest, NextJobResponse, ReportMetricsRequest,
-    ResolveBuilderIdRequest, ResolveBuilderIdResponse,
+    BuildFailurePhase, BuildProgressRequest, NextJobRequest, NextJobResponse,
+    RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
+    ResolveBuilderIdResponse,
 };
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -53,6 +54,7 @@ pub struct BuilderApiClient {
     server_url: String,
     builder_id: Uuid,
     signing_key: SigningKey,
+    supported_execution_strategies: Vec<RemoteBuildExecutionStrategy>,
 }
 
 impl BuilderApiClient {
@@ -103,6 +105,7 @@ impl BuilderApiClient {
             server_url,
             builder_id,
             signing_key,
+            supported_execution_strategies: config.supported_execution_strategies.clone(),
         })
     }
 
@@ -324,7 +327,10 @@ impl BuilderApiClient {
     pub async fn get_next_job(&self) -> Result<Option<NextJobResponse>> {
         let path = format!("/api/v1/builders/{}/next-job", self.builder_id);
         let url = format!("{}{}", self.server_url, path);
-        let body = Vec::new(); // Empty body for GET
+        let body = serde_json::to_vec(&NextJobRequest {
+            protocol_version: 2,
+            supported_execution_strategies: self.supported_execution_strategies.clone(),
+        })?;
         let (builder_id, signature, timestamp) = self.sign_request("GET", &path, &body);
 
         let response = self
@@ -333,6 +339,8 @@ impl BuilderApiClient {
             .header("X-Builder-ID", builder_id)
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
+            .header("Content-Type", "application/json")
+            .body(body)
             .send()
             .await
             .context("Failed to request next job")?;
@@ -911,6 +919,7 @@ mod tests {
             server_url: "http://localhost:8080".to_string(),
             builder_id,
             signing_key: key,
+            supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
         };
 
         let body = b"test request body";

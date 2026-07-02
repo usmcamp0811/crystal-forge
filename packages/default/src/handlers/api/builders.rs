@@ -19,6 +19,7 @@ use bytes::Bytes;
 use ed25519_dalek::{Signature, Verifier};
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -32,7 +33,7 @@ use crate::handlers::builder_request::{
 use crate::models::builders::{
     AppendLogsRequest, BuildJob, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary,
     BuilderWithEnvironments, CreateBuilderRequest, EvaluatorFingerprint,
-    KeypairRegeneratedResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest,
+    KeypairRegeneratedResponse, NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest,
     ResolveBuilderIdRequest, ResolveBuilderIdResponse, SourceInputDeliveryMode,
     UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
     VerifiedSourceIdentity,
@@ -262,6 +263,17 @@ fn source_mirror_id(repo_url: &str) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("repo-{short}")
+}
+
+fn parse_next_job_request(body: &[u8]) -> Result<NextJobRequest, StatusCode> {
+    if body.is_empty() {
+        return Ok(NextJobRequest {
+            protocol_version: 1,
+            supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
+        });
+    }
+
+    serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST)
 }
 
 fn apply_cache_destination_env(
@@ -1229,7 +1241,8 @@ pub async fn get_next_job(
 ) -> Result<Json<crate::models::builders::NextJobResponse>, StatusCode> {
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/next-job", builder_id);
-    let verified = authenticate_builder_request(&headers, body, "GET", &path, &state.pool).await?;
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "GET", &path, &state.pool).await?;
 
     // Verify the builder_id matches
     if verified.builder_id != builder_id {
@@ -1243,6 +1256,21 @@ pub async fn get_next_job(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     if !builder.enabled {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let next_job_request = parse_next_job_request(&body)?;
+    let execution_strategy = state.server_config.remote_build_execution_strategy;
+    if !next_job_request
+        .supported_execution_strategies
+        .contains(&execution_strategy)
+    {
+        tracing::debug!(
+            builder_id = %builder_id,
+            ?execution_strategy,
+            supported = ?next_job_request.supported_execution_strategies,
+            "builder does not support configured remote execution strategy; not claiming a job"
+        );
         return Err(StatusCode::NOT_FOUND);
     }
 
@@ -1286,7 +1314,6 @@ pub async fn get_next_job(
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
 
-    let execution_strategy = state.server_config.remote_build_execution_strategy;
     let source = verified_source_identity_for_derivation(&state.pool, &derivation).await;
     let expected_drv_path = derivation.derivation_path.clone();
     let source_input_delivery = match execution_strategy {
@@ -1295,6 +1322,28 @@ pub async fn get_next_job(
             SourceInputDeliveryMode::LocalGitWorktree
         }
     };
+
+    if execution_strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
+        && (source.is_none() || expected_drv_path.is_none())
+    {
+        tracing::error!(
+            job_id = %job.id,
+            derivation_id = derivation.id,
+            has_source = source.is_some(),
+            has_expected_drv_path = expected_drv_path.is_some(),
+            "claimed source-verified job is missing required manifest metadata; requeueing"
+        );
+        requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    job_id = %job.id,
+                    "failed to requeue job after manifest assembly error: {e}"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     let payload = crate::models::builders::BuildJobDerivation {
         id: derivation.id,
@@ -1316,6 +1365,31 @@ pub async fn get_next_job(
         job,
         derivation: payload,
     }))
+}
+
+async fn requeue_claimed_job_after_manifest_error(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE build_jobs
+        SET status = 'queued',
+            builder_id = NULL,
+            started_at = NULL,
+            updated_at = NOW()
+        WHERE id = $1
+          AND builder_id = $2
+          AND status = 'building'
+        "#,
+    )
+    .bind(job_id)
+    .bind(builder_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/progress - Build progress heartbeat
@@ -2371,11 +2445,15 @@ mod tests {
     use super::map_create_builder_error;
     use super::parse_derivation_requisites;
     use super::parse_job_status_request;
+    use super::parse_next_job_request;
     use super::source_flake_target_for_derivation;
     use super::verify_builder_resolve_request;
     use crate::builder::api_client::BuilderApiClient;
     use crate::derivations::{Derivation, DerivationType};
-    use crate::models::builders::{Builder, BuilderStatus, ResolveBuilderIdRequest};
+    use crate::models::builders::{
+        Builder, BuilderStatus, NextJobRequest, RemoteBuildExecutionStrategy,
+        ResolveBuilderIdRequest,
+    };
     use crate::models::public_key::PublicKey;
 
     fn signed_resolve_request(
@@ -2504,6 +2582,38 @@ mod tests {
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0], paths.as_slice());
+    }
+
+    #[test]
+    fn empty_next_job_body_defaults_to_legacy_server_derivation_only() {
+        let request = parse_next_job_request(b"").expect("empty request is legacy-compatible");
+
+        assert_eq!(request.protocol_version, 1);
+        assert_eq!(
+            request.supported_execution_strategies,
+            vec![RemoteBuildExecutionStrategy::ServerDerivation]
+        );
+    }
+
+    #[test]
+    fn next_job_body_accepts_explicit_verified_source_capability() {
+        let body = serde_json::to_vec(&NextJobRequest {
+            protocol_version: 2,
+            supported_execution_strategies: vec![
+                RemoteBuildExecutionStrategy::ServerDerivation,
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            ],
+        })
+        .expect("request should serialize");
+
+        let request = parse_next_job_request(&body).expect("request should parse");
+
+        assert_eq!(request.protocol_version, 2);
+        assert!(
+            request
+                .supported_execution_strategies
+                .contains(&RemoteBuildExecutionStrategy::SourceReEvaluateVerified)
+        );
     }
 
     #[test]
