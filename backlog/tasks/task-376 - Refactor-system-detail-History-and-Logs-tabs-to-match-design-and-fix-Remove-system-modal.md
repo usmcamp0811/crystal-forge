@@ -3,7 +3,7 @@ id: TASK-376
 title: >-
   Refactor system detail History and Logs tabs to match design and fix Remove
   system modal
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-02 00:55'
 updated_date: '2026-07-02 00:56'
@@ -163,8 +163,6 @@ nix develop -c trunk serve
 - Compare Remove confirmation modal with Rollback modal styling
 <!-- AC:END -->
 
-
-
 ## Implementation Notes
 
 **History Tab:**
@@ -208,3 +206,9 @@ nix develop -c trunk serve
 - Check for delete endpoint early; create backend task if missing
 - Test timezone toggle in browser with different system locales
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: agent-claude on gray in ~/code/crystal-forge/dev
+<!-- SECTION:NOTES:END -->
