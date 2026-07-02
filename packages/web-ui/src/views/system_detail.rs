@@ -984,7 +984,37 @@ pub fn SystemDetailView(id: String) -> Element {
                             }
                         }
                     });
-                }
+                },
+                on_delete: {
+                    let system_id = system.id;
+                    let hostname = system.hostname.clone();
+                    let nav = nav.clone();
+                    let toast_message = toast_message.clone();
+                    move |_| {
+                        let system_id = system_id;
+                        let hostname = hostname.clone();
+                        let nav = nav.clone();
+                        let toast_message = toast_message.clone();
+                        spawn(async move {
+                            match crate::api::client::deactivate_system(&system_id).await {
+                                Ok(_) => {
+                                    toast_message.set(Some((
+                                        format!("System {} removed from registry", hostname),
+                                        true,
+                                    )));
+                                    // Navigate back to systems list
+                                    nav.push(Route::SystemsView {});
+                                }
+                                Err(error) => {
+                                    toast_message.set(Some((
+                                        format!("Failed to remove system: {}", error),
+                                        false,
+                                    )));
+                                }
+                            }
+                        });
+                    }
+                },
             }
         }
 

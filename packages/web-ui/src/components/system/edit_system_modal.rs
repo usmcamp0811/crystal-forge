@@ -4,6 +4,7 @@
 //! flake assignment section, segmented deployment mode, pinned commit picker.
 
 use crate::api::models::{CommitInfo, SystemDetail, UpdateSystemRequest};
+use crate::components::modals::RemoveSystemDialog;
 use dioxus::prelude::*;
 
 /// Branch options for the flake branch field.
@@ -33,6 +34,7 @@ pub fn EditSystemModal(
     #[props(default)] error_message: Option<String>,
     on_close: EventHandler<()>,
     on_save: EventHandler<UpdateSystemRequest>,
+    on_delete: EventHandler<()>,
 ) -> Element {
     let mut hostname = use_signal(|| system.hostname.clone());
     let mut environment = use_signal(|| system.environment.clone().unwrap_or_default());
@@ -62,7 +64,8 @@ pub fn EditSystemModal(
     });
     let mut flake_branch = use_signal(|| derived_branch(system.environment.as_deref()).to_string());
     let mut is_saving = use_signal(|| false);
-    let mut show_danger = use_signal(|| false);
+    let mut show_remove_modal = use_signal(|| false);
+    let mut is_deleting = use_signal(|| false);
 
     // Pinned commit selection. Seeds from the system's latest known commit so the picker
     // highlights the active pin. Wired to the real `/systems/:id/commits` data passed in
@@ -447,29 +450,11 @@ pub fn EditSystemModal(
                     // Danger zone (design: remove system)
                     div {
                         style: "margin-top: 10px; padding-top: 14px; border-top: 1px solid var(--cf-divider);",
-                        if show_danger() {
-                            div {
-                                style: "display: flex; align-items: center; gap: 8px;",
-                                span {
-                                    style: "font-size: 12px; color: var(--cf-text-secondary);",
-                                    "Remove "
-                                    span { class: "mono", style: "color: #fecaca; font-weight: 700;", "{hostname}" }
-                                    " from the registry?"
-                                }
-                                button {
-                                    class: "btn btn-ghost focus-ring",
-                                    style: "color: #f87171; border-color: rgba(248,113,113,0.3); font-size: 12px;",
-                                    onclick: move |_| show_danger.set(false),
-                                    "Cancel"
-                                }
-                            }
-                        } else {
-                            button {
-                                class: "btn btn-ghost focus-ring",
-                                style: "color: #f87171; border-color: rgba(248,113,113,0.3); font-size: 12px;",
-                                onclick: move |_| show_danger.set(true),
-                                "Remove system from registry"
-                            }
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            style: "color: #f87171; border-color: rgba(248,113,113,0.3); font-size: 12px;",
+                            onclick: move |_| show_remove_modal.set(true),
+                            "Remove system from registry"
                         }
                     }
 
@@ -503,6 +488,23 @@ pub fn EditSystemModal(
                         }
                     }
                 }
+            }
+        }
+        
+        // Remove system confirmation modal
+        if show_remove_modal() {
+            RemoveSystemDialog {
+                hostname: hostname.read().clone(),
+                environment: environment.read().clone().into(),
+                is_loading: is_deleting(),
+                on_confirm: move |_| {
+                    is_deleting.set(true);
+                    on_delete.call(());
+                },
+                on_cancel: move |_| {
+                    show_remove_modal.set(false);
+                    is_deleting.set(false);
+                },
             }
         }
     }
