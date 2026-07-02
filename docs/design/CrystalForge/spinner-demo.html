@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Spinner Demo — Crystal Forge</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    body { padding: 40px 48px 80px; }
+    .demo-section { margin-bottom: 48px; }
+    .demo-label {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.12em; color: var(--cf-text-muted);
+      margin-bottom: 20px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--cf-divider);
+    }
+    .demo-row {
+      display: flex; align-items: center; gap: 28px; flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    .demo-cell {
+      display: flex; flex-direction: column; align-items: center; gap: 10px;
+    }
+    .demo-name {
+      font-size: 10px; color: var(--cf-text-muted);
+      font-family: var(--font-mono);
+    }
+    h1 {
+      font-size: 22px; font-weight: 700; letter-spacing: -0.01em;
+      margin: 0 0 6px; color: var(--cf-text-primary);
+    }
+    p.sub { font-size: 13px; color: var(--cf-text-secondary); margin: 0 0 40px; }
+    hr { border: 0; border-top: 1px solid var(--cf-divider); margin: 48px 0; }
+
+    /* interactive button demo */
+    .demo-btn-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <script type="text/babel" src="components/Icon.jsx"></script>
+  <script type="text/babel" src="components/Spinner.jsx"></script>
+
+  <script type="text/babel">
+    function Demo() {
+      const [busy, setBusy] = React.useState({});
+      const [progress, setProgress] = React.useState(0.42);
+
+      // tick progress
+      React.useEffect(() => {
+        const id = setInterval(() => setProgress(p => p >= 1 ? 0 : +(p + 0.004).toFixed(3)), 40);
+        return () => clearInterval(id);
+      }, []);
+
+      const trigger = (key, ms = 2000) => {
+        setBusy(b => ({ ...b, [key]: true }));
+        setTimeout(() => setBusy(b => ({ ...b, [key]: false })), ms);
+      };
+
+      const PURPLE = "var(--cf-brand-purple)";
+      const BLUE   = "#60a5fa";
+      const EMERALD = "#34d399";
+      const AMBER  = "#fbbf24";
+      const RED    = "#f87171";
+
+      return (
+        <div>
+          <h1>Spinner system</h1>
+          <p className="sub">Crystal Forge · unified loading indicators</p>
+
+          {/* ── Spinner ── */}
+          <div className="demo-section">
+            <div className="demo-label">Spinner — indeterminate ring</div>
+
+            <div className="demo-row">
+              {[
+                { label: "sm (14)", el: <Spinner size={14} /> },
+                { label: "md (20)", el: <Spinner size={20} /> },
+                { label: "lg (28)", el: <Spinner size={28} /> },
+                { label: "xl (40)", el: <Spinner size={40} /> },
+              ].map(({ label, el }) => (
+                <div className="demo-cell" key={label}>
+                  {el}
+                  <span className="demo-name">{label}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="demo-row">
+              {[
+                { color: PURPLE,  label: "purple" },
+                { color: BLUE,    label: "blue" },
+                { color: EMERALD, label: "emerald" },
+                { color: AMBER,   label: "amber" },
+                { color: RED,     label: "red" },
+              ].map(({ color, label }) => (
+                <div className="demo-cell" key={label}>
+                  <Spinner size={22} color={color} />
+                  <span className="demo-name">{label}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="demo-label" style={{ marginTop: 28 }}>In context — button loading states</div>
+            <div className="demo-btn-row">
+              <button
+                className="btn btn-primary focus-ring"
+                onClick={() => trigger("deploy")}
+                disabled={busy.deploy}
+              >
+                {busy.deploy
+                  ? <><Spinner size={13} color="#fff" /> Deploying…</>
+                  : <><Icon name="deploy" size={13}/> Deploy</>}
+              </button>
+
+              <button
+                className="btn btn-ghost focus-ring"
+                onClick={() => trigger("scan")}
+                disabled={busy.scan}
+              >
+                {busy.scan
+                  ? <><Spinner size={13} /> Scanning…</>
+                  : <><Icon name="sync" size={13}/> Rescan fleet</>}
+              </button>
+
+              <button
+                className="btn btn-subtle focus-ring"
+                onClick={() => trigger("eval")}
+                disabled={busy.eval}
+              >
+                {busy.eval
+                  ? <><Spinner size={13} /> Evaluating…</>
+                  : <><Icon name="eval" size={13}/> Re-evaluate</>}
+              </button>
+            </div>
+          </div>
+
+          <hr />
+
+          {/* ── Pulse ── */}
+          <div className="demo-section">
+            <div className="demo-label">Pulse — live stream dot</div>
+
+            <div className="demo-row">
+              {[
+                { label: "sm (5px)", el: <Pulse size={5} /> },
+                { label: "md (7px)", el: <Pulse size={7} /> },
+                { label: "lg (10px)", el: <Pulse size={10} /> },
+              ].map(({ label, el }) => (
+                <div className="demo-cell" key={label}>
+                  {el}
+                  <span className="demo-name">{label}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="demo-row">
+              {[
+                { color: BLUE,    label: "blue (default)" },
+                { color: EMERALD, label: "emerald" },
+                { color: AMBER,   label: "amber" },
+                { color: RED,     label: "red" },
+              ].map(({ color, label }) => (
+                <div className="demo-cell" key={label}>
+                  <Pulse size={8} color={color} />
+                  <span className="demo-name">{label}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="demo-label" style={{ marginTop: 28 }}>In context</div>
+            <div className="demo-row" style={{ gap: 20 }}>
+              {/* Live indicator (BuildsView) */}
+              <div style={{ display:"flex", alignItems:"center", gap:8, fontSize:12, color:"var(--cf-text-muted)" }}>
+                <span style={{ display:"inline-flex", alignItems:"center", gap:6 }}>
+                  <Pulse />
+                  <span style={{ color:"#34d399", fontWeight:600 }}>Live</span>
+                </span>
+                <span>· updated just now</span>
+              </div>
+
+              {/* Eval status chip */}
+              <span className="chip chip-info">
+                <span className="chip-dot" style={{ background: BLUE }} />
+                in_progress
+                <Pulse style={{ marginLeft:6 }} />
+              </span>
+
+              {/* Tab label */}
+              <button className="sd-tab active" style={{ cursor:"default" }}>
+                <Icon name="terminal" size={12}/> Log <Pulse style={{ marginLeft:4 }} />
+              </button>
+            </div>
+          </div>
+
+          <hr />
+
+          {/* ── ProgressBar ── */}
+          <div className="demo-section">
+            <div className="demo-label">ProgressBar — linear</div>
+
+            <div style={{ display:"flex", flexDirection:"column", gap:20, maxWidth:480 }}>
+              {/* Determinate */}
+              <div>
+                <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginBottom:8 }}>
+                  Determinate · auto-ticking ({Math.round(progress * 100)}%)
+                </div>
+                <ProgressBar value={progress} color={PURPLE} height={6} />
+              </div>
+
+              {/* Indeterminate */}
+              <div>
+                <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginBottom:8 }}>Indeterminate sweep</div>
+                <ProgressBar color={BLUE} height={4} />
+              </div>
+
+              {/* Segmented */}
+              <div>
+                <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginBottom:8 }}>
+                  Segmented (cached · building · queued)
+                </div>
+                <ProgressBar
+                  height={6}
+                  segments={[
+                    { color: EMERALD, value: 0.54 },
+                    { color: BLUE,    value: 0.28 },
+                  ]}
+                />
+              </div>
+
+              {/* Height variants */}
+              <div>
+                <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginBottom:12 }}>Height variants</div>
+                <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                  {[
+                    { h:2,  label:"2px · micro" },
+                    { h:3,  label:"3px · scan row" },
+                    { h:4,  label:"4px · default" },
+                    { h:6,  label:"6px · medium" },
+                    { h:10, label:"10px · heavy" },
+                  ].map(({ h, label }) => (
+                    <div key={h} style={{ display:"flex", alignItems:"center", gap:12 }}>
+                      <span style={{ fontSize:10, color:"var(--cf-text-muted)", fontFamily:"var(--font-mono)", width:120, flexShrink:0 }}>{label}</span>
+                      <ProgressBar value={0.65} height={h} color={PURPLE} style={{ flex:1 }} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Color variants */}
+              <div>
+                <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginBottom:12 }}>Color variants</div>
+                <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                  {[
+                    { color: PURPLE,  label: "purple" },
+                    { color: BLUE,    label: "blue" },
+                    { color: EMERALD, label: "emerald" },
+                    { color: AMBER,   label: "amber" },
+                    { color: RED,     label: "red" },
+                  ].map(({ color, label }) => (
+                    <div key={label} style={{ display:"flex", alignItems:"center", gap:12 }}>
+                      <span style={{ fontSize:10, color:"var(--cf-text-muted)", fontFamily:"var(--font-mono)", width:120, flexShrink:0 }}>{label}</span>
+                      <ProgressBar value={0.65} height={5} color={color} style={{ flex:1 }} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<Demo />);
+  </script>
+</body>
+</html>
