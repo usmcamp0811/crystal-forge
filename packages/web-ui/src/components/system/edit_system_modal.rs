@@ -493,18 +493,28 @@ pub fn EditSystemModal(
         
         // Remove system confirmation modal
         if show_remove_modal() {
-            RemoveSystemDialog {
-                hostname: hostname.read().clone(),
-                environment: environment.read().clone().into(),
-                is_loading: is_deleting(),
-                on_confirm: move |_| {
-                    is_deleting.set(true);
-                    on_delete.call(());
-                },
-                on_cancel: move |_| {
-                    show_remove_modal.set(false);
-                    is_deleting.set(false);
-                },
+            {
+                let env_value = environment.read().clone();
+                let env_opt = if env_value.trim().is_empty() {
+                    None
+                } else {
+                    Some(env_value)
+                };
+                rsx! {
+                    RemoveSystemDialog {
+                        hostname: hostname.read().clone(),
+                        environment: env_opt,
+                        is_loading: is_deleting(),
+                        on_confirm: move |_| {
+                            is_deleting.set(true);
+                            on_delete.call(());
+                        },
+                        on_cancel: move |_| {
+                            show_remove_modal.set(false);
+                            is_deleting.set(false);
+                        },
+                    }
+                }
             }
         }
     }

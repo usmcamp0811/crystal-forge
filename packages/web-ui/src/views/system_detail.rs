@@ -3140,8 +3140,9 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                 class: "sd-log-stream",
                 onmounted: move |evt| {
                     #[cfg(target_arch = "wasm32")]
-                    if let Some(element) = evt.try_as_web_event() {
-                        scroll_ref.set(Some(element));
+                    {
+                        use dioxus::dioxus_web::WebEventExt;
+                        scroll_ref.set(Some(evt.as_web_event()));
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     let _ = evt;
@@ -3382,12 +3383,12 @@ fn build_history_events(
 
         let is_gen_changing = !matches!(kind, HistoryEventKind::Restart);
         let (generation, prev_generation) = if is_gen_changing {
-            let gen = running_gen;
+            let current = running_gen;
             let prev = running_gen.map(|g| g - 1);
             if let Some(g) = running_gen {
                 running_gen = Some(g - 1);
             }
-            (gen, prev)
+            (current, prev)
         } else {
             (running_gen, None)
         };
@@ -3453,6 +3454,7 @@ fn fold_restart_clusters(events: &[HistoryEvent]) -> Vec<TimelineItem> {
 /// - Collapsible restart clusters for consecutive reboots at one generation
 /// - Rollback and view-logs actions that jump to the corresponding log line
 /// - Infinite scroll pagination for deep history
+#[component]
 fn HistoryTab(
     entries: Vec<SystemHistoryEntry>,
     commits: Vec<SystemCommitHistory>,
@@ -3576,7 +3578,7 @@ fn HistoryTab(
                                     }
                                 } else {
                                     let is_open = open_clusters.read().contains(&idx);
-                                    let gen = list[0].generation;
+                                    let cluster_gen = list[0].generation;
                                     let first_when = relative_time(list[list.len() - 1].timestamp);
                                     let last_when = relative_time(list[0].timestamp);
                                     let count = list.len();
@@ -3613,7 +3615,7 @@ fn HistoryTab(
                                                     span { class: "tl-restart-sep", "·" }
                                                     span { class: "tl-restart-label",
                                                         "generation "
-                                                        if let Some(g) = gen {
+                                                        if let Some(g) = cluster_gen {
                                                             span { class: "mono", "#{g}" }
                                                         } else {
                                                             span { class: "mono", "—" }
@@ -3764,13 +3766,13 @@ fn DeployRow(
                         span { class: "tl-kind", style: "color: {accent};", "{kind_label}" }
 
                         // Generation transition (#prev → #cur) or "no generation activated"
-                        if let Some(gen) = event.generation {
+                        if let Some(gen_num) = event.generation {
                             span { class: "tl-gen",
                                 if let Some(prev) = event.prev_generation {
                                     span { class: "tl-gen-prev", "#{prev}" }
                                     Icon { name: IconName::ArrowRight, size: 11 }
                                 }
-                                strong { "#{gen}" }
+                                strong { "#{gen_num}" }
                             }
                         } else {
                             span { class: "tl-gen tl-gen-none", "no generation activated" }
