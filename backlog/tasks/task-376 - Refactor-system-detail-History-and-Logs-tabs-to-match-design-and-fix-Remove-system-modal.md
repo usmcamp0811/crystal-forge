@@ -3,9 +3,10 @@ id: TASK-376
 title: >-
   Refactor system detail History and Logs tabs to match design and fix Remove
   system modal
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-07-02 00:55'
+updated_date: '2026-07-02 00:56'
 labels:
   - ui
   - system-detail
