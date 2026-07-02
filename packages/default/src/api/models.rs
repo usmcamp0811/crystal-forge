@@ -1433,6 +1433,17 @@ pub struct SystemHistoryEntry {
     pub flake_repo_url: Option<String>,
     pub actor: String,
     pub outcome: String,
+    /// Authoritative event classification derived from `change_reason`:
+    /// `cf_deployment`, `local_rebuild`, `restart`, or `state_change`.
+    pub event_kind: String,
+    /// Recorded generation number at this transition (from `system_states.generation`).
+    pub generation: Option<i32>,
+    /// Whether the running store path at this transition maps to a tracked flake commit.
+    /// For out-of-band local rebuilds this distinguishes "reconciled" from
+    /// "untracked / capture-to-flake".
+    pub reconciled: bool,
+    /// Whether this recorded generation's store path matched the current store path.
+    pub generation_matches_current_store_path: Option<bool>,
 }
 
 /// Agent-originated event shown on system details logs tab.
