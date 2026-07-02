@@ -2786,7 +2786,6 @@ fn DeployGatePanel(deployment_policy: String, cve_critical: i64) -> Element {
     }
 }
 
-#[component]
 /// Enhanced Logs tab matching the design reference.
 ///
 /// Features:
