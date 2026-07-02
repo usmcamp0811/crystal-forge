@@ -2125,6 +2125,7 @@ pub async fn append_job_logs(
 const BUILD_LOG_WS_CHANNEL_BUFFER: usize = 1024;
 const MAX_BUILD_LOG_WS_CHANNELS: usize = 2048;
 const BUILD_LOG_HISTORY_BUFFER: usize = 4000;
+const PERSISTED_BUILD_LOG_REPLAY_CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -2228,25 +2229,13 @@ async fn handle_log_stream(
         return;
     };
 
-    let history_snapshot = {
-        let history = state.build_log_history.lock().await;
-        history.get(&job_id).cloned().unwrap_or_default()
-    };
-
-    for frame in history_snapshot {
-        if let Err(e) = socket.send(Message::Text(frame.into())).await {
-            tracing::debug!(
-                "Failed to replay build log history to websocket for job {}: {}",
-                job_id,
-                e
-            );
-            return;
-        }
-    }
-
     match principal {
         BuildLogStreamPrincipal::Viewer => {
             let mut rx = tx.subscribe();
+            if !replay_initial_build_log_history(&mut socket, &state, job_id, true).await {
+                return;
+            }
+
             while let Ok(frame) = rx.recv().await {
                 if let Err(e) = socket.send(Message::Text(frame)).await {
                     tracing::debug!(
@@ -2259,6 +2248,10 @@ async fn handle_log_stream(
             }
         }
         BuildLogStreamPrincipal::Builder(builder_id) => {
+            if !replay_initial_build_log_history(&mut socket, &state, job_id, false).await {
+                return;
+            }
+
             let max_chunk_bytes = state.server_config.max_build_log_chunk_mb * 1024 * 1024;
             let max_total_bytes = state.server_config.max_build_log_size_mb * 1024 * 1024;
 
@@ -2395,6 +2388,101 @@ async fn handle_log_stream(
     tracing::info!("WebSocket connection closed for job {}", job_id);
 }
 
+async fn replay_initial_build_log_history(
+    socket: &mut WebSocket,
+    state: &CFState,
+    job_id: Uuid,
+    include_persisted_logs: bool,
+) -> bool {
+    for frame in initial_build_log_history_snapshot(state, job_id, include_persisted_logs).await {
+        if let Err(e) = socket.send(Message::Text(frame.into())).await {
+            tracing::debug!(
+                "Failed to replay build log history to websocket for job {}: {}",
+                job_id,
+                e
+            );
+            return false;
+        }
+    }
+
+    true
+}
+
+async fn initial_build_log_history_snapshot(
+    state: &CFState,
+    job_id: Uuid,
+    include_persisted_logs: bool,
+) -> Vec<String> {
+    let in_memory_snapshot = {
+        let history = state.build_log_history.lock().await;
+        history.get(&job_id).cloned().unwrap_or_default()
+    };
+
+    if !in_memory_snapshot.is_empty() {
+        return in_memory_snapshot;
+    }
+
+    if !include_persisted_logs {
+        return Vec::new();
+    }
+
+    match builders::get_build_job_by_id(&state.pool, &job_id).await {
+        Ok(Some(job)) => persisted_build_log_frames(job.logs.as_deref()),
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load persisted build logs for websocket replay on job {}: {}",
+                job_id,
+                e
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn persisted_build_log_frames(logs: Option<&str>) -> Vec<String> {
+    let Some(logs) = logs.filter(|logs| !logs.is_empty()) else {
+        return Vec::new();
+    };
+
+    split_utf8_chunks(logs, PERSISTED_BUILD_LOG_REPLAY_CHUNK_BYTES)
+        .filter_map(|chunk| {
+            serde_json::to_string(&BuildStreamMessage::Log {
+                message: chunk.to_string(),
+            })
+            .ok()
+        })
+        .collect()
+}
+
+fn split_utf8_chunks(input: &str, max_chunk_bytes: usize) -> impl Iterator<Item = &str> {
+    let max_chunk_bytes = max_chunk_bytes.max(1);
+    let mut start = 0;
+
+    std::iter::from_fn(move || {
+        if start >= input.len() {
+            return None;
+        }
+
+        let mut end = (start + max_chunk_bytes).min(input.len());
+        while end > start && !input.is_char_boundary(end) {
+            end -= 1;
+        }
+
+        if end == start {
+            end = input[start..]
+                .char_indices()
+                .nth(1)
+                .map(|(idx, _)| start + idx)
+                .unwrap_or(input.len());
+        }
+
+        let chunk = &input[start..end];
+        start = end;
+        Some(chunk)
+    })
+}
+
 fn broadcast_build_stream_message(
     tx: &tokio::sync::broadcast::Sender<String>,
     msg: &BuildStreamMessage,
@@ -2475,6 +2563,7 @@ mod tests {
     use super::parse_derivation_requisites;
     use super::parse_job_status_request;
     use super::parse_next_job_request;
+    use super::persisted_build_log_frames;
     use super::source_flake_target_for_derivation;
     use super::verify_builder_resolve_request;
     use crate::builder::api_client::BuilderApiClient;
@@ -2697,6 +2786,39 @@ mod tests {
             parsed.is_err(),
             "untagged JSON should not be accepted as a valid stream frame"
         );
+    }
+
+    #[test]
+    fn persisted_build_logs_replay_as_typed_log_frames() {
+        let frames = persisted_build_log_frames(Some("line 1\nline 2\n"));
+
+        assert_eq!(frames.len(), 1);
+        let parsed = serde_json::from_str::<BuildStreamMessage>(&frames[0])
+            .expect("persisted log frame should deserialize");
+        assert!(matches!(
+            parsed,
+            BuildStreamMessage::Log { message } if message == "line 1\nline 2\n"
+        ));
+    }
+
+    #[test]
+    fn persisted_build_logs_replay_without_splitting_multibyte_chars() {
+        let frames = persisted_build_log_frames(Some("é".repeat(40_000).as_str()));
+
+        assert!(frames.len() > 1);
+        let replayed = frames
+            .iter()
+            .map(|frame| {
+                match serde_json::from_str::<BuildStreamMessage>(frame)
+                    .expect("persisted log frame should deserialize")
+                {
+                    BuildStreamMessage::Log { message } => message,
+                    _ => panic!("persisted replay should only create log frames"),
+                }
+            })
+            .collect::<String>();
+
+        assert_eq!(replayed, "é".repeat(40_000));
     }
 
     #[test]
