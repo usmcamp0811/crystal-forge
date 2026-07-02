@@ -6,7 +6,7 @@
 //! - CVEs: Expandable vulnerability list
 //! - Logs: Recent deployment logs
 
-use chrono::{Duration, Utc};
+use chrono::{Duration, Local, Utc};
 use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
@@ -200,6 +200,8 @@ pub fn SystemDetailView(id: String) -> Element {
     // Current tab state
     let mut active_tab = use_signal(|| Tab::Overview);
     let mut edit_modal_open = use_signal(|| false);
+    let mut remove_in_progress = use_signal(|| false);
+    let mut remove_error_message: Signal<Option<String>> = use_signal(|| None);
     let mut show_ssh_modal = use_signal(|| false);
 
     // Confirmation dialog state for Sync
@@ -214,6 +216,11 @@ pub fn SystemDetailView(id: String) -> Element {
     let mut show_rollback_dialog = use_signal(|| false);
     let mut show_generation_rollback_modal = use_signal(|| false);
     let mut rollback_target: Signal<Option<SystemCommitHistory>> = use_signal(|| None);
+
+    // Jump-to-log target: set when "view logs" is clicked on a History event so the
+    // Logs tab can scroll to and highlight the matching line. Carries a nonce so
+    // repeated jumps to the same event still retrigger the effect.
+    let mut log_jump_target: Signal<Option<(String, u64)>> = use_signal(|| None);
 
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
@@ -286,8 +293,11 @@ pub fn SystemDetailView(id: String) -> Element {
         }
     });
 
+    let mut agent_events_poll_tick = use_signal(|| 0_u64);
     let id_for_events = id.clone();
+    let agent_events_poll_tick_for_resource = agent_events_poll_tick.clone();
     let agent_events_resource = use_resource(move || {
+        let _ = agent_events_poll_tick_for_resource();
         let id = id_for_events.clone();
         async move {
             let Ok(system_id) = Uuid::parse_str(&id) else {
@@ -299,6 +309,26 @@ pub fn SystemDetailView(id: String) -> Element {
                 .entries
         }
     });
+
+    // Refresh agent events while the Logs tab is active so auto-scroll/tail mode can
+    // surface events generated after the page initially loaded. This is polling until
+    // a streaming endpoint exists.
+    {
+        let active_tab_for_events = active_tab;
+        use_future(move || async move {
+            loop {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    gloo_timers::future::TimeoutFuture::new(3000).await;
+                    if *active_tab_for_events.read() == Tab::Logs {
+                        agent_events_poll_tick.set(agent_events_poll_tick() + 1);
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                break;
+            }
+        });
+    }
 
     let id_for_scan_eligibility = id.clone();
     let scan_eligibility_resource = use_resource(move || {
@@ -454,6 +484,11 @@ pub fn SystemDetailView(id: String) -> Element {
         })
         .filter(|commits| !commits.is_empty())
         .unwrap_or_else(|| history_commit_history.clone());
+    let effective_history_entries = if history_entries.is_empty() {
+        synthesize_history_entries_from_commits(&deploy_commit_history)
+    } else {
+        history_entries.clone()
+    };
     let overview_current_commit = deploy_commit_history
         .iter()
         .find(|commit| commit.is_current)
@@ -892,14 +927,21 @@ pub fn SystemDetailView(id: String) -> Element {
                     },
                     Tab::History => rsx! {
                         HistoryTab {
-                            commits: history_commit_history.clone(),
+                            entries: effective_history_entries.clone(),
+                            commits: deploy_commit_history.clone(),
+                            current_generation: system.generation,
                             deployment_policy: system.deployment_policy.clone(),
                             allow_mutations: can_mutate,
                             on_rollback: move |commit| {
                                 rollback_target.set(Some(commit));
                                 show_rollback_dialog.set(true);
                             },
-                            on_view_logs: move |_| active_tab.set(Tab::Logs),
+                            on_view_logs: move |event_id: String| {
+                                // Record the jump target with a fresh nonce, then switch to Logs.
+                                let nonce = chrono::Utc::now().timestamp_millis() as u64;
+                                log_jump_target.set(Some((event_id, nonce)));
+                                active_tab.set(Tab::Logs);
+                            },
                         }
                     },
                     Tab::Cves => rsx! {
@@ -928,7 +970,11 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     },
                     Tab::Logs => rsx! {
-                        LogsTabStyled { logs: deployment_logs.clone() }
+                        LogsTabStyled {
+                            logs: deployment_logs.clone(),
+                            history_entries: effective_history_entries.clone(),
+                            jump_target: log_jump_target.read().clone(),
+                        }
                     },
                     Tab::Config => rsx! {
                         ConfigTab { system: system.clone() }
@@ -959,7 +1005,13 @@ pub fn SystemDetailView(id: String) -> Element {
                     .map(|flake| vec![flake.name.clone()])
                     .unwrap_or_default(),
                 recent_commits: edit_recent_commits.clone(),
-                on_close: move |_| edit_modal_open.set(false),
+                remove_in_progress: remove_in_progress(),
+                remove_error_message: remove_error_message.read().clone(),
+                on_close: move |_| {
+                    remove_error_message.set(None);
+                    remove_in_progress.set(false);
+                    edit_modal_open.set(false);
+                },
                 on_save: move |request: crate::api::models::UpdateSystemRequest| {
                     let system_id = system.id;
                     spawn(async move {
@@ -984,7 +1036,38 @@ pub fn SystemDetailView(id: String) -> Element {
                             }
                         }
                     });
-                }
+                },
+                on_delete: {
+                    let system_id = system.id;
+                    let hostname = system.hostname.clone();
+                    let nav = nav.clone();
+                    move |_| {
+                        let system_id = system_id;
+                        let hostname = hostname.clone();
+                        let nav = nav.clone();
+                        let mut toast_message = toast_message;
+                        remove_error_message.set(None);
+                        remove_in_progress.set(true);
+                        spawn(async move {
+                            match crate::api::client::deactivate_system(&system_id).await {
+                                Ok(_) => {
+                                    remove_in_progress.set(false);
+                                    toast_message.set(Some((
+                                        format!("System {} removed from registry", hostname),
+                                        true,
+                                    )));
+                                    // Navigate back to systems list
+                                    nav.push(Route::SystemsView {});
+                                }
+                                Err(error) => {
+                                    remove_in_progress.set(false);
+                                    remove_error_message
+                                        .set(Some(format!("Failed to remove system: {error}")));
+                                }
+                            }
+                        });
+                    }
+                },
             }
         }
 
@@ -2740,63 +2823,442 @@ fn DeployGatePanel(deployment_policy: String, cve_critical: i64) -> Element {
     }
 }
 
-#[component]
-fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
+/// Enhanced Logs tab matching the design reference.
+///
+/// Features:
+/// - Auto-scroll mode for the combined deployment log stream
+/// - Timezone toggle (local vs UTC)
+/// - Log level filtering (all, info, warn, error)
+/// - Day separators on date boundaries
+/// - Jump-to-event from history with highlighting
+/// - Clear button for the current displayed log window
+#[derive(Clone, PartialEq, Props)]
+struct LogsTabProps {
+    logs: Vec<DeploymentLogEntry>,
+    /// History entries used to synthesize anchored log lines so "view logs" jumps
+    /// from the History tab land on the exact event line (design parity).
+    #[props(default)]
+    history_entries: Vec<SystemHistoryEntry>,
+    /// Jump target from the History tab: (event id, nonce). The nonce lets repeated
+    /// jumps to the same event retrigger the scroll/highlight effect.
+    #[props(default)]
+    jump_target: Option<(String, u64)>,
+}
+
+fn LogsTabStyled(props: LogsTabProps) -> Element {
+    let LogsTabProps {
+        logs,
+        history_entries,
+        jump_target,
+    } = props;
+
     let mut filter = use_signal(|| "all".to_string());
     let mut tail = use_signal(|| true);
-    let mut cleared = use_signal(|| false);
+    let mut use_utc = use_signal(|| false);
+    let mut highlighted_event = use_signal(|| None::<String>);
+    let mut clear_before: Signal<Option<chrono::DateTime<Utc>>> = use_signal(|| None);
+    // Stable DOM id for the scroll container so we can locate it (and anchored lines)
+    // via document.query_selector without relying on event-based element handles.
+    let log_stream_id = "sd-log-stream-container";
 
-    let filtered_logs: Vec<&DeploymentLogEntry> = logs
+    // Keep the stream pinned to the bottom while auto-scroll is enabled. This runs
+    // continuously instead of only when the checkbox changes, so newly polled agent
+    // events remain visible as they arrive.
+    let tail_for_autoscroll = tail.clone();
+    use_future(move || async move {
+        loop {
+            #[cfg(target_arch = "wasm32")]
+            {
+                gloo_timers::future::TimeoutFuture::new(500).await;
+                if *tail_for_autoscroll.read() {
+                    if let Some(container) = web_sys::window()
+                        .and_then(|w| w.document())
+                        .and_then(|d| d.get_element_by_id(log_stream_id))
+                    {
+                        container.set_scroll_top(container.scroll_height());
+                    }
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            break;
+        }
+    });
+
+    // Auto-scroll to bottom when tailing. Locate the container via its stable DOM id
+    // so we don't depend on event-based element handles.
+    use_effect(move || {
+        let _tail_dep = *tail.read();
+        #[cfg(target_arch = "wasm32")]
+        if _tail_dep {
+            if let Some(container) = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.get_element_by_id(log_stream_id))
+            {
+                container.set_scroll_top(container.scroll_height());
+            }
+        }
+    });
+
+    // Handle jump to event from history: stop tailing, reset filter, scroll to the
+    // anchored line, and flash-highlight it for ~2.4s (design parity).
+    {
+        let jump_target = jump_target.clone();
+        use_effect(move || {
+            let Some((event_id, _nonce)) = jump_target.clone() else {
+                return;
+            };
+            tail.set(false);
+            filter.set("all".to_string());
+            highlighted_event.set(Some(event_id.clone()));
+
+            // Scroll the anchored line into view (center it).
+            #[cfg(target_arch = "wasm32")]
+            {
+                let event_id_scroll = event_id.clone();
+                spawn(async move {
+                    // Let the DOM update before querying for the anchor.
+                    gloo_timers::future::TimeoutFuture::new(60).await;
+                    if let Some(container) = web_sys::window()
+                        .and_then(|w| w.document())
+                        .and_then(|d| d.get_element_by_id(log_stream_id))
+                    {
+                        let selector = format!("[data-ev=\"{event_id_scroll}\"]");
+                        if let Ok(Some(el)) = container.query_selector(&selector) {
+                            if let Ok(html_el) = el.dyn_into::<web_sys::HtmlElement>() {
+                                let target = (html_el.offset_top() - container.client_height() / 2
+                                    + html_el.offset_height())
+                                .max(0);
+                                container.set_scroll_top(target);
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Clear highlight after 2.4 seconds.
+            let event_id_clone = event_id.clone();
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(2400).await;
+                highlighted_event.with_mut(|hl| {
+                    if hl.as_ref() == Some(&event_id_clone) {
+                        *hl = None;
+                    }
+                });
+            });
+        });
+    }
+
+    // Combine reconstructed (anchored) timeline lines with real agent logs.
+    // Reconstructed lines are explicitly labelled so they are not mistaken for
+    // current live activity from the host.
+    // Tuple: (timestamp, level, message, Option<event_id anchor>)
+    let all_lines: Vec<(chrono::DateTime<Utc>, String, String, Option<String>)> = {
+        let mut combined = Vec::new();
+
+        // Synthesize anchored lines from history entries so each timeline event has a
+        // real line to jump to. The anchored (key) line carries the event id.
+        for (idx, entry) in history_entries.iter().enumerate() {
+            let event_id = format!("ev{idx}");
+            let kind = classify_history_entry(entry);
+            let base = entry.timestamp;
+            let short_msg = entry
+                .change_reason
+                .lines()
+                .next()
+                .unwrap_or(&entry.change_reason)
+                .to_string();
+            let sha = entry
+                .commit_hash
+                .as_ref()
+                .map(|s| s.chars().take(7).collect::<String>())
+                .unwrap_or_else(|| "—".to_string());
+            let store_short = entry
+                .store_path
+                .as_ref()
+                .and_then(|p| p.rsplit('/').next())
+                .unwrap_or("")
+                .to_string();
+
+            // push(offset_secs, level, message, anchor?)
+            let mut push = |off: i64, level: &str, msg: String, anchor: bool| {
+                let ts = base + chrono::Duration::seconds(off);
+                combined.push((
+                    ts,
+                    level.to_string(),
+                    msg,
+                    if anchor { Some(event_id.clone()) } else { None },
+                ));
+            };
+
+            match kind {
+                HistoryEventKind::Restart => {
+                    push(
+                        0,
+                        "info",
+                        "[reconstructed timeline] systemd: reached target multi-user.target".into(),
+                        false,
+                    );
+                    push(
+                        2,
+                        "info",
+                        format!("[reconstructed timeline] agent: boot recorded — {short_msg}"),
+                        true,
+                    );
+                    push(
+                        4,
+                        "info",
+                        "[reconstructed timeline] heartbeat observed after boot".into(),
+                        false,
+                    );
+                }
+                HistoryEventKind::LocalRebuildMatched => {
+                    push(
+                        0,
+                        "warn",
+                        "[reconstructed timeline] agent: out-of-band activation detected".into(),
+                        false,
+                    );
+                    push(
+                        2,
+                        "info",
+                        format!(
+                            "[reconstructed timeline] local: nixos-rebuild switch by {} — {short_msg}",
+                            entry.actor
+                        ),
+                        false,
+                    );
+                    push(
+                        5,
+                        "info",
+                        format!(
+                            "[reconstructed timeline] agent: generation activated out of band (store-path {store_short})"
+                        ),
+                        true,
+                    );
+                    push(
+                        7,
+                        "info",
+                        format!(
+                            "[reconstructed timeline] reconcile: store-path matches pushed commit {sha} — config is tracked"
+                        ),
+                        false,
+                    );
+                }
+                HistoryEventKind::LocalRebuildUntracked => {
+                    push(
+                        0,
+                        "warn",
+                        "[reconstructed timeline] agent: out-of-band activation detected".into(),
+                        false,
+                    );
+                    push(
+                        2,
+                        "info",
+                        format!(
+                            "[reconstructed timeline] local: nixos-rebuild switch by {} — {short_msg}",
+                            entry.actor
+                        ),
+                        false,
+                    );
+                    push(
+                        5,
+                        "warn",
+                        format!(
+                            "[reconstructed timeline] agent: generation activated locally — no flake commit (store-path {store_short})"
+                        ),
+                        true,
+                    );
+                    push(
+                        7,
+                        "warn",
+                        "[reconstructed timeline] drift: running config no longer maps to a tracked flake revision".into(),
+                        false,
+                    );
+                }
+                HistoryEventKind::DeployFailed => {
+                    push(
+                        0,
+                        "info",
+                        format!(
+                            "[reconstructed timeline] deploy: evaluating configuration @ {sha}"
+                        ),
+                        false,
+                    );
+                    push(
+                        4,
+                        "error",
+                        format!("[reconstructed timeline] activation failed: {short_msg}"),
+                        true,
+                    );
+                    push(
+                        6,
+                        "warn",
+                        "[reconstructed timeline] deploy: rolled back to previous generation"
+                            .into(),
+                        false,
+                    );
+                }
+                HistoryEventKind::Deploy => {
+                    push(
+                        0,
+                        "info",
+                        format!(
+                            "[reconstructed timeline] deploy: evaluating configuration @ {sha}"
+                        ),
+                        false,
+                    );
+                    push(
+                        2,
+                        "info",
+                        "[reconstructed timeline] eval: success — derivations resolved, building"
+                            .into(),
+                        false,
+                    );
+                    push(
+                        5,
+                        "info",
+                        "[reconstructed timeline] build: completed".into(),
+                        false,
+                    );
+                    push(
+                        7,
+                        "info",
+                        "[reconstructed timeline] deploy: activating configuration".into(),
+                        false,
+                    );
+                    push(
+                        9,
+                        "info",
+                        format!("[reconstructed timeline] deploy: generation activated ({sha})"),
+                        true,
+                    );
+                }
+            }
+        }
+
+        // Add real agent-event logs (no anchors — they augment the synthesized stream).
+        for entry in &logs {
+            let level = match entry.level {
+                LogLevel::Info | LogLevel::Debug => "info",
+                LogLevel::Warn => "warn",
+                LogLevel::Error => "error",
+            };
+            combined.push((
+                entry.timestamp,
+                level.to_string(),
+                entry.message.clone(),
+                None,
+            ));
+        }
+
+        combined.sort_by_key(|(ts, _, _, _)| *ts);
+        combined
+    };
+
+    // Filter by clear boundary and log level.
+    let clear_boundary = *clear_before.read();
+    let filtered_lines: Vec<_> = all_lines
         .iter()
-        .filter(|e| {
-            let f = filter.read();
-            match f.as_str() {
-                "info" => matches!(e.level, LogLevel::Info | LogLevel::Debug),
-                "warn" => matches!(e.level, LogLevel::Warn),
-                "error" => matches!(e.level, LogLevel::Error),
+        .filter(|(timestamp, level, _, _)| {
+            if let Some(boundary) = clear_boundary {
+                if *timestamp <= boundary {
+                    return false;
+                }
+            }
+
+            match filter.read().as_str() {
+                "info" => level == "info",
+                "warn" => level == "warn",
+                "error" => level == "error",
                 _ => true,
             }
         })
         .collect();
-    let displayed_logs: Vec<&DeploymentLogEntry> = if cleared() { vec![] } else { filtered_logs };
 
-    // Precompute a day-break label for each line: shown when the calendar day changes from
-    // the previous visible line (design parity — sticky "Today"/"Yesterday"/date dividers).
-    let today = chrono::Utc::now().date_naive();
-    let yesterday = today.pred_opt().unwrap_or(today);
-    let log_rows: Vec<(Option<String>, &DeploymentLogEntry)> = {
-        let mut previous_day: Option<chrono::NaiveDate> = None;
-        displayed_logs
-            .into_iter()
-            .map(|entry| {
-                let day = entry.timestamp.date_naive();
-                let show = previous_day != Some(day);
-                previous_day = Some(day);
-                let label = if show {
-                    Some(if day == today {
-                        "Today".to_string()
-                    } else if day == yesterday {
-                        "Yesterday".to_string()
-                    } else {
-                        day.format("%a, %b %-d, %Y").to_string()
-                    })
-                } else {
-                    None
-                };
-                (label, entry)
-            })
-            .collect()
+    let latest_line_timestamp = all_lines.iter().map(|(timestamp, _, _, _)| *timestamp).max();
+
+    // Compute day separators in the selected display timezone.
+    let use_utc_value = *use_utc.read();
+    let today = if use_utc_value {
+        chrono::Utc::now().date_naive()
+    } else {
+        chrono::Local::now().date_naive()
     };
+    let yesterday = today.pred_opt().unwrap_or(today);
+
+    let mut previous_day: Option<chrono::NaiveDate> = None;
+    let log_rows: Vec<(
+        Option<String>,
+        &(chrono::DateTime<Utc>, String, String, Option<String>),
+    )> = filtered_lines
+        .into_iter()
+        .map(|entry| {
+            let day = display_log_date(entry.0, use_utc_value);
+            let show = previous_day != Some(day);
+            previous_day = Some(day);
+            let label = if show {
+                Some(if day == today {
+                    "Today".to_string()
+                } else if day == yesterday {
+                    "Yesterday".to_string()
+                } else {
+                    day.format("%a, %b %-d, %Y").to_string()
+                })
+            } else {
+                None
+            };
+            (label, entry)
+        })
+        .collect();
+
+    let local_tz_abbr = local_timezone_label();
+    let tz_label = if *use_utc.read() {
+        "UTC"
+    } else {
+        local_tz_abbr.as_str()
+    };
+
+    let download_text = log_rows
+        .iter()
+        .map(|(_, entry)| {
+            let (timestamp, level, message, _) = entry;
+            format!(
+                "{} [{}] {}",
+                format_log_timestamp(*timestamp, use_utc_value),
+                level.to_uppercase(),
+                message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     rsx! {
         section {
             class: "card sd-logs-card",
             div {
                 class: "sd-card-head",
-                style: "padding: 14px 18px;",
-                h2 { "Live logs" }
+                style: "padding: 14px 18px; max-height: 720px; overflow-y: auto;",
+                h2 { "Deployment logs" }
                 div {
                     class: "sd-logs-controls",
+
+                    // Timezone toggle
+                    div {
+                        class: "seg seg-tz",
+                        title: "Timestamp timezone",
+                        button {
+                            class: if !*use_utc.read() { "active" } else { "" },
+                            onclick: move |_| use_utc.set(false),
+                            "{local_tz_abbr}"
+                        }
+                        button {
+                            class: if *use_utc.read() { "active" } else { "" },
+                            onclick: move |_| use_utc.set(true),
+                            "UTC"
+                        }
+                    }
+
+                    // Level filter
                     div {
                         class: "seg",
                         for lvl in ["all", "info", "warn", "error"] {
@@ -2804,6 +3266,7 @@ fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
                                 let cls = if filter() == lvl { "active" } else { "" };
                                 rsx! {
                                     button {
+                                        key: "{lvl}",
                                         class: "{cls}",
                                         onclick: move |_| filter.set(lvl.to_string()),
                                         "{lvl}"
@@ -2812,73 +3275,177 @@ fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
                             }
                         }
                     }
+
+                    // Tail toggle
                     label {
                         class: "sd-toggle",
                         input {
                             r#type: "checkbox",
-                            checked: tail(),
-                            onchange: move |_| tail.set(!tail()),
+                            checked: *tail.read(),
+                            onchange: move |_| {
+                                let current = *tail.read();
+                                tail.set(!current);
+                            },
                         }
-                        span { "tail" }
+                        span { "auto-scroll" }
                     }
+
+                    // Local clear button. This hides currently displayed lines and lets newly
+                    // polled agent events appear after the clear boundary.
                     button {
                         class: "btn btn-ghost xs focus-ring",
-                        onclick: move |_| cleared.set(true),
-                        "Clear"
+                        onclick: move |_| {
+                            clear_before.set(latest_line_timestamp);
+                            highlighted_event.set(None);
+                        },
+                        disabled: latest_line_timestamp.is_none(),
+                        "Clear display"
                     }
+
+                    // Download button
                     button {
                         class: "btn btn-ghost xs focus-ring",
-                        svg {
-                            class: "w-3 h-3",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            view_box: "0 0 24 24",
-                            path { d: "M12 3v12M6 9l6 6 6-6M4 21h16" }
-                        }
-                        "Download"
+                        onclick: move |_| {
+                            download_text_file(&download_text, "system-detail-logs.txt");
+                        },
+                        Icon { name: IconName::Download, size: 11 }
+                        " Download"
                     }
                 }
             }
+
+            // Timezone info bar
+            div {
+                class: "sd-log-tzbar",
+                Icon { name: IconName::Clock, size: 11 }
+                " Timestamps shown in "
+                strong { "{tz_label}" }
+                " · reconstructed timeline entries are labelled and derived from deployment history"
+            }
+
+            // Log stream
             pre {
                 class: "sd-log-stream",
+                id: "{log_stream_id}",
+
                 for (day_label, entry) in log_rows {
                     {
-                        let level_class = match entry.level {
-                            LogLevel::Info => "sd-log-line sd-log-info",
-                            LogLevel::Warn => "sd-log-line sd-log-warn",
-                            LogLevel::Error => "sd-log-line sd-log-error",
-                            LogLevel::Debug => "sd-log-line sd-log-info",
+                        let (timestamp, level, message, event_id) = entry;
+
+                        // Format timestamp based on timezone preference
+                        let ts_str = format_log_time(*timestamp, *use_utc.read());
+
+                        let level_class = match level.as_str() {
+                            "info" => "sd-log-line sd-log-info",
+                            "warn" => "sd-log-line sd-log-warn",
+                            "error" => "sd-log-line sd-log-error",
+                            _ => "sd-log-line sd-log-info",
                         };
-                        let ts = entry.timestamp.format("%H:%M:%S").to_string();
-                        let lvl = match entry.level {
-                            LogLevel::Info => "INFO",
-                            LogLevel::Warn => "WARN",
-                            LogLevel::Error => "ERROR",
-                            LogLevel::Debug => "DEBUG",
-                        };
+
+                        let is_highlighted = event_id.is_some() && highlighted_event.read().as_ref() == event_id.as_ref();
+                        let highlight_class = if is_highlighted { " sd-log-hl" } else { "" };
+
+                        let lvl_upper = level.to_uppercase();
+
                         rsx! {
                             if let Some(label) = day_label {
                                 div {
+                                    key: "day-{label}",
                                     class: "sd-log-day",
                                     role: "separator",
                                     span { class: "sd-log-day-label", "{label}" }
                                 }
                             }
                             div {
-                                class: "{level_class}",
-                                span { class: "sd-log-t", "{ts}" }
-                                span { class: "sd-log-lvl", "{lvl}" }
-                                span { class: "sd-log-m", "{entry.message}" }
+                                key: "{timestamp}-{message}",
+                                class: "{level_class}{highlight_class}",
+                                "data-ev": event_id.as_ref().map(|s| s.as_str()).unwrap_or(""),
+                                span { class: "sd-log-t", "{ts_str}" }
+                                span { class: "sd-log-lvl", "{lvl_upper}" }
+                                span { class: "sd-log-m", "{message}" }
                             }
                         }
                     }
                 }
-                if tail() {
+
+                // Tail caret
+                if *tail.read() {
                     div { class: "sd-log-caret", "▍" }
                 }
             }
         }
+    }
+}
+
+fn display_log_date(timestamp: chrono::DateTime<Utc>, use_utc: bool) -> chrono::NaiveDate {
+    if use_utc {
+        timestamp.date_naive()
+    } else {
+        timestamp.with_timezone(&Local).date_naive()
+    }
+}
+
+fn format_log_time(timestamp: chrono::DateTime<Utc>, use_utc: bool) -> String {
+    if use_utc {
+        timestamp.format("%H:%M:%S").to_string()
+    } else {
+        timestamp
+            .with_timezone(&Local)
+            .format("%H:%M:%S")
+            .to_string()
+    }
+}
+
+fn format_log_timestamp(timestamp: chrono::DateTime<Utc>, use_utc: bool) -> String {
+    if use_utc {
+        timestamp.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    } else {
+        timestamp
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S %Z")
+            .to_string()
+    }
+}
+
+fn local_timezone_label() -> String {
+    let label = Local::now().format("%Z").to_string();
+    if label.trim().is_empty() {
+        "local".to_string()
+    } else {
+        label
+    }
+}
+
+fn download_text_file(content: &str, filename: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let encoded = js_sys::encode_uri_component(content)
+            .as_string()
+            .unwrap_or_default();
+        let data_uri = format!("data:text/plain;charset=utf-8,{}", encoded);
+        let js_code = format!(
+            r#"
+            (function() {{
+                var a = document.createElement('a');
+                a.href = '{uri}';
+                a.download = '{name}';
+                a.style = 'display:none';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            }})();
+            "#,
+            uri = data_uri.replace('\'', "\\'"),
+            name = filename.replace('\'', "\\'"),
+        );
+
+        let func = js_sys::Function::new_no_args(&js_code);
+        let _ = func.call0(&wasm_bindgen::JsValue::NULL);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (content, filename);
     }
 }
 
@@ -2955,33 +3522,300 @@ fn ConfigTab(system: SystemDetail) -> Element {
     }
 }
 
+/// Kind of history timeline event, mirroring the design reference's event model.
+#[derive(Debug, Clone, PartialEq)]
+enum HistoryEventKind {
+    /// Config deployed through Crystal Forge (generation-changing).
+    Deploy,
+    /// Deploy that failed to activate.
+    DeployFailed,
+    /// Out-of-band `nixos-rebuild switch` on the host, later reconciled to a pushed commit.
+    LocalRebuildMatched,
+    /// Out-of-band `nixos-rebuild switch` on the host with no tracked flake commit.
+    LocalRebuildUntracked,
+    /// System restart (reboot) at the same generation.
+    Restart,
+}
+
+/// A single unified timeline event, built from deployment history + agent events.
+///
+/// This is the Rust analogue of the design reference's `buildHistory` event objects.
+#[derive(Debug, Clone, PartialEq)]
+struct HistoryEvent {
+    id: String,
+    kind: HistoryEventKind,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    generation: Option<i32>,
+    prev_generation: Option<i32>,
+    sha: Option<String>,
+    message: String,
+    actor: String,
+    duration: Option<String>,
+    store_path: Option<String>,
+    /// Backing commit for rollback actions (deploy events only).
+    commit: Option<SystemCommitHistory>,
+}
+
+/// A rendered timeline item: either a standalone event or a folded restart cluster.
+#[derive(Debug, Clone, PartialEq)]
+enum TimelineItem {
+    Event(HistoryEvent),
+    RestartCluster(Vec<HistoryEvent>),
+}
+
+/// Classify a history entry's source/outcome into a timeline event kind.
+///
+/// Prefers the authoritative `event_kind` provided by the backend (derived from
+/// `system_states.change_reason`): `cf_deployment` (CF deploy), `local_rebuild`
+/// (on-host/out-of-band activation), and `restart` (reboot). Reconciliation of an
+/// out-of-band rebuild uses the backend `reconciled` flag (running store-path maps
+/// to a tracked flake commit). Falls back to string heuristics only for legacy
+/// payloads that predate these fields.
+fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
+    let outcome = entry.outcome.to_lowercase();
+
+    match entry.event_kind.as_str() {
+        "cf_deployment" => {
+            if outcome.contains("fail") || outcome.contains("error") {
+                HistoryEventKind::DeployFailed
+            } else {
+                HistoryEventKind::Deploy
+            }
+        }
+        "local_rebuild" => {
+            if entry.reconciled {
+                HistoryEventKind::LocalRebuildMatched
+            } else {
+                HistoryEventKind::LocalRebuildUntracked
+            }
+        }
+        "restart" => HistoryEventKind::Restart,
+        _ => classify_history_entry_legacy(entry),
+    }
+}
+
+/// Human-readable timeline message for an event.
+///
+/// The raw `change_reason` (e.g. "config_change") is not operator-friendly, so we
+/// surface a descriptive summary per kind while still preferring any richer message
+/// text carried on the entry (e.g. a commit subject in the fallback path).
+fn history_event_message(entry: &SystemHistoryEntry, kind: &HistoryEventKind) -> String {
+    let raw = entry
+        .change_reason
+        .lines()
+        .next()
+        .unwrap_or(&entry.change_reason)
+        .trim()
+        .to_string();
+
+    let is_raw_reason = matches!(
+        raw.as_str(),
+        "config_change" | "cf_deployment" | "startup" | "state_delta" | "state_change" | ""
+    );
+
+    match kind {
+        HistoryEventKind::Deploy => {
+            if is_raw_reason {
+                "Deployed through Crystal Forge".to_string()
+            } else {
+                raw
+            }
+        }
+        HistoryEventKind::DeployFailed => {
+            if is_raw_reason {
+                "Deploy failed to activate".to_string()
+            } else {
+                raw
+            }
+        }
+        HistoryEventKind::LocalRebuildMatched | HistoryEventKind::LocalRebuildUntracked => {
+            if is_raw_reason {
+                "nixos-rebuild switch on host".to_string()
+            } else {
+                raw
+            }
+        }
+        HistoryEventKind::Restart => {
+            if is_raw_reason {
+                "System restarted".to_string()
+            } else {
+                raw
+            }
+        }
+    }
+}
+
+/// Legacy heuristic classification for payloads without an authoritative `event_kind`.
+fn classify_history_entry_legacy(entry: &SystemHistoryEntry) -> HistoryEventKind {
+    let reason = entry.change_reason.to_lowercase();
+    let outcome = entry.outcome.to_lowercase();
+    let actor = entry.actor.to_lowercase();
+
+    if outcome.contains("fail") || outcome.contains("error") {
+        return HistoryEventKind::DeployFailed;
+    }
+    if reason.contains("restart") || reason.contains("boot") || reason.contains("startup") {
+        return HistoryEventKind::Restart;
+    }
+    let is_local =
+        actor.contains('@') || reason.contains("nixos-rebuild") || reason.contains("local");
+    if is_local {
+        if entry.commit_hash.is_some() {
+            HistoryEventKind::LocalRebuildMatched
+        } else {
+            HistoryEventKind::LocalRebuildUntracked
+        }
+    } else {
+        HistoryEventKind::Deploy
+    }
+}
+
+/// Build the unified event list from deployment history entries and the system's
+/// current generation.
+///
+/// When the backend supplies an authoritative per-entry `generation`, that value is
+/// used directly and the previous generation is taken from the next-older entry, so
+/// deploys render `#prev → #cur` and restarts render an unchanged generation
+/// ("held steady"). For legacy payloads without a recorded generation, we fall back
+/// to walking newest → oldest and decrementing on each generation-changing deploy.
+fn build_history_events(
+    entries: &[SystemHistoryEntry],
+    commits: &[SystemCommitHistory],
+    current_generation: Option<i32>,
+) -> Vec<HistoryEvent> {
+    let mut events = Vec::with_capacity(entries.len());
+    // Fallback running generation for payloads without an authoritative value.
+    let mut running_gen = current_generation;
+    // Whether any entry carries an authoritative recorded generation.
+    let has_authoritative_gen = entries.iter().any(|e| e.generation.is_some());
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let kind = classify_history_entry(entry);
+        let short_reason = history_event_message(entry, &kind);
+
+        // Match a commit record (for the rollback action + rich commit link).
+        let commit = entry
+            .commit_hash
+            .as_ref()
+            .and_then(|hash| commits.iter().find(|c| &c.hash == hash).cloned());
+
+        let is_gen_changing = !matches!(
+            kind,
+            HistoryEventKind::Restart | HistoryEventKind::DeployFailed
+        );
+        let (generation, prev_generation) = if has_authoritative_gen {
+            // Authoritative: use the recorded generation and compare against the
+            // next-older recorded generation to show a real transition.
+            let current = entry.generation;
+            let older = entries
+                .get(idx + 1)
+                .and_then(|older_entry| older_entry.generation);
+            let prev = match (is_gen_changing, current, older) {
+                // Only surface a transition when the generation actually changed.
+                (true, Some(cur), Some(old)) if old != cur => Some(old),
+                _ => None,
+            };
+            (current, prev)
+        } else if is_gen_changing {
+            let current = running_gen;
+            let prev = running_gen.map(|g| g - 1);
+            if let Some(g) = running_gen {
+                running_gen = Some(g - 1);
+            }
+            (current, prev)
+        } else {
+            (running_gen, None)
+        };
+
+        events.push(HistoryEvent {
+            id: format!("ev{idx}"),
+            kind,
+            timestamp: entry.timestamp,
+            generation,
+            prev_generation,
+            sha: entry.commit_hash.clone(),
+            message: short_reason,
+            actor: entry.actor.clone(),
+            // Do not infer operation duration from spacing between history records.
+            // The backend does not currently expose reliable operation start/end or
+            // uptime timestamps for these timeline entries.
+            duration: None,
+            store_path: entry.store_path.clone(),
+            commit,
+        });
+    }
+
+    events
+}
+
+/// Fold consecutive restart events into clusters; deploys stay standalone.
+/// Mirrors the design's item-folding pass so routine reboots don't drown out changes.
+fn fold_restart_clusters(events: &[HistoryEvent]) -> Vec<TimelineItem> {
+    let mut items = Vec::new();
+    let mut run: Vec<HistoryEvent> = Vec::new();
+
+    for e in events {
+        if matches!(e.kind, HistoryEventKind::Restart) {
+            run.push(e.clone());
+        } else {
+            if !run.is_empty() {
+                items.push(TimelineItem::RestartCluster(std::mem::take(&mut run)));
+            }
+            items.push(TimelineItem::Event(e.clone()));
+        }
+    }
+    if !run.is_empty() {
+        items.push(TimelineItem::RestartCluster(run));
+    }
+    items
+}
+
+/// Enhanced History tab — a faithful Rust recreation of the design reference.
+///
+/// Features:
+/// - Rich deployment event cards with generation transitions (#prev → #cur)
+/// - Out-of-band local rebuild indicators with matched/untracked status
+/// - Collapsible restart clusters for consecutive reboots at one generation
+/// - Rollback and view-logs actions that jump to the corresponding log line
+/// - Infinite scroll pagination for deep history, with a load-more fallback
 #[component]
 fn HistoryTab(
+    entries: Vec<SystemHistoryEntry>,
     commits: Vec<SystemCommitHistory>,
+    current_generation: Option<i32>,
     deployment_policy: String,
     allow_mutations: bool,
     on_rollback: EventHandler<SystemCommitHistory>,
-    on_view_logs: EventHandler<()>,
+    on_view_logs: EventHandler<String>,
 ) -> Element {
-    let rows = commits;
-    let committed_timestamps: Vec<chrono::DateTime<chrono::Utc>> =
-        rows.iter().map(|c| c.committed_at).collect();
+    let events = build_history_events(&entries, &commits, current_generation);
+    let items = fold_restart_clusters(&events);
 
-    let status_chip = move |commit: &SystemCommitHistory| {
-        if commit.is_current || commit.was_deployed {
-            rsx!(
-                span { class: "chip chip-healthy", "success" }
-            )
-        } else if commit.is_ready_to_deploy {
-            rsx!(
-                span { class: "chip chip-warning", "pending" }
-            )
-        } else {
-            rsx!(
-                span { class: "chip chip-critical", "failed" }
-            )
-        }
-    };
+    let deploy_count = events
+        .iter()
+        .filter(|e| !matches!(e.kind, HistoryEventKind::Restart))
+        .count();
+    let restart_count = events
+        .iter()
+        .filter(|e| matches!(e.kind, HistoryEventKind::Restart))
+        .count();
+
+    // Infinite scroll pagination: reveal a page of clustered items at a time as
+    // the user approaches the bottom, with an explicit load-more fallback.
+    const PAGE: usize = 14;
+    let mut visible_count = use_signal(|| PAGE);
+    let total_items = items.len();
+    let shown_count = (*visible_count.read()).min(total_items);
+    let shown = items.iter().take(shown_count).cloned().collect::<Vec<_>>();
+    let has_more = shown_count < total_items;
+    // Stable DOM id for the timeline's own scroll container. This mirrors the
+    // established commit-list pattern elsewhere in the UI and avoids relying on
+    // the page-level `.content` scroller.
+    let timeline_scroll_id = "sd-history-scroll";
+
+    // Track which restart clusters are expanded (keyed by item index).
+    let mut open_clusters: Signal<std::collections::HashSet<usize>> =
+        use_signal(std::collections::HashSet::new);
 
     rsx! {
         section {
@@ -2992,97 +3826,379 @@ fn HistoryTab(
                 class: "sd-card-head",
                 style: "padding: 14px 18px;",
                 h2 { "Deployment history" }
-                span { class: "sd-card-meta", "{rows.len()} deployments · policy {deployment_policy}" }
+                span {
+                    class: "sd-card-meta",
+                    "{deploy_count} deploys · {restart_count} restarts · policy {deployment_policy}"
+                }
             }
 
-            table {
-                class: "sys-table",
-                thead {
-                    tr {
-                        th { "When" }
-                        th { "Commit" }
-                        th { "Message" }
-                        th { "Status" }
-                        th { "Gen" }
-                        th { "By" }
-                        th { "Duration" }
-                        th { style: "text-align: right;", " " }
+            // Timeline
+            div {
+                class: "tl",
+                id: "{timeline_scroll_id}",
+                style: "padding: 14px 18px;",
+                onscroll: move |_| {
+                    if !has_more {
+                        return;
                     }
-                }
-                tbody {
-                    for (idx, commit) in rows.into_iter().enumerate() {
-                        {
-                            let short_hash = commit.hash.chars().take(7).collect::<String>();
-                            let when_text = relative_time(commit.committed_at);
-                            let by = commit.author.clone();
-                            let generation = if commit.is_current || commit.was_deployed {
-                                format!("#{}", commit.deployed_at.map(|_| 0).unwrap_or(0)).replace("#0", "#—")
-                            } else {
-                                "—".to_string()
-                            };
-                            let deploy_duration_secs = commit
-                                .deployed_at
-                                .map(|deployed| deployed.signed_duration_since(commit.committed_at).num_seconds())
-                                .filter(|secs| *secs > 0);
+                    let Some(window) = web_sys::window() else {
+                        return;
+                    };
+                    let Some(document) = window.document() else {
+                        return;
+                    };
+                    let Some(element) = document.get_element_by_id(timeline_scroll_id) else {
+                        return;
+                    };
+                    let scroll_top = element.scroll_top();
+                    let client_height = element.client_height();
+                    let scroll_height = element.scroll_height();
+                    if scroll_top + client_height + 96 >= scroll_height {
+                        let next = (*visible_count.read() + PAGE).min(total_items);
+                        visible_count.set(next);
+                    }
+                },
 
-                            // Fallback when deployed_at equals committed_at (common in current API mapping):
-                            // derive a real timeline duration from adjacent deployment timestamps.
-                            let timeline_duration_secs = if idx == 0 {
-                                Some(Utc::now().signed_duration_since(commit.committed_at).num_seconds().max(0))
-                            } else {
-                                committed_timestamps.get(idx.saturating_sub(1)).map(|newer| {
-                                    newer
-                                        .signed_duration_since(commit.committed_at)
-                                        .num_seconds()
-                                        .max(0)
-                                })
-                            };
-
-                            let duration = deploy_duration_secs
-                                .or(timeline_duration_secs)
-                                .map(format_duration_compact)
-                                .unwrap_or_else(|| "—".to_string());
-
-                            rsx! {
-                                tr {
-                                    td { style: "color: var(--cf-text-secondary); font-size: 12px;", "{when_text}" }
-                                    td { class: "mono", "{short_hash}" }
-                                    td { style: "color: var(--cf-text-primary); font-size: 13px;", "{commit.message}" }
-                                    td { {status_chip(&commit)} }
-                                    td { class: "mono", style: "font-size: 12px;", "{generation}" }
-                                    td { class: "mono", style: "font-size: 12px;", "{by}" }
-                                    td { class: "mono", style: "font-size: 12px;", "{duration}" }
-                                    td {
+                for (idx, item) in shown.iter().enumerate() {
+                    {
+                        match item {
+                            TimelineItem::Event(event) => rsx! {
+                                DeployRow {
+                                    key: "{event.id}",
+                                    event: event.clone(),
+                                    allow_mutations,
+                                    on_rollback: {
+                                        let commit = event.commit.clone();
+                                        move |_| {
+                                            if let Some(commit) = commit.clone() {
+                                                on_rollback.call(commit);
+                                            }
+                                        }
+                                    },
+                                    on_view_logs: {
+                                        let id = event.id.clone();
+                                        move |_| on_view_logs.call(id.clone())
+                                    },
+                                }
+                            },
+                            TimelineItem::RestartCluster(list) => {
+                                if list.len() == 1 {
+                                    let e = list[0].clone();
+                                    rsx! {
                                         div {
-                                            class: "row-actions",
-                                            button {
-                                                class: "btn-icon focus-ring",
-                                                title: "View logs",
-                                                onclick: move |_| on_view_logs.call(()),
-                                                svg {
-                                                    class: "w-3.5 h-3.5",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    view_box: "0 0 24 24",
-                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M8 9l3 3-3 3m5 0h3" }
+                                            key: "restart-{idx}",
+                                            class: "tl-row",
+                                            div { class: "tl-rail",
+                                                span {
+                                                    class: "tl-node tl-node-sm",
+                                                    style: "--node: var(--cf-blue);",
+                                                    Icon { name: IconName::Power, size: 11 }
                                                 }
                                             }
-                                            button {
-                                                class: "btn-icon focus-ring",
-                                                title: "Rollback",
-                                                disabled: !allow_mutations,
-                                                onclick: move |_| on_rollback.call(commit.clone()),
-                                                svg {
-                                                    class: "w-3.5 h-3.5",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    view_box: "0 0 24 24",
-                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 14l-4-4 4-4M5 10h7a4 4 0 014 4v1" }
+                                            div { class: "tl-body",
+                                                div { class: "tl-restart-single",
+                                                    RestartLine { event: e }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    let is_open = open_clusters.read().contains(&idx);
+                                    let cluster_gen = list[0].generation;
+                                    let first_when = relative_time(list[list.len() - 1].timestamp);
+                                    let last_when = relative_time(list[0].timestamp);
+                                    let count = list.len();
+                                    let list_clone = list.clone();
+                                    rsx! {
+                                        div {
+                                            key: "cluster-{idx}",
+                                            class: "tl-row",
+                                            div { class: "tl-rail",
+                                                span {
+                                                    class: "tl-node tl-node-sm",
+                                                    style: "--node: var(--cf-blue);",
+                                                    Icon { name: IconName::Power, size: 11 }
+                                                }
+                                            }
+                                            div { class: "tl-body",
+                                                button {
+                                                    class: "tl-cluster focus-ring",
+                                                    "aria-expanded": "{is_open}",
+                                                    onclick: move |_| {
+                                                        open_clusters.with_mut(|set| {
+                                                            if set.contains(&idx) {
+                                                                set.remove(&idx);
+                                                            } else {
+                                                                set.insert(idx);
+                                                            }
+                                                        });
+                                                    },
+                                                    Icon {
+                                                        name: if is_open { IconName::ChevronDown } else { IconName::ChevronRight },
+                                                        size: 14,
+                                                    }
+                                                    span { class: "tl-cluster-count", "{count} restarts" }
+                                                    span { class: "tl-restart-sep", "·" }
+                                                    span { class: "tl-restart-label",
+                                                        "generation "
+                                                        if let Some(g) = cluster_gen {
+                                                            span { class: "mono", "#{g}" }
+                                                        } else {
+                                                            span { class: "mono", "—" }
+                                                        }
+                                                        " held steady"
+                                                    }
+                                                    span { class: "tl-spacer" }
+                                                    span { class: "tl-when", "{first_when} – {last_when}" }
+                                                }
+                                                if is_open {
+                                                    div { class: "tl-cluster-list",
+                                                        for (j, e) in list_clone.iter().enumerate() {
+                                                            RestartLine { key: "{idx}-{j}", event: e.clone() }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+
+                // Auto-load sentinel: the timeline's onscroll handler reveals the
+                // next page as this row nears the visible bottom. The button remains
+                // a keyboard/no-scroll fallback.
+                if has_more {
+                    div {
+                        class: "tl-row tl-sentinel",
+                        div { class: "tl-rail",
+                            span {
+                                class: "tl-node tl-node-sm tl-node-load",
+                                Icon { name: IconName::Sync, size: 11 }
+                            }
+                        }
+                        div { class: "tl-body",
+                            div { class: "tl-loadmore",
+                                button {
+                                    class: "btn btn-ghost xs focus-ring",
+                                    onclick: move |_| {
+                                        let next = (*visible_count.read() + PAGE).min(total_items);
+                                        visible_count.set(next);
+                                    },
+                                    "Load older history "
+                                    span { class: "tl-loadmore-count", "{shown_count} of {total_items}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A single reboot line within a restart cluster (design `RestartLine`).
+#[component]
+fn RestartLine(event: HistoryEvent) -> Element {
+    let when = relative_time(event.timestamp);
+    rsx! {
+        div { class: "tl-restart-line",
+            span { class: "tl-restart-dot" }
+            Icon { name: IconName::Power, size: 12 }
+            span { class: "tl-restart-label", "System restarted" }
+            span { class: "tl-restart-sep", "·" }
+            span { class: "tl-when", "{when}" }
+        }
+    }
+}
+
+/// A prominent generation-changing event row (design `DeployRow`).
+#[component]
+fn DeployRow(
+    event: HistoryEvent,
+    allow_mutations: bool,
+    on_rollback: EventHandler<()>,
+    on_view_logs: EventHandler<()>,
+) -> Element {
+    let failed = matches!(event.kind, HistoryEventKind::DeployFailed);
+    let matched = matches!(event.kind, HistoryEventKind::LocalRebuildMatched);
+    let untracked = matches!(event.kind, HistoryEventKind::LocalRebuildUntracked);
+    let local = matched || untracked;
+
+    // Accent color per event kind (mirrors the design's accent map).
+    let accent = if failed {
+        "var(--cf-red)"
+    } else if untracked {
+        "var(--cf-amber)"
+    } else if matched {
+        "var(--cf-blue)"
+    } else {
+        "var(--cf-brand-purple)"
+    };
+
+    let kind_label = if failed {
+        "Deploy failed"
+    } else if local {
+        "Local rebuild"
+    } else {
+        "Deployed"
+    };
+
+    let icon_name = if failed {
+        IconName::X
+    } else if local {
+        IconName::Edit
+    } else {
+        IconName::Deploy
+    };
+
+    let short_sha = event
+        .sha
+        .as_ref()
+        .map(|s| s.chars().take(7).collect::<String>());
+    let short_store = event
+        .store_path
+        .as_ref()
+        .and_then(|p| p.rsplit('/').next())
+        .map(|s| s.to_string());
+    let when = relative_time(event.timestamp);
+    let can_rollback = allow_mutations && event.commit.is_some() && !failed;
+
+    rsx! {
+        div { class: "tl-row",
+            // Rail node
+            div { class: "tl-rail",
+                span {
+                    class: "tl-node",
+                    style: "--node: {accent};",
+                    Icon { name: icon_name, size: 13 }
+                }
+            }
+            // Card
+            div { class: "tl-body",
+                div {
+                    class: "tl-card",
+                    style: "--accent: {accent};",
+
+                    // Header: kind + generation transition + badges + status
+                    div { class: "tl-card-head",
+                        span { class: "tl-kind", style: "color: {accent};", "{kind_label}" }
+
+                        // Generation transition (#prev → #cur) or "no generation activated"
+                        if let Some(gen_num) = event.generation {
+                            span { class: "tl-gen",
+                                if let Some(prev) = event.prev_generation {
+                                    span { class: "tl-gen-prev", "#{prev}" }
+                                    Icon { name: IconName::ArrowRight, size: 11 }
+                                }
+                                strong { "#{gen_num}" }
+                            }
+                        } else {
+                            span { class: "tl-gen tl-gen-none", "no generation activated" }
+                        }
+
+                        if local {
+                            span { class: "tl-badge-oob", "out of band" }
+                        }
+                        if matched {
+                            span { class: "tl-badge-reconciled",
+                                Icon { name: IconName::Check, size: 9 }
+                                " reconciled"
+                            }
+                        }
+
+                        span { class: "tl-spacer" }
+
+                        // Status chip
+                        if failed {
+                            span { class: "chip chip-critical",
+                                Icon { name: IconName::X, size: 10 }
+                                " failed"
+                            }
+                        } else {
+                            span { class: "chip chip-healthy",
+                                Icon { name: IconName::Check, size: 10 }
+                                " success"
+                            }
+                        }
+                    }
+
+                    // Message
+                    div { class: "tl-msg", "{event.message}" }
+
+                    // Meta row
+                    div { class: "tl-meta",
+                        // Commit link / untracked marker
+                        if untracked {
+                            span {
+                                class: "tl-meta-item tl-untracked",
+                                title: "Built locally with nixos-rebuild — no matching flake commit",
+                                Icon { name: IconName::Warn, size: 11 }
+                                " no flake commit · "
+                                span { class: "mono", "{short_store.clone().unwrap_or_else(|| \"untracked\".to_string())}" }
+                            }
+                        } else if let Some(sha) = short_sha.clone() {
+                            span { class: "tl-meta-item mono",
+                                Icon { name: IconName::Git, size: 11 }
+                                if matched { " matched " } else { " " }
+                                "{sha}"
+                            }
+                        }
+
+                        span { class: "tl-meta-item",
+                            Icon { name: IconName::User, size: 11 }
+                            " {event.actor}"
+                        }
+                        if let Some(duration) = event.duration.clone() {
+                            span { class: "tl-meta-item",
+                                span { class: "mono", "{duration}" }
+                            }
+                        }
+                        span { class: "tl-meta-item tl-when", "{when}" }
+
+                        span { class: "tl-spacer" }
+
+                        // Actions
+                        div { class: "row-actions",
+                            button {
+                                class: "btn-icon focus-ring",
+                                title: "Jump to this event in logs",
+                                onclick: move |_| on_view_logs.call(()),
+                                Icon { name: IconName::Terminal, size: 14 }
+                            }
+                            if can_rollback {
+                                button {
+                                    class: "btn-icon focus-ring",
+                                    title: "Rollback to this generation",
+                                    onclick: move |_| on_rollback.call(()),
+                                    Icon { name: IconName::Rollback, size: 14 }
+                                }
+                            }
+                        }
+                    }
+
+                    // Reconciled note
+                    if matched {
+                        div { class: "tl-oob-note tl-oob-resolved",
+                            Icon { name: IconName::Git, size: 12 }
+                            span {
+                                "Activated on-host out of band, then reconciled to pushed commit "
+                                if let Some(sha) = short_sha.clone() {
+                                    span { class: "tl-inline-sha mono", "{sha}" }
+                                }
+                                ". Config is tracked and reproducible."
+                            }
+                        }
+                    }
+
+                    // Untracked note
+                    if untracked {
+                        div { class: "tl-oob-note",
+                            Icon { name: IconName::Warn, size: 12 }
+                            span {
+                                "Built on the host, outside Crystal Forge — the running config doesn't map to any tracked flake commit. Capture it to a flake to restore reproducibility."
                             }
                         }
                     }
@@ -3105,22 +4221,6 @@ fn relative_time(at: chrono::DateTime<chrono::Utc>) -> String {
         format!("{}d ago", d.num_days())
     } else {
         at.format("%b %d").to_string()
-    }
-}
-
-fn format_duration_compact(total_seconds: i64) -> String {
-    let secs = total_seconds.max(0);
-    let days = secs / 86_400;
-    let hours = (secs % 86_400) / 3_600;
-    let minutes = (secs % 3_600) / 60;
-    let seconds = secs % 60;
-
-    if days > 0 {
-        format!("{}d {}h", days, hours)
-    } else if hours > 0 {
-        format!("{}h {}m", hours, minutes)
-    } else {
-        format!("{}m {}s", minutes, seconds)
     }
 }
 
@@ -5647,6 +6747,35 @@ fn map_commit_infos_to_commit_history(
         .collect()
 }
 
+fn synthesize_history_entries_from_commits(
+    commits: &[SystemCommitHistory],
+) -> Vec<SystemHistoryEntry> {
+    commits
+        .iter()
+        .map(|commit| SystemHistoryEntry {
+            timestamp: commit.deployed_at.unwrap_or(commit.committed_at),
+            store_path: None,
+            system_configuration_name: commit.config_identity.clone(),
+            change_reason: commit.message.clone(),
+            commit_hash: Some(commit.hash.clone()),
+            flake_name: None,
+            flake_repo_url: commit.flake_repo_url.clone(),
+            actor: commit.author.clone(),
+            outcome: if commit.was_deployed || commit.is_current {
+                "success".to_string()
+            } else {
+                "pending".to_string()
+            },
+            // Commit fallback rows represent tracked flake commits, so they classify
+            // as deploys with a reconciled/tracked source.
+            event_kind: "cf_deployment".to_string(),
+            generation: None,
+            reconciled: true,
+            generation_matches_current_store_path: None,
+        })
+        .collect()
+}
+
 fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogEntry> {
     events
         .into_iter()
@@ -5692,8 +6821,12 @@ mod tests {
                 commit_hash: Some("aaaaaaaa".to_string()),
                 flake_name: Some("infra".to_string()),
                 flake_repo_url: Some("https://example.com/infra.git".to_string()),
-                actor: "agent".to_string(),
+                actor: "crystal-forge".to_string(),
                 outcome: "recorded".to_string(),
+                event_kind: "cf_deployment".to_string(),
+                generation: Some(3),
+                reconciled: true,
+                generation_matches_current_store_path: Some(true),
             },
             SystemHistoryEntry {
                 timestamp: now - Duration::minutes(10),
@@ -5703,8 +6836,12 @@ mod tests {
                 commit_hash: Some("bbbbbbbb".to_string()),
                 flake_name: Some("infra".to_string()),
                 flake_repo_url: Some("https://example.com/infra.git".to_string()),
-                actor: "agent".to_string(),
+                actor: "crystal-forge".to_string(),
                 outcome: "recorded".to_string(),
+                event_kind: "cf_deployment".to_string(),
+                generation: Some(2),
+                reconciled: true,
+                generation_matches_current_store_path: Some(false),
             },
             SystemHistoryEntry {
                 timestamp: now - Duration::minutes(20),
@@ -5714,8 +6851,12 @@ mod tests {
                 commit_hash: Some("aaaaaaaa".to_string()),
                 flake_name: Some("infra".to_string()),
                 flake_repo_url: Some("https://example.com/infra.git".to_string()),
-                actor: "agent".to_string(),
+                actor: "crystal-forge".to_string(),
                 outcome: "recorded".to_string(),
+                event_kind: "cf_deployment".to_string(),
+                generation: Some(1),
+                reconciled: true,
+                generation_matches_current_store_path: Some(false),
             },
         ];
 

@@ -188,6 +188,7 @@ pub fn SystemsListView() -> Element {
     let mut add_error = use_signal(|| None::<String>);
     let mut draft = use_signal(NewSystemDraft::new);
     let mut pending_remove = use_signal(|| None::<SystemSummary>);
+    let mut removing_in_progress = use_signal(|| false);
     let mut pending_update_key = use_signal(|| None::<SystemSummary>);
     let mut show_key_modal = use_signal(|| false);
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
@@ -197,6 +198,7 @@ pub fn SystemsListView() -> Element {
     // New modal state for edit and deploy
     let mut edit_modal_system = use_signal(|| None::<SystemDetail>);
     let mut edit_modal_error = use_signal(|| None::<String>);
+    let mut edit_remove_in_progress = use_signal(|| false);
     let mut deploy_modal_system = use_signal(|| {
         None::<(
             SystemDetail,
@@ -880,9 +882,15 @@ pub fn SystemsListView() -> Element {
             if let Some(system) = pending_remove.read().clone() {
                 RemoveSystemDialog {
                     hostname: system.hostname.clone(),
-                    on_cancel: move |_| pending_remove.set(None),
+                    environment: system.environment.clone(),
+                    is_loading: removing_in_progress(),
+                    on_cancel: move |_| {
+                        pending_remove.set(None);
+                        removing_in_progress.set(false);
+                    },
                     on_confirm: move |_| {
                         let system_id = system.id;
+                        removing_in_progress.set(true);
                         spawn(async move {
                             match deactivate_system_via_api(system_id).await {
                                 Ok(_) => {
@@ -890,10 +898,12 @@ pub fn SystemsListView() -> Element {
                                     values.retain(|item| item.id != system_id);
                                     local_systems.set(values);
                                     pending_remove.set(None);
+                                    removing_in_progress.set(false);
                                 }
                                 Err(error_message) => {
                                     api_notice.set(Some(error_message));
                                     pending_remove.set(None);
+                                    removing_in_progress.set(false);
                                 }
                             }
                         });
@@ -936,8 +946,11 @@ pub fn SystemsListView() -> Element {
                     flake_names: registered_flakes.clone(),
                     environments: dropdown_environments.clone(),
                     error_message: edit_modal_error.read().clone(),
+                    remove_in_progress: edit_remove_in_progress(),
+                    remove_error_message: edit_modal_error.read().clone(),
                     on_close: move |_| {
                         edit_modal_error.set(None);
+                        edit_remove_in_progress.set(false);
                         edit_modal_system.set(None)
                     },
                     on_save: move |request: crate::api::models::UpdateSystemRequest| {
@@ -971,6 +984,27 @@ pub fn SystemsListView() -> Element {
                                  }
                              }
                          });
+                    },
+                    on_delete: move |_| {
+                        let system_id = detail.id;
+                        edit_modal_error.set(None);
+                        edit_remove_in_progress.set(true);
+                        spawn(async move {
+                            match deactivate_system_via_api(system_id).await {
+                                Ok(_) => {
+                                    let mut values = local_systems.read().clone();
+                                    values.retain(|item| item.id != system_id);
+                                    local_systems.set(values);
+                                    edit_modal_error.set(None);
+                                    edit_remove_in_progress.set(false);
+                                    edit_modal_system.set(None);
+                                }
+                                Err(error_message) => {
+                                    edit_remove_in_progress.set(false);
+                                    edit_modal_error.set(Some(error_message));
+                                }
+                            }
+                        });
                     }
                 }
             }

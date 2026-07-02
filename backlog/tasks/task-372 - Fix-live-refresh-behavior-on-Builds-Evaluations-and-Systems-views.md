@@ -4,6 +4,7 @@ title: 'Fix live refresh behavior on Builds, Evaluations, and Systems views'
 status: To Do
 assignee: []
 created_date: '2026-06-27 03:56'
+updated_date: '2026-06-28 02:14'
 labels:
   - web-ui
   - live-refresh
@@ -20,7 +21,7 @@ references:
   - packages/web-ui/src/views/systems.rs
   - packages/web-ui/src/api/client.rs
 priority: medium
-ordinal: 0
+ordinal: 2000
 ---
 
 ## Description

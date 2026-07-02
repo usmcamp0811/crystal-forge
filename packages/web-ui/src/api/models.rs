@@ -1409,6 +1409,19 @@ pub struct SystemHistoryEntry {
     pub flake_repo_url: Option<String>,
     pub actor: String,
     pub outcome: String,
+    /// Authoritative event classification derived from `change_reason`:
+    /// `cf_deployment`, `local_rebuild`, `restart`, or `state_change`.
+    #[serde(default)]
+    pub event_kind: String,
+    /// Recorded generation number at this transition.
+    #[serde(default)]
+    pub generation: Option<i32>,
+    /// Whether the running store path maps to a tracked flake commit.
+    #[serde(default)]
+    pub reconciled: bool,
+    /// Whether this recorded generation matched the current store path.
+    #[serde(default)]
+    pub generation_matches_current_store_path: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

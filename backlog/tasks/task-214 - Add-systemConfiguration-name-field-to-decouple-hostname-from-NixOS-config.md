@@ -4,7 +4,7 @@ title: Add systemConfiguration name field to decouple hostname from NixOS config
 status: To Do
 assignee: []
 created_date: '2026-03-24'
-updated_date: '2026-03-24'
+updated_date: '2026-06-28 02:14'
 labels:
   - backend
   - database
@@ -13,6 +13,7 @@ labels:
   - system-management
 dependencies: []
 priority: medium
+ordinal: 320000
 ---
 
 ## Description

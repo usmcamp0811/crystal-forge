@@ -1,0 +1,920 @@
+// Compliance view — bundle catalog + per-system control evidence + export
+
+function ComplianceView({ onOpenSystem, selectedBundleId, onClearBundle }) {
+  const [bundleId, setBundleId] = React.useState(selectedBundleId || COMPLIANCE_BUNDLES[0]?.id || null);
+
+  React.useEffect(() => {
+    if (selectedBundleId) { setBundleId(selectedBundleId); onClearBundle?.(); }
+  }, [selectedBundleId]);
+  const [selectedSysId, setSelectedSysId] = React.useState(null);
+  const [exportOpen, setExportOpen] = React.useState(false);
+  const [newBundleOpen, setNewBundleOpen] = React.useState(false);
+  const [importOpen, setImportOpen] = React.useState(false);
+  const [editBundleOpen, setEditBundleOpen] = React.useState(false);
+  const [filter, setFilter] = React.useState("all");
+
+  const bundle = COMPLIANCE_BUNDLES.find(b => b.id === bundleId);
+
+  const applicableSystems = React.useMemo(() => {
+    if (!bundle) return [];
+    return SYSTEMS.filter(s => bundle.requiredEnvs.includes(s.environment))
+      .map(s => ({ sys: s, rollup: bundleStatusForSystem(bundle, s) }));
+  }, [bundleId]);
+
+  const stats = React.useMemo(() => {
+    const totals = { pass:0, warn:0, fail:0, waiver:0, totalControls:0 };
+    applicableSystems.forEach(({ rollup }) => {
+      if (!rollup.applies) return;
+      totals.pass += rollup.pass;
+      totals.warn += rollup.warn;
+      totals.fail += rollup.fail;
+      totals.waiver += rollup.waiver;
+      totals.totalControls += rollup.total;
+    });
+    const compliantHosts = applicableSystems.filter(s => s.rollup.applies && s.rollup.fail === 0).length;
+    return {
+      ...totals,
+      compliantHosts,
+      totalHosts: applicableSystems.length,
+      overallScore: totals.totalControls ? Math.round(((totals.pass + totals.waiver) / totals.totalControls) * 100) : 0,
+    };
+  }, [bundle, applicableSystems]);
+
+  const filteredSystems = applicableSystems.filter(({ rollup }) => {
+    if (filter === "all") return true;
+    if (filter === "fail") return rollup.fail > 0;
+    if (filter === "warn") return rollup.warn > 0 && rollup.fail === 0;
+    if (filter === "clean") return rollup.fail === 0 && rollup.warn === 0;
+    return true;
+  });
+
+  // For drill-in
+  const drillSys = SYSTEMS.find(s => s.id === selectedSysId);
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">Compliance</h1>
+          <p className="page-subtitle">
+            Walk through compliance bundles, review per-control evidence, export for auditors.
+          </p>
+        </div>
+        <div style={{ display:"flex", gap:8 }}>
+          <button className="btn btn-ghost focus-ring" onClick={() => setExportOpen(true)}>
+            <Icon name="download" size={14}/> Export evidence
+          </button>
+          <button className="btn btn-ghost focus-ring" onClick={() => setImportOpen(true)}>
+            <Icon name="download" size={14} style={{ transform:"rotate(180deg)" }}/> Import STIG
+          </button>
+          <button className="btn btn-primary focus-ring" onClick={() => setNewBundleOpen(true)}>
+            <Icon name="plus" size={14}/> New bundle
+          </button>
+        </div>
+      </div>
+
+      {/* Bundle selector */}
+      <div style={{ display:"grid", gridTemplateColumns:"320px 1fr", gap:16, alignItems:"start" }}>
+        <BundleCatalog bundles={COMPLIANCE_BUNDLES} selectedId={bundleId} onSelect={(id) => { setBundleId(id); setSelectedSysId(null); }}/>
+
+        {bundle && (
+          <div style={{ display:"flex", flexDirection:"column", gap:14, minWidth:0 }}>
+            <BundleHeader bundle={bundle} stats={stats} onEdit={() => setEditBundleOpen(true)}/>
+
+            {/* Score strip */}
+            <div className="stat-strip">
+              <div className="stat">
+                <span className="stat-accent" style={{ "--stat-color": stats.overallScore >= 90 ? "#34d399" : stats.overallScore >= 70 ? "#fbbf24" : "#f87171" }}/>
+                <div className="stat-label">Overall score</div>
+                <div className="stat-value" style={{ color: stats.overallScore >= 90 ? "#34d399" : stats.overallScore >= 70 ? "#fbbf24" : "#f87171" }}>{stats.overallScore}%</div>
+                <div className="stat-meta">{stats.compliantHosts} of {stats.totalHosts} hosts fully compliant</div>
+              </div>
+              {[
+                { label:"Pass",   val:stats.pass,   color:"#34d399" },
+                { label:"Warn",   val:stats.warn,   color:"#fbbf24" },
+                { label:"Fail",   val:stats.fail,   color:"#f87171" },
+                { label:"Waiver", val:stats.waiver, color:"#a78bfa" },
+              ].map(s => (
+                <div key={s.label} className="stat">
+                  <span className="stat-accent" style={{ "--stat-color": s.color }}/>
+                  <div className="stat-label">{s.label}</div>
+                  <div className="stat-value" style={{ color: s.color }}>{s.val}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Bundle nav: controls list + systems matrix */}
+            <BundleDrilldown
+              bundle={bundle}
+              filter={filter}
+              setFilter={setFilter}
+              applicableSystems={filteredSystems}
+              onOpenSystem={(s) => setSelectedSysId(s.id)}
+            />
+          </div>
+        )}
+      </div>
+
+      {drillSys && bundle && (
+        <ControlsEvidenceDrawer
+          bundle={bundle}
+          sys={drillSys}
+          onClose={() => setSelectedSysId(null)}
+          onOpenSystem={onOpenSystem}
+        />
+      )}
+      {exportOpen && bundle && (
+        <ExportEvidenceModal bundle={bundle} stats={stats} onClose={() => setExportOpen(false)}/>
+      )}
+      {newBundleOpen && (
+        <NewBundleModal onClose={() => setNewBundleOpen(false)}/>
+      )}
+      {importOpen && (
+        <ImportStigModal
+          onClose={() => setImportOpen(false)}
+          onComplete={(id) => { setImportOpen(false); setBundleId(id); setSelectedSysId(null); }}
+        />
+      )}
+      {editBundleOpen && bundle && (
+        <NewBundleModal
+          bundle={bundle}
+          onClose={() => setEditBundleOpen(false)}
+          onDelete={() => {
+            const idx = COMPLIANCE_BUNDLES.findIndex(b => b.id === bundle.id);
+            if (idx >= 0) COMPLIANCE_BUNDLES.splice(idx, 1);
+            const next = COMPLIANCE_BUNDLES[0]?.id || null;
+            setBundleId(next);
+            setSelectedSysId(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ── Left rail: bundle catalog ── */
+function BundleCatalog({ bundles, selectedId, onSelect }) {
+  return (
+    <div className="card" style={{ padding:0, position:"sticky", top:16, maxHeight:"calc(100vh - 160px)", overflow:"auto" }}>
+      <div style={{ padding:"12px 14px", borderBottom:"1px solid var(--cf-divider)", fontSize:11, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", fontWeight:600 }}>
+        Compliance bundles
+      </div>
+      {bundles.map(b => {
+        const isSel = b.id === selectedId;
+        return (
+          <button key={b.id}
+            onClick={() => onSelect(b.id)}
+            className="focus-ring"
+            style={{
+              all:"unset", cursor:"pointer", display:"block",
+              padding:"12px 14px", width:"100%", boxSizing:"border-box",
+              borderLeft: `3px solid ${isSel ? "var(--cf-brand-purple)" : "transparent"}`,
+              background: isSel ? "color-mix(in oklab,var(--cf-brand-purple) 8%, transparent)" : "transparent",
+              borderBottom:"1px solid var(--cf-divider)",
+            }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, marginBottom:4 }}>
+              <span style={{ fontSize:12, fontWeight:600, color:"var(--cf-text-primary)" }}>{b.name}</span>
+              <span className="chip chip-unknown" style={{ fontSize:9, padding:"1px 6px" }}>{b.layer}</span>
+            </div>
+            <div style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{b.framework} · {b.version}</div>
+            <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:4 }}>{b.policyIds.length} controls · {b.requiredEnvs.length} env{b.requiredEnvs.length === 1 ? "" : "s"}</div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ── Bundle header ── */
+function BundleHeader({ bundle, stats, onEdit }) {
+  return (
+    <div className="card" style={{ padding:18, display:"flex", flexDirection:"column", gap:10 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:14, flexWrap:"wrap" }}>
+        <div>
+          <h2 style={{ margin:0, fontSize:18, fontWeight:700 }}>{bundle.name}</h2>
+          <div style={{ display:"flex", gap:8, marginTop:6, alignItems:"center", flexWrap:"wrap" }}>
+            <span className="chip chip-info">{bundle.framework}</span>
+            <span className="chip chip-unknown">{bundle.version}</span>
+            <span className="chip chip-unknown">{bundle.layer}</span>
+            <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>Owned by <span className="mono">{bundle.owner}</span> · Last reviewed {bundle.lastReview}</span>
+          </div>
+        </div>
+        <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+            {bundle.requiredEnvs.map(env => <EnvBadge key={env} env={env}/>)}
+          </div>
+          <button className="btn btn-ghost focus-ring" onClick={onEdit}><Icon name="edit" size={13}/> Edit bundle</button>
+        </div>
+      </div>
+      <p style={{ margin:0, fontSize:13, color:"var(--cf-text-secondary)", lineHeight:1.5 }}>{bundle.description}</p>
+    </div>
+  );
+}
+
+/* ── Controls list + systems matrix ── */
+function BundleDrilldown({ bundle, filter, setFilter, applicableSystems, onOpenSystem }) {
+  return (
+    <div className="card" style={{ overflow:"hidden" }}>
+      <div style={{ padding:"12px 16px", borderBottom:"1px solid var(--cf-divider)", display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+        <h3 style={{ margin:0, fontSize:13, fontWeight:600 }}>Systems</h3>
+        <div className="seg">
+          {[
+            { v:"all",   l:"All" },
+            { v:"clean", l:"Clean" },
+            { v:"warn",  l:"Warning" },
+            { v:"fail",  l:"Failing" },
+          ].map(o => (
+            <button key={o.v} className={filter === o.v ? "active" : ""} onClick={() => setFilter(o.v)}>{o.l}</button>
+          ))}
+        </div>
+        <span className="filter-count">{applicableSystems.length} hosts</span>
+      </div>
+      <div className="sd-callout sd-callout-info" style={{ margin:"12px 16px 0" }}>
+        <Icon name="shield" size={13}/>
+        <div style={{ fontSize:12 }}>Select a host to step through its <strong>per-control evidence</strong> — the proof Crystal Forge collected that each control is satisfied.</div>
+      </div>
+      <table className="sys-table">
+        <thead>
+          <tr>
+            <th>Host</th>
+            <th>Env</th>
+            <th>Score</th>
+            <th>Pass</th>
+            <th>Warn</th>
+            <th>Fail</th>
+            <th>Waiver</th>
+            <th style={{ textAlign:"right" }}> </th>
+          </tr>
+        </thead>
+        <tbody>
+          {applicableSystems.map(({ sys, rollup }) => (
+            <tr key={sys.id} style={{ cursor:"pointer" }} onClick={() => onOpenSystem(sys)}>
+              <td>
+                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  <span className="status-dot" style={{ "--status-color": sys.statusColor }}/>
+                  <span className="mono" style={{ fontWeight:600, fontSize:13 }}>{sys.hostname}</span>
+                </div>
+              </td>
+              <td><EnvBadge env={sys.environment}/></td>
+              <td>
+                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  <div style={{ width:48, height:5, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden" }}>
+                    <div style={{ width:`${rollup.score}%`, height:"100%", background: rollup.score >= 90 ? "#34d399" : rollup.score >= 70 ? "#fbbf24" : "#f87171" }}/>
+                  </div>
+                  <span className="mono" style={{ fontSize:12, fontWeight:600, color: rollup.score >= 90 ? "#34d399" : rollup.score >= 70 ? "#fbbf24" : "#f87171" }}>{rollup.score}%</span>
+                </div>
+              </td>
+              <td className="mono" style={{ color:"#34d399", fontWeight:600 }}>{rollup.pass}</td>
+              <td className="mono" style={{ color: rollup.warn > 0 ? "#fbbf24" : "var(--cf-text-muted)", fontWeight: rollup.warn > 0 ? 600 : 400 }}>{rollup.warn}</td>
+              <td className="mono" style={{ color: rollup.fail > 0 ? "#f87171" : "var(--cf-text-muted)", fontWeight: rollup.fail > 0 ? 700 : 400 }}>{rollup.fail}</td>
+              <td className="mono" style={{ color: rollup.waiver > 0 ? "#a78bfa" : "var(--cf-text-muted)" }}>{rollup.waiver}</td>
+              <td style={{ textAlign:"right" }}>
+                <button className="btn btn-ghost focus-ring xs" onClick={(e) => { e.stopPropagation(); onOpenSystem(sys); }}>
+                  View evidence <Icon name="arrow-right" size={11}/>
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ── Drawer: walk through controls for a host ── */
+function ControlsEvidenceDrawer({ bundle, sys, onClose, onOpenSystem, showSystemLink, onOpenBundle }) {
+  const [activeIdx, setActiveIdx] = React.useState(0);
+
+  React.useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+      if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); setActiveIdx(i => Math.min(bundle.policyIds.length - 1, i + 1)); }
+      if (e.key === "k" || e.key === "ArrowUp")   { e.preventDefault(); setActiveIdx(i => Math.max(0, i - 1)); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [bundle.policyIds.length, onClose]);
+
+  const evidenceList = bundle.policyIds.map(pid => evidenceForControl(bundle, pid, sys));
+  const active = evidenceList[activeIdx];
+
+  return (
+    <>
+      <div className="fl-tray-backdrop" onClick={onClose}/>
+      <aside className="fl-tray" style={{ width:"min(960px, 96vw)" }}>
+        <header className="fl-tray-head">
+          <div style={{ display:"flex", alignItems:"center", gap:12, minWidth:0, flex:1 }}>
+            <Icon name="shield" size={18} style={{ color:"var(--cf-brand-purple)", flexShrink:0 }}/>
+            <div style={{ minWidth:0 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <span style={{ fontWeight:700, fontSize:15 }} className="mono">{sys.hostname}</span>
+                <EnvBadge env={sys.environment}/>
+                <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>vs</span>
+                <span className="chip chip-info">{bundle.name}</span>
+              </div>
+              <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>
+                Stepping through {bundle.policyIds.length} controls · use <kbd className="kbd">j</kbd>/<kbd className="kbd">k</kbd> to navigate
+              </div>
+            </div>
+          </div>
+          <div style={{ display:"flex", gap:6 }}>
+            {showSystemLink !== false ? (
+              <button className="btn btn-ghost focus-ring xs" onClick={() => { onClose(); onOpenSystem?.(sys); }}>
+                <Icon name="arrow-right" size={11}/> Open system
+              </button>
+            ) : (
+              <button className="btn btn-ghost focus-ring xs" onClick={() => { onClose(); onOpenBundle?.(bundle); }}>
+                <Icon name="arrow-right" size={11}/> View bundle
+              </button>
+            )}
+            <button className="btn-icon focus-ring" onClick={onClose}><Icon name="x" size={16}/></button>
+          </div>
+        </header>
+
+        <div style={{ display:"grid", gridTemplateColumns:"260px 1fr", flex:1, minHeight:0, overflow:"hidden" }}>
+          {/* Left: control nav */}
+          <nav style={{ borderRight:"1px solid var(--cf-divider)", overflowY:"auto", background:"color-mix(in oklab, var(--cf-page-bg) 30%, var(--cf-card-bg))" }}>
+            {evidenceList.map((ev, i) => {
+              const color = { pass:"#34d399", warn:"#fbbf24", fail:"#f87171", waiver:"#a78bfa" }[ev.status];
+              const isSel = i === activeIdx;
+              return (
+                <button key={ev.policyId}
+                  onClick={() => setActiveIdx(i)}
+                  className="focus-ring"
+                  style={{
+                    all:"unset", cursor:"pointer", display:"block",
+                    padding:"10px 14px", width:"100%", boxSizing:"border-box",
+                    borderLeft:`3px solid ${isSel ? "var(--cf-brand-purple)" : "transparent"}`,
+                    background: isSel ? "color-mix(in oklab, var(--cf-brand-purple) 8%, transparent)" : "transparent",
+                    borderBottom:"1px solid var(--cf-divider)",
+                  }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:8 }}>
+                    <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{String(i+1).padStart(2,"0")}</span>
+                    <span style={{ width:8, height:8, borderRadius:"50%", background:color }}/>
+                  </div>
+                  <div style={{ fontSize:12, color:"var(--cf-text-primary)", marginTop:4, fontWeight: isSel ? 600 : 400, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                    {ev.policyName}
+                  </div>
+                </button>
+              );
+            })}
+          </nav>
+
+          {/* Right: evidence detail */}
+          <div style={{ overflow:"auto", padding:20, display:"flex", flexDirection:"column", gap:16 }}>
+            <ControlEvidenceCard evidence={active} controlIdx={activeIdx} total={bundle.policyIds.length}/>
+          </div>
+        </div>
+      </aside>
+    </>
+  );
+}
+
+function ControlEvidenceCard({ evidence, controlIdx, total }) {
+  const sc = { pass:"#34d399", warn:"#fbbf24", fail:"#f87171", waiver:"#a78bfa" }[evidence.status];
+  const sevColor = { high:"#f87171", medium:"#fbbf24", low:"#60a5fa" }[evidence.severity];
+
+  return (
+    <>
+      <div>
+        <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:8 }}>
+          <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>Control {controlIdx + 1} of {total}</span>
+          <span className="chip" style={{ color: sc, background:`color-mix(in oklab, ${sc} 14%, transparent)`, border:`1px solid ${sc}` }}>{evidence.status}</span>
+          <span className="chip" style={{ color: sevColor, background:`color-mix(in oklab, ${sevColor} 14%, transparent)` }}>{evidence.severity} severity</span>
+        </div>
+        <h2 style={{ margin:0, fontSize:18, fontWeight:700, fontFamily:"var(--font-mono)" }}>{evidence.policyName}</h2>
+        <p style={{ margin:"6px 0 0", fontSize:13, color:"var(--cf-text-secondary)", lineHeight:1.5 }}>{evidence.summary}</p>
+      </div>
+
+      {/* Status callout */}
+      {evidence.status === "fail" && (
+        <div className="sd-callout sd-callout-danger">
+          <Icon name="x" size={13}/>
+          <div style={{ fontSize:12 }}><strong>Not compliant.</strong> The required configuration is not applied on this host. Investigate via system logs or apply the policy module.</div>
+        </div>
+      )}
+      {evidence.status === "warn" && (
+        <div className="sd-callout sd-callout-warn">
+          <Icon name="warn" size={13}/>
+          <div style={{ fontSize:12 }}><strong>Compliant with warnings.</strong> Auditor may request additional evidence.</div>
+        </div>
+      )}
+      {evidence.status === "waiver" && (
+        <div className="sd-callout" style={{ background:"rgba(167,139,250,0.08)", borderColor:"rgba(167,139,250,0.25)" }}>
+          <Icon name="file" size={13} style={{ color:"#a78bfa" }}/>
+          <div style={{ fontSize:12 }}><strong>Waiver in effect.</strong> Risk accepted with compensating control. See evidence below.</div>
+        </div>
+      )}
+
+      {/* Evidence items */}
+      <div>
+        <h3 style={{ fontSize:11, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", margin:"0 0 8px", fontWeight:600 }}>
+          Evidence · {evidence.items.length} item{evidence.items.length === 1 ? "" : "s"}
+        </h3>
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          {evidence.items.map((item, i) => {
+            const meta = EVIDENCE_TYPES[item.type] || { label:item._label || item.type, icon:"file" };
+            return (
+              <div key={i} className="ev-item">
+                <div className="ev-item-head">
+                  <Icon name={meta.icon} size={14} style={{ color:"var(--cf-brand-purple)", flexShrink:0 }}/>
+                  <div style={{ minWidth:0, flex:1 }}>
+                    <div style={{ fontSize:12, fontWeight:600, color:"var(--cf-text-primary)" }}>{item._label || meta.label}</div>
+                    <div className="mono" style={{ fontSize:11, color:"var(--cf-text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{item.ref}</div>
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--cf-text-muted)", textAlign:"right", whiteSpace:"nowrap", flexShrink:0 }}>
+                    <div>{item.at}</div>
+                    <div className="mono" style={{ fontSize:10, marginTop:2 }}>{item.source}</div>
+                  </div>
+                </div>
+                {item.artifact && <EvidenceArtifact artifact={item.artifact}/>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Mapping placeholder */}
+      <div style={{ padding:12, background:"var(--cf-subtle-bg)", borderRadius:8, fontSize:11, color:"var(--cf-text-secondary)" }}>
+        <strong style={{ color:"var(--cf-text-primary)" }}>Framework mapping</strong>
+        <span style={{ marginLeft:8 }}>—</span>
+        <span className="mono" style={{ marginLeft:8 }}>SRG-OS-{(controlIdx * 31 + 23) % 1000} / CCI-{(controlIdx * 7 + 41) % 9999}</span>
+      </div>
+    </>
+  );
+}
+
+/* ── Renders the actual evidence artifact body ── */
+function EvidenceArtifact({ artifact }) {
+  const [open, setOpen] = React.useState(true);
+  const kind = artifact.kind;
+  const isShot = kind === "screenshot";
+
+  // Lightweight prompt coloring for terminal-style artifacts
+  const renderTerminal = (text) => text.split("\n").map((ln, i) => {
+    const isPrompt = ln.startsWith("$ ");
+    const isRule = ln.startsWith("----") || ln.startsWith("→") || ln.includes("→ ");
+    return (
+      <div key={i} style={{ whiteSpace:"pre", color: isPrompt ? "#7dd3fc" : isRule ? "#34d399" : "var(--cf-text-secondary)" }}>{ln || " "}</div>
+    );
+  });
+
+  return (
+    <div className={`ev-art ev-art-${kind}`}>
+      <button className="ev-art-bar focus-ring" onClick={() => setOpen(o => !o)}>
+        <Icon name={kind === "json" ? "file" : kind === "code" ? "file" : kind === "doc" ? "file" : isShot ? "server" : "terminal"} size={11}/>
+        <span className="ev-art-title">{artifact.title}</span>
+        <Icon name={open ? "chevron-up" : "chevron-down"} size={13} style={{ marginLeft:"auto" }}/>
+      </button>
+      {open && (
+        isShot ? (
+          <div className="ev-shot">
+            <div className="ev-shot-bar"><span/><span/><span/></div>
+            <pre className="ev-shot-body">{artifact.content}</pre>
+          </div>
+        ) : (
+          <pre className={`ev-art-body ev-art-body-${kind}`}>
+            {kind === "terminal" ? renderTerminal(artifact.content) : artifact.content}
+          </pre>
+        )
+      )}
+    </div>
+  );
+}
+
+/* ── Export modal ── */
+function ExportEvidenceModal({ bundle, stats, onClose }) {
+  const [format, setFormat] = React.useState("oscal");
+  const [scope, setScope] = React.useState("all");
+  const [includeWaivers, setIncludeWaivers] = React.useState(true);
+  const [includeSourceConfig, setIncludeSourceConfig] = React.useState(true);
+  const [bundleIds, setBundleIds] = React.useState([bundle.id]);
+  const [envs, setEnvs] = React.useState(() => [...bundle.requiredEnvs]);
+
+  const allBundles = (typeof COMPLIANCE_BUNDLES !== "undefined" ? COMPLIANCE_BUNDLES : []);
+  const selectedBundles = allBundles.filter(b => bundleIds.includes(b.id));
+
+  // Environments available = union of requiredEnvs across selected bundles
+  const availableEnvs = React.useMemo(() => {
+    const set = new Set();
+    selectedBundles.forEach(b => b.requiredEnvs.forEach(e => set.add(e)));
+    return (typeof ENVIRONMENTS !== "undefined" ? ENVIRONMENTS : []).map(e => e.name).filter(n => set.has(n));
+  }, [bundleIds]);
+
+  // Keep envs valid when bundle selection changes
+  React.useEffect(() => {
+    setEnvs(prev => {
+      const next = prev.filter(e => availableEnvs.includes(e));
+      return next.length ? next : [...availableEnvs];
+    });
+  }, [bundleIds]);
+
+  const toggleBundle = (id) => setBundleIds(prev =>
+    prev.includes(id) ? (prev.length > 1 ? prev.filter(x => x !== id) : prev) : [...prev, id]);
+  const toggleEnv = (name) => setEnvs(prev =>
+    prev.includes(name) ? prev.filter(x => x !== name) : [...prev, name]);
+
+  const [bundleQuery, setBundleQuery] = React.useState("");
+  const filteredBundles = allBundles.filter(b =>
+    !bundleQuery ||
+    b.name.toLowerCase().includes(bundleQuery.toLowerCase()) ||
+    (b.framework||"").toLowerCase().includes(bundleQuery.toLowerCase()));
+
+  // Recompute scope stats live from selection
+  const computed = React.useMemo(() => {
+    let totalHosts = 0, totalControls = 0, pass = 0, warn = 0, fail = 0, waiver = 0;
+    const hostSet = new Set();
+    selectedBundles.forEach(b => {
+      SYSTEMS.filter(s => b.requiredEnvs.includes(s.environment) && envs.includes(s.environment))
+        .forEach(s => {
+          const r = bundleStatusForSystem(b, s);
+          if (!r.applies) return;
+          hostSet.add(s.id);
+          totalHosts += 1;
+          totalControls += r.total; pass += r.pass; warn += r.warn; fail += r.fail; waiver += r.waiver;
+        });
+    });
+    return { uniqueHosts: hostSet.size, hostEvals: totalHosts, totalControls, pass, warn, fail, waiver };
+  }, [bundleIds, envs]);
+
+  const formatMeta = {
+    oscal: { name:"OSCAL 1.1.2 JSON",  ext:"oscal.json", desc:"NIST OSCAL System Security Plan + Assessment Results for ATO packages." },
+    json:  { name:"Crystal Forge JSON", ext:"cf-evidence.json", desc:"Native CF schema — best for re-ingest or custom dashboards." },
+    csv:   { name:"CSV summary",        ext:"summary.csv", desc:"Flat per-(host, control) table. Spreadsheet-friendly." },
+    pdf:   { name:"PDF report",         ext:"pdf",        desc:"Cover page + per-host summary + evidence index. For auditors." },
+    sarif: { name:"SARIF 2.1.0",        ext:"sarif",      desc:"Static analysis exchange format — works with most SAST/posture tools." },
+  };
+
+  const filename = (() => {
+    const date = new Date().toISOString().slice(0,10);
+    const envPart = envs.length === 1 ? envs[0] : envs.length === availableEnvs.length ? "all-envs" : `${envs.length}envs`;
+    const bundlePart = bundleIds.length === 1 ? bundle.id : `${bundleIds.length}bundles`;
+    return `cf-${bundlePart}-${envPart}-${date}.${formatMeta[format].ext}`;
+  })();
+
+  const canExport = bundleIds.length > 0 && envs.length > 0 && computed.hostEvals > 0;
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(680px,96vw)", maxHeight:"92vh" }}>
+        <div className="modal-head">
+          <h2><Icon name="download" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>Export evidence</h2>
+          <p>Each environment typically has its own ATO package — select the bundles and environments to scope this export.</p>
+        </div>
+        <div className="modal-body" style={{ overflowY:"auto" }}>
+
+          <div className="field">
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+              <label style={{ margin:0 }}>Compliance bundles <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· {bundleIds.length} of {allBundles.length}</span></label>
+              <div style={{ display:"flex", gap:4 }}>
+                <button className="focus-ring" onClick={() => setBundleIds(allBundles.map(b => b.id))}
+                  style={{ all:"unset", cursor:"pointer", fontSize:11, color:"var(--cf-brand-purple)", padding:"2px 6px" }}>Select all</button>
+                <button className="focus-ring" onClick={() => setBundleIds([bundle.id])}
+                  style={{ all:"unset", cursor:"pointer", fontSize:11, color:"var(--cf-text-muted)", padding:"2px 6px" }}>Reset</button>
+              </div>
+            </div>
+            {allBundles.length > 4 && (
+              <input className="input focus-ring" placeholder="Search bundles…" value={bundleQuery}
+                onChange={e=>setBundleQuery(e.target.value)} style={{ marginBottom:8 }}/>
+            )}
+            <div style={{ display:"flex", flexDirection:"column", gap:6, maxHeight:208, overflowY:"auto", paddingRight:2 }}>
+              {filteredBundles.length === 0 && (
+                <div style={{ fontSize:12, color:"var(--cf-text-muted)", padding:"8px 2px" }}>No bundles match “{bundleQuery}”.</div>
+              )}
+              {filteredBundles.map(b => {
+                const on = bundleIds.includes(b.id);
+                return (
+                  <button key={b.id} className="focus-ring" onClick={() => toggleBundle(b.id)}
+                    style={{
+                      all:"unset", cursor:"pointer", padding:"9px 11px", borderRadius:8,
+                      border:`1px solid ${on ? "var(--cf-brand-purple)" : "var(--cf-divider)"}`,
+                      background: on ? "color-mix(in oklab, var(--cf-brand-purple) 8%, var(--cf-card-bg))" : "var(--cf-card-bg)",
+                      display:"flex", alignItems:"center", gap:10,
+                    }}>
+                    <span style={{
+                      width:16, height:16, borderRadius:4, flexShrink:0,
+                      border:`1.5px solid ${on ? "var(--cf-brand-purple)" : "var(--cf-text-muted)"}`,
+                      background: on ? "var(--cf-brand-purple)" : "transparent",
+                      display:"flex", alignItems:"center", justifyContent:"center",
+                    }}>{on && <Icon name="check" size={11} style={{ color:"white" }}/>}</span>
+                    <div style={{ minWidth:0, flex:1 }}>
+                      <div style={{ fontSize:12, fontWeight:600 }}>{b.name}</div>
+                      <div style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{b.framework} · {b.version} · {b.policyIds.length} controls</div>
+                    </div>
+                    <div style={{ display:"flex", gap:4, flexShrink:0 }}>
+                      {b.requiredEnvs.map(e => <EnvBadge key={e} env={e}/>)}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="field">
+            <label>Environments {envs.length < availableEnvs.length && <span style={{ color:"var(--cf-brand-purple)", fontWeight:600 }}>· scoped</span>}</label>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+              {availableEnvs.map(name => {
+                const on = envs.includes(name);
+                const meta = (typeof ENVIRONMENTS !== "undefined" ? ENVIRONMENTS : []).find(e => e.name === name);
+                return (
+                  <button key={name} className="focus-ring" onClick={() => toggleEnv(name)}
+                    style={{
+                      all:"unset", cursor:"pointer", padding:"6px 12px", borderRadius:99,
+                      border:`1px solid ${on ? (meta?.dot || "var(--cf-brand-purple)") : "var(--cf-divider)"}`,
+                      background: on ? `color-mix(in oklab, ${meta?.dot || "var(--cf-brand-purple)"} 14%, var(--cf-card-bg))` : "var(--cf-card-bg)",
+                      display:"flex", alignItems:"center", gap:7, fontSize:12, fontWeight:600,
+                      color: on ? "var(--cf-text-primary)" : "var(--cf-text-muted)",
+                    }}>
+                    <span style={{ width:8, height:8, borderRadius:99, background: meta?.dot || "#888" }}/>
+                    {name}
+                    {on && <Icon name="check" size={11}/>}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="help" style={{ marginTop:6 }}>
+              Export one environment at a time for a focused ATO, or combine several. Only hosts in the selected environments are included.
+            </div>
+          </div>
+
+          <div className="field">
+            <label>Output format</label>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+              {Object.entries(formatMeta).map(([k, m]) => (
+                <button key={k}
+                  className="focus-ring"
+                  onClick={() => setFormat(k)}
+                  style={{
+                    all:"unset", cursor:"pointer",
+                    padding:"10px 12px", borderRadius:8,
+                    border: `1px solid ${format === k ? "var(--cf-brand-purple)" : "var(--cf-divider)"}`,
+                    background: format === k ? "color-mix(in oklab, var(--cf-brand-purple) 8%, var(--cf-card-bg))" : "var(--cf-card-bg)",
+                    display:"flex", flexDirection:"column", gap:4,
+                  }}>
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:6 }}>
+                    <span style={{ fontSize:12, fontWeight:600 }}>{m.name}</span>
+                    {format === k && <Icon name="check" size={12} style={{ color:"var(--cf-brand-purple)" }}/>}
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--cf-text-muted)", lineHeight:1.4 }}>{m.desc}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="field">
+            <label>Host scope</label>
+            <div className="seg" style={{ width:"fit-content" }}>
+              {[
+                { v:"all",  l:`All ${computed.hostEvals} host evals` },
+                { v:"fail", l:`Failing only (${computed.fail})` },
+                { v:"clean",l:"Compliant only" },
+              ].map(o => (
+                <button key={o.v} className={scope === o.v ? "active" : ""} onClick={() => setScope(o.v)}>{o.l}</button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            <label style={{ display:"flex", gap:8, alignItems:"center", fontSize:13, cursor:"pointer" }}>
+              <input type="checkbox" checked={includeWaivers} onChange={e=>setIncludeWaivers(e.target.checked)} style={{ accentColor:"var(--cf-brand-purple)" }}/>
+              <span>Include waiver justifications + expiry dates</span>
+            </label>
+            <label style={{ display:"flex", gap:8, alignItems:"center", fontSize:13, cursor:"pointer" }}>
+              <input type="checkbox" checked={includeSourceConfig} onChange={e=>setIncludeSourceConfig(e.target.checked)} style={{ accentColor:"var(--cf-brand-purple)" }}/>
+              <span>Include rendered NixOS module source for each control</span>
+            </label>
+          </div>
+
+          <div className="sd-callout sd-callout-info" style={{ marginTop:10 }}>
+            <Icon name="check" size={13}/>
+            <div style={{ fontSize:12 }}>
+              <div><strong>{bundleIds.length}</strong> bundle{bundleIds.length===1?"":"s"} · <strong>{envs.length}</strong> environment{envs.length===1?"":"s"} · <strong>{computed.uniqueHosts}</strong> host{computed.uniqueHosts===1?"":"s"} · <strong>{computed.totalControls}</strong> control evaluations</div>
+              <div style={{ marginTop:4 }}>Filename: <span className="mono" style={{ fontWeight:600 }}>{filename}</span></div>
+            </div>
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary focus-ring" onClick={onClose} disabled={!canExport}
+            style={!canExport ? { opacity:0.5, cursor:"not-allowed" } : null}>
+            <Icon name="download" size={13}/> Download {formatMeta[format].name}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Bundle form modal: create or edit ── */
+function NewBundleModal({ onClose, bundle: editBundle, onDelete }) {
+  const isEdit = !!editBundle;
+  const [form, setForm] = React.useState({
+    name: editBundle?.name || "",
+    framework: editBundle?.framework || "DISA STIG",
+    version: editBundle?.version || "",
+    description: editBundle?.description || "",
+    requiredEnvs: editBundle?.requiredEnvs ? [...editBundle.requiredEnvs] : ["production"],
+    policyIds: editBundle?.policyIds ? [...editBundle.policyIds] : [],
+  });
+  const [query, setQuery] = React.useState("");
+  const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+
+  const policies = (typeof POLICIES !== "undefined" ? POLICIES : []);
+  const filtered = policies.filter(p =>
+    !query || p.name.toLowerCase().includes(query.toLowerCase()) || (p.description||"").toLowerCase().includes(query.toLowerCase())
+  );
+  const togglePolicy = (id) => set("policyIds", form.policyIds.includes(id)
+    ? form.policyIds.filter(x => x !== id)
+    : [...form.policyIds, id]);
+  const toggleEnv = (env) => set("requiredEnvs", form.requiredEnvs.includes(env)
+    ? form.requiredEnvs.filter(x => x !== env)
+    : [...form.requiredEnvs, env]);
+
+  const canSave = form.name.trim() && form.policyIds.length > 0;
+  const [confirmDel, setConfirmDel] = React.useState(false);
+
+  const save = () => {
+    if (isEdit) {
+      Object.assign(editBundle, {
+        name: form.name.trim(), framework: form.framework, version: form.version,
+        description: form.description, requiredEnvs: form.requiredEnvs, policyIds: form.policyIds,
+        lastReview: "just now",
+      });
+    }
+    onClose();
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(760px,97vw)", maxHeight:"92vh" }}>
+        {confirmDel ? (
+          <DeleteBundleConfirm bundle={editBundle} onCancel={() => setConfirmDel(false)} onConfirm={() => { onDelete?.(); onClose(); }}/>
+        ) : (
+        <>
+        <div className="modal-head">
+          <h2><Icon name="shield" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>{isEdit ? "Edit compliance bundle" : "New compliance bundle"}</h2>
+          <p>A bundle represents a standard (a STIG, NIST baseline, or your own) — assembled from granular policies that each assert one thing.</p>
+        </div>
+        <div className="modal-body" style={{ overflowY:"auto" }}>
+          <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr", gap:14 }}>
+            <div className="field">
+              <label>Bundle name</label>
+              <input className="input focus-ring" value={form.name} onChange={e=>set("name",e.target.value)} placeholder="e.g. Anduril NixOS STIG (v1r2)"/>
+            </div>
+            <div className="field">
+              <label>Version / revision</label>
+              <input className="input focus-ring mono" value={form.version} onChange={e=>set("version",e.target.value)} placeholder="v1r5" style={{ fontSize:12 }}/>
+            </div>
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 2fr", gap:14 }}>
+            <div className="field">
+              <label>Framework</label>
+              <select className="input focus-ring" value={form.framework} onChange={e=>set("framework",e.target.value)}>
+                {["DISA STIG","NIST 800-53","CMMC","CIS Benchmark","Internal","Custom"].map(f => <option key={f}>{f}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>Description</label>
+              <input className="input focus-ring" value={form.description} onChange={e=>set("description",e.target.value)} placeholder="What this bundle verifies"/>
+            </div>
+          </div>
+
+          <div className="field">
+            <label>Applies to environments</label>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+              {ENVIRONMENTS.map(env => {
+                const on = form.requiredEnvs.includes(env.name);
+                return (
+                  <button key={env.name} className="focus-ring" onClick={()=>toggleEnv(env.name)}
+                    style={{
+                      padding:"4px 10px", borderRadius:99, fontSize:11, cursor:"pointer",
+                      border:`1px solid ${on ? env.color : "var(--cf-card-border)"}`,
+                      background: on ? `color-mix(in oklab, ${env.color} 14%, var(--cf-card-bg))` : "transparent",
+                      color: on ? env.color : "var(--cf-text-secondary)",
+                      display:"inline-flex", alignItems:"center", gap:6, fontFamily:"inherit",
+                    }}>
+                    <span style={{ width:6, height:6, borderRadius:"50%", background: env.color }}/>
+                    {env.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Policy picker */}
+          <div style={{ padding:14, border:"1px solid var(--cf-divider)", borderRadius:10, background:"color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg))" }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, marginBottom:10 }}>
+              <div style={{ fontSize:13, fontWeight:600, display:"flex", alignItems:"center", gap:6 }}>
+                <Icon name="file" size={13}/> Controls in this bundle
+                <span className="chip chip-info" style={{ fontSize:10 }}>{form.policyIds.length} selected</span>
+              </div>
+              <div className="filter-search" style={{ maxWidth:200, margin:0 }}>
+                <Icon name="search"/>
+                <input className="input focus-ring" placeholder="Filter policies…" value={query} onChange={e=>setQuery(e.target.value)}/>
+              </div>
+            </div>
+            <div style={{ display:"flex", flexDirection:"column", gap:4, maxHeight:260, overflowY:"auto" }}>
+              {filtered.map(p => {
+                const on = form.policyIds.includes(p.id);
+                return (
+                  <button key={p.id} className="focus-ring" onClick={()=>togglePolicy(p.id)}
+                    style={{
+                      all:"unset", cursor:"pointer", display:"flex", gap:10, alignItems:"flex-start",
+                      padding:"9px 11px", borderRadius:8,
+                      border:`1px solid ${on ? "var(--cf-brand-purple)" : "var(--cf-divider)"}`,
+                      background: on ? "color-mix(in oklab, var(--cf-brand-purple) 9%, var(--cf-card-bg))" : "var(--cf-card-bg)",
+                    }}>
+                    <div style={{
+                      width:16, height:16, borderRadius:5, flexShrink:0, marginTop:1,
+                      border:`1.5px solid ${on ? "var(--cf-brand-purple)" : "var(--cf-card-border)"}`,
+                      background: on ? "var(--cf-brand-purple)" : "transparent",
+                      display:"grid", placeItems:"center",
+                    }}>
+                      {on && <Icon name="check" size={11} style={{ color:"#fff" }}/>}
+                    </div>
+                    <div style={{ minWidth:0, flex:1 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                        <span className="mono" style={{ fontSize:12, fontWeight:600 }}>{p.name}</span>
+                        <span className={`chip ${p.type === "builtin" ? "chip-unknown" : "chip-info"}`} style={{ fontSize:9 }}>{p.type}</span>
+                      </div>
+                      <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>{p.description}</div>
+                    </div>
+                  </button>
+                );
+              })}
+              {filtered.length === 0 && (
+                <div style={{ fontSize:12, color:"var(--cf-text-muted)", padding:"16px 0", textAlign:"center" }}>No policies match. Define new policies in the Policies view.</div>
+              )}
+            </div>
+          </div>
+
+          {form.policyIds.length === 0 && (
+            <div className="help" style={{ color:"#fbbf24" }}>
+              <Icon name="warn" size={10} style={{ verticalAlign:"middle" }}/> Select at least one policy. A bundle is a collection of policies that together represent a standard.
+            </div>
+          )}
+
+          {isEdit && (
+            <div style={{ marginTop:10, paddingTop:14, borderTop:"1px solid var(--cf-divider)" }}>
+              <div style={{ fontSize:11, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", marginBottom:8 }}>Danger zone</div>
+              <button className="btn btn-ghost focus-ring" onClick={()=>setConfirmDel(true)} style={{ color:"#f87171", borderColor:"rgba(248,113,113,0.3)" }}>
+                <Icon name="trash" size={12}/> Delete bundle
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="modal-foot">
+          <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary focus-ring" disabled={!canSave} onClick={save}>
+            <Icon name="check" size={13}/> {isEdit ? "Save changes" : "Create bundle"}
+          </button>
+        </div>
+        </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DeleteBundleConfirm({ bundle, onCancel, onConfirm }) {
+  const [typed, setTyped] = React.useState("");
+  const matches = typed === bundle.name;
+  const policyCount = bundle.policyIds?.length || 0;
+  return (
+    <>
+      <div className="modal-head" style={{ background:"rgba(248,113,113,0.06)" }}>
+        <h2 style={{ color:"#fecaca", display:"flex", alignItems:"center", gap:8 }}>
+          <Icon name="warn" size={16} style={{ color:"#f87171" }}/>
+          Delete bundle
+        </h2>
+        <p>This permanently removes the <span className="mono" style={{ fontWeight:600 }}>{bundle.name}</span> compliance bundle.</p>
+      </div>
+      <div className="modal-body">
+        <div className="sd-callout sd-callout-danger" style={{ marginBottom:12 }}>
+          <Icon name="warn" size={14}/>
+          <div style={{ fontSize:12, color:"#fecaca" }}>
+            <ul style={{ margin:0, paddingLeft:16, lineHeight:1.6 }}>
+              <li>The bundle and its mapping of {policyCount} polic{policyCount === 1 ? "y" : "ies"} is removed</li>
+              <li>Underlying policies are <em>not</em> deleted — they remain in the Policies view</li>
+              <li>Systems referencing this bundle for compliance will no longer be gated by it</li>
+              <li>Collected evidence history is retained for audit</li>
+            </ul>
+          </div>
+        </div>
+        <div className="field">
+          <label>Type <span className="mono" style={{ color:"#fecaca", fontWeight:700 }}>{bundle.name}</span> to confirm</label>
+          <input className="input focus-ring mono" placeholder={bundle.name} value={typed} onChange={e=>setTyped(e.target.value)} autoFocus/>
+        </div>
+      </div>
+      <div className="modal-foot">
+        <button className="btn btn-ghost focus-ring" onClick={onCancel}>Cancel</button>
+        <button className="btn focus-ring" disabled={!matches} onClick={onConfirm}
+          style={{ background: matches ? "#dc2626" : "var(--cf-subtle-bg)", color: matches ? "white" : "var(--cf-text-muted)" }}>
+          <Icon name="trash" size={13}/> Delete bundle
+        </button>
+      </div>
+    </>
+  );
+}
+
+Object.assign(window, { ComplianceView, ControlsEvidenceDrawer, ControlEvidenceCard });

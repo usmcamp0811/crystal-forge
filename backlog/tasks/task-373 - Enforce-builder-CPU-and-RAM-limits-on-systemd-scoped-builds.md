@@ -4,7 +4,7 @@ title: Enforce builder CPU and RAM limits on systemd-scoped builds
 status: To Do
 assignee: []
 created_date: '2026-06-27 04:04'
-updated_date: '2026-06-27 04:12'
+updated_date: '2026-06-28 02:14'
 labels:
   - builder
   - resource-limits
@@ -28,7 +28,7 @@ documentation:
   - >-
     https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html
 priority: high
-ordinal: 0
+ordinal: 3000
 ---
 
 ## Description

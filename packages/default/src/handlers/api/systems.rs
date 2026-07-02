@@ -1846,18 +1846,53 @@ pub async fn get_system_history(
 
     let entries = rows
         .into_iter()
-        .map(|row| SystemHistoryEntry {
-            timestamp: row.timestamp,
-            store_path: row.store_path,
-            system_configuration_name: row.system_configuration_name,
-            change_reason: row
+        .map(|row| {
+            let change_reason = row
                 .change_reason
-                .unwrap_or_else(|| "state_delta".to_string()),
-            commit_hash: row.commit_hash,
-            flake_name: row.flake_name,
-            flake_repo_url: row.flake_repo_url,
-            actor: "agent".to_string(),
-            outcome: "recorded".to_string(),
+                .unwrap_or_else(|| "state_delta".to_string());
+
+            // Authoritative classification derived from the recorded change_reason.
+            // `cf_deployment` = deploy driven through Crystal Forge; `config_change` =
+            // on-host/out-of-band activation (e.g. a manual `nixos-rebuild switch`);
+            // `startup` = reboot/restart at the same generation.
+            let event_kind = match change_reason.as_str() {
+                "cf_deployment" => "cf_deployment",
+                "config_change" => "local_rebuild",
+                "startup" => "restart",
+                _ => "state_change",
+            }
+            .to_string();
+
+            // Reconciled/tracked when the running store path maps to a known flake
+            // commit; untracked (capture-to-flake) otherwise.
+            let reconciled = row.commit_hash.is_some();
+
+            // Actor attribution: CF deploys are agent-applied; on-host rebuilds are
+            // host-local. We do not currently capture the specific user, so we report
+            // the honest source rather than a fabricated value.
+            let actor = match change_reason.as_str() {
+                "cf_deployment" => "crystal-forge",
+                "config_change" => "on-host",
+                _ => "agent",
+            }
+            .to_string();
+
+            SystemHistoryEntry {
+                timestamp: row.timestamp,
+                store_path: row.store_path,
+                system_configuration_name: row.system_configuration_name,
+                change_reason,
+                commit_hash: row.commit_hash,
+                flake_name: row.flake_name,
+                flake_repo_url: row.flake_repo_url,
+                actor,
+                outcome: "recorded".to_string(),
+                event_kind,
+                generation: row.generation,
+                reconciled,
+                generation_matches_current_store_path: row
+                    .generation_matches_current_store_path,
+            }
         })
         .collect::<Vec<_>>();
 

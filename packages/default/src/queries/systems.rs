@@ -31,6 +31,10 @@ pub struct SystemHistoryRow {
     pub commit_hash: Option<String>,
     pub flake_name: Option<String>,
     pub flake_repo_url: Option<String>,
+    /// Recorded generation number at this state transition (from `system_states.generation`).
+    pub generation: Option<i32>,
+    /// Whether the recorded generation's store path matched the current store path.
+    pub generation_matches_current_store_path: Option<bool>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -469,7 +473,9 @@ pub async fn list_system_history_rows(
             ss.change_reason,
             c.git_commit_hash AS commit_hash,
             f.name AS flake_name,
-            f.repo_url AS flake_repo_url
+            f.repo_url AS flake_repo_url,
+            ss.generation,
+            ss.generation_matches_current_store_path
         FROM systems s
         JOIN system_states ss ON ss.hostname = s.hostname
         LEFT JOIN derivations d
