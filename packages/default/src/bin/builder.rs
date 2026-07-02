@@ -284,6 +284,58 @@ struct PreBuildFailure {
     message: String,
 }
 
+#[derive(Debug)]
+enum VerificationOutcome {
+    Completed(Result<String, PreBuildFailure>),
+    Cancelled,
+}
+
+async fn wait_for_pre_build_verification<F, C, CFuture>(
+    verification_future: F,
+    build_timeout: std::time::Duration,
+    pre_build_phase: &AtomicU8,
+    mut cancellation_requested: C,
+) -> VerificationOutcome
+where
+    F: std::future::Future<Output = Result<String, PreBuildFailure>>,
+    C: FnMut() -> CFuture,
+    CFuture: std::future::Future<Output = bool>,
+{
+    tokio::pin!(verification_future);
+    let timeout = tokio::time::sleep(build_timeout);
+    tokio::pin!(timeout);
+    let mut cancel_poll = tokio::time::interval(std::time::Duration::from_secs(5));
+
+    loop {
+        tokio::select! {
+            result = &mut verification_future => break VerificationOutcome::Completed(result),
+            _ = &mut timeout => {
+                let phase = match pre_build_phase.load(Ordering::SeqCst) {
+                    PRE_BUILD_EVALUATION => BuildFailurePhase::Evaluation,
+                    _ => BuildFailurePhase::SourceFetch,
+                };
+                break VerificationOutcome::Completed(Err(PreBuildFailure {
+                    phase,
+                    message: format!(
+                        "verified source pre-build {} timed out after {:?}",
+                        if phase == BuildFailurePhase::Evaluation {
+                            "evaluation"
+                        } else {
+                            "source-fetch"
+                        },
+                        build_timeout
+                    ),
+                }));
+            }
+            _ = cancel_poll.tick() => {
+                if cancellation_requested().await {
+                    break VerificationOutcome::Cancelled;
+                }
+            }
+        }
+    }
+}
+
 fn expected_drv_path(payload: &BuildJobDerivation) -> Result<&str, PreBuildFailure> {
     payload
         .expected_drv_path
@@ -924,64 +976,34 @@ async fn execute_build_job(
                 job_id,
                 &pre_build_phase,
             );
-            tokio::pin!(verification_future);
-            let timeout = tokio::time::sleep(build_timeout);
-            tokio::pin!(timeout);
-            let mut cancel_poll = tokio::time::interval(std::time::Duration::from_secs(5));
-
-            loop {
-                tokio::select! {
-                    result = &mut verification_future => break result,
-                    _ = &mut timeout => {
-                        let phase = match pre_build_phase.load(Ordering::SeqCst) {
-                            PRE_BUILD_EVALUATION => BuildFailurePhase::Evaluation,
-                            _ => BuildFailurePhase::SourceFetch,
-                        };
-                        break Err(PreBuildFailure {
-                            phase,
-                            message: format!(
-                                "verified source pre-build {} timed out after {:?}",
-                                if phase == BuildFailurePhase::Evaluation {
-                                    "evaluation"
-                                } else {
-                                    "source-fetch"
-                                },
-                                build_timeout
-                            ),
-                        });
-                    }
-                    _ = cancel_poll.tick() => {
-                        match client.get_job_status(job_id).await {
-                            Ok(Some(status)) if status == "cancelling" => {
-                                warn!("🛑 Job #{} cancelled during verified source pre-build phase", job_id);
-                                if let Err(err) = client.finalize_cancelled_job(job_id).await {
-                                    error!("❌ Failed to finalize cancelled job #{}: {}", job_id, err);
-                                }
-                                if let Some(cleanup) = cleanup_worktree.as_ref() {
-                                    cleanup_source_worktree(cleanup).await;
-                                }
-                                return;
-                            }
-                            Ok(_) => {}
-                            Err(err) => warn!(
+            wait_for_pre_build_verification(verification_future, build_timeout, &pre_build_phase, || {
+                let client = client.clone();
+                async move {
+                    match client.get_job_status(job_id).await {
+                        Ok(Some(status)) if status == "cancelling" => true,
+                        Ok(_) => false,
+                        Err(err) => {
+                            warn!(
                                 "⚠️ Failed to poll cancellation during verified source pre-build phase for job #{}: {}",
                                 job_id, err
-                            ),
+                            );
+                            false
                         }
                     }
                 }
-            }
+            })
+            .await
         };
 
         match verification {
-            Ok(verified_drv_path) => {
+            VerificationOutcome::Completed(Ok(verified_drv_path)) => {
                 info!(
                     "✅ Verified source re-evaluation matched server drvPath: {}",
                     verified_drv_path
                 );
                 derivation_payload.derivation_path = Some(verified_drv_path);
             }
-            Err(failure) => {
+            VerificationOutcome::Completed(Err(failure)) => {
                 error!(
                     "❌ Job #{} failed before build during {}: {}",
                     job_id, failure.phase, failure.message
@@ -994,6 +1016,19 @@ async fn execute_build_job(
                         "❌ Failed to report job #{} pre-build failure: {}",
                         job_id, report_err
                     );
+                }
+                if let Some(cleanup) = cleanup_worktree.as_ref() {
+                    cleanup_source_worktree(cleanup).await;
+                }
+                return;
+            }
+            VerificationOutcome::Cancelled => {
+                warn!(
+                    "🛑 Job #{} cancelled during verified source pre-build phase",
+                    job_id
+                );
+                if let Err(err) = client.finalize_cancelled_job(job_id).await {
+                    error!("❌ Failed to finalize cancelled job #{}: {}", job_id, err);
                 }
                 if let Some(cleanup) = cleanup_worktree.as_ref() {
                     cleanup_source_worktree(cleanup).await;
@@ -1059,6 +1094,9 @@ async fn execute_build_job(
                     "❌ Failed to report job #{} derivation import failure: {}",
                     job_id, report_err
                 );
+            }
+            if let Some(cleanup) = cleanup_worktree.as_ref() {
+                cleanup_source_worktree(cleanup).await;
             }
             return;
         }
@@ -1541,13 +1579,16 @@ fn is_local_db_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_candidate_worktree, drv_path_eval_attr, ensure_mirror_has_commit, mock_store_path,
-        should_mock_build_fail, source_flake_ref, source_workspace_paths,
-        source_workspace_paths_for_job, verify_drv_identity,
+        PRE_BUILD_SOURCE_FETCH, cleanup_candidate_worktree, drv_path_eval_attr,
+        ensure_mirror_has_commit, mock_store_path, should_mock_build_fail, source_flake_ref,
+        source_workspace_paths, source_workspace_paths_for_job, verify_drv_identity,
+        wait_for_pre_build_verification,
     };
     use crystal_forge::models::builders::{
         BuildFailurePhase, SourceInputDeliveryMode, VerifiedSourceIdentity,
     };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
     fn source(archive_url: Option<&str>) -> VerifiedSourceIdentity {
         VerifiedSourceIdentity {
@@ -1653,6 +1694,53 @@ mod tests {
             failure
                 .message
                 .contains("expected server-authorized drvPath")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_pre_build_drops_verification_future_before_finalization() {
+        struct DropGuardFuture {
+            dropped: Arc<AtomicBool>,
+        }
+
+        impl std::future::Future for DropGuardFuture {
+            type Output = Result<String, super::PreBuildFailure>;
+
+            fn poll(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Self::Output> {
+                std::task::Poll::Pending
+            }
+        }
+
+        impl Drop for DropGuardFuture {
+            fn drop(&mut self) {
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let pre_build_phase = AtomicU8::new(PRE_BUILD_SOURCE_FETCH);
+        let outcome = wait_for_pre_build_verification(
+            DropGuardFuture {
+                dropped: Arc::clone(&dropped),
+            },
+            std::time::Duration::from_secs(60),
+            &pre_build_phase,
+            || async { true },
+        )
+        .await;
+
+        assert!(matches!(outcome, super::VerificationOutcome::Cancelled));
+
+        // This assertion models the production caller's next step: finalization
+        // happens only after wait_for_pre_build_verification has returned, which
+        // means the pinned verification future has already left scope and run
+        // its Drop implementation (killing any child process via kill_on_drop).
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "verification future must be dropped before cancellation finalization can run"
         );
     }
 

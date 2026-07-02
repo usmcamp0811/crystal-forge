@@ -15,7 +15,58 @@ use crate::models::builders::{
 };
 use crate::models::public_key::PublicKey;
 
-const CLAIM_NEXT_JOB_WILDCARD_SQL: &str = r#"
+const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
+    UPDATE build_jobs
+    SET builder_id = $1,
+        status = 'building',
+        started_at = NOW(),
+        updated_at = NOW()
+    WHERE id = (
+        SELECT build_jobs.id
+        FROM build_jobs
+        WHERE build_jobs.status = 'queued'
+        ORDER BY
+            build_jobs.priority_weight DESC,
+            (
+                SELECT c.commit_timestamp
+                FROM derivations d
+                LEFT JOIN commits c ON c.id = d.commit_id
+                WHERE d.id = build_jobs.derivation_id
+            ) DESC NULLS LAST,
+            build_jobs.created_at ASC
+        LIMIT 1
+        FOR UPDATE OF build_jobs SKIP LOCKED
+    )
+    RETURNING *
+    "#;
+
+const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
+    UPDATE build_jobs
+    SET builder_id = $1,
+        status = 'building',
+        started_at = NOW(),
+        updated_at = NOW()
+    WHERE id = (
+        SELECT build_jobs.id
+        FROM build_jobs
+        WHERE build_jobs.status = 'queued'
+          AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
+        ORDER BY
+            build_jobs.priority_weight DESC,
+            (
+                SELECT c.commit_timestamp
+                FROM derivations d
+                LEFT JOIN commits c ON c.id = d.commit_id
+                WHERE d.id = build_jobs.derivation_id
+            ) DESC NULLS LAST,
+            build_jobs.created_at ASC
+        LIMIT 1
+        FOR UPDATE OF build_jobs SKIP LOCKED
+    )
+    RETURNING *
+    "#;
+
+const CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
         status = 'building',
@@ -47,7 +98,7 @@ const CLAIM_NEXT_JOB_WILDCARD_SQL: &str = r#"
     RETURNING *
     "#;
 
-const CLAIM_NEXT_JOB_FILTERED_SQL: &str = r#"
+const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
         status = 'building',
@@ -790,26 +841,50 @@ pub async fn claim_next_job_atomic(
 
     // 3. Claim next available job with FOR UPDATE SKIP LOCKED
     // This atomically finds and locks the next job in priority order
-    let require_verified_source_metadata =
-        execution_strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified;
-
     let job = if environment_ids.is_empty() {
         // Wildcard: builder can claim jobs from any environment
-        sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_WILDCARD_SQL)
-            .bind(builder_id)
-            .bind(require_verified_source_metadata)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("Failed to claim job (wildcard) in transaction")?
+        match execution_strategy {
+            RemoteBuildExecutionStrategy::ServerDerivation => {
+                sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL)
+                    .bind(builder_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .context("Failed to claim job (wildcard server_derivation) in transaction")?
+            }
+            RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
+                sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL)
+                    .bind(builder_id)
+                    .bind(true)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .context(
+                        "Failed to claim job (wildcard source_re_evaluate_verified) in transaction",
+                    )?
+            }
+        }
     } else {
         // Filtered: only jobs matching builder's environment assignments
-        sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_FILTERED_SQL)
-            .bind(builder_id)
-            .bind(environment_ids)
-            .bind(require_verified_source_metadata)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("Failed to claim job (filtered) in transaction")?
+        match execution_strategy {
+            RemoteBuildExecutionStrategy::ServerDerivation => {
+                sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL)
+                    .bind(builder_id)
+                    .bind(environment_ids)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .context("Failed to claim job (filtered server_derivation) in transaction")?
+            }
+            RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
+                sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL)
+                    .bind(builder_id)
+                    .bind(environment_ids)
+                    .bind(true)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .context(
+                        "Failed to claim job (filtered source_re_evaluate_verified) in transaction",
+                    )?
+            }
+        }
     };
 
     // 4. Commit transaction (makes count check + job assignment atomic)
@@ -1430,14 +1505,35 @@ mod tests {
 
     #[test]
     fn claim_next_job_queries_lock_only_build_jobs_rows() {
-        for sql in [CLAIM_NEXT_JOB_WILDCARD_SQL, CLAIM_NEXT_JOB_FILTERED_SQL] {
+        for sql in [
+            CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL,
+            CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL,
+            CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL,
+            CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL,
+        ] {
             assert!(
                 sql.contains("FOR UPDATE OF build_jobs SKIP LOCKED"),
                 "claim SQL must lock only build_jobs so nullable outer joins remain legal: {sql}"
             );
+        }
+
+        for sql in [
+            CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL,
+            CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL,
+        ] {
+            assert!(
+                !sql.contains("LEFT JOIN flakes"),
+                "server_derivation claim SQL must not execute verified-source nullable joins: {sql}"
+            );
+        }
+
+        for sql in [
+            CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL,
+            CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL,
+        ] {
             assert!(
                 sql.contains("LEFT JOIN commits") && sql.contains("LEFT JOIN flakes"),
-                "regression guard should cover the verified-source outer joins: {sql}"
+                "verified-source claim SQL must cover metadata outer joins: {sql}"
             );
         }
     }
