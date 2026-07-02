@@ -3112,7 +3112,10 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                         input {
                             r#type: "checkbox",
                             checked: *tail.read(),
-                            onchange: move |_| tail.set(!*tail.read()),
+                            onchange: move |_| {
+                                let current = *tail.read();
+                                tail.set(!current);
+                            },
                         }
                         span { "tail" }
                     }
