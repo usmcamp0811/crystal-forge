@@ -388,6 +388,29 @@ struct MirrorLock {
     _file: File,
 }
 
+struct TempPathCleanup {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TempPathCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempPathCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 async fn acquire_mirror_lock(mirror_path: &Path) -> Result<MirrorLock, PreBuildFailure> {
     let lock_path = mirror_path.with_extension("git.lock");
     if let Some(parent) = lock_path.parent() {
@@ -415,16 +438,24 @@ async fn acquire_mirror_lock(mirror_path: &Path) -> Result<MirrorLock, PreBuildF
             ),
         })?;
 
-    #[allow(deprecated)]
-    flock(file.as_raw_fd(), FlockArg::LockExclusive).map_err(|e| PreBuildFailure {
-        phase: BuildFailurePhase::SourceFetch,
-        message: format!(
-            "failed to acquire source mirror lock {}: {e}",
-            lock_path.display()
-        ),
-    })?;
-
-    Ok(MirrorLock { _file: file })
+    loop {
+        #[allow(deprecated)]
+        match flock(file.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
+            Ok(()) => return Ok(MirrorLock { _file: file }),
+            Err(e) if e == nix::errno::Errno::EWOULDBLOCK || e == nix::errno::Errno::EAGAIN => {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(e) => {
+                return Err(PreBuildFailure {
+                    phase: BuildFailurePhase::SourceFetch,
+                    message: format!(
+                        "failed to acquire source mirror lock {}: {e}",
+                        lock_path.display()
+                    ),
+                });
+            }
+        }
+    }
 }
 
 /// Ensure a bare mirror exists at `mirror_path` and contains `commit_hash`.
@@ -465,6 +496,7 @@ async fn ensure_mirror_has_commit(
         }
 
         let _ = tokio::fs::remove_dir_all(&temp_mirror_path).await;
+        let mut temp_mirror_cleanup = TempPathCleanup::new(temp_mirror_path.clone());
 
         let output = tokio::process::Command::new("git")
             .kill_on_drop(true)
@@ -492,6 +524,7 @@ async fn ensure_mirror_has_commit(
                     mirror_path.display()
                 ))
             })?;
+        temp_mirror_cleanup.disarm();
 
         info!("✅ Source mirror cloned at {}", mirror_path.display());
     }
@@ -1750,6 +1783,45 @@ mod tests {
                 "-e",
                 &format!("{second_commit}^{{commit}}"),
             ],
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_mirror_clone_removes_temporary_directory() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let mirror_path = temp.path().join("mirror.git");
+        let missing_repo = temp.path().join("missing-source-repo");
+
+        ensure_mirror_has_commit(
+            &mirror_path,
+            missing_repo.to_str().expect("test path should be utf-8"),
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .await
+        .expect_err("missing repo should fail clone");
+
+        let leftovers: Vec<_> = std::fs::read_dir(temp.path())
+            .expect("tempdir should be readable")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("mirror.git.tmp-")
+            })
+            .collect();
+
+        assert!(
+            leftovers.is_empty(),
+            "temporary mirror clone directories should be removed after clone failure: {leftovers:?}"
         );
     }
 

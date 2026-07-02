@@ -11,7 +11,7 @@ use axum::{
         Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose};
@@ -249,13 +249,25 @@ fn source_mirror_id(repo_url: &str) -> String {
 
 fn parse_next_job_request(body: &[u8]) -> Result<NextJobRequest, StatusCode> {
     if body.is_empty() {
-        return Ok(NextJobRequest {
-            protocol_version: 1,
-            supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
-        });
+        return Ok(legacy_next_job_request());
     }
 
     serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+fn legacy_next_job_request() -> NextJobRequest {
+    NextJobRequest {
+        protocol_version: 1,
+        supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
+    }
+}
+
+fn next_job_request_for_method(method: &Method, body: &[u8]) -> Result<NextJobRequest, StatusCode> {
+    if *method == Method::GET {
+        return Ok(legacy_next_job_request());
+    }
+
+    parse_next_job_request(body)
 }
 
 fn apply_cache_destination_env(
@@ -1209,7 +1221,7 @@ pub async fn builder_heartbeat(
         message: "Heartbeat recorded".to_string(),
     }))
 }
-/// POST /api/v1/builders/:id/next-job - Get next job for builder
+/// GET/POST /api/v1/builders/:id/next-job - Get next job for builder
 ///
 /// This endpoint implements the load-based job assignment logic:
 /// 1. Filter jobs by builder's environment assignments (or all if no assignments)
@@ -1218,13 +1230,15 @@ pub async fn builder_heartbeat(
 pub async fn get_next_job(
     State(state): State<CFState>,
     Path(builder_id): Path<Uuid>,
+    method: Method,
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<Json<crate::models::builders::NextJobResponse>, StatusCode> {
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/next-job", builder_id);
     let verified =
-        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
+        authenticate_builder_request(&headers, body.clone(), method.as_str(), &path, &state.pool)
+            .await?;
 
     // Verify the builder_id matches
     if verified.builder_id != builder_id {
@@ -1241,7 +1255,7 @@ pub async fn get_next_job(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let next_job_request = parse_next_job_request(&body)?;
+    let next_job_request = next_job_request_for_method(&method, &body)?;
     let execution_strategy = state.server_config.remote_build_execution_strategy;
     if !next_job_request
         .supported_execution_strategies
@@ -2443,7 +2457,7 @@ async fn record_build_stream_message(state: &CFState, job_id: Uuid, msg: &BuildS
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
-    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
     use base64::engine::{Engine, general_purpose};
     use chrono::{Duration, Utc};
     use ed25519_dalek::{Signer, SigningKey};
@@ -2457,6 +2471,7 @@ mod tests {
     use super::fallback_job_status_request_for_invalid_details;
     use super::format_failure_message;
     use super::map_create_builder_error;
+    use super::next_job_request_for_method;
     use super::parse_derivation_requisites;
     use super::parse_job_status_request;
     use super::parse_next_job_request;
@@ -2601,6 +2616,18 @@ mod tests {
     #[test]
     fn empty_next_job_body_defaults_to_legacy_server_derivation_only() {
         let request = parse_next_job_request(b"").expect("empty request is legacy-compatible");
+
+        assert_eq!(request.protocol_version, 1);
+        assert_eq!(
+            request.supported_execution_strategies,
+            vec![RemoteBuildExecutionStrategy::ServerDerivation]
+        );
+    }
+
+    #[test]
+    fn legacy_get_next_job_request_defaults_to_protocol_v1_server_derivation_only() {
+        let request = next_job_request_for_method(&Method::GET, b"")
+            .expect("legacy GET request should be accepted");
 
         assert_eq!(request.protocol_version, 1);
         assert_eq!(

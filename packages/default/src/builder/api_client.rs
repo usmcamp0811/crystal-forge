@@ -325,17 +325,40 @@ impl BuilderApiClient {
     /// Get the next available job from the server, including the embedded
     /// derivation build payload so the builder needs no database access.
     pub async fn get_next_job(&self) -> Result<Option<NextJobResponse>> {
-        let path = format!("/api/v1/builders/{}/next-job", self.builder_id);
-        let url = format!("{}{}", self.server_url, path);
         let body = serde_json::to_vec(&NextJobRequest {
             protocol_version: 2,
             supported_execution_strategies: self.supported_execution_strategies.clone(),
         })?;
-        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
 
-        let response = self
-            .client
-            .post(&url)
+        let response = self.send_next_job_request("POST", body).await?;
+        if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+            warn!(
+                "⚠️  Server rejected POST /next-job with 405; retrying legacy GET for rolling upgrade compatibility"
+            );
+            return self
+                .parse_next_job_response(self.send_next_job_request("GET", Vec::new()).await?)
+                .await;
+        }
+
+        self.parse_next_job_response(response).await
+    }
+
+    async fn send_next_job_request(
+        &self,
+        method: &str,
+        body: Vec<u8>,
+    ) -> Result<reqwest::Response> {
+        let path = format!("/api/v1/builders/{}/next-job", self.builder_id);
+        let url = format!("{}{}", self.server_url, path);
+        let (builder_id, signature, timestamp) = self.sign_request(method, &path, &body);
+
+        let request = match method {
+            "GET" => self.client.get(&url),
+            "POST" => self.client.post(&url),
+            _ => anyhow::bail!("unsupported next-job request method {method}"),
+        };
+
+        request
             .header("X-Builder-ID", builder_id)
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
@@ -343,8 +366,13 @@ impl BuilderApiClient {
             .body(body)
             .send()
             .await
-            .context("Failed to request next job")?;
+            .context("Failed to request next job")
+    }
 
+    async fn parse_next_job_response(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<Option<NextJobResponse>> {
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             // No jobs available
             return Ok(None);

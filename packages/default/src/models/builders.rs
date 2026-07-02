@@ -378,9 +378,9 @@ pub struct BuildJobDerivation {
 
 /// Signed request body for POST /api/v1/builders/:id/next-job.
 ///
-/// Older builders send an empty body; the server treats those as protocol v1
-/// builders that support only `server_derivation` so they never receive newer
-/// source-verified jobs by accident.
+/// Older builders poll the same endpoint with GET and an empty body; the server
+/// treats those as protocol v1 builders that support only `server_derivation` so
+/// they never receive newer source-verified jobs by accident.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NextJobRequest {
     #[serde(default = "default_builder_protocol_version")]
@@ -482,7 +482,7 @@ impl std::fmt::Display for BuildFailurePhase {
     }
 }
 
-/// Response returned by POST /api/v1/builders/:id/next-job.
+/// Response returned by GET/POST /api/v1/builders/:id/next-job.
 ///
 /// Embeds both the claimed job and the derivation build payload so the remote
 /// builder needs only a single round trip and no database connection.
