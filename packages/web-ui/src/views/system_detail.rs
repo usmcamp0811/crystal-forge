@@ -2821,8 +2821,9 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
     let mut use_utc = use_signal(|| false);
     let mut tail_lines: Signal<Vec<(String, String, String)>> = use_signal(Vec::new); // (timestamp, level, message)
     let mut highlighted_event = use_signal(|| None::<String>);
-    #[allow(unused_mut)]
-    let mut scroll_ref = use_signal(|| None::<web_sys::Element>);
+    // Stable DOM id for the scroll container so we can locate it (and anchored lines)
+    // via document.query_selector without relying on event-based element handles.
+    let log_stream_id = "sd-log-stream-container";
 
     // Live tail: add simulated heartbeat/agent events every 2-3 seconds
     use_effect(move || {
@@ -2857,12 +2858,18 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         });
     });
 
-    // Auto-scroll to bottom when tailing
+    // Auto-scroll to bottom when tailing. Locate the container via its stable DOM id
+    // so we don't depend on event-based element handles.
     use_effect(move || {
-        if *tail.read() {
-            #[cfg(target_arch = "wasm32")]
-            if let Some(element) = scroll_ref.read().as_ref() {
-                element.set_scroll_top(element.scroll_height());
+        let _tail_dep = *tail.read();
+        let _lines_dep = tail_lines.read().len();
+        #[cfg(target_arch = "wasm32")]
+        if _tail_dep {
+            if let Some(container) = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.get_element_by_id(log_stream_id))
+            {
+                container.set_scroll_top(container.scroll_height());
             }
         }
     });
@@ -2886,12 +2893,13 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                 spawn(async move {
                     // Let the DOM update before querying for the anchor.
                     gloo_timers::future::TimeoutFuture::new(60).await;
-                    if let Some(container) = scroll_ref.read().as_ref() {
+                    if let Some(container) = web_sys::window()
+                        .and_then(|w| w.document())
+                        .and_then(|d| d.get_element_by_id(log_stream_id))
+                    {
                         let selector = format!("[data-ev=\"{event_id_scroll}\"]");
                         if let Ok(Some(el)) = container.query_selector(&selector) {
-                            if let Ok(html_el) =
-                                el.dyn_into::<web_sys::HtmlElement>()
-                            {
+                            if let Ok(html_el) = el.dyn_into::<web_sys::HtmlElement>() {
                                 let target = (html_el.offset_top()
                                     - container.client_height() / 2
                                     + html_el.offset_height())
@@ -3138,15 +3146,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
             // Log stream
             pre {
                 class: "sd-log-stream",
-                onmounted: move |evt| {
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        use dioxus::dioxus_web::WebEventExt;
-                        scroll_ref.set(Some(evt.as_web_event()));
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    let _ = evt;
-                },
+                id: "{log_stream_id}",
                 
                 for (day_label, entry) in log_rows {
                     {
