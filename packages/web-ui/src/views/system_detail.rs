@@ -3748,7 +3748,10 @@ fn HistoryTab(
     let shown_count = (*visible_count.read()).min(total_items);
     let shown = items.iter().take(shown_count).cloned().collect::<Vec<_>>();
     let has_more = shown_count < total_items;
-    let history_scroll_id = "sd-history-timeline";
+    // Stable DOM id for the timeline's own scroll container. This mirrors the
+    // established commit-list pattern elsewhere in the UI and avoids relying on
+    // the page-level `.content` scroller.
+    let timeline_scroll_id = "sd-history-scroll";
 
     // Track which restart clusters are expanded (keyed by item index).
     let mut open_clusters: Signal<std::collections::HashSet<usize>> =
@@ -3772,16 +3775,19 @@ fn HistoryTab(
             // Timeline
             div {
                 class: "tl",
-                id: "{history_scroll_id}",
+                id: "{timeline_scroll_id}",
                 style: "padding: 14px 18px;",
                 onscroll: move |_| {
                     if !has_more {
                         return;
                     }
-                    let Some(element) = web_sys::window()
-                        .and_then(|window| window.document())
-                        .and_then(|document| document.get_element_by_id(history_scroll_id))
-                    else {
+                    let Some(window) = web_sys::window() else {
+                        return;
+                    };
+                    let Some(document) = window.document() else {
+                        return;
+                    };
+                    let Some(element) = document.get_element_by_id(timeline_scroll_id) else {
                         return;
                     };
                     let scroll_top = element.scroll_top();
@@ -3901,7 +3907,9 @@ fn HistoryTab(
                     }
                 }
 
-                // Load more sentinel fallback for keyboard and non-scroll users.
+                // Auto-load sentinel: the timeline's onscroll handler reveals the
+                // next page as this row nears the visible bottom. The button remains
+                // a keyboard/no-scroll fallback.
                 if has_more {
                     div {
                         class: "tl-row tl-sentinel",
