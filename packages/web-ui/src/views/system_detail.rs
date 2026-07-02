@@ -3492,10 +3492,88 @@ enum TimelineItem {
 
 /// Classify a history entry's source/outcome into a timeline event kind.
 ///
-/// Uses `change_reason`, `outcome`, and `store_path`/`commit_hash` presence to
-/// distinguish CF deploys, failed deploys, out-of-band local rebuilds (matched vs
-/// untracked), and restarts — mirroring the design's `source`/`resolution` model.
+/// Prefers the authoritative `event_kind` provided by the backend (derived from
+/// `system_states.change_reason`): `cf_deployment` (CF deploy), `local_rebuild`
+/// (on-host/out-of-band activation), and `restart` (reboot). Reconciliation of an
+/// out-of-band rebuild uses the backend `reconciled` flag (running store-path maps
+/// to a tracked flake commit). Falls back to string heuristics only for legacy
+/// payloads that predate these fields.
 fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
+    let outcome = entry.outcome.to_lowercase();
+
+    match entry.event_kind.as_str() {
+        "cf_deployment" => {
+            if outcome.contains("fail") || outcome.contains("error") {
+                HistoryEventKind::DeployFailed
+            } else {
+                HistoryEventKind::Deploy
+            }
+        }
+        "local_rebuild" => {
+            if entry.reconciled {
+                HistoryEventKind::LocalRebuildMatched
+            } else {
+                HistoryEventKind::LocalRebuildUntracked
+            }
+        }
+        "restart" => HistoryEventKind::Restart,
+        _ => classify_history_entry_legacy(entry),
+    }
+}
+
+/// Human-readable timeline message for an event.
+///
+/// The raw `change_reason` (e.g. "config_change") is not operator-friendly, so we
+/// surface a descriptive summary per kind while still preferring any richer message
+/// text carried on the entry (e.g. a commit subject in the fallback path).
+fn history_event_message(entry: &SystemHistoryEntry, kind: &HistoryEventKind) -> String {
+    let raw = entry
+        .change_reason
+        .lines()
+        .next()
+        .unwrap_or(&entry.change_reason)
+        .trim()
+        .to_string();
+
+    let is_raw_reason = matches!(
+        raw.as_str(),
+        "config_change" | "cf_deployment" | "startup" | "state_delta" | "state_change" | ""
+    );
+
+    match kind {
+        HistoryEventKind::Deploy => {
+            if is_raw_reason {
+                "Deployed through Crystal Forge".to_string()
+            } else {
+                raw
+            }
+        }
+        HistoryEventKind::DeployFailed => {
+            if is_raw_reason {
+                "Deploy failed to activate".to_string()
+            } else {
+                raw
+            }
+        }
+        HistoryEventKind::LocalRebuildMatched | HistoryEventKind::LocalRebuildUntracked => {
+            if is_raw_reason {
+                "nixos-rebuild switch on host".to_string()
+            } else {
+                raw
+            }
+        }
+        HistoryEventKind::Restart => {
+            if is_raw_reason {
+                "System restarted".to_string()
+            } else {
+                raw
+            }
+        }
+    }
+}
+
+/// Legacy heuristic classification for payloads without an authoritative `event_kind`.
+fn classify_history_entry_legacy(entry: &SystemHistoryEntry) -> HistoryEventKind {
     let reason = entry.change_reason.to_lowercase();
     let outcome = entry.outcome.to_lowercase();
     let actor = entry.actor.to_lowercase();
@@ -3506,12 +3584,9 @@ fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
     if reason.contains("restart") || reason.contains("boot") || reason.contains("startup") {
         return HistoryEventKind::Restart;
     }
-    // Out-of-band: activation by a host-local actor (root@host / user@host) rather than
-    // an operator or CI bot pushing through Crystal Forge.
     let is_local =
         actor.contains('@') || reason.contains("nixos-rebuild") || reason.contains("local");
     if is_local {
-        // Matched (reconciled) when we still have a commit anchor; untracked otherwise.
         if entry.commit_hash.is_some() {
             HistoryEventKind::LocalRebuildMatched
         } else {
@@ -3523,25 +3598,27 @@ fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
 }
 
 /// Build the unified event list from deployment history entries and the system's
-/// current generation. Deploy events decrement the running generation as we walk
-/// backwards in time (newest → oldest), matching the design's generation math.
+/// current generation.
+///
+/// When the backend supplies an authoritative per-entry `generation`, that value is
+/// used directly and the previous generation is taken from the next-older entry, so
+/// deploys render `#prev → #cur` and restarts render an unchanged generation
+/// ("held steady"). For legacy payloads without a recorded generation, we fall back
+/// to walking newest → oldest and decrementing on each generation-changing deploy.
 fn build_history_events(
     entries: &[SystemHistoryEntry],
     commits: &[SystemCommitHistory],
     current_generation: Option<i32>,
 ) -> Vec<HistoryEvent> {
     let mut events = Vec::with_capacity(entries.len());
-    // Walk newest → oldest; each generation-changing deploy steps the generation down.
+    // Fallback running generation for payloads without an authoritative value.
     let mut running_gen = current_generation;
+    // Whether any entry carries an authoritative recorded generation.
+    let has_authoritative_gen = entries.iter().any(|e| e.generation.is_some());
 
     for (idx, entry) in entries.iter().enumerate() {
         let kind = classify_history_entry(entry);
-        let short_reason = entry
-            .change_reason
-            .lines()
-            .next()
-            .unwrap_or(&entry.change_reason)
-            .to_string();
+        let short_reason = history_event_message(entry, &kind);
 
         // Match a commit record (for the rollback action + rich commit link).
         let commit = entry
@@ -3553,7 +3630,20 @@ fn build_history_events(
             kind,
             HistoryEventKind::Restart | HistoryEventKind::DeployFailed
         );
-        let (generation, prev_generation) = if is_gen_changing {
+        let (generation, prev_generation) = if has_authoritative_gen {
+            // Authoritative: use the recorded generation and compare against the
+            // next-older recorded generation to show a real transition.
+            let current = entry.generation;
+            let older = entries
+                .get(idx + 1)
+                .and_then(|older_entry| older_entry.generation);
+            let prev = match (is_gen_changing, current, older) {
+                // Only surface a transition when the generation actually changed.
+                (true, Some(cur), Some(old)) if old != cur => Some(old),
+                _ => None,
+            };
+            (current, prev)
+        } else if is_gen_changing {
             let current = running_gen;
             let prev = running_gen.map(|g| g - 1);
             if let Some(g) = running_gen {
@@ -6630,6 +6720,12 @@ fn synthesize_history_entries_from_commits(
             } else {
                 "pending".to_string()
             },
+            // Commit fallback rows represent tracked flake commits, so they classify
+            // as deploys with a reconciled/tracked source.
+            event_kind: "cf_deployment".to_string(),
+            generation: None,
+            reconciled: true,
+            generation_matches_current_store_path: None,
         })
         .collect()
 }
@@ -6679,8 +6775,12 @@ mod tests {
                 commit_hash: Some("aaaaaaaa".to_string()),
                 flake_name: Some("infra".to_string()),
                 flake_repo_url: Some("https://example.com/infra.git".to_string()),
-                actor: "agent".to_string(),
+                actor: "crystal-forge".to_string(),
                 outcome: "recorded".to_string(),
+                event_kind: "cf_deployment".to_string(),
+                generation: Some(3),
+                reconciled: true,
+                generation_matches_current_store_path: Some(true),
             },
             SystemHistoryEntry {
                 timestamp: now - Duration::minutes(10),
@@ -6690,8 +6790,12 @@ mod tests {
                 commit_hash: Some("bbbbbbbb".to_string()),
                 flake_name: Some("infra".to_string()),
                 flake_repo_url: Some("https://example.com/infra.git".to_string()),
-                actor: "agent".to_string(),
+                actor: "crystal-forge".to_string(),
                 outcome: "recorded".to_string(),
+                event_kind: "cf_deployment".to_string(),
+                generation: Some(2),
+                reconciled: true,
+                generation_matches_current_store_path: Some(false),
             },
             SystemHistoryEntry {
                 timestamp: now - Duration::minutes(20),
@@ -6701,8 +6805,12 @@ mod tests {
                 commit_hash: Some("aaaaaaaa".to_string()),
                 flake_name: Some("infra".to_string()),
                 flake_repo_url: Some("https://example.com/infra.git".to_string()),
-                actor: "agent".to_string(),
+                actor: "crystal-forge".to_string(),
                 outcome: "recorded".to_string(),
+                event_kind: "cf_deployment".to_string(),
+                generation: Some(1),
+                reconciled: true,
+                generation_matches_current_store_path: Some(false),
             },
         ];
 
