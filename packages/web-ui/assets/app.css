@@ -4851,3 +4851,20 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
   margin-top: 8px; padding-left: 12px; border-left: 2px solid var(--cf-divider);
   display: flex; flex-direction: column; gap: 4px;
 }
+
+/* ─── Logs tab enhancements ──────────────────────────────────────────────────── */
+.sd-log-tzbar {
+  padding: 6px 16px; background: var(--cf-subtle-bg); border-bottom: 1px solid var(--cf-divider);
+  font-size: 11px; color: var(--cf-text-secondary); display: flex; align-items: center; gap: 4px;
+}
+.sd-log-hl {
+  background: color-mix(in oklab, var(--cf-amber) 20%, transparent) !important;
+  animation: highlight-pulse 2.4s ease-out;
+}
+@keyframes highlight-pulse {
+  0%, 100% { background: color-mix(in oklab, var(--cf-amber) 20%, transparent); }
+  50% { background: color-mix(in oklab, var(--cf-amber) 35%, transparent); }
+}
+.seg-tz {
+  min-width: 90px;
+}

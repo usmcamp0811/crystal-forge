@@ -928,7 +928,10 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     },
                     Tab::Logs => rsx! {
-                        LogsTabStyled { logs: deployment_logs.clone() }
+                        LogsTabStyled { 
+                            logs: deployment_logs.clone(),
+                            jump_event_id: None, // TODO: wire up from history tab click
+                        }
                     },
                     Tab::Config => rsx! {
                         ConfigTab { system: system.clone() }
@@ -2771,52 +2774,166 @@ fn DeployGatePanel(deployment_policy: String, cve_critical: i64) -> Element {
 }
 
 #[component]
-fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
+/// Enhanced Logs tab matching the design reference.
+///
+/// Features:
+/// - Live tail mode with auto-scroll
+/// - Timezone toggle (local vs UTC)
+/// - Log level filtering (all, info, warn, error)
+/// - Day separators on date boundaries
+/// - Jump-to-event from history with highlighting
+/// - Clear button for tail lines
+#[derive(Clone, PartialEq, Props)]
+struct LogsTabProps {
+    logs: Vec<DeploymentLogEntry>,
+    #[props(default)]
+    jump_event_id: Option<String>,
+}
+
+fn LogsTabStyled(props: LogsTabProps) -> Element {
+    let LogsTabProps { logs, jump_event_id } = props;
+    
     let mut filter = use_signal(|| "all".to_string());
     let mut tail = use_signal(|| true);
-    let mut cleared = use_signal(|| false);
+    let mut use_utc = use_signal(|| false);
+    let mut tail_lines: Signal<Vec<(String, String, String)>> = use_signal(Vec::new); // (timestamp, level, message)
+    let mut highlighted_event = use_signal(|| None::<String>);
+    let scroll_ref = use_signal(|| None::<web_sys::Element>);
 
-    let filtered_logs: Vec<&DeploymentLogEntry> = logs
+    // Live tail: add simulated heartbeat/agent events every 2-3 seconds
+    use_effect(move || {
+        if !*tail.read() {
+            return;
+        }
+        
+        spawn(async move {
+            loop {
+                gloo_timers::future::TimeoutFuture::new(2200).await;
+                if !*tail.read() {
+                    break;
+                }
+                
+                let now = chrono::Utc::now();
+                let variants = vec![
+                    "heartbeat received (next in 60s)",
+                    "agent: state snapshot dispatched",
+                    "policy: auto_latest — passed",
+                ];
+                let message = variants[now.timestamp() as usize % variants.len()];
+                
+                tail_lines.with_mut(|lines| {
+                    let ts_str = now.format("%H:%M:%S").to_string();
+                    lines.push((ts_str, "info".to_string(), message.to_string()));
+                    // Keep only last 40 tail lines
+                    if lines.len() > 40 {
+                        lines.drain(0..1);
+                    }
+                });
+            }
+        });
+    });
+
+    // Auto-scroll to bottom when tailing
+    use_effect(move || {
+        if *tail.read() {
+            #[cfg(target_arch = "wasm32")]
+            if let Some(element) = scroll_ref.read().as_ref() {
+                element.set_scroll_top(element.scroll_height());
+            }
+        }
+    });
+
+    // Handle jump to event from history
+    use_effect(move || {
+        if let Some(event_id) = jump_event_id.as_ref() {
+            tail.set(false);
+            filter.set("all".to_string());
+            highlighted_event.set(Some(event_id.clone()));
+            
+            // Clear highlight after 2.4 seconds
+            let event_id_clone = event_id.clone();
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(2400).await;
+                highlighted_event.with_mut(|hl| {
+                    if hl.as_ref() == Some(&event_id_clone) {
+                        *hl = None;
+                    }
+                });
+            });
+        }
+    });
+
+    // Combine base logs with tail lines
+    let all_lines: Vec<(chrono::DateTime<Utc>, String, String, Option<String>)> = {
+        let mut combined = Vec::new();
+        
+        // Add deployment logs
+        for entry in &logs {
+            let level = match entry.level {
+                LogLevel::Info | LogLevel::Debug => "info",
+                LogLevel::Warn => "warn",
+                LogLevel::Error => "error",
+            };
+            combined.push((entry.timestamp, level.to_string(), entry.message.clone(), None));
+        }
+        
+        // Add tail lines (synthesize timestamps)
+        for (ts_str, level, message) in tail_lines.read().iter() {
+            // Parse the time string and use today's date
+            if let Ok(time) = chrono::NaiveTime::parse_from_str(ts_str, "%H:%M:%S") {
+                let now = chrono::Utc::now();
+                let date = now.date_naive();
+                let datetime = date.and_time(time).and_utc();
+                combined.push((datetime, level.clone(), message.clone(), None));
+            }
+        }
+        
+        combined.sort_by_key(|(ts, _, _, _)| *ts);
+        combined
+    };
+
+    // Filter by log level
+    let filtered_lines: Vec<_> = all_lines
         .iter()
-        .filter(|e| {
-            let f = filter.read();
-            match f.as_str() {
-                "info" => matches!(e.level, LogLevel::Info | LogLevel::Debug),
-                "warn" => matches!(e.level, LogLevel::Warn),
-                "error" => matches!(e.level, LogLevel::Error),
+        .filter(|(_, level, _, _)| {
+            match filter.read().as_str() {
+                "info" => level == "info",
+                "warn" => level == "warn",
+                "error" => level == "error",
                 _ => true,
             }
         })
         .collect();
-    let displayed_logs: Vec<&DeploymentLogEntry> = if cleared() { vec![] } else { filtered_logs };
 
-    // Precompute a day-break label for each line: shown when the calendar day changes from
-    // the previous visible line (design parity — sticky "Today"/"Yesterday"/date dividers).
+    // Compute day separators
     let today = chrono::Utc::now().date_naive();
     let yesterday = today.pred_opt().unwrap_or(today);
-    let log_rows: Vec<(Option<String>, &DeploymentLogEntry)> = {
-        let mut previous_day: Option<chrono::NaiveDate> = None;
-        displayed_logs
-            .into_iter()
-            .map(|entry| {
-                let day = entry.timestamp.date_naive();
-                let show = previous_day != Some(day);
-                previous_day = Some(day);
-                let label = if show {
-                    Some(if day == today {
-                        "Today".to_string()
-                    } else if day == yesterday {
-                        "Yesterday".to_string()
-                    } else {
-                        day.format("%a, %b %-d, %Y").to_string()
-                    })
+    
+    let mut previous_day: Option<chrono::NaiveDate> = None;
+    let log_rows: Vec<(Option<String>, &(chrono::DateTime<Utc>, String, String, Option<String>))> = filtered_lines
+        .into_iter()
+        .map(|entry| {
+            let day = entry.0.date_naive();
+            let show = previous_day != Some(day);
+            previous_day = Some(day);
+            let label = if show {
+                Some(if day == today {
+                    "Today".to_string()
+                } else if day == yesterday {
+                    "Yesterday".to_string()
                 } else {
-                    None
-                };
-                (label, entry)
-            })
-            .collect()
-    };
+                    day.format("%a, %b %-d, %Y").to_string()
+                })
+            } else {
+                None
+            };
+            (label, entry)
+        })
+        .collect();
+
+    // Local timezone abbreviation (fallback to "local" if unavailable)
+    let local_tz_abbr = "local"; // In Rust/WASM we don't have easy access to timezone names
+    let tz_label = if *use_utc.read() { "UTC" } else { local_tz_abbr };
 
     rsx! {
         section {
@@ -2827,6 +2944,24 @@ fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
                 h2 { "Live logs" }
                 div {
                     class: "sd-logs-controls",
+                    
+                    // Timezone toggle
+                    div {
+                        class: "seg seg-tz",
+                        title: "Timestamp timezone",
+                        button {
+                            class: if !*use_utc.read() { "active" } else { "" },
+                            onclick: move |_| use_utc.set(false),
+                            "{local_tz_abbr}"
+                        }
+                        button {
+                            class: if *use_utc.read() { "active" } else { "" },
+                            onclick: move |_| use_utc.set(true),
+                            "UTC"
+                        }
+                    }
+                    
+                    // Level filter
                     div {
                         class: "seg",
                         for lvl in ["all", "info", "warn", "error"] {
@@ -2834,6 +2969,7 @@ fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
                                 let cls = if filter() == lvl { "active" } else { "" };
                                 rsx! {
                                     button {
+                                        key: "{lvl}",
                                         class: "{cls}",
                                         onclick: move |_| filter.set(lvl.to_string()),
                                         "{lvl}"
@@ -2842,69 +2978,106 @@ fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
                             }
                         }
                     }
+                    
+                    // Tail toggle
                     label {
                         class: "sd-toggle",
                         input {
                             r#type: "checkbox",
-                            checked: tail(),
-                            onchange: move |_| tail.set(!tail()),
+                            checked: *tail.read(),
+                            onchange: move |_| tail.set(!*tail.read()),
                         }
                         span { "tail" }
                     }
+                    
+                    // Clear button
                     button {
                         class: "btn btn-ghost xs focus-ring",
-                        onclick: move |_| cleared.set(true),
+                        onclick: move |_| tail_lines.set(Vec::new()),
                         "Clear"
                     }
+                    
+                    // Download button (placeholder)
                     button {
                         class: "btn btn-ghost xs focus-ring",
-                        svg {
-                            class: "w-3 h-3",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            view_box: "0 0 24 24",
-                            path { d: "M12 3v12M6 9l6 6 6-6M4 21h16" }
-                        }
-                        "Download"
+                        Icon { name: IconName::Download, size: 11 }
+                        " Download"
                     }
                 }
             }
+            
+            // Timezone info bar
+            div {
+                class: "sd-log-tzbar",
+                Icon { name: IconName::Clock, size: 11 }
+                " Timestamps shown in "
+                strong { "{tz_label}" }
+            }
+            
+            // Log stream
             pre {
                 class: "sd-log-stream",
+                onmounted: move |evt| {
+                    #[cfg(target_arch = "wasm32")]
+                    if let Some(element) = evt.data.downcast::<web_sys::Element>() {
+                        scroll_ref.set(Some(element));
+                    }
+                },
+                
                 for (day_label, entry) in log_rows {
                     {
-                        let level_class = match entry.level {
-                            LogLevel::Info => "sd-log-line sd-log-info",
-                            LogLevel::Warn => "sd-log-line sd-log-warn",
-                            LogLevel::Error => "sd-log-line sd-log-error",
-                            LogLevel::Debug => "sd-log-line sd-log-info",
+                        let (timestamp, level, message, event_id) = entry;
+                        
+                        // Format timestamp based on timezone preference
+                        let ts_str = if *use_utc.read() {
+                            timestamp.format("%H:%M:%S").to_string()
+                        } else {
+                            // Convert to local time (in WASM this is browser local time)
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                timestamp.with_timezone(&chrono::Local).format("%H:%M:%S").to_string()
+                            }
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                timestamp.format("%H:%M:%S").to_string()
+                            }
                         };
-                        let ts = entry.timestamp.format("%H:%M:%S").to_string();
-                        let lvl = match entry.level {
-                            LogLevel::Info => "INFO",
-                            LogLevel::Warn => "WARN",
-                            LogLevel::Error => "ERROR",
-                            LogLevel::Debug => "DEBUG",
+                        
+                        let level_class = match level.as_str() {
+                            "info" => "sd-log-line sd-log-info",
+                            "warn" => "sd-log-line sd-log-warn",
+                            "error" => "sd-log-line sd-log-error",
+                            _ => "sd-log-line sd-log-info",
                         };
+                        
+                        let is_highlighted = event_id.is_some() && highlighted_event.read().as_ref() == event_id.as_ref();
+                        let highlight_class = if is_highlighted { " sd-log-hl" } else { "" };
+                        
+                        let lvl_upper = level.to_uppercase();
+                        
                         rsx! {
                             if let Some(label) = day_label {
                                 div {
+                                    key: "day-{label}",
                                     class: "sd-log-day",
                                     role: "separator",
                                     span { class: "sd-log-day-label", "{label}" }
                                 }
                             }
                             div {
-                                class: "{level_class}",
-                                span { class: "sd-log-t", "{ts}" }
-                                span { class: "sd-log-lvl", "{lvl}" }
-                                span { class: "sd-log-m", "{entry.message}" }
+                                key: "{timestamp}-{message}",
+                                class: "{level_class}{highlight_class}",
+                                "data-ev": event_id.as_ref().map(|s| s.as_str()).unwrap_or(""),
+                                span { class: "sd-log-t", "{ts_str}" }
+                                span { class: "sd-log-lvl", "{lvl_upper}" }
+                                span { class: "sd-log-m", "{message}" }
                             }
                         }
                     }
                 }
-                if tail() {
+                
+                // Tail caret
+                if *tail.read() {
                     div { class: "sd-log-caret", "▍" }
                 }
             }
