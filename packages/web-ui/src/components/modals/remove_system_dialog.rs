@@ -23,12 +23,12 @@ pub fn RemoveSystemDialog(
     on_cancel: EventHandler<()>,
 ) -> Element {
     let mut confirm_text = use_signal(|| String::new());
-    
+
     let is_production = environment
         .as_ref()
         .map(|e| e.eq_ignore_ascii_case("production"))
         .unwrap_or(false);
-    
+
     let confirm_enabled = if is_production {
         !is_loading && confirm_text.read().trim() == hostname.trim()
     } else {

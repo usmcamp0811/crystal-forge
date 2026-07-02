@@ -490,7 +490,7 @@ pub fn EditSystemModal(
                 }
             }
         }
-        
+
         // Remove system confirmation modal
         if show_remove_modal() {
             {
