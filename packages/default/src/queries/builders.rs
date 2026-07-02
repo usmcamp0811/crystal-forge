@@ -15,6 +15,71 @@ use crate::models::builders::{
 };
 use crate::models::public_key::PublicKey;
 
+const CLAIM_NEXT_JOB_WILDCARD_SQL: &str = r#"
+    UPDATE build_jobs
+    SET builder_id = $1,
+        status = 'building',
+        started_at = NOW(),
+        updated_at = NOW()
+    WHERE id = (
+        SELECT build_jobs.id
+        FROM build_jobs
+        JOIN derivations d ON d.id = build_jobs.derivation_id
+        LEFT JOIN commits c ON c.id = d.commit_id
+        LEFT JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
+        WHERE build_jobs.status = 'queued'
+          AND (
+              NOT $2
+              OR (
+                  d.commit_id IS NOT NULL
+                  AND d.derivation_path IS NOT NULL
+                  AND c.id IS NOT NULL
+                  AND f.id IS NOT NULL
+              )
+          )
+        ORDER BY
+            build_jobs.priority_weight DESC,
+            c.commit_timestamp DESC NULLS LAST,
+            build_jobs.created_at ASC
+        LIMIT 1
+        FOR UPDATE OF build_jobs SKIP LOCKED
+    )
+    RETURNING *
+    "#;
+
+const CLAIM_NEXT_JOB_FILTERED_SQL: &str = r#"
+    UPDATE build_jobs
+    SET builder_id = $1,
+        status = 'building',
+        started_at = NOW(),
+        updated_at = NOW()
+    WHERE id = (
+        SELECT build_jobs.id
+        FROM build_jobs
+        JOIN derivations d ON d.id = build_jobs.derivation_id
+        LEFT JOIN commits c ON c.id = d.commit_id
+        LEFT JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
+        WHERE build_jobs.status = 'queued'
+          AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
+          AND (
+              NOT $3
+              OR (
+                  d.commit_id IS NOT NULL
+                  AND d.derivation_path IS NOT NULL
+                  AND c.id IS NOT NULL
+                  AND f.id IS NOT NULL
+              )
+          )
+        ORDER BY
+            build_jobs.priority_weight DESC,
+            c.commit_timestamp DESC NULLS LAST,
+            build_jobs.created_at ASC
+        LIMIT 1
+        FOR UPDATE OF build_jobs SKIP LOCKED
+    )
+    RETURNING *
+    "#;
+
 /// Advisory lock used to serialize all queue priority_weight mutations.
 const BUILD_QUEUE_PRIORITY_LOCK_ID: i64 = 0x4346_4251; // 'CFBQ'
 
@@ -730,86 +795,21 @@ pub async fn claim_next_job_atomic(
 
     let job = if environment_ids.is_empty() {
         // Wildcard: builder can claim jobs from any environment
-        sqlx::query_as::<_, BuildJob>(
-            r#"
-            UPDATE build_jobs
-            SET builder_id = $1,
-                status = 'building',
-                started_at = NOW(),
-                updated_at = NOW()
-            WHERE id = (
-                SELECT build_jobs.id
-                FROM build_jobs
-                JOIN derivations d ON d.id = build_jobs.derivation_id
-                LEFT JOIN commits c ON c.id = d.commit_id
-                LEFT JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
-                WHERE build_jobs.status = 'queued'
-                  AND (
-                      NOT $2
-                      OR (
-                          d.commit_id IS NOT NULL
-                          AND d.derivation_path IS NOT NULL
-                          AND c.id IS NOT NULL
-                          AND f.id IS NOT NULL
-                      )
-                  )
-                ORDER BY
-                    build_jobs.priority_weight DESC,
-                    c.commit_timestamp DESC NULLS LAST,
-                    build_jobs.created_at ASC
-                LIMIT 1
-                FOR UPDATE SKIP LOCKED
-            )
-            RETURNING *
-            "#,
-        )
-        .bind(builder_id)
-        .bind(require_verified_source_metadata)
-        .fetch_optional(&mut *tx)
-        .await
-        .context("Failed to claim job (wildcard) in transaction")?
+        sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_WILDCARD_SQL)
+            .bind(builder_id)
+            .bind(require_verified_source_metadata)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to claim job (wildcard) in transaction")?
     } else {
         // Filtered: only jobs matching builder's environment assignments
-        sqlx::query_as::<_, BuildJob>(
-            r#"
-            UPDATE build_jobs
-            SET builder_id = $1,
-                status = 'building',
-                started_at = NOW(),
-                updated_at = NOW()
-            WHERE id = (
-                SELECT build_jobs.id
-                FROM build_jobs
-                JOIN derivations d ON d.id = build_jobs.derivation_id
-                LEFT JOIN commits c ON c.id = d.commit_id
-                LEFT JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
-                WHERE build_jobs.status = 'queued'
-                  AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
-                  AND (
-                      NOT $3
-                      OR (
-                          d.commit_id IS NOT NULL
-                          AND d.derivation_path IS NOT NULL
-                          AND c.id IS NOT NULL
-                          AND f.id IS NOT NULL
-                      )
-                  )
-                ORDER BY
-                    build_jobs.priority_weight DESC,
-                    c.commit_timestamp DESC NULLS LAST,
-                    build_jobs.created_at ASC
-                LIMIT 1
-                FOR UPDATE SKIP LOCKED
-            )
-            RETURNING *
-            "#,
-        )
-        .bind(builder_id)
-        .bind(environment_ids)
-        .bind(require_verified_source_metadata)
-        .fetch_optional(&mut *tx)
-        .await
-        .context("Failed to claim job (filtered) in transaction")?
+        sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_FILTERED_SQL)
+            .bind(builder_id)
+            .bind(environment_ids)
+            .bind(require_verified_source_metadata)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to claim job (filtered) in transaction")?
     };
 
     // 4. Commit transaction (makes count check + job assignment atomic)
@@ -1427,6 +1427,20 @@ mod tests {
     use base64::Engine;
     use chrono::{Duration, Utc};
     use sqlx::postgres::PgPoolOptions;
+
+    #[test]
+    fn claim_next_job_queries_lock_only_build_jobs_rows() {
+        for sql in [CLAIM_NEXT_JOB_WILDCARD_SQL, CLAIM_NEXT_JOB_FILTERED_SQL] {
+            assert!(
+                sql.contains("FOR UPDATE OF build_jobs SKIP LOCKED"),
+                "claim SQL must lock only build_jobs so nullable outer joins remain legal: {sql}"
+            );
+            assert!(
+                sql.contains("LEFT JOIN commits") && sql.contains("LEFT JOIN flakes"),
+                "regression guard should cover the verified-source outer joins: {sql}"
+            );
+        }
+    }
 
     async fn queue_test_pool() -> PgPool {
         let database_url = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")

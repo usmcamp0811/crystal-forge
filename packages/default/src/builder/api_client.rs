@@ -332,6 +332,15 @@ impl BuilderApiClient {
 
         let response = self.send_next_job_request("POST", body).await?;
         if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+            if !self
+                .supported_execution_strategies
+                .contains(&RemoteBuildExecutionStrategy::ServerDerivation)
+            {
+                anyhow::bail!(
+                    "server only supports legacy GET polling, but this builder does not support server_derivation"
+                );
+            }
+
             warn!(
                 "⚠️  Server rejected POST /next-job with 405; retrying legacy GET for rolling upgrade compatibility"
             );
@@ -966,6 +975,71 @@ mod tests {
         assert_eq!(id, builder_id.to_string());
         assert_eq!(sig.len(), 88); // 64 bytes Ed25519 signature as base64
         assert!(!ts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn verified_only_builder_does_not_retry_legacy_get_after_405() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let request_count_for_server = Arc::clone(&request_count);
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("client should connect once");
+            request_count_for_server.fetch_add(1, Ordering::SeqCst);
+            let mut buf = [0_u8; 1024];
+            let n = stream
+                .read(&mut buf)
+                .await
+                .expect("request should be readable");
+            let request = String::from_utf8_lossy(&buf[..n]);
+            assert!(
+                request.starts_with("POST /api/v1/builders/"),
+                "initial next-job request should be POST, got: {request}"
+            );
+            stream
+                .write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("response should write");
+        });
+
+        let client = BuilderApiClient {
+            client: Client::new(),
+            server_url: format!("http://{addr}"),
+            builder_id: Uuid::new_v4(),
+            signing_key: SigningKey::generate(&mut rand::thread_rng()),
+            supported_execution_strategies: vec![
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            ],
+        };
+
+        let result = client.get_next_job().await;
+
+        assert!(
+            result.is_err(),
+            "verified-only builder should reject legacy fallback"
+        );
+        assert!(
+            result
+                .expect_err("result should be an error")
+                .to_string()
+                .contains("does not support server_derivation")
+        );
+        server.await.expect("test server should finish");
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            1,
+            "verified-only builder must not issue a legacy GET retry"
+        );
     }
 
     #[test]
