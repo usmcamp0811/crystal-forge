@@ -65,8 +65,6 @@ pub fn EditSystemModal(
     let mut flake_branch = use_signal(|| derived_branch(system.environment.as_deref()).to_string());
     let mut is_saving = use_signal(|| false);
     let mut show_remove_modal = use_signal(|| false);
-    let mut is_deleting = use_signal(|| false);
-
     // Pinned commit selection. Seeds from the system's latest known commit so the picker
     // highlights the active pin. Wired to the real `/systems/:id/commits` data passed in
     // via `recent_commits`.
@@ -494,24 +492,16 @@ pub fn EditSystemModal(
         // Remove system confirmation modal
         if show_remove_modal() {
             {
-                let env_value = environment.read().clone();
-                let env_opt = if env_value.trim().is_empty() {
-                    None
-                } else {
-                    Some(env_value)
-                };
                 rsx! {
                     RemoveSystemDialog {
-                        hostname: hostname.read().clone(),
-                        environment: env_opt,
-                        is_loading: is_deleting(),
+                        hostname: system.hostname.clone(),
+                        environment: system.environment.clone(),
+                        is_loading: false,
                         on_confirm: move |_| {
-                            is_deleting.set(true);
                             on_delete.call(());
                         },
                         on_cancel: move |_| {
                             show_remove_modal.set(false);
-                            is_deleting.set(false);
                         },
                     }
                 }

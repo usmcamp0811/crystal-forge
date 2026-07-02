@@ -6,7 +6,7 @@
 //! - CVEs: Expandable vulnerability list
 //! - Logs: Recent deployment logs
 
-use chrono::{Duration, Utc};
+use chrono::{Duration, Local, Utc};
 use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
@@ -459,6 +459,11 @@ pub fn SystemDetailView(id: String) -> Element {
         })
         .filter(|commits| !commits.is_empty())
         .unwrap_or_else(|| history_commit_history.clone());
+    let effective_history_entries = if history_entries.is_empty() {
+        synthesize_history_entries_from_commits(&deploy_commit_history)
+    } else {
+        history_entries.clone()
+    };
     let overview_current_commit = deploy_commit_history
         .iter()
         .find(|commit| commit.is_current)
@@ -897,8 +902,8 @@ pub fn SystemDetailView(id: String) -> Element {
                     },
                     Tab::History => rsx! {
                         HistoryTab {
-                            entries: history_entries.clone(),
-                            commits: history_commit_history.clone(),
+                            entries: effective_history_entries.clone(),
+                            commits: deploy_commit_history.clone(),
                             current_generation: system.generation,
                             deployment_policy: system.deployment_policy.clone(),
                             allow_mutations: can_mutate,
@@ -942,7 +947,7 @@ pub fn SystemDetailView(id: String) -> Element {
                     Tab::Logs => rsx! {
                         LogsTabStyled {
                             logs: deployment_logs.clone(),
-                            history_entries: history_entries.clone(),
+                            history_entries: effective_history_entries.clone(),
                             jump_target: log_jump_target.read().clone(),
                         }
                     },
@@ -2788,7 +2793,7 @@ fn DeployGatePanel(deployment_policy: String, cve_critical: i64) -> Element {
 /// Enhanced Logs tab matching the design reference.
 ///
 /// Features:
-/// - Live tail mode with auto-scroll
+/// - Auto-scroll mode for the combined deployment log stream
 /// - Timezone toggle (local vs UTC)
 /// - Log level filtering (all, info, warn, error)
 /// - Day separators on date boundaries
@@ -2817,50 +2822,15 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
     let mut filter = use_signal(|| "all".to_string());
     let mut tail = use_signal(|| true);
     let mut use_utc = use_signal(|| false);
-    let mut tail_lines: Signal<Vec<(String, String, String)>> = use_signal(Vec::new); // (timestamp, level, message)
     let mut highlighted_event = use_signal(|| None::<String>);
     // Stable DOM id for the scroll container so we can locate it (and anchored lines)
     // via document.query_selector without relying on event-based element handles.
     let log_stream_id = "sd-log-stream-container";
 
-    // Live tail: add simulated heartbeat/agent events every 2-3 seconds
-    use_effect(move || {
-        if !*tail.read() {
-            return;
-        }
-
-        spawn(async move {
-            loop {
-                gloo_timers::future::TimeoutFuture::new(2200).await;
-                if !*tail.read() {
-                    break;
-                }
-
-                let now = chrono::Utc::now();
-                let variants = vec![
-                    "heartbeat received (next in 60s)",
-                    "agent: state snapshot dispatched",
-                    "policy: auto_latest — passed",
-                ];
-                let message = variants[now.timestamp() as usize % variants.len()];
-
-                tail_lines.with_mut(|lines| {
-                    let ts_str = now.format("%H:%M:%S").to_string();
-                    lines.push((ts_str, "info".to_string(), message.to_string()));
-                    // Keep only last 40 tail lines
-                    if lines.len() > 40 {
-                        lines.drain(0..1);
-                    }
-                });
-            }
-        });
-    });
-
     // Auto-scroll to bottom when tailing. Locate the container via its stable DOM id
     // so we don't depend on event-based element handles.
     use_effect(move || {
         let _tail_dep = *tail.read();
-        let _lines_dep = tail_lines.read().len();
         #[cfg(target_arch = "wasm32")]
         if _tail_dep {
             if let Some(container) = web_sys::window()
@@ -2921,7 +2891,9 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         });
     }
 
-    // Combine synthesized (anchored) history lines, real agent logs, and live tail lines.
+    // Combine reconstructed (anchored) timeline lines with real agent logs.
+    // Reconstructed lines are explicitly labelled so they are not mistaken for
+    // current live activity from the host.
     // Tuple: (timestamp, level, message, Option<event_id anchor>)
     let all_lines: Vec<(chrono::DateTime<Utc>, String, String, Option<String>)> = {
         let mut combined = Vec::new();
@@ -2966,29 +2938,34 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                     push(
                         0,
                         "info",
-                        "systemd: reached target multi-user.target".into(),
+                        "[reconstructed timeline] systemd: reached target multi-user.target".into(),
                         false,
                     );
                     push(
                         2,
                         "info",
-                        format!("agent: boot recorded — {short_msg}"),
+                        format!("[reconstructed timeline] agent: boot recorded — {short_msg}"),
                         true,
                     );
-                    push(4, "info", "heartbeat received (next in 60s)".into(), false);
+                    push(
+                        4,
+                        "info",
+                        "[reconstructed timeline] heartbeat observed after boot".into(),
+                        false,
+                    );
                 }
                 HistoryEventKind::LocalRebuildMatched => {
                     push(
                         0,
                         "warn",
-                        "agent: out-of-band activation detected".into(),
+                        "[reconstructed timeline] agent: out-of-band activation detected".into(),
                         false,
                     );
                     push(
                         2,
                         "info",
                         format!(
-                            "local: nixos-rebuild switch by {} — {short_msg}",
+                            "[reconstructed timeline] local: nixos-rebuild switch by {} — {short_msg}",
                             entry.actor
                         ),
                         false,
@@ -2997,7 +2974,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                         5,
                         "info",
                         format!(
-                            "agent: generation activated out of band (store-path {store_short})"
+                            "[reconstructed timeline] agent: generation activated out of band (store-path {store_short})"
                         ),
                         true,
                     );
@@ -3005,7 +2982,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                         7,
                         "info",
                         format!(
-                            "reconcile: store-path matches pushed commit {sha} — config is tracked"
+                            "[reconstructed timeline] reconcile: store-path matches pushed commit {sha} — config is tracked"
                         ),
                         false,
                     );
@@ -3014,14 +2991,14 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                     push(
                         0,
                         "warn",
-                        "agent: out-of-band activation detected".into(),
+                        "[reconstructed timeline] agent: out-of-band activation detected".into(),
                         false,
                     );
                     push(
                         2,
                         "info",
                         format!(
-                            "local: nixos-rebuild switch by {} — {short_msg}",
+                            "[reconstructed timeline] local: nixos-rebuild switch by {} — {short_msg}",
                             entry.actor
                         ),
                         false,
@@ -3030,14 +3007,14 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                         5,
                         "warn",
                         format!(
-                            "agent: generation activated locally — no flake commit (store-path {store_short})"
+                            "[reconstructed timeline] agent: generation activated locally — no flake commit (store-path {store_short})"
                         ),
                         true,
                     );
                     push(
                         7,
                         "warn",
-                        "drift: running config no longer maps to a tracked flake revision".into(),
+                        "[reconstructed timeline] drift: running config no longer maps to a tracked flake revision".into(),
                         false,
                     );
                 }
@@ -3045,14 +3022,22 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                     push(
                         0,
                         "info",
-                        format!("deploy: evaluating configuration @ {sha}"),
+                        format!(
+                            "[reconstructed timeline] deploy: evaluating configuration @ {sha}"
+                        ),
                         false,
                     );
-                    push(4, "error", format!("activation failed: {short_msg}"), true);
+                    push(
+                        4,
+                        "error",
+                        format!("[reconstructed timeline] activation failed: {short_msg}"),
+                        true,
+                    );
                     push(
                         6,
                         "warn",
-                        "deploy: rolled back to previous generation".into(),
+                        "[reconstructed timeline] deploy: rolled back to previous generation"
+                            .into(),
                         false,
                     );
                 }
@@ -3060,21 +3045,34 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                     push(
                         0,
                         "info",
-                        format!("deploy: evaluating configuration @ {sha}"),
+                        format!(
+                            "[reconstructed timeline] deploy: evaluating configuration @ {sha}"
+                        ),
                         false,
                     );
                     push(
                         2,
                         "info",
-                        "eval: success — derivations resolved, building".into(),
+                        "[reconstructed timeline] eval: success — derivations resolved, building"
+                            .into(),
                         false,
                     );
-                    push(5, "info", "build: completed".into(), false);
-                    push(7, "info", "deploy: activating configuration".into(), false);
+                    push(
+                        5,
+                        "info",
+                        "[reconstructed timeline] build: completed".into(),
+                        false,
+                    );
+                    push(
+                        7,
+                        "info",
+                        "[reconstructed timeline] deploy: activating configuration".into(),
+                        false,
+                    );
                     push(
                         9,
                         "info",
-                        format!("deploy: generation activated ({sha})"),
+                        format!("[reconstructed timeline] deploy: generation activated ({sha})"),
                         true,
                     );
                 }
@@ -3096,16 +3094,6 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
             ));
         }
 
-        // Add live tail lines (synthesized timestamps).
-        for (ts_str, level, message) in tail_lines.read().iter() {
-            if let Ok(time) = chrono::NaiveTime::parse_from_str(ts_str, "%H:%M:%S") {
-                let now = chrono::Utc::now();
-                let date = now.date_naive();
-                let datetime = date.and_time(time).and_utc();
-                combined.push((datetime, level.clone(), message.clone(), None));
-            }
-        }
-
         combined.sort_by_key(|(ts, _, _, _)| *ts);
         combined
     };
@@ -3121,8 +3109,13 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         })
         .collect();
 
-    // Compute day separators
-    let today = chrono::Utc::now().date_naive();
+    // Compute day separators in the selected display timezone.
+    let use_utc_value = *use_utc.read();
+    let today = if use_utc_value {
+        chrono::Utc::now().date_naive()
+    } else {
+        chrono::Local::now().date_naive()
+    };
     let yesterday = today.pred_opt().unwrap_or(today);
 
     let mut previous_day: Option<chrono::NaiveDate> = None;
@@ -3132,7 +3125,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
     )> = filtered_lines
         .into_iter()
         .map(|entry| {
-            let day = entry.0.date_naive();
+            let day = display_log_date(entry.0, use_utc_value);
             let show = previous_day != Some(day);
             previous_day = Some(day);
             let label = if show {
@@ -3150,21 +3143,34 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         })
         .collect();
 
-    // Local timezone abbreviation (fallback to "local" if unavailable)
-    let local_tz_abbr = "local"; // In Rust/WASM we don't have easy access to timezone names
+    let local_tz_abbr = local_timezone_label();
     let tz_label = if *use_utc.read() {
         "UTC"
     } else {
-        local_tz_abbr
+        local_tz_abbr.as_str()
     };
+
+    let download_text = log_rows
+        .iter()
+        .map(|(_, entry)| {
+            let (timestamp, level, message, _) = entry;
+            format!(
+                "{} [{}] {}",
+                format_log_timestamp(*timestamp, use_utc_value),
+                level.to_uppercase(),
+                message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     rsx! {
         section {
             class: "card sd-logs-card",
             div {
                 class: "sd-card-head",
-                style: "padding: 14px 18px;",
-                h2 { "Live logs" }
+                style: "padding: 14px 18px; max-height: 720px; overflow-y: auto;",
+                h2 { "Deployment logs" }
                 div {
                     class: "sd-logs-controls",
 
@@ -3213,19 +3219,22 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                                 tail.set(!current);
                             },
                         }
-                        span { "tail" }
+                        span { "auto-scroll" }
                     }
 
-                    // Clear button
+                    // Clear highlight button
                     button {
                         class: "btn btn-ghost xs focus-ring",
-                        onclick: move |_| tail_lines.set(Vec::new()),
-                        "Clear"
+                        onclick: move |_| highlighted_event.set(None),
+                        "Clear highlight"
                     }
 
-                    // Download button (placeholder)
+                    // Download button
                     button {
                         class: "btn btn-ghost xs focus-ring",
+                        onclick: move |_| {
+                            download_text_file(&download_text, "system-detail-logs.txt");
+                        },
                         Icon { name: IconName::Download, size: 11 }
                         " Download"
                     }
@@ -3238,6 +3247,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                 Icon { name: IconName::Clock, size: 11 }
                 " Timestamps shown in "
                 strong { "{tz_label}" }
+                " · reconstructed timeline entries are labelled and derived from deployment history"
             }
 
             // Log stream
@@ -3250,19 +3260,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                         let (timestamp, level, message, event_id) = entry;
 
                         // Format timestamp based on timezone preference
-                        let ts_str = if *use_utc.read() {
-                            timestamp.format("%H:%M:%S").to_string()
-                        } else {
-                            // Convert to local time (in WASM this is browser local time)
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                timestamp.with_timezone(&chrono::Local).format("%H:%M:%S").to_string()
-                            }
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                timestamp.format("%H:%M:%S").to_string()
-                            }
-                        };
+                        let ts_str = format_log_time(*timestamp, *use_utc.read());
 
                         let level_class = match level.as_str() {
                             "info" => "sd-log-line sd-log-info",
@@ -3303,6 +3301,78 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                 }
             }
         }
+    }
+}
+
+fn display_log_date(timestamp: chrono::DateTime<Utc>, use_utc: bool) -> chrono::NaiveDate {
+    if use_utc {
+        timestamp.date_naive()
+    } else {
+        timestamp.with_timezone(&Local).date_naive()
+    }
+}
+
+fn format_log_time(timestamp: chrono::DateTime<Utc>, use_utc: bool) -> String {
+    if use_utc {
+        timestamp.format("%H:%M:%S").to_string()
+    } else {
+        timestamp
+            .with_timezone(&Local)
+            .format("%H:%M:%S")
+            .to_string()
+    }
+}
+
+fn format_log_timestamp(timestamp: chrono::DateTime<Utc>, use_utc: bool) -> String {
+    if use_utc {
+        timestamp.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    } else {
+        timestamp
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S %Z")
+            .to_string()
+    }
+}
+
+fn local_timezone_label() -> String {
+    let label = Local::now().format("%Z").to_string();
+    if label.trim().is_empty() {
+        "local".to_string()
+    } else {
+        label
+    }
+}
+
+fn download_text_file(content: &str, filename: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let encoded = js_sys::encode_uri_component(content)
+            .as_string()
+            .unwrap_or_default();
+        let data_uri = format!("data:text/plain;charset=utf-8,{}", encoded);
+        let js_code = format!(
+            r#"
+            (function() {{
+                var a = document.createElement('a');
+                a.href = '{uri}';
+                a.download = '{name}';
+                a.style = 'display:none';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            }})();
+            "#,
+            uri = data_uri.replace('\'', "\\'"),
+            name = filename.replace('\'', "\\'"),
+        );
+
+        let func = js_sys::Function::new_no_args(&js_code);
+        let _ = func.call0(&wasm_bindgen::JsValue::NULL);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (content, filename);
     }
 }
 
@@ -3479,7 +3549,10 @@ fn build_history_events(
             .as_ref()
             .and_then(|hash| commits.iter().find(|c| &c.hash == hash).cloned());
 
-        let is_gen_changing = !matches!(kind, HistoryEventKind::Restart);
+        let is_gen_changing = !matches!(
+            kind,
+            HistoryEventKind::Restart | HistoryEventKind::DeployFailed
+        );
         let (generation, prev_generation) = if is_gen_changing {
             let current = running_gen;
             let prev = running_gen.map(|g| g - 1);
@@ -3554,7 +3627,7 @@ fn fold_restart_clusters(events: &[HistoryEvent]) -> Vec<TimelineItem> {
 /// - Out-of-band local rebuild indicators with matched/untracked status
 /// - Collapsible restart clusters for consecutive reboots at one generation
 /// - Rollback and view-logs actions that jump to the corresponding log line
-/// - Infinite scroll pagination for deep history
+/// - Infinite scroll pagination for deep history, with a load-more fallback
 #[component]
 fn HistoryTab(
     entries: Vec<SystemHistoryEntry>,
@@ -3565,32 +3638,7 @@ fn HistoryTab(
     on_rollback: EventHandler<SystemCommitHistory>,
     on_view_logs: EventHandler<String>,
 ) -> Element {
-    // Fall back to synthesizing entries from commits when the history API is empty,
-    // so the timeline is never blank when we have commit data.
-    let effective_entries: Vec<SystemHistoryEntry> = if entries.is_empty() {
-        commits
-            .iter()
-            .map(|c| SystemHistoryEntry {
-                timestamp: c.deployed_at.unwrap_or(c.committed_at),
-                store_path: None,
-                system_configuration_name: c.config_identity.clone(),
-                change_reason: c.message.clone(),
-                commit_hash: Some(c.hash.clone()),
-                flake_name: None,
-                flake_repo_url: c.flake_repo_url.clone(),
-                actor: c.author.clone(),
-                outcome: if c.was_deployed || c.is_current {
-                    "success".to_string()
-                } else {
-                    "pending".to_string()
-                },
-            })
-            .collect()
-    } else {
-        entries.clone()
-    };
-
-    let events = build_history_events(&effective_entries, &commits, current_generation);
+    let events = build_history_events(&entries, &commits, current_generation);
     let items = fold_restart_clusters(&events);
 
     let deploy_count = events
@@ -3602,13 +3650,15 @@ fn HistoryTab(
         .filter(|e| matches!(e.kind, HistoryEventKind::Restart))
         .count();
 
-    // Infinite scroll: reveal a page of clustered items at a time.
+    // Infinite scroll pagination: reveal a page of clustered items at a time as
+    // the user approaches the bottom, with an explicit load-more fallback.
     const PAGE: usize = 14;
     let mut visible_count = use_signal(|| PAGE);
     let total_items = items.len();
     let shown_count = (*visible_count.read()).min(total_items);
     let shown = items.iter().take(shown_count).cloned().collect::<Vec<_>>();
     let has_more = shown_count < total_items;
+    let history_scroll_id = "sd-history-timeline";
 
     // Track which restart clusters are expanded (keyed by item index).
     let mut open_clusters: Signal<std::collections::HashSet<usize>> =
@@ -3632,7 +3682,26 @@ fn HistoryTab(
             // Timeline
             div {
                 class: "tl",
+                id: "{history_scroll_id}",
                 style: "padding: 14px 18px;",
+                onscroll: move |_| {
+                    if !has_more {
+                        return;
+                    }
+                    let Some(element) = web_sys::window()
+                        .and_then(|window| window.document())
+                        .and_then(|document| document.get_element_by_id(history_scroll_id))
+                    else {
+                        return;
+                    };
+                    let scroll_top = element.scroll_top();
+                    let client_height = element.client_height();
+                    let scroll_height = element.scroll_height();
+                    if scroll_top + client_height + 96 >= scroll_height {
+                        let next = (*visible_count.read() + PAGE).min(total_items);
+                        visible_count.set(next);
+                    }
+                },
 
                 for (idx, item) in shown.iter().enumerate() {
                     {
@@ -3742,7 +3811,7 @@ fn HistoryTab(
                     }
                 }
 
-                // Infinite scroll sentinel / load more
+                // Load more sentinel fallback for keyboard and non-scroll users.
                 if has_more {
                     div {
                         class: "tl-row tl-sentinel",
@@ -3760,7 +3829,7 @@ fn HistoryTab(
                                         let next = (*visible_count.read() + PAGE).min(total_items);
                                         visible_count.set(next);
                                     },
-                                    "Load older history… "
+                                    "Load older history "
                                     span { class: "tl-loadmore-count", "{shown_count} of {total_items}" }
                                 }
                             }
@@ -6538,6 +6607,29 @@ fn map_commit_infos_to_commit_history(
                 flake_repo_url: None,
                 config_identity: None,
             }
+        })
+        .collect()
+}
+
+fn synthesize_history_entries_from_commits(
+    commits: &[SystemCommitHistory],
+) -> Vec<SystemHistoryEntry> {
+    commits
+        .iter()
+        .map(|commit| SystemHistoryEntry {
+            timestamp: commit.deployed_at.unwrap_or(commit.committed_at),
+            store_path: None,
+            system_configuration_name: commit.config_identity.clone(),
+            change_reason: commit.message.clone(),
+            commit_hash: Some(commit.hash.clone()),
+            flake_name: None,
+            flake_repo_url: commit.flake_repo_url.clone(),
+            actor: commit.author.clone(),
+            outcome: if commit.was_deployed || commit.is_current {
+                "success".to_string()
+            } else {
+                "pending".to_string()
+            },
         })
         .collect()
 }
