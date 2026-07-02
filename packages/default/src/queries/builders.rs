@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use crate::models::builders::{
     BuildJob, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderSummary,
-    BuilderWithEnvironments, CreateBuilderRequest, ReportMetricsRequest, UpdateBuilderRequest,
+    BuilderWithEnvironments, CreateBuilderRequest, RemoteBuildExecutionStrategy,
+    ReportMetricsRequest, UpdateBuilderRequest,
 };
 use crate::models::public_key::PublicKey;
 
@@ -693,6 +694,7 @@ pub async fn claim_next_job_atomic(
     builder_id: &Uuid,
     max_concurrent_jobs: i32,
     environment_ids: &[Uuid],
+    execution_strategy: RemoteBuildExecutionStrategy,
 ) -> Result<Option<BuildJob>> {
     // Start transaction for atomic count + claim
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
@@ -723,6 +725,9 @@ pub async fn claim_next_job_atomic(
 
     // 3. Claim next available job with FOR UPDATE SKIP LOCKED
     // This atomically finds and locks the next job in priority order
+    let require_verified_source_metadata =
+        execution_strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified;
+
     let job = if environment_ids.is_empty() {
         // Wildcard: builder can claim jobs from any environment
         sqlx::query_as::<_, BuildJob>(
@@ -733,18 +738,25 @@ pub async fn claim_next_job_atomic(
                 started_at = NOW(),
                 updated_at = NOW()
             WHERE id = (
-                SELECT id
+                SELECT build_jobs.id
                 FROM build_jobs
-                WHERE status = 'queued'
+                JOIN derivations d ON d.id = build_jobs.derivation_id
+                LEFT JOIN commits c ON c.id = d.commit_id
+                LEFT JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
+                WHERE build_jobs.status = 'queued'
+                  AND (
+                      NOT $2
+                      OR (
+                          d.commit_id IS NOT NULL
+                          AND d.derivation_path IS NOT NULL
+                          AND c.id IS NOT NULL
+                          AND f.id IS NOT NULL
+                      )
+                  )
                 ORDER BY
-                    priority_weight DESC,
-                    (
-                        SELECT c.commit_timestamp
-                        FROM derivations d
-                        LEFT JOIN commits c ON c.id = d.commit_id
-                        WHERE d.id = build_jobs.derivation_id
-                    ) DESC NULLS LAST,
-                    created_at ASC
+                    build_jobs.priority_weight DESC,
+                    c.commit_timestamp DESC NULLS LAST,
+                    build_jobs.created_at ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
@@ -752,6 +764,7 @@ pub async fn claim_next_job_atomic(
             "#,
         )
         .bind(builder_id)
+        .bind(require_verified_source_metadata)
         .fetch_optional(&mut *tx)
         .await
         .context("Failed to claim job (wildcard) in transaction")?
@@ -765,19 +778,26 @@ pub async fn claim_next_job_atomic(
                 started_at = NOW(),
                 updated_at = NOW()
             WHERE id = (
-                SELECT id
+                SELECT build_jobs.id
                 FROM build_jobs
-                WHERE status = 'queued'
-                  AND (environment_id = ANY($2) OR environment_id IS NULL)
+                JOIN derivations d ON d.id = build_jobs.derivation_id
+                LEFT JOIN commits c ON c.id = d.commit_id
+                LEFT JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
+                WHERE build_jobs.status = 'queued'
+                  AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
+                  AND (
+                      NOT $3
+                      OR (
+                          d.commit_id IS NOT NULL
+                          AND d.derivation_path IS NOT NULL
+                          AND c.id IS NOT NULL
+                          AND f.id IS NOT NULL
+                      )
+                  )
                 ORDER BY
-                    priority_weight DESC,
-                    (
-                        SELECT c.commit_timestamp
-                        FROM derivations d
-                        LEFT JOIN commits c ON c.id = d.commit_id
-                        WHERE d.id = build_jobs.derivation_id
-                    ) DESC NULLS LAST,
-                    created_at ASC
+                    build_jobs.priority_weight DESC,
+                    c.commit_timestamp DESC NULLS LAST,
+                    build_jobs.created_at ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
@@ -786,6 +806,7 @@ pub async fn claim_next_job_atomic(
         )
         .bind(builder_id)
         .bind(environment_ids)
+        .bind(require_verified_source_metadata)
         .fetch_optional(&mut *tx)
         .await
         .context("Failed to claim job (filtered) in transaction")?
@@ -1671,10 +1692,16 @@ mod tests {
         assert_eq!(first_in_queue, expected_first);
 
         let builder = create_active_test_builder(&pool, "order-match-builder").await;
-        let claimed = claim_next_job_atomic(&pool, &builder.id, builder.max_concurrent_jobs, &[])
-            .await
-            .expect("Failed to claim next job")
-            .expect("Expected a queued job to be claimed");
+        let claimed = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            builder.max_concurrent_jobs,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+        )
+        .await
+        .expect("Failed to claim next job")
+        .expect("Expected a queued job to be claimed");
 
         assert_eq!(claimed.id, first_in_queue);
     }
@@ -1734,10 +1761,16 @@ mod tests {
         assert_eq!(first_after, second);
 
         let builder = create_active_test_builder(&pool, "prioritize-order-builder").await;
-        let claimed = claim_next_job_atomic(&pool, &builder.id, builder.max_concurrent_jobs, &[])
-            .await
-            .expect("Failed to claim after prioritize")
-            .expect("Expected a queued job after prioritize");
+        let claimed = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            builder.max_concurrent_jobs,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+        )
+        .await
+        .expect("Failed to claim after prioritize")
+        .expect("Expected a queued job after prioritize");
         assert_eq!(claimed.id, second);
     }
 
@@ -1910,8 +1943,20 @@ mod tests {
         let builder_b = create_active_test_builder(&pool, "concurrent-builder-b").await;
 
         let (claimed_a, claimed_b) = tokio::join!(
-            claim_next_job_atomic(&pool, &builder_a.id, builder_a.max_concurrent_jobs, &[]),
-            claim_next_job_atomic(&pool, &builder_b.id, builder_b.max_concurrent_jobs, &[])
+            claim_next_job_atomic(
+                &pool,
+                &builder_a.id,
+                builder_a.max_concurrent_jobs,
+                &[],
+                RemoteBuildExecutionStrategy::ServerDerivation,
+            ),
+            claim_next_job_atomic(
+                &pool,
+                &builder_b.id,
+                builder_b.max_concurrent_jobs,
+                &[],
+                RemoteBuildExecutionStrategy::ServerDerivation,
+            )
         );
 
         let claimed_a = claimed_a

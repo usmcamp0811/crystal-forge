@@ -180,35 +180,17 @@ async fn resolve_cache_destinations_for_derivation(
 async fn verified_source_identity_for_derivation(
     pool: &sqlx::PgPool,
     derivation: &crate::derivations::Derivation,
-) -> Option<VerifiedSourceIdentity> {
-    let commit_id = derivation.commit_id?;
-    let commit = match crate::queries::commits::get_commit_by_id(pool, commit_id).await {
-        Ok(commit) => commit,
-        Err(e) => {
-            tracing::debug!(
-                derivation_id = derivation.id,
-                commit_id,
-                "failed to load commit for verified source identity: {e}"
-            );
-            return None;
-        }
+) -> anyhow::Result<Option<VerifiedSourceIdentity>> {
+    let Some(commit_id) = derivation.commit_id else {
+        return Ok(None);
     };
+    let commit = crate::queries::commits::get_commit_by_id(pool, commit_id).await?;
 
-    let flake = match crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await {
-        Ok(flake) => flake,
-        Err(e) => {
-            tracing::debug!(
-                derivation_id = derivation.id,
-                flake_id = commit.flake_id,
-                "failed to load flake for verified source identity: {e}"
-            );
-            return None;
-        }
-    };
+    let flake = crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await?;
 
     let mirror_id = source_mirror_id(&flake.repo_url);
 
-    Some(VerifiedSourceIdentity {
+    Ok(Some(VerifiedSourceIdentity {
         repo_url: flake.repo_url,
         commit_hash: commit.git_commit_hash,
         flake_target: source_flake_target_for_derivation(derivation),
@@ -218,7 +200,7 @@ async fn verified_source_identity_for_derivation(
         lock_hash: None,
         archive_url: None,
         archive_sha256: None,
-    })
+    }))
 }
 
 fn current_evaluator_fingerprint() -> EvaluatorFingerprint {
@@ -1227,7 +1209,7 @@ pub async fn builder_heartbeat(
         message: "Heartbeat recorded".to_string(),
     }))
 }
-/// GET /api/v1/builders/:id/next-job - Get next job for builder
+/// POST /api/v1/builders/:id/next-job - Get next job for builder
 ///
 /// This endpoint implements the load-based job assignment logic:
 /// 1. Filter jobs by builder's environment assignments (or all if no assignments)
@@ -1242,7 +1224,7 @@ pub async fn get_next_job(
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/next-job", builder_id);
     let verified =
-        authenticate_builder_request(&headers, body.clone(), "GET", &path, &state.pool).await?;
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
 
     // Verify the builder_id matches
     if verified.builder_id != builder_id {
@@ -1265,13 +1247,13 @@ pub async fn get_next_job(
         .supported_execution_strategies
         .contains(&execution_strategy)
     {
-        tracing::debug!(
+        tracing::warn!(
             builder_id = %builder_id,
             ?execution_strategy,
             supported = ?next_job_request.supported_execution_strategies,
-            "builder does not support configured remote execution strategy; not claiming a job"
+            "builder does not support configured remote execution strategy; returning 409 Conflict"
         );
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::CONFLICT);
     }
 
     // Get builder's environment assignments (empty = wildcard)
@@ -1287,6 +1269,7 @@ pub async fn get_next_job(
         &builder_id,
         builder.max_concurrent_jobs,
         &environment_ids,
+        execution_strategy,
     )
     .await
     .map_err(|e| {
@@ -1302,19 +1285,50 @@ pub async fn get_next_job(
 
     // Embed the derivation build payload so the remote builder needs no DB access.
     let derivation =
-        crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+        match crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
             .await
-            .map_err(|e| {
+        {
+            Ok(derivation) => derivation,
+            Err(e) => {
                 tracing::error!(
                     "Failed to load derivation {} for claimed job {}: {}",
                     job.derivation_id,
                     job.id,
                     e
                 );
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+                requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+                    .await
+                    .map_err(|err| {
+                        tracing::error!(
+                            job_id = %job.id,
+                            "failed to requeue job after derivation load error: {err}"
+                        );
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?;
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        };
 
-    let source = verified_source_identity_for_derivation(&state.pool, &derivation).await;
+    let source = match verified_source_identity_for_derivation(&state.pool, &derivation).await {
+        Ok(source) => source,
+        Err(e) => {
+            tracing::error!(
+                job_id = %job.id,
+                derivation_id = derivation.id,
+                "failed to assemble verified source identity; requeueing claimed job: {e}"
+            );
+            requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+                .await
+                .map_err(|err| {
+                    tracing::error!(
+                        job_id = %job.id,
+                        "failed to requeue job after source identity assembly error: {err}"
+                    );
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
     let expected_drv_path = derivation.derivation_path.clone();
     let source_input_delivery = match execution_strategy {
         RemoteBuildExecutionStrategy::ServerDerivation => SourceInputDeliveryMode::None,

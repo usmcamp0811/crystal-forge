@@ -6,11 +6,21 @@ use crystal_forge::models::builders::{
     BuildFailurePhase, BuildJobDerivation, NextJobResponse, RemoteBuildExecutionStrategy,
     ReportMetricsRequest, SourceInputDeliveryMode, VerifiedSourceIdentity,
 };
+#[allow(deprecated)]
+use nix::fcntl::{FlockArg, flock};
+use std::fs::File;
 use std::hash::{Hash, Hasher};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+
+/// Tracks the active pre-build phase for accurate timeout failure reporting.
+/// - `PRE_BUILD_SOURCE_FETCH`: source-fetch operations (lock, clone, fetch, worktree)
+/// - `PRE_BUILD_EVALUATION`: nix eval phase
+const PRE_BUILD_SOURCE_FETCH: u8 = 0;
+const PRE_BUILD_EVALUATION: u8 = 1;
 use tokio::io::AsyncWriteExt;
 use tokio::signal;
 use tokio::sync::mpsc;
@@ -375,13 +385,7 @@ fn source_workspace_paths_for_job(
 }
 
 struct MirrorLock {
-    path: PathBuf,
-}
-
-impl Drop for MirrorLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
+    _file: File,
 }
 
 async fn acquire_mirror_lock(mirror_path: &Path) -> Result<MirrorLock, PreBuildFailure> {
@@ -398,23 +402,29 @@ async fn acquire_mirror_lock(mirror_path: &Path) -> Result<MirrorLock, PreBuildF
             })?;
     }
 
-    loop {
-        match tokio::fs::create_dir(&lock_path).await {
-            Ok(()) => return Ok(MirrorLock { path: lock_path }),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            }
-            Err(e) => {
-                return Err(PreBuildFailure {
-                    phase: BuildFailurePhase::SourceFetch,
-                    message: format!(
-                        "failed to acquire source mirror lock {}: {e}",
-                        lock_path.display()
-                    ),
-                });
-            }
-        }
-    }
+    let file = File::options()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: format!(
+                "failed to open source mirror lock {}: {e}",
+                lock_path.display()
+            ),
+        })?;
+
+    #[allow(deprecated)]
+    flock(file.as_raw_fd(), FlockArg::LockExclusive).map_err(|e| PreBuildFailure {
+        phase: BuildFailurePhase::SourceFetch,
+        message: format!(
+            "failed to acquire source mirror lock {}: {e}",
+            lock_path.display()
+        ),
+    })?;
+
+    Ok(MirrorLock { _file: file })
 }
 
 /// Ensure a bare mirror exists at `mirror_path` and contains `commit_hash`.
@@ -435,10 +445,15 @@ async fn ensure_mirror_has_commit(
     };
 
     if !mirror_path.exists() {
+        let temp_mirror_path = mirror_path.with_extension(format!(
+            "git.tmp-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         info!(
             "🪞 Source mirror missing; cloning {} into {}",
             repo_url,
-            mirror_path.display()
+            temp_mirror_path.display()
         );
         if let Some(parent) = mirror_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -449,12 +464,14 @@ async fn ensure_mirror_has_commit(
             })?;
         }
 
+        let _ = tokio::fs::remove_dir_all(&temp_mirror_path).await;
+
         let output = tokio::process::Command::new("git")
             .kill_on_drop(true)
             .arg("clone")
             .arg("--bare")
             .arg(repo_url)
-            .arg(mirror_path)
+            .arg(&temp_mirror_path)
             .output()
             .await
             .map_err(|e| source_fetch(format!("failed to spawn git clone --bare: {e}")))?;
@@ -465,6 +482,16 @@ async fn ensure_mirror_has_commit(
                 "git clone --bare failed for {repo_url}: {stderr}"
             )));
         }
+
+        tokio::fs::rename(&temp_mirror_path, mirror_path)
+            .await
+            .map_err(|e| {
+                source_fetch(format!(
+                    "failed to install cloned source mirror {} -> {}: {e}",
+                    temp_mirror_path.display(),
+                    mirror_path.display()
+                ))
+            })?;
 
         info!("✅ Source mirror cloned at {}", mirror_path.display());
     }
@@ -746,6 +773,7 @@ async fn evaluate_verified_source_drv(
     mirror_root: &Path,
     worktree_root: &Path,
     job_id: uuid::Uuid,
+    pre_build_phase: &AtomicU8,
 ) -> Result<String, PreBuildFailure> {
     let source_ref = if delivery == SourceInputDeliveryMode::LocalGitWorktree {
         ensure_source_worktree(source, mirror_root, worktree_root, job_id)
@@ -757,6 +785,9 @@ async fn evaluate_verified_source_drv(
     };
     let eval_attr = drv_path_eval_attr(&source_ref, &source.flake_target);
     info!("🔎 Evaluating verified source drvPath: {}", eval_attr);
+
+    // Transition phase tracker to evaluation phase so timeouts are reported correctly.
+    pre_build_phase.store(PRE_BUILD_EVALUATION, Ordering::SeqCst);
 
     let output = tokio::process::Command::new("nix")
         .kill_on_drop(true)
@@ -792,6 +823,7 @@ async fn verify_source_build_plan(
     mirror_root: &Path,
     worktree_root: &Path,
     job_id: uuid::Uuid,
+    pre_build_phase: &AtomicU8,
 ) -> Result<String, PreBuildFailure> {
     let expected = expected_drv_path(payload)?.to_string();
     let source = payload.source.as_ref().ok_or_else(|| PreBuildFailure {
@@ -804,6 +836,7 @@ async fn verify_source_build_plan(
         mirror_root,
         worktree_root,
         job_id,
+        pre_build_phase,
     )
     .await?;
     verify_drv_identity(&expected, &actual)?;
@@ -847,12 +880,16 @@ async fn execute_build_job(
             "🔐 Verifying source build plan before build (timeout: {:?})",
             build_timeout
         );
+        // Track the active sub-phase so timeouts are reported with the correct
+        // failure phase (SourceFetch vs Evaluation).
+        let pre_build_phase = Arc::new(AtomicU8::new(PRE_BUILD_SOURCE_FETCH));
         let verification = {
             let verification_future = verify_source_build_plan(
                 &derivation_payload,
                 source_mirror_root,
                 source_worktree_root,
                 job_id,
+                &pre_build_phase,
             );
             tokio::pin!(verification_future);
             let timeout = tokio::time::sleep(build_timeout);
@@ -863,10 +900,19 @@ async fn execute_build_job(
                 tokio::select! {
                     result = &mut verification_future => break result,
                     _ = &mut timeout => {
+                        let phase = match pre_build_phase.load(Ordering::SeqCst) {
+                            PRE_BUILD_EVALUATION => BuildFailurePhase::Evaluation,
+                            _ => BuildFailurePhase::SourceFetch,
+                        };
                         break Err(PreBuildFailure {
-                            phase: BuildFailurePhase::Evaluation,
+                            phase,
                             message: format!(
-                                "verified source pre-build evaluation timed out after {:?}",
+                                "verified source pre-build {} timed out after {:?}",
+                                if phase == BuildFailurePhase::Evaluation {
+                                    "evaluation"
+                                } else {
+                                    "source-fetch"
+                                },
                                 build_timeout
                             ),
                         });

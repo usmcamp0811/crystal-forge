@@ -331,11 +331,11 @@ impl BuilderApiClient {
             protocol_version: 2,
             supported_execution_strategies: self.supported_execution_strategies.clone(),
         })?;
-        let (builder_id, signature, timestamp) = self.sign_request("GET", &path, &body);
+        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
 
         let response = self
             .client
-            .get(&url)
+            .post(&url)
             .header("X-Builder-ID", builder_id)
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
@@ -347,6 +347,16 @@ impl BuilderApiClient {
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             // No jobs available
+            return Ok(None);
+        }
+
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            warn!(
+                "⚠️  Server reports incompatible execution strategy (409 Conflict). \
+                 Check server's remote_build_execution_strategy setting matches \
+                 builder supported_strategies={:?}",
+                self.supported_execution_strategies,
+            );
             return Ok(None);
         }
 

@@ -487,7 +487,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/builders/:id/heartbeat",
             post(builders::builder_heartbeat),
         )
-        .route("/api/v1/builders/:id/next-job", get(builders::get_next_job))
+        .route(
+            "/api/v1/builders/:id/next-job",
+            post(builders::get_next_job),
+        )
         .route(
             "/api/v1/builders/:id/jobs/:job_id/start",
             post(builders::start_job),
