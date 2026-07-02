@@ -17,6 +17,8 @@ pub fn RemoveSystemDialog(
     environment: Option<String>,
     /// Whether the request is in progress
     is_loading: bool,
+    /// Error from the latest removal attempt, shown inside the active dialog.
+    #[props(default)] error_message: Option<String>,
     /// Called when the user confirms removal
     on_confirm: EventHandler<()>,
     /// Called when the user cancels
@@ -26,7 +28,12 @@ pub fn RemoveSystemDialog(
 
     let is_production = environment
         .as_ref()
-        .map(|e| e.eq_ignore_ascii_case("production"))
+        .map(|e| {
+            matches!(
+                e.trim().to_ascii_lowercase().as_str(),
+                "production" | "prod"
+            )
+        })
         .unwrap_or(false);
 
     let confirm_enabled = if is_production {
@@ -99,6 +106,14 @@ pub fn RemoveSystemDialog(
                                 style: "width: 100%; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--cf-card-border); font-family: var(--font-mono); font-size: 13px; box-sizing: border-box; background: var(--cf-card-bg); color: var(--cf-text-primary);",
                                 disabled: is_loading,
                             }
+                        }
+                    }
+
+                    if let Some(message) = &error_message {
+                        div {
+                            class: "rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200",
+                            style: "margin-top: 16px;",
+                            "{message}"
                         }
                     }
                 }

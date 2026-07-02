@@ -4848,7 +4848,6 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
 }
 .tl-restart-label { color: var(--cf-text-primary); }
 .tl-restart-sep { color: var(--cf-text-muted); }
-.tl-restart-ran { font-family: var(--font-mono); }
 .tl-restart-single { padding: 0; }
 .tl-cluster {
   width: 100%; text-align: left; background: none; border: none; color: var(--cf-text-primary);

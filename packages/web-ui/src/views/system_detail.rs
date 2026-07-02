@@ -200,6 +200,8 @@ pub fn SystemDetailView(id: String) -> Element {
     // Current tab state
     let mut active_tab = use_signal(|| Tab::Overview);
     let mut edit_modal_open = use_signal(|| false);
+    let mut remove_in_progress = use_signal(|| false);
+    let mut remove_error_message: Signal<Option<String>> = use_signal(|| None);
     let mut show_ssh_modal = use_signal(|| false);
 
     // Confirmation dialog state for Sync
@@ -291,8 +293,11 @@ pub fn SystemDetailView(id: String) -> Element {
         }
     });
 
+    let mut agent_events_poll_tick = use_signal(|| 0_u64);
     let id_for_events = id.clone();
+    let agent_events_poll_tick_for_resource = agent_events_poll_tick.clone();
     let agent_events_resource = use_resource(move || {
+        let _ = agent_events_poll_tick_for_resource();
         let id = id_for_events.clone();
         async move {
             let Ok(system_id) = Uuid::parse_str(&id) else {
@@ -304,6 +309,26 @@ pub fn SystemDetailView(id: String) -> Element {
                 .entries
         }
     });
+
+    // Refresh agent events while the Logs tab is active so auto-scroll/tail mode can
+    // surface events generated after the page initially loaded. This is polling until
+    // a streaming endpoint exists.
+    {
+        let active_tab_for_events = active_tab;
+        use_future(move || async move {
+            loop {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    gloo_timers::future::TimeoutFuture::new(3000).await;
+                    if *active_tab_for_events.read() == Tab::Logs {
+                        agent_events_poll_tick.set(agent_events_poll_tick() + 1);
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                break;
+            }
+        });
+    }
 
     let id_for_scan_eligibility = id.clone();
     let scan_eligibility_resource = use_resource(move || {
@@ -980,7 +1005,13 @@ pub fn SystemDetailView(id: String) -> Element {
                     .map(|flake| vec![flake.name.clone()])
                     .unwrap_or_default(),
                 recent_commits: edit_recent_commits.clone(),
-                on_close: move |_| edit_modal_open.set(false),
+                remove_in_progress: remove_in_progress(),
+                remove_error_message: remove_error_message.read().clone(),
+                on_close: move |_| {
+                    remove_error_message.set(None);
+                    remove_in_progress.set(false);
+                    edit_modal_open.set(false);
+                },
                 on_save: move |request: crate::api::models::UpdateSystemRequest| {
                     let system_id = system.id;
                     spawn(async move {
@@ -1015,9 +1046,12 @@ pub fn SystemDetailView(id: String) -> Element {
                         let hostname = hostname.clone();
                         let nav = nav.clone();
                         let mut toast_message = toast_message;
+                        remove_error_message.set(None);
+                        remove_in_progress.set(true);
                         spawn(async move {
                             match crate::api::client::deactivate_system(&system_id).await {
                                 Ok(_) => {
+                                    remove_in_progress.set(false);
                                     toast_message.set(Some((
                                         format!("System {} removed from registry", hostname),
                                         true,
@@ -1026,10 +1060,9 @@ pub fn SystemDetailView(id: String) -> Element {
                                     nav.push(Route::SystemsView {});
                                 }
                                 Err(error) => {
-                                    toast_message.set(Some((
-                                        format!("Failed to remove system: {}", error),
-                                        false,
-                                    )));
+                                    remove_in_progress.set(false);
+                                    remove_error_message
+                                        .set(Some(format!("Failed to remove system: {error}")));
                                 }
                             }
                         });
@@ -2798,7 +2831,7 @@ fn DeployGatePanel(deployment_policy: String, cve_critical: i64) -> Element {
 /// - Log level filtering (all, info, warn, error)
 /// - Day separators on date boundaries
 /// - Jump-to-event from history with highlighting
-/// - Clear button for tail lines
+/// - Clear button for the current displayed log window
 #[derive(Clone, PartialEq, Props)]
 struct LogsTabProps {
     logs: Vec<DeploymentLogEntry>,
@@ -2823,9 +2856,33 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
     let mut tail = use_signal(|| true);
     let mut use_utc = use_signal(|| false);
     let mut highlighted_event = use_signal(|| None::<String>);
+    let mut clear_before: Signal<Option<chrono::DateTime<Utc>>> = use_signal(|| None);
     // Stable DOM id for the scroll container so we can locate it (and anchored lines)
     // via document.query_selector without relying on event-based element handles.
     let log_stream_id = "sd-log-stream-container";
+
+    // Keep the stream pinned to the bottom while auto-scroll is enabled. This runs
+    // continuously instead of only when the checkbox changes, so newly polled agent
+    // events remain visible as they arrive.
+    let tail_for_autoscroll = tail.clone();
+    use_future(move || async move {
+        loop {
+            #[cfg(target_arch = "wasm32")]
+            {
+                gloo_timers::future::TimeoutFuture::new(500).await;
+                if *tail_for_autoscroll.read() {
+                    if let Some(container) = web_sys::window()
+                        .and_then(|w| w.document())
+                        .and_then(|d| d.get_element_by_id(log_stream_id))
+                    {
+                        container.set_scroll_top(container.scroll_height());
+                    }
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            break;
+        }
+    });
 
     // Auto-scroll to bottom when tailing. Locate the container via its stable DOM id
     // so we don't depend on event-based element handles.
@@ -3098,16 +3155,27 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         combined
     };
 
-    // Filter by log level
+    // Filter by clear boundary and log level.
+    let clear_boundary = *clear_before.read();
     let filtered_lines: Vec<_> = all_lines
         .iter()
-        .filter(|(_, level, _, _)| match filter.read().as_str() {
-            "info" => level == "info",
-            "warn" => level == "warn",
-            "error" => level == "error",
-            _ => true,
+        .filter(|(timestamp, level, _, _)| {
+            if let Some(boundary) = clear_boundary {
+                if *timestamp <= boundary {
+                    return false;
+                }
+            }
+
+            match filter.read().as_str() {
+                "info" => level == "info",
+                "warn" => level == "warn",
+                "error" => level == "error",
+                _ => true,
+            }
         })
         .collect();
+
+    let latest_line_timestamp = all_lines.iter().map(|(timestamp, _, _, _)| *timestamp).max();
 
     // Compute day separators in the selected display timezone.
     let use_utc_value = *use_utc.read();
@@ -3222,11 +3290,16 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                         span { "auto-scroll" }
                     }
 
-                    // Clear highlight button
+                    // Local clear button. This hides currently displayed lines and lets newly
+                    // polled agent events appear after the clear boundary.
                     button {
                         class: "btn btn-ghost xs focus-ring",
-                        onclick: move |_| highlighted_event.set(None),
-                        "Clear highlight"
+                        onclick: move |_| {
+                            clear_before.set(latest_line_timestamp);
+                            highlighted_event.set(None);
+                        },
+                        disabled: latest_line_timestamp.is_none(),
+                        "Clear display"
                     }
 
                     // Download button
@@ -3654,22 +3727,6 @@ fn build_history_events(
             (running_gen, None)
         };
 
-        // Derive a duration from the gap to the next-newer entry (design shows "built in Xs").
-        let duration = if idx == 0 {
-            None
-        } else {
-            let newer = entries[idx - 1].timestamp;
-            let secs = newer
-                .signed_duration_since(entry.timestamp)
-                .num_seconds()
-                .max(0);
-            if secs > 0 {
-                Some(format_duration_compact(secs))
-            } else {
-                None
-            }
-        };
-
         events.push(HistoryEvent {
             id: format!("ev{idx}"),
             kind,
@@ -3679,7 +3736,10 @@ fn build_history_events(
             sha: entry.commit_hash.clone(),
             message: short_reason,
             actor: entry.actor.clone(),
-            duration,
+            // Do not infer operation duration from spacing between history records.
+            // The backend does not currently expose reliable operation start/end or
+            // uptime timestamps for these timeline entries.
+            duration: None,
             store_path: entry.store_path.clone(),
             commit,
         });
@@ -3942,7 +4002,6 @@ fn HistoryTab(
 /// A single reboot line within a restart cluster (design `RestartLine`).
 #[component]
 fn RestartLine(event: HistoryEvent) -> Element {
-    let ran = event.duration.clone().unwrap_or_else(|| "—".to_string());
     let when = relative_time(event.timestamp);
     rsx! {
         div { class: "tl-restart-line",
@@ -3950,11 +4009,6 @@ fn RestartLine(event: HistoryEvent) -> Element {
             Icon { name: IconName::Power, size: 12 }
             span { class: "tl-restart-label", "System restarted" }
             span { class: "tl-restart-sep", "·" }
-            span { class: "tl-restart-ran",
-                "ran "
-                span { class: "mono", "{ran}" }
-            }
-            span { class: "tl-spacer" }
             span { class: "tl-when", "{when}" }
         }
     }
@@ -4010,7 +4064,6 @@ fn DeployRow(
         .and_then(|p| p.rsplit('/').next())
         .map(|s| s.to_string());
     let when = relative_time(event.timestamp);
-    let duration = event.duration.clone().unwrap_or_else(|| "—".to_string());
     let can_rollback = allow_mutations && event.commit.is_some() && !failed;
 
     rsx! {
@@ -4098,9 +4151,10 @@ fn DeployRow(
                             Icon { name: IconName::User, size: 11 }
                             " {event.actor}"
                         }
-                        span { class: "tl-meta-item",
-                            if failed { "ran " } else { "built in " }
-                            span { class: "mono", "{duration}" }
+                        if let Some(duration) = event.duration.clone() {
+                            span { class: "tl-meta-item",
+                                span { class: "mono", "{duration}" }
+                            }
                         }
                         span { class: "tl-meta-item tl-when", "{when}" }
 
@@ -4167,22 +4221,6 @@ fn relative_time(at: chrono::DateTime<chrono::Utc>) -> String {
         format!("{}d ago", d.num_days())
     } else {
         at.format("%b %d").to_string()
-    }
-}
-
-fn format_duration_compact(total_seconds: i64) -> String {
-    let secs = total_seconds.max(0);
-    let days = secs / 86_400;
-    let hours = (secs % 86_400) / 3_600;
-    let minutes = (secs % 3_600) / 60;
-    let seconds = secs % 60;
-
-    if days > 0 {
-        format!("{}d {}h", days, hours)
-    } else if hours > 0 {
-        format!("{}h {}m", hours, minutes)
-    } else {
-        format!("{}m {}s", minutes, seconds)
     }
 }
 

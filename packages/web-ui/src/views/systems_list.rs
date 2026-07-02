@@ -198,6 +198,7 @@ pub fn SystemsListView() -> Element {
     // New modal state for edit and deploy
     let mut edit_modal_system = use_signal(|| None::<SystemDetail>);
     let mut edit_modal_error = use_signal(|| None::<String>);
+    let mut edit_remove_in_progress = use_signal(|| false);
     let mut deploy_modal_system = use_signal(|| {
         None::<(
             SystemDetail,
@@ -945,8 +946,11 @@ pub fn SystemsListView() -> Element {
                     flake_names: registered_flakes.clone(),
                     environments: dropdown_environments.clone(),
                     error_message: edit_modal_error.read().clone(),
+                    remove_in_progress: edit_remove_in_progress(),
+                    remove_error_message: edit_modal_error.read().clone(),
                     on_close: move |_| {
                         edit_modal_error.set(None);
+                        edit_remove_in_progress.set(false);
                         edit_modal_system.set(None)
                     },
                     on_save: move |request: crate::api::models::UpdateSystemRequest| {
@@ -983,6 +987,8 @@ pub fn SystemsListView() -> Element {
                     },
                     on_delete: move |_| {
                         let system_id = detail.id;
+                        edit_modal_error.set(None);
+                        edit_remove_in_progress.set(true);
                         spawn(async move {
                             match deactivate_system_via_api(system_id).await {
                                 Ok(_) => {
@@ -990,9 +996,11 @@ pub fn SystemsListView() -> Element {
                                     values.retain(|item| item.id != system_id);
                                     local_systems.set(values);
                                     edit_modal_error.set(None);
+                                    edit_remove_in_progress.set(false);
                                     edit_modal_system.set(None);
                                 }
                                 Err(error_message) => {
+                                    edit_remove_in_progress.set(false);
                                     edit_modal_error.set(Some(error_message));
                                 }
                             }

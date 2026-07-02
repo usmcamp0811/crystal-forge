@@ -32,6 +32,8 @@ pub fn EditSystemModal(
     #[props(default)] environments: Vec<String>,
     #[props(default)] recent_commits: Vec<CommitInfo>,
     #[props(default)] error_message: Option<String>,
+    #[props(default)] remove_in_progress: bool,
+    #[props(default)] remove_error_message: Option<String>,
     on_close: EventHandler<()>,
     on_save: EventHandler<UpdateSystemRequest>,
     on_delete: EventHandler<()>,
@@ -496,7 +498,8 @@ pub fn EditSystemModal(
                     RemoveSystemDialog {
                         hostname: system.hostname.clone(),
                         environment: system.environment.clone(),
-                        is_loading: false,
+                        is_loading: remove_in_progress,
+                        error_message: remove_error_message.clone(),
                         on_confirm: move |_| {
                             on_delete.call(());
                         },
