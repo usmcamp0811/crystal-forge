@@ -37,6 +37,12 @@ pub enum IconName {
     Key,
     File,
     Link,
+    /// User / person icon (design Icon.jsx "user").
+    User,
+    /// Power button icon for system restarts (design Icon.jsx "power").
+    Power,
+    /// Clock / history-time icon (design Icon.jsx "history").
+    Clock,
 }
 
 #[component]
@@ -311,6 +317,37 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
             }
             path {
                 d: "M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        // User / person (design Icon.jsx "user").
+        IconName::User => rsx! {
+            path {
+                d: "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            circle { cx: "12", cy: "7", r: "4" }
+        },
+        // Power button for system restarts (design Icon.jsx "power").
+        IconName::Power => rsx! {
+            path {
+                d: "M18.36 6.64a9 9 0 1 1-12.73 0",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            path {
+                d: "M12 2v10",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        // Clock / history-time (design Icon.jsx "history").
+        IconName::Clock => rsx! {
+            circle { cx: "12", cy: "12", r: "9" }
+            path {
+                d: "M12 7v5l3 2",
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }

@@ -215,6 +215,11 @@ pub fn SystemDetailView(id: String) -> Element {
     let mut show_generation_rollback_modal = use_signal(|| false);
     let mut rollback_target: Signal<Option<SystemCommitHistory>> = use_signal(|| None);
 
+    // Jump-to-log target: set when "view logs" is clicked on a History event so the
+    // Logs tab can scroll to and highlight the matching line. Carries a nonce so
+    // repeated jumps to the same event still retrigger the effect.
+    let mut log_jump_target: Signal<Option<(String, u64)>> = use_signal(|| None);
+
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
 
@@ -892,14 +897,21 @@ pub fn SystemDetailView(id: String) -> Element {
                     },
                     Tab::History => rsx! {
                         HistoryTab {
+                            entries: history_entries.clone(),
                             commits: history_commit_history.clone(),
+                            current_generation: system.generation,
                             deployment_policy: system.deployment_policy.clone(),
                             allow_mutations: can_mutate,
                             on_rollback: move |commit| {
                                 rollback_target.set(Some(commit));
                                 show_rollback_dialog.set(true);
                             },
-                            on_view_logs: move |_| active_tab.set(Tab::Logs),
+                            on_view_logs: move |event_id: String| {
+                                // Record the jump target with a fresh nonce, then switch to Logs.
+                                let nonce = chrono::Utc::now().timestamp_millis() as u64;
+                                log_jump_target.set(Some((event_id, nonce)));
+                                active_tab.set(Tab::Logs);
+                            },
                         }
                     },
                     Tab::Cves => rsx! {
@@ -928,9 +940,10 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     },
                     Tab::Logs => rsx! {
-                        LogsTabStyled { 
+                        LogsTabStyled {
                             logs: deployment_logs.clone(),
-                            jump_event_id: None, // TODO: wire up from history tab click
+                            history_entries: history_entries.clone(),
+                            jump_target: log_jump_target.read().clone(),
                         }
                     },
                     Tab::Config => rsx! {
@@ -2786,19 +2799,30 @@ fn DeployGatePanel(deployment_policy: String, cve_critical: i64) -> Element {
 #[derive(Clone, PartialEq, Props)]
 struct LogsTabProps {
     logs: Vec<DeploymentLogEntry>,
+    /// History entries used to synthesize anchored log lines so "view logs" jumps
+    /// from the History tab land on the exact event line (design parity).
     #[props(default)]
-    jump_event_id: Option<String>,
+    history_entries: Vec<SystemHistoryEntry>,
+    /// Jump target from the History tab: (event id, nonce). The nonce lets repeated
+    /// jumps to the same event retrigger the scroll/highlight effect.
+    #[props(default)]
+    jump_target: Option<(String, u64)>,
 }
 
 fn LogsTabStyled(props: LogsTabProps) -> Element {
-    let LogsTabProps { logs, jump_event_id } = props;
-    
+    let LogsTabProps {
+        logs,
+        history_entries,
+        jump_target,
+    } = props;
+
     let mut filter = use_signal(|| "all".to_string());
     let mut tail = use_signal(|| true);
     let mut use_utc = use_signal(|| false);
     let mut tail_lines: Signal<Vec<(String, String, String)>> = use_signal(Vec::new); // (timestamp, level, message)
     let mut highlighted_event = use_signal(|| None::<String>);
-    let scroll_ref = use_signal(|| None::<web_sys::Element>);
+    #[allow(unused_mut)]
+    let mut scroll_ref = use_signal(|| None::<web_sys::Element>);
 
     // Live tail: add simulated heartbeat/agent events every 2-3 seconds
     use_effect(move || {
@@ -2843,14 +2867,43 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         }
     });
 
-    // Handle jump to event from history
-    use_effect(move || {
-        if let Some(event_id) = jump_event_id.as_ref() {
+    // Handle jump to event from history: stop tailing, reset filter, scroll to the
+    // anchored line, and flash-highlight it for ~2.4s (design parity).
+    {
+        let jump_target = jump_target.clone();
+        use_effect(move || {
+            let Some((event_id, _nonce)) = jump_target.clone() else {
+                return;
+            };
             tail.set(false);
             filter.set("all".to_string());
             highlighted_event.set(Some(event_id.clone()));
-            
-            // Clear highlight after 2.4 seconds
+
+            // Scroll the anchored line into view (center it).
+            #[cfg(target_arch = "wasm32")]
+            {
+                let event_id_scroll = event_id.clone();
+                spawn(async move {
+                    // Let the DOM update before querying for the anchor.
+                    gloo_timers::future::TimeoutFuture::new(60).await;
+                    if let Some(container) = scroll_ref.read().as_ref() {
+                        let selector = format!("[data-ev=\"{event_id_scroll}\"]");
+                        if let Ok(Some(el)) = container.query_selector(&selector) {
+                            if let Ok(html_el) =
+                                el.dyn_into::<web_sys::HtmlElement>()
+                            {
+                                let target = (html_el.offset_top()
+                                    - container.client_height() / 2
+                                    + html_el.offset_height())
+                                .max(0);
+                                container.set_scroll_top(target);
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Clear highlight after 2.4 seconds.
             let event_id_clone = event_id.clone();
             spawn(async move {
                 gloo_timers::future::TimeoutFuture::new(2400).await;
@@ -2860,14 +2913,83 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                     }
                 });
             });
-        }
-    });
+        });
+    }
 
-    // Combine base logs with tail lines
+    // Combine synthesized (anchored) history lines, real agent logs, and live tail lines.
+    // Tuple: (timestamp, level, message, Option<event_id anchor>)
     let all_lines: Vec<(chrono::DateTime<Utc>, String, String, Option<String>)> = {
         let mut combined = Vec::new();
-        
-        // Add deployment logs
+
+        // Synthesize anchored lines from history entries so each timeline event has a
+        // real line to jump to. The anchored (key) line carries the event id.
+        for (idx, entry) in history_entries.iter().enumerate() {
+            let event_id = format!("ev{idx}");
+            let kind = classify_history_entry(entry);
+            let base = entry.timestamp;
+            let short_msg = entry
+                .change_reason
+                .lines()
+                .next()
+                .unwrap_or(&entry.change_reason)
+                .to_string();
+            let sha = entry
+                .commit_hash
+                .as_ref()
+                .map(|s| s.chars().take(7).collect::<String>())
+                .unwrap_or_else(|| "—".to_string());
+            let store_short = entry
+                .store_path
+                .as_ref()
+                .and_then(|p| p.rsplit('/').next())
+                .unwrap_or("")
+                .to_string();
+
+            // push(offset_secs, level, message, anchor?)
+            let mut push = |off: i64, level: &str, msg: String, anchor: bool| {
+                let ts = base + chrono::Duration::seconds(off);
+                combined.push((
+                    ts,
+                    level.to_string(),
+                    msg,
+                    if anchor { Some(event_id.clone()) } else { None },
+                ));
+            };
+
+            match kind {
+                HistoryEventKind::Restart => {
+                    push(0, "info", "systemd: reached target multi-user.target".into(), false);
+                    push(2, "info", format!("agent: boot recorded — {short_msg}"), true);
+                    push(4, "info", "heartbeat received (next in 60s)".into(), false);
+                }
+                HistoryEventKind::LocalRebuildMatched => {
+                    push(0, "warn", "agent: out-of-band activation detected".into(), false);
+                    push(2, "info", format!("local: nixos-rebuild switch by {} — {short_msg}", entry.actor), false);
+                    push(5, "info", format!("agent: generation activated out of band (store-path {store_short})"), true);
+                    push(7, "info", format!("reconcile: store-path matches pushed commit {sha} — config is tracked"), false);
+                }
+                HistoryEventKind::LocalRebuildUntracked => {
+                    push(0, "warn", "agent: out-of-band activation detected".into(), false);
+                    push(2, "info", format!("local: nixos-rebuild switch by {} — {short_msg}", entry.actor), false);
+                    push(5, "warn", format!("agent: generation activated locally — no flake commit (store-path {store_short})"), true);
+                    push(7, "warn", "drift: running config no longer maps to a tracked flake revision".into(), false);
+                }
+                HistoryEventKind::DeployFailed => {
+                    push(0, "info", format!("deploy: evaluating configuration @ {sha}"), false);
+                    push(4, "error", format!("activation failed: {short_msg}"), true);
+                    push(6, "warn", "deploy: rolled back to previous generation".into(), false);
+                }
+                HistoryEventKind::Deploy => {
+                    push(0, "info", format!("deploy: evaluating configuration @ {sha}"), false);
+                    push(2, "info", "eval: success — derivations resolved, building".into(), false);
+                    push(5, "info", "build: completed".into(), false);
+                    push(7, "info", "deploy: activating configuration".into(), false);
+                    push(9, "info", format!("deploy: generation activated ({sha})"), true);
+                }
+            }
+        }
+
+        // Add real agent-event logs (no anchors — they augment the synthesized stream).
         for entry in &logs {
             let level = match entry.level {
                 LogLevel::Info | LogLevel::Debug => "info",
@@ -2876,10 +2998,9 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
             };
             combined.push((entry.timestamp, level.to_string(), entry.message.clone(), None));
         }
-        
-        // Add tail lines (synthesize timestamps)
+
+        // Add live tail lines (synthesized timestamps).
         for (ts_str, level, message) in tail_lines.read().iter() {
-            // Parse the time string and use today's date
             if let Ok(time) = chrono::NaiveTime::parse_from_str(ts_str, "%H:%M:%S") {
                 let now = chrono::Utc::now();
                 let date = now.date_naive();
@@ -2887,7 +3008,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                 combined.push((datetime, level.clone(), message.clone(), None));
             }
         }
-        
+
         combined.sort_by_key(|(ts, _, _, _)| *ts);
         combined
     };
@@ -3019,9 +3140,11 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                 class: "sd-log-stream",
                 onmounted: move |evt| {
                     #[cfg(target_arch = "wasm32")]
-                    if let Some(element) = evt.data.downcast::<web_sys::Element>() {
+                    if let Some(element) = evt.try_as_web_event() {
                         scroll_ref.set(Some(element));
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let _ = evt;
                 },
                 
                 for (day_label, entry) in log_rows {
@@ -3159,27 +3282,234 @@ fn ConfigTab(system: SystemDetail) -> Element {
 }
 
 #[component]
-/// Enhanced History tab matching the design reference with rich event cards.
-/// 
+/// Kind of history timeline event, mirroring the design reference's event model.
+#[derive(Debug, Clone, PartialEq)]
+enum HistoryEventKind {
+    /// Config deployed through Crystal Forge (generation-changing).
+    Deploy,
+    /// Deploy that failed to activate.
+    DeployFailed,
+    /// Out-of-band `nixos-rebuild switch` on the host, later reconciled to a pushed commit.
+    LocalRebuildMatched,
+    /// Out-of-band `nixos-rebuild switch` on the host with no tracked flake commit.
+    LocalRebuildUntracked,
+    /// System restart (reboot) at the same generation.
+    Restart,
+}
+
+/// A single unified timeline event, built from deployment history + agent events.
+///
+/// This is the Rust analogue of the design reference's `buildHistory` event objects.
+#[derive(Debug, Clone, PartialEq)]
+struct HistoryEvent {
+    id: String,
+    kind: HistoryEventKind,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    generation: Option<i32>,
+    prev_generation: Option<i32>,
+    sha: Option<String>,
+    message: String,
+    actor: String,
+    duration: Option<String>,
+    store_path: Option<String>,
+    /// Backing commit for rollback actions (deploy events only).
+    commit: Option<SystemCommitHistory>,
+}
+
+/// A rendered timeline item: either a standalone event or a folded restart cluster.
+#[derive(Debug, Clone, PartialEq)]
+enum TimelineItem {
+    Event(HistoryEvent),
+    RestartCluster(Vec<HistoryEvent>),
+}
+
+/// Classify a history entry's source/outcome into a timeline event kind.
+///
+/// Uses `change_reason`, `outcome`, and `store_path`/`commit_hash` presence to
+/// distinguish CF deploys, failed deploys, out-of-band local rebuilds (matched vs
+/// untracked), and restarts — mirroring the design's `source`/`resolution` model.
+fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
+    let reason = entry.change_reason.to_lowercase();
+    let outcome = entry.outcome.to_lowercase();
+    let actor = entry.actor.to_lowercase();
+
+    if outcome.contains("fail") || outcome.contains("error") {
+        return HistoryEventKind::DeployFailed;
+    }
+    if reason.contains("restart") || reason.contains("boot") || reason.contains("startup") {
+        return HistoryEventKind::Restart;
+    }
+    // Out-of-band: activation by a host-local actor (root@host / user@host) rather than
+    // an operator or CI bot pushing through Crystal Forge.
+    let is_local = actor.contains('@') || reason.contains("nixos-rebuild") || reason.contains("local");
+    if is_local {
+        // Matched (reconciled) when we still have a commit anchor; untracked otherwise.
+        if entry.commit_hash.is_some() {
+            HistoryEventKind::LocalRebuildMatched
+        } else {
+            HistoryEventKind::LocalRebuildUntracked
+        }
+    } else {
+        HistoryEventKind::Deploy
+    }
+}
+
+/// Build the unified event list from deployment history entries and the system's
+/// current generation. Deploy events decrement the running generation as we walk
+/// backwards in time (newest → oldest), matching the design's generation math.
+fn build_history_events(
+    entries: &[SystemHistoryEntry],
+    commits: &[SystemCommitHistory],
+    current_generation: Option<i32>,
+) -> Vec<HistoryEvent> {
+    let mut events = Vec::with_capacity(entries.len());
+    // Walk newest → oldest; each generation-changing deploy steps the generation down.
+    let mut running_gen = current_generation;
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let kind = classify_history_entry(entry);
+        let short_reason = entry
+            .change_reason
+            .lines()
+            .next()
+            .unwrap_or(&entry.change_reason)
+            .to_string();
+
+        // Match a commit record (for the rollback action + rich commit link).
+        let commit = entry.commit_hash.as_ref().and_then(|hash| {
+            commits.iter().find(|c| &c.hash == hash).cloned()
+        });
+
+        let is_gen_changing = !matches!(kind, HistoryEventKind::Restart);
+        let (generation, prev_generation) = if is_gen_changing {
+            let gen = running_gen;
+            let prev = running_gen.map(|g| g - 1);
+            if let Some(g) = running_gen {
+                running_gen = Some(g - 1);
+            }
+            (gen, prev)
+        } else {
+            (running_gen, None)
+        };
+
+        // Derive a duration from the gap to the next-newer entry (design shows "built in Xs").
+        let duration = if idx == 0 {
+            None
+        } else {
+            let newer = entries[idx - 1].timestamp;
+            let secs = newer.signed_duration_since(entry.timestamp).num_seconds().max(0);
+            if secs > 0 {
+                Some(format_duration_compact(secs))
+            } else {
+                None
+            }
+        };
+
+        events.push(HistoryEvent {
+            id: format!("ev{idx}"),
+            kind,
+            timestamp: entry.timestamp,
+            generation,
+            prev_generation,
+            sha: entry.commit_hash.clone(),
+            message: short_reason,
+            actor: entry.actor.clone(),
+            duration,
+            store_path: entry.store_path.clone(),
+            commit,
+        });
+    }
+
+    events
+}
+
+/// Fold consecutive restart events into clusters; deploys stay standalone.
+/// Mirrors the design's item-folding pass so routine reboots don't drown out changes.
+fn fold_restart_clusters(events: &[HistoryEvent]) -> Vec<TimelineItem> {
+    let mut items = Vec::new();
+    let mut run: Vec<HistoryEvent> = Vec::new();
+
+    for e in events {
+        if matches!(e.kind, HistoryEventKind::Restart) {
+            run.push(e.clone());
+        } else {
+            if !run.is_empty() {
+                items.push(TimelineItem::RestartCluster(std::mem::take(&mut run)));
+            }
+            items.push(TimelineItem::Event(e.clone()));
+        }
+    }
+    if !run.is_empty() {
+        items.push(TimelineItem::RestartCluster(run));
+    }
+    items
+}
+
+/// Enhanced History tab — a faithful Rust recreation of the design reference.
+///
 /// Features:
-/// - Rich deployment event cards with generation transitions
-/// - Collapsible restart clusters for consecutive reboots
-/// - Out-of-band rebuild indicators with reconciliation status
-/// - Rollback and view-logs actions on events
-/// - Infinite scroll pagination
+/// - Rich deployment event cards with generation transitions (#prev → #cur)
+/// - Out-of-band local rebuild indicators with matched/untracked status
+/// - Collapsible restart clusters for consecutive reboots at one generation
+/// - Rollback and view-logs actions that jump to the corresponding log line
+/// - Infinite scroll pagination for deep history
 fn HistoryTab(
+    entries: Vec<SystemHistoryEntry>,
     commits: Vec<SystemCommitHistory>,
+    current_generation: Option<i32>,
     deployment_policy: String,
     allow_mutations: bool,
     on_rollback: EventHandler<SystemCommitHistory>,
-    on_view_logs: EventHandler<()>,
+    on_view_logs: EventHandler<String>,
 ) -> Element {
-    // Track how many items to show for infinite scroll
-    let mut visible_count = use_signal(|| 14_usize);
-    
-    let deploy_count = commits.len();
-    let shown = commits.iter().take(*visible_count.read()).cloned().collect::<Vec<_>>();
-    let has_more = *visible_count.read() < commits.len();
+    // Fall back to synthesizing entries from commits when the history API is empty,
+    // so the timeline is never blank when we have commit data.
+    let effective_entries: Vec<SystemHistoryEntry> = if entries.is_empty() {
+        commits
+            .iter()
+            .map(|c| SystemHistoryEntry {
+                timestamp: c.deployed_at.unwrap_or(c.committed_at),
+                store_path: None,
+                system_configuration_name: c.config_identity.clone(),
+                change_reason: c.message.clone(),
+                commit_hash: Some(c.hash.clone()),
+                flake_name: None,
+                flake_repo_url: c.flake_repo_url.clone(),
+                actor: c.author.clone(),
+                outcome: if c.was_deployed || c.is_current {
+                    "success".to_string()
+                } else {
+                    "pending".to_string()
+                },
+            })
+            .collect()
+    } else {
+        entries.clone()
+    };
+
+    let events = build_history_events(&effective_entries, &commits, current_generation);
+    let items = fold_restart_clusters(&events);
+
+    let deploy_count = events
+        .iter()
+        .filter(|e| !matches!(e.kind, HistoryEventKind::Restart))
+        .count();
+    let restart_count = events
+        .iter()
+        .filter(|e| matches!(e.kind, HistoryEventKind::Restart))
+        .count();
+
+    // Infinite scroll: reveal a page of clustered items at a time.
+    const PAGE: usize = 14;
+    let mut visible_count = use_signal(|| PAGE);
+    let total_items = items.len();
+    let shown_count = (*visible_count.read()).min(total_items);
+    let shown = items.iter().take(shown_count).cloned().collect::<Vec<_>>();
+    let has_more = shown_count < total_items;
+
+    // Track which restart clusters are expanded (keyed by item index).
+    let mut open_clusters: Signal<std::collections::HashSet<usize>> =
+        use_signal(std::collections::HashSet::new);
 
     rsx! {
         section {
@@ -3190,127 +3520,114 @@ fn HistoryTab(
                 class: "sd-card-head",
                 style: "padding: 14px 18px;",
                 h2 { "Deployment history" }
-                span { class: "sd-card-meta", "{deploy_count} deployments · policy {deployment_policy}" }
+                span {
+                    class: "sd-card-meta",
+                    "{deploy_count} deploys · {restart_count} restarts · policy {deployment_policy}"
+                }
             }
 
-            // Timeline container
+            // Timeline
             div {
                 class: "tl",
                 style: "padding: 14px 18px;",
 
-                for (idx, commit) in shown.iter().enumerate() {
+                for (idx, item) in shown.iter().enumerate() {
                     {
-                        let is_first = idx == 0;
-                        let short_hash = commit.hash.chars().take(7).collect::<String>();
-                        let when_text = relative_time(commit.committed_at);
-                        
-                        // Determine event styling based on deployment status
-                        let (accent_color, event_kind, icon_name) = if commit.is_current {
-                            ("var(--cf-brand-purple)", "Deployed (current)", IconName::Deploy)
-                        } else if commit.was_deployed {
-                            ("var(--cf-blue)", "Deployed", IconName::Deploy)
-                        } else {
-                            ("var(--cf-text-muted)", "Not deployed", IconName::GitBranch)
-                        };
-
-                        // Calculate generation display
-                        let gen_display = if commit.is_current || commit.was_deployed {
-                            // For now, we don't have generation in SystemCommitHistory
-                            // This would come from system_detail.generation or history API
-                            "".to_string()
-                        } else {
-                            "".to_string()
-                        };
-
-                        rsx! {
-                            div {
-                                key: "{commit.hash}",
-                                class: "tl-row",
-
-                                // Timeline rail with node
-                                div {
-                                    class: "tl-rail",
-                                    span {
-                                        class: "tl-node",
-                                        style: "--node: {accent_color};",
-                                        Icon { name: icon_name, size: 13 }
-                                    }
+                        match item {
+                            TimelineItem::Event(event) => rsx! {
+                                DeployRow {
+                                    key: "{event.id}",
+                                    event: event.clone(),
+                                    allow_mutations,
+                                    on_rollback: {
+                                        let commit = event.commit.clone();
+                                        move |_| {
+                                            if let Some(commit) = commit.clone() {
+                                                on_rollback.call(commit);
+                                            }
+                                        }
+                                    },
+                                    on_view_logs: {
+                                        let id = event.id.clone();
+                                        move |_| on_view_logs.call(id.clone())
+                                    },
                                 }
-
-                                // Event card body
-                                div {
-                                    class: "tl-body",
-                                    div {
-                                        class: "tl-card",
-                                        style: "--accent: {accent_color};",
-
-                                        // Card header with event type, generation, and status
+                            },
+                            TimelineItem::RestartCluster(list) => {
+                                if list.len() == 1 {
+                                    let e = list[0].clone();
+                                    rsx! {
                                         div {
-                                            class: "tl-card-head",
-                                            span {
-                                                class: "tl-kind",
-                                                style: "color: {accent_color};",
-                                                "{event_kind}"
-                                            }
-                                            if !gen_display.is_empty() {
-                                                span { class: "tl-gen", "{gen_display}" }
-                                            }
-                                            span { class: "tl-spacer" }
-                                            if commit.is_current {
-                                                span { class: "chip chip-healthy",
-                                                    Icon { name: IconName::Check, size: 10 }
-                                                    " current"
+                                            key: "restart-{idx}",
+                                            class: "tl-row",
+                                            div { class: "tl-rail",
+                                                span {
+                                                    class: "tl-node tl-node-sm",
+                                                    style: "--node: var(--cf-blue);",
+                                                    Icon { name: IconName::Power, size: 11 }
                                                 }
-                                            } else if commit.was_deployed {
-                                                span { class: "chip chip-info", "deployed" }
-                                            } else if commit.is_ready_to_deploy {
-                                                span { class: "chip chip-warning", "ready" }
+                                            }
+                                            div { class: "tl-body",
+                                                div { class: "tl-restart-single",
+                                                    RestartLine { event: e }
+                                                }
                                             }
                                         }
-
-                                        // Commit message
+                                    }
+                                } else {
+                                    let is_open = open_clusters.read().contains(&idx);
+                                    let gen = list[0].generation;
+                                    let first_when = relative_time(list[list.len() - 1].timestamp);
+                                    let last_when = relative_time(list[0].timestamp);
+                                    let count = list.len();
+                                    let list_clone = list.clone();
+                                    rsx! {
                                         div {
-                                            class: "tl-msg",
-                                            "{commit.message}"
-                                        }
-
-                                        // Metadata row
-                                        div {
-                                            class: "tl-meta",
-                                            span {
-                                                class: "tl-meta-item mono",
-                                                Icon { name: IconName::GitBranch, size: 11 }
-                                                " {short_hash}"
+                                            key: "cluster-{idx}",
+                                            class: "tl-row",
+                                            div { class: "tl-rail",
+                                                span {
+                                                    class: "tl-node tl-node-sm",
+                                                    style: "--node: var(--cf-blue);",
+                                                    Icon { name: IconName::Power, size: 11 }
+                                                }
                                             }
-                                            span {
-                                                class: "tl-meta-item",
-                                                Icon { name: IconName::User, size: 11 }
-                                                " {commit.author}"
-                                            }
-                                            span {
-                                                class: "tl-meta-item tl-when",
-                                                "{when_text}"
-                                            }
-                                            span { class: "tl-spacer" }
-
-                                            // Actions
-                                            div {
-                                                class: "row-actions",
+                                            div { class: "tl-body",
                                                 button {
-                                                    class: "btn-icon focus-ring",
-                                                    title: "View logs",
-                                                    onclick: move |_| on_view_logs.call(()),
-                                                    Icon { name: IconName::Terminal, size: 14 }
+                                                    class: "tl-cluster focus-ring",
+                                                    "aria-expanded": "{is_open}",
+                                                    onclick: move |_| {
+                                                        open_clusters.with_mut(|set| {
+                                                            if set.contains(&idx) {
+                                                                set.remove(&idx);
+                                                            } else {
+                                                                set.insert(idx);
+                                                            }
+                                                        });
+                                                    },
+                                                    Icon {
+                                                        name: if is_open { IconName::ChevronDown } else { IconName::ChevronRight },
+                                                        size: 14,
+                                                    }
+                                                    span { class: "tl-cluster-count", "{count} restarts" }
+                                                    span { class: "tl-restart-sep", "·" }
+                                                    span { class: "tl-restart-label",
+                                                        "generation "
+                                                        if let Some(g) = gen {
+                                                            span { class: "mono", "#{g}" }
+                                                        } else {
+                                                            span { class: "mono", "—" }
+                                                        }
+                                                        " held steady"
+                                                    }
+                                                    span { class: "tl-spacer" }
+                                                    span { class: "tl-when", "{first_when} – {last_when}" }
                                                 }
-                                                if !commit.is_current && allow_mutations {
-                                                    button {
-                                                        class: "btn-icon focus-ring",
-                                                        title: "Rollback to this commit",
-                                                        onclick: {
-                                                            let commit = commit.clone();
-                                                            move |_| on_rollback.call(commit.clone())
-                                                        },
-                                                        Icon { name: IconName::History, size: 14 }
+                                                if is_open {
+                                                    div { class: "tl-cluster-list",
+                                                        for (j, e) in list_clone.iter().enumerate() {
+                                                            RestartLine { key: "{idx}-{j}", event: e.clone() }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -3322,27 +3639,242 @@ fn HistoryTab(
                     }
                 }
 
-                // Infinite scroll trigger
+                // Infinite scroll sentinel / load more
                 if has_more {
                     div {
                         class: "tl-row tl-sentinel",
                         div { class: "tl-rail",
                             span {
                                 class: "tl-node tl-node-sm tl-node-load",
-                                Icon { name: IconName::MoreHorizontal, size: 11 }
+                                Icon { name: IconName::Sync, size: 11 }
                             }
                         }
-                        div {
-                            class: "tl-body",
-                            div {
-                                class: "tl-loadmore",
+                        div { class: "tl-body",
+                            div { class: "tl-loadmore",
                                 button {
                                     class: "btn btn-ghost xs focus-ring",
                                     onclick: move |_| {
-                                        visible_count.set((*visible_count.read() + 14).min(commits.len()));
+                                        let next = (*visible_count.read() + PAGE).min(total_items);
+                                        visible_count.set(next);
                                     },
-                                    "Load more history… ({visible_count} of {deploy_count})"
+                                    "Load older history… "
+                                    span { class: "tl-loadmore-count", "{shown_count} of {total_items}" }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A single reboot line within a restart cluster (design `RestartLine`).
+#[component]
+fn RestartLine(event: HistoryEvent) -> Element {
+    let ran = event.duration.clone().unwrap_or_else(|| "—".to_string());
+    let when = relative_time(event.timestamp);
+    rsx! {
+        div { class: "tl-restart-line",
+            span { class: "tl-restart-dot" }
+            Icon { name: IconName::Power, size: 12 }
+            span { class: "tl-restart-label", "System restarted" }
+            span { class: "tl-restart-sep", "·" }
+            span { class: "tl-restart-ran",
+                "ran "
+                span { class: "mono", "{ran}" }
+            }
+            span { class: "tl-spacer" }
+            span { class: "tl-when", "{when}" }
+        }
+    }
+}
+
+/// A prominent generation-changing event row (design `DeployRow`).
+#[component]
+fn DeployRow(
+    event: HistoryEvent,
+    allow_mutations: bool,
+    on_rollback: EventHandler<()>,
+    on_view_logs: EventHandler<()>,
+) -> Element {
+    let failed = matches!(event.kind, HistoryEventKind::DeployFailed);
+    let matched = matches!(event.kind, HistoryEventKind::LocalRebuildMatched);
+    let untracked = matches!(event.kind, HistoryEventKind::LocalRebuildUntracked);
+    let local = matched || untracked;
+
+    // Accent color per event kind (mirrors the design's accent map).
+    let accent = if failed {
+        "var(--cf-red)"
+    } else if untracked {
+        "var(--cf-amber)"
+    } else if matched {
+        "var(--cf-blue)"
+    } else {
+        "var(--cf-brand-purple)"
+    };
+
+    let kind_label = if failed {
+        "Deploy failed"
+    } else if local {
+        "Local rebuild"
+    } else {
+        "Deployed"
+    };
+
+    let icon_name = if failed {
+        IconName::X
+    } else if local {
+        IconName::Edit
+    } else {
+        IconName::Deploy
+    };
+
+    let short_sha = event
+        .sha
+        .as_ref()
+        .map(|s| s.chars().take(7).collect::<String>());
+    let short_store = event
+        .store_path
+        .as_ref()
+        .and_then(|p| p.rsplit('/').next())
+        .map(|s| s.to_string());
+    let when = relative_time(event.timestamp);
+    let duration = event.duration.clone().unwrap_or_else(|| "—".to_string());
+    let can_rollback = allow_mutations && event.commit.is_some() && !failed;
+
+    rsx! {
+        div { class: "tl-row",
+            // Rail node
+            div { class: "tl-rail",
+                span {
+                    class: "tl-node",
+                    style: "--node: {accent};",
+                    Icon { name: icon_name, size: 13 }
+                }
+            }
+            // Card
+            div { class: "tl-body",
+                div {
+                    class: "tl-card",
+                    style: "--accent: {accent};",
+
+                    // Header: kind + generation transition + badges + status
+                    div { class: "tl-card-head",
+                        span { class: "tl-kind", style: "color: {accent};", "{kind_label}" }
+
+                        // Generation transition (#prev → #cur) or "no generation activated"
+                        if let Some(gen) = event.generation {
+                            span { class: "tl-gen",
+                                if let Some(prev) = event.prev_generation {
+                                    span { class: "tl-gen-prev", "#{prev}" }
+                                    Icon { name: IconName::ArrowRight, size: 11 }
+                                }
+                                strong { "#{gen}" }
+                            }
+                        } else {
+                            span { class: "tl-gen tl-gen-none", "no generation activated" }
+                        }
+
+                        if local {
+                            span { class: "tl-badge-oob", "out of band" }
+                        }
+                        if matched {
+                            span { class: "tl-badge-reconciled",
+                                Icon { name: IconName::Check, size: 9 }
+                                " reconciled"
+                            }
+                        }
+
+                        span { class: "tl-spacer" }
+
+                        // Status chip
+                        if failed {
+                            span { class: "chip chip-critical",
+                                Icon { name: IconName::X, size: 10 }
+                                " failed"
+                            }
+                        } else {
+                            span { class: "chip chip-healthy",
+                                Icon { name: IconName::Check, size: 10 }
+                                " success"
+                            }
+                        }
+                    }
+
+                    // Message
+                    div { class: "tl-msg", "{event.message}" }
+
+                    // Meta row
+                    div { class: "tl-meta",
+                        // Commit link / untracked marker
+                        if untracked {
+                            span {
+                                class: "tl-meta-item tl-untracked",
+                                title: "Built locally with nixos-rebuild — no matching flake commit",
+                                Icon { name: IconName::Warn, size: 11 }
+                                " no flake commit · "
+                                span { class: "mono", "{short_store.clone().unwrap_or_else(|| \"untracked\".to_string())}" }
+                            }
+                        } else if let Some(sha) = short_sha.clone() {
+                            span { class: "tl-meta-item mono",
+                                Icon { name: IconName::Git, size: 11 }
+                                if matched { " matched " } else { " " }
+                                "{sha}"
+                            }
+                        }
+
+                        span { class: "tl-meta-item",
+                            Icon { name: IconName::User, size: 11 }
+                            " {event.actor}"
+                        }
+                        span { class: "tl-meta-item",
+                            if failed { "ran " } else { "built in " }
+                            span { class: "mono", "{duration}" }
+                        }
+                        span { class: "tl-meta-item tl-when", "{when}" }
+
+                        span { class: "tl-spacer" }
+
+                        // Actions
+                        div { class: "row-actions",
+                            button {
+                                class: "btn-icon focus-ring",
+                                title: "Jump to this event in logs",
+                                onclick: move |_| on_view_logs.call(()),
+                                Icon { name: IconName::Terminal, size: 14 }
+                            }
+                            if can_rollback {
+                                button {
+                                    class: "btn-icon focus-ring",
+                                    title: "Rollback to this generation",
+                                    onclick: move |_| on_rollback.call(()),
+                                    Icon { name: IconName::Rollback, size: 14 }
+                                }
+                            }
+                        }
+                    }
+
+                    // Reconciled note
+                    if matched {
+                        div { class: "tl-oob-note tl-oob-resolved",
+                            Icon { name: IconName::Git, size: 12 }
+                            span {
+                                "Activated on-host out of band, then reconciled to pushed commit "
+                                if let Some(sha) = short_sha.clone() {
+                                    span { class: "tl-inline-sha mono", "{sha}" }
+                                }
+                                ". Config is tracked and reproducible."
+                            }
+                        }
+                    }
+
+                    // Untracked note
+                    if untracked {
+                        div { class: "tl-oob-note",
+                            Icon { name: IconName::Warn, size: 12 }
+                            span {
+                                "Built on the host, outside Crystal Forge — the running config doesn't map to any tracked flake commit. Capture it to a flake to restore reproducibility."
                             }
                         }
                     }

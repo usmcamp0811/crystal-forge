@@ -80,7 +80,7 @@ pub fn RemoveSystemDialog(
                     div {
                         class: "sd-callout sd-callout-warn",
                         style: "margin-bottom: 16px;",
-                        Icon { name: IconName::AlertTriangle, size: 13 }
+                        Icon { name: IconName::Warn, size: 13 }
                         span {
                             "Removing a system disables it and hides it from active views. History and audit logs are preserved but the system will no longer receive deployments."
                         }
