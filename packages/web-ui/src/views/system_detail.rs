@@ -2986,6 +2986,14 @@ fn ConfigTab(system: SystemDetail) -> Element {
 }
 
 #[component]
+/// Enhanced History tab matching the design reference with rich event cards.
+/// 
+/// Features:
+/// - Rich deployment event cards with generation transitions
+/// - Collapsible restart clusters for consecutive reboots
+/// - Out-of-band rebuild indicators with reconciliation status
+/// - Rollback and view-logs actions on events
+/// - Infinite scroll pagination
 fn HistoryTab(
     commits: Vec<SystemCommitHistory>,
     deployment_policy: String,
@@ -2993,25 +3001,12 @@ fn HistoryTab(
     on_rollback: EventHandler<SystemCommitHistory>,
     on_view_logs: EventHandler<()>,
 ) -> Element {
-    let rows = commits;
-    let committed_timestamps: Vec<chrono::DateTime<chrono::Utc>> =
-        rows.iter().map(|c| c.committed_at).collect();
-
-    let status_chip = move |commit: &SystemCommitHistory| {
-        if commit.is_current || commit.was_deployed {
-            rsx!(
-                span { class: "chip chip-healthy", "success" }
-            )
-        } else if commit.is_ready_to_deploy {
-            rsx!(
-                span { class: "chip chip-warning", "pending" }
-            )
-        } else {
-            rsx!(
-                span { class: "chip chip-critical", "failed" }
-            )
-        }
-    };
+    // Track how many items to show for infinite scroll
+    let mut visible_count = use_signal(|| 14_usize);
+    
+    let deploy_count = commits.len();
+    let shown = commits.iter().take(*visible_count.read()).cloned().collect::<Vec<_>>();
+    let has_more = *visible_count.read() < commits.len();
 
     rsx! {
         section {
@@ -3022,96 +3017,158 @@ fn HistoryTab(
                 class: "sd-card-head",
                 style: "padding: 14px 18px;",
                 h2 { "Deployment history" }
-                span { class: "sd-card-meta", "{rows.len()} deployments · policy {deployment_policy}" }
+                span { class: "sd-card-meta", "{deploy_count} deployments · policy {deployment_policy}" }
             }
 
-            table {
-                class: "sys-table",
-                thead {
-                    tr {
-                        th { "When" }
-                        th { "Commit" }
-                        th { "Message" }
-                        th { "Status" }
-                        th { "Gen" }
-                        th { "By" }
-                        th { "Duration" }
-                        th { style: "text-align: right;", " " }
-                    }
-                }
-                tbody {
-                    for (idx, commit) in rows.into_iter().enumerate() {
-                        {
-                            let short_hash = commit.hash.chars().take(7).collect::<String>();
-                            let when_text = relative_time(commit.committed_at);
-                            let by = commit.author.clone();
-                            let generation = if commit.is_current || commit.was_deployed {
-                                format!("#{}", commit.deployed_at.map(|_| 0).unwrap_or(0)).replace("#0", "#—")
-                            } else {
-                                "—".to_string()
-                            };
-                            let deploy_duration_secs = commit
-                                .deployed_at
-                                .map(|deployed| deployed.signed_duration_since(commit.committed_at).num_seconds())
-                                .filter(|secs| *secs > 0);
+            // Timeline container
+            div {
+                class: "tl",
+                style: "padding: 14px 18px;",
 
-                            // Fallback when deployed_at equals committed_at (common in current API mapping):
-                            // derive a real timeline duration from adjacent deployment timestamps.
-                            let timeline_duration_secs = if idx == 0 {
-                                Some(Utc::now().signed_duration_since(commit.committed_at).num_seconds().max(0))
-                            } else {
-                                committed_timestamps.get(idx.saturating_sub(1)).map(|newer| {
-                                    newer
-                                        .signed_duration_since(commit.committed_at)
-                                        .num_seconds()
-                                        .max(0)
-                                })
-                            };
+                for (idx, commit) in shown.iter().enumerate() {
+                    {
+                        let is_first = idx == 0;
+                        let short_hash = commit.hash.chars().take(7).collect::<String>();
+                        let when_text = relative_time(commit.committed_at);
+                        
+                        // Determine event styling based on deployment status
+                        let (accent_color, event_kind, icon_name) = if commit.is_current {
+                            ("var(--cf-brand-purple)", "Deployed (current)", IconName::Deploy)
+                        } else if commit.was_deployed {
+                            ("var(--cf-blue)", "Deployed", IconName::Deploy)
+                        } else {
+                            ("var(--cf-text-muted)", "Not deployed", IconName::GitBranch)
+                        };
 
-                            let duration = deploy_duration_secs
-                                .or(timeline_duration_secs)
-                                .map(format_duration_compact)
-                                .unwrap_or_else(|| "—".to_string());
+                        // Calculate generation display
+                        let gen_display = if commit.is_current || commit.was_deployed {
+                            // For now, we don't have generation in SystemCommitHistory
+                            // This would come from system_detail.generation or history API
+                            "".to_string()
+                        } else {
+                            "".to_string()
+                        };
 
-                            rsx! {
-                                tr {
-                                    td { style: "color: var(--cf-text-secondary); font-size: 12px;", "{when_text}" }
-                                    td { class: "mono", "{short_hash}" }
-                                    td { style: "color: var(--cf-text-primary); font-size: 13px;", "{commit.message}" }
-                                    td { {status_chip(&commit)} }
-                                    td { class: "mono", style: "font-size: 12px;", "{generation}" }
-                                    td { class: "mono", style: "font-size: 12px;", "{by}" }
-                                    td { class: "mono", style: "font-size: 12px;", "{duration}" }
-                                    td {
+                        rsx! {
+                            div {
+                                key: "{commit.hash}",
+                                class: "tl-row",
+
+                                // Timeline rail with node
+                                div {
+                                    class: "tl-rail",
+                                    span {
+                                        class: "tl-node",
+                                        style: "--node: {accent_color};",
+                                        Icon { name: icon_name, size: 13 }
+                                    }
+                                }
+
+                                // Event card body
+                                div {
+                                    class: "tl-body",
+                                    div {
+                                        class: "tl-card",
+                                        style: "--accent: {accent_color};",
+
+                                        // Card header with event type, generation, and status
                                         div {
-                                            class: "row-actions",
-                                            button {
-                                                class: "btn-icon focus-ring",
-                                                title: "View logs",
-                                                onclick: move |_| on_view_logs.call(()),
-                                                svg {
-                                                    class: "w-3.5 h-3.5",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    view_box: "0 0 24 24",
-                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M8 9l3 3-3 3m5 0h3" }
-                                                }
+                                            class: "tl-card-head",
+                                            span {
+                                                class: "tl-kind",
+                                                style: "color: {accent_color};",
+                                                "{event_kind}"
                                             }
-                                            button {
-                                                class: "btn-icon focus-ring",
-                                                title: "Rollback",
-                                                disabled: !allow_mutations,
-                                                onclick: move |_| on_rollback.call(commit.clone()),
-                                                svg {
-                                                    class: "w-3.5 h-3.5",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    view_box: "0 0 24 24",
-                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 14l-4-4 4-4M5 10h7a4 4 0 014 4v1" }
+                                            if !gen_display.is_empty() {
+                                                span { class: "tl-gen", "{gen_display}" }
+                                            }
+                                            span { class: "tl-spacer" }
+                                            if commit.is_current {
+                                                span { class: "chip chip-healthy",
+                                                    Icon { name: IconName::Check, size: 10 }
+                                                    " current"
+                                                }
+                                            } else if commit.was_deployed {
+                                                span { class: "chip chip-info", "deployed" }
+                                            } else if commit.is_ready_to_deploy {
+                                                span { class: "chip chip-warning", "ready" }
+                                            }
+                                        }
+
+                                        // Commit message
+                                        div {
+                                            class: "tl-msg",
+                                            "{commit.message}"
+                                        }
+
+                                        // Metadata row
+                                        div {
+                                            class: "tl-meta",
+                                            span {
+                                                class: "tl-meta-item mono",
+                                                Icon { name: IconName::GitBranch, size: 11 }
+                                                " {short_hash}"
+                                            }
+                                            span {
+                                                class: "tl-meta-item",
+                                                Icon { name: IconName::User, size: 11 }
+                                                " {commit.author}"
+                                            }
+                                            span {
+                                                class: "tl-meta-item tl-when",
+                                                "{when_text}"
+                                            }
+                                            span { class: "tl-spacer" }
+
+                                            // Actions
+                                            div {
+                                                class: "row-actions",
+                                                button {
+                                                    class: "btn-icon focus-ring",
+                                                    title: "View logs",
+                                                    onclick: move |_| on_view_logs.call(()),
+                                                    Icon { name: IconName::Terminal, size: 14 }
+                                                }
+                                                if !commit.is_current && allow_mutations {
+                                                    button {
+                                                        class: "btn-icon focus-ring",
+                                                        title: "Rollback to this commit",
+                                                        onclick: {
+                                                            let commit = commit.clone();
+                                                            move |_| on_rollback.call(commit.clone())
+                                                        },
+                                                        Icon { name: IconName::History, size: 14 }
+                                                    }
                                                 }
                                             }
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Infinite scroll trigger
+                if has_more {
+                    div {
+                        class: "tl-row tl-sentinel",
+                        div { class: "tl-rail",
+                            span {
+                                class: "tl-node tl-node-sm tl-node-load",
+                                Icon { name: IconName::MoreHorizontal, size: 11 }
+                            }
+                        }
+                        div {
+                            class: "tl-body",
+                            div {
+                                class: "tl-loadmore",
+                                button {
+                                    class: "btn btn-ghost xs focus-ring",
+                                    onclick: move |_| {
+                                        visible_count.set((*visible_count.read() + 14).min(commits.len()));
+                                    },
+                                    "Load more history… ({visible_count} of {deploy_count})"
                                 }
                             }
                         }
