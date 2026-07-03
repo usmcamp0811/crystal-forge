@@ -157,7 +157,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": false,
       "baseline": "advisory"
@@ -171,7 +171,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": false,
       "baseline": "advisory"
@@ -185,7 +185,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
       "baseline": "advisory"
@@ -199,7 +199,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": false,
       "baseline": "advisory"
@@ -213,7 +213,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
       "baseline": "advisory"
@@ -557,7 +557,7 @@
       "profiles": [
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": false,
       "baseline": "advisory"
@@ -570,7 +570,7 @@
       "profiles": [
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": false,
       "baseline": "advisory"
@@ -623,7 +623,7 @@
       "profiles": [
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
       "baseline": "advisory"
@@ -649,7 +649,7 @@
       "profiles": [
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
       "baseline": "advisory"
@@ -841,7 +841,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": true,
       "baseline": "advisory"
@@ -950,7 +950,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": true,
       "baseline": "advisory"
@@ -1048,7 +1048,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": true,
       "mockedData": true,
       "baseline": "advisory"
@@ -1089,7 +1089,7 @@
       "profiles": [
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": true,
       "baseline": "advisory"
@@ -1102,7 +1102,7 @@
       "profiles": [
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": true,
       "mockedData": true,
       "baseline": "advisory"
@@ -1116,7 +1116,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
       "baseline": "advisory"
@@ -1158,7 +1158,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": true,
       "baseline": "advisory"
@@ -1199,7 +1199,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": true,
       "mockedData": true,
       "baseline": "advisory"
@@ -1212,7 +1212,7 @@
       "profiles": [
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": true,
       "mockedData": true,
       "baseline": "advisory"
@@ -1253,7 +1253,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": true,
       "baseline": "advisory"
@@ -1267,7 +1267,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": true,
       "baseline": "advisory"
@@ -1351,7 +1351,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": false,
       "baseline": "advisory"
@@ -1407,7 +1407,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": false,
       "baseline": "advisory"
@@ -1421,7 +1421,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": false,
       "baseline": "advisory"
@@ -1435,7 +1435,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": false,
       "baseline": "advisory"
@@ -1449,7 +1449,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": false,
       "baseline": "advisory"
@@ -1519,7 +1519,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
       "baseline": "advisory"
@@ -1533,7 +1533,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
       "baseline": "advisory"
@@ -1547,7 +1547,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": true,
       "baseline": "advisory"
@@ -1603,7 +1603,7 @@
         "ci_fast",
         "full"
       ],
-      "semanticAssertions": false,
+      "semanticAssertions": true,
       "interactions": false,
       "mockedData": true,
       "baseline": "advisory",

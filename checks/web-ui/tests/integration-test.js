@@ -5189,6 +5189,11 @@ const steps = [
     action: async (page) => {
       await page.goto(`${baseUrl}/style-guide`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
+
+      await assertVisible(
+        page.getByRole("heading", { name: "Component Isolation Surface" }).first(),
+        "Expected style guide heading on /style-guide",
+      );
     },
   },
   {
