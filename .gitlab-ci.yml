@@ -269,7 +269,11 @@ web-ui-screenshots-mr-comment:
       done
 
       # Attach visual baseline diff images (changed steps only, capped to 20)
-      DIFF_COUNT=$(ls -1 web-ui-screenshots/diffs/*.png 2>/dev/null | wc -l)
+      if [ -d web-ui-screenshots/diffs ]; then
+        DIFF_COUNT=$(find web-ui-screenshots/diffs -maxdepth 1 -type f -name '*.png' | wc -l)
+      else
+        DIFF_COUNT=0
+      fi
       if [ "$DIFF_COUNT" -gt 0 ]; then
         SCREENSHOT_MD="${SCREENSHOT_MD}---\n\n## Visual Baseline Diffs (${DIFF_COUNT})\n\nRed areas differ from the approved baseline in \`checks/web-ui/baselines/\`.\n\n"
         UPLOADED=0
