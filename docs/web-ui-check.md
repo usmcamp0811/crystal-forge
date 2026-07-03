@@ -36,8 +36,8 @@ sandbox); their VMs are not booted otherwise.
 
 1. **Warmup** — boots `machine` + `gitserver` only (cache VMs are skipped
    unless mega phases are enabled).
-2. **Build verification** — index.html served, JS loader referenced, WASM
-   asset served with a valid `\0asm` magic header. Hard gate.
+2. **Build verification** — index.html served, JS loader referenced and served,
+   packaged WASM output present with a valid `\0asm` magic header. Hard gate.
 3. **Playwright steps** — coverage gate first (steps ⇄ manifest must agree
    exactly), then each step runs its semantic assertions, captures dark and
    light screenshots, and compares each themed screenshot to its baseline.

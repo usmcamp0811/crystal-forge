@@ -2,7 +2,7 @@
 #
 # Manifest-driven Playwright verification of the web UI against a real
 # Crystal Forge server (PostgreSQL + gitserver), with:
-# - Explicit build verification (index.html, JS loader, WASM magic header)
+# - Explicit build verification (served index.html/JS loader, packaged WASM magic header)
 # - Semantic assertions + screenshots per coverage-manifest.json step
 # - Visual regression against approved baselines in ./baselines
 #   (ImageMagick compare; "strict" steps gate, "advisory" steps report)
@@ -26,11 +26,12 @@ let
   CF_TEST_SERVER_PORT = 3000;
 
   # Explicit web-ui build verification (AC from TASK-8.12, preserved here):
-  # index.html is served, it references a JS loader, and the loader's WASM
-  # asset is served with a valid wasm magic header.
+  # index.html is served, it references a JS loader, the loader is served, and
+  # the referenced packaged WASM output has a valid wasm magic header.
   verifyWebUiAssets = pkgs.writeShellScript "verify-web-ui-assets" ''
     set -euo pipefail
     base="$1"
+    ui_dist="$2"
 
     normalize_asset_path() {
       local p="$1"
@@ -56,24 +57,15 @@ let
       wasm_ref=$(printf '%s' "$index" | grep -oE '"[^"]*\.wasm"' | head -1 | tr -d '"')
     fi
     [ -n "$wasm_ref" ] || { echo "FAIL: no .wasm reference found in loader or index"; exit 1; }
-    case "$wasm_ref" in
-      http*) wasm_url="$wasm_ref" ;;
-      /*) wasm_url="$base/$(normalize_asset_path "$wasm_ref")" ;;
-      *)
-        js_dir=$(dirname "$(normalize_asset_path "$js_path")")
-        wasm_rel=$(normalize_asset_path "$wasm_ref")
-        if [ "$js_dir" = "." ]; then
-          wasm_url="$base/$wasm_rel"
-        else
-          wasm_url="$base/$js_dir/$wasm_rel"
-        fi
-        ;;
-    esac
 
-    magic=$(curl -sf "$wasm_url" | head -c4 | od -An -tx1 | tr -d ' \n')
-    [ "$magic" = "0061736d" ] || { echo "FAIL: wasm asset $wasm_url has invalid magic ($magic)"; exit 1; }
+    wasm_name=$(basename "$(normalize_asset_path "$wasm_ref")")
+    wasm_path=$(find "$ui_dist" -type f -name "$wasm_name" | head -1)
+    [ -n "$wasm_path" ] || { echo "FAIL: wasm output $wasm_name not found under $ui_dist"; exit 1; }
 
-    echo "web-ui build verification OK: index served, loader $js_path, wasm $wasm_url"
+    magic=$(head -c4 "$wasm_path" | od -An -tx1 | tr -d ' \n')
+    [ "$magic" = "0061736d" ] || { echo "FAIL: wasm output $wasm_path has invalid magic ($magic)"; exit 1; }
+
+    echo "web-ui build verification OK: index served, loader $js_path, wasm output $wasm_path"
   '';
 
   # Use fixed test keys to avoid cf-keygen CI flakiness
@@ -404,11 +396,11 @@ in pkgs.testers.runNixOSTest {
     }/status | jq .")
     print("Server is up and responding")
 
-    # Explicitly verify the served UI build: index.html present, JS loader
-    # referenced, and the WASM bundle served with a valid magic header.
+    # Explicitly verify the UI build: index.html served, JS loader served, and
+    # the packaged WASM output has a valid magic header.
     print(machine.succeed("${verifyWebUiAssets} http://127.0.0.1:${
       toString CF_TEST_SERVER_PORT
-    }"))
+    } ${pkgs.crystal-forge.web-ui}/public"))
 
     # === Phase 4: Web UI Tests (Playwright) ===
     print("=== Phase 4: Web UI Tests (Playwright) ===")
