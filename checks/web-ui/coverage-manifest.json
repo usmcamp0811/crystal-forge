@@ -8,6 +8,15 @@
     },
     "timezoneId": "UTC",
     "locale": "en-US",
+    "visualThemes": [
+      "dark",
+      "light"
+    ],
+    "designFixture": {
+      "path": "checks/web-ui/design-fixtures.json",
+      "policy": "non-blocking-gauge",
+      "note": "Canonical fixture data for aligning docs/design/CrystalForge mocked JSX examples with representative Playwright states. The web-ui check reports designRef + fixture coverage as a non-blocking visual parity gauge; pixel comparison against rendered design examples is intentionally not a hard gate in TASK-139."
+    },
     "visualDiff": {
       "fuzzPercent": 3,
       "maxDiffPixelRatio": 0.005,

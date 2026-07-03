@@ -4,16 +4,18 @@
 # Usage:
 #   ./approve-baselines.sh <screenshots-dir> [step-name ...]
 #
-#   <screenshots-dir>  Directory containing freshly captured <step>.png files,
+#   <screenshots-dir>  Directory containing freshly captured <step>--<theme>.png files,
 #                      e.g. ./result/screenshots from
 #                      `nix build .#checks.x86_64-linux.web-ui` or an unpacked
 #                      `web-ui-screenshots` CI artifact.
 #   [step-name ...]    Optional list of step names to approve. When omitted,
-#                      every PNG that matches a step in coverage-manifest.json
-#                      is approved.
+#                      every PNG that matches a manifest step and configured
+#                      visual theme is approved.
 #
-# The script only copies screenshots whose names exist as steps in
-# coverage-manifest.json (reports, diffs, and export screenshots are skipped).
+# The script only copies screenshots whose names match a manifest step and a
+# configured visual theme in coverage-manifest.json (reports, diffs, and export
+# screenshots are skipped). Baseline names are <step>--dark.png and
+# <step>--light.png so both modes are reviewed independently.
 # Review `git diff --stat checks/web-ui/baselines` before committing.
 set -euo pipefail
 
@@ -35,12 +37,35 @@ mapfile -t manifest_steps < <(
   ' "$manifest"
 )
 
+mapfile -t visual_themes < <(
+  node -e '
+    const m = require(process.argv[1]);
+    for (const t of m.settings.visualThemes || ["dark", "light"]) console.log(t);
+  ' "$manifest"
+)
+
 is_step() {
   local name="$1"
   for s in "${manifest_steps[@]}"; do
     [ "$s" = "$name" ] && return 0
   done
   return 1
+}
+
+is_theme() {
+  local name="$1"
+  for t in "${visual_themes[@]}"; do
+    [ "$t" = "$name" ] && return 0
+  done
+  return 1
+}
+
+is_baseline_capture() {
+  local name="$1"
+  local step="${name%--*}"
+  local theme="${name##*--}"
+  [ "$step" != "$name" ] || return 1
+  is_step "$step" && is_theme "$theme"
 }
 
 approved=0
@@ -58,8 +83,8 @@ fi
 
 mkdir -p "$baselines"
 for name in "${names[@]}"; do
-  if ! is_step "$name"; then
-    echo "skip (not a manifest step): $name"
+  if ! is_baseline_capture "$name"; then
+    echo "skip (not a manifest step/theme capture): $name"
     skipped=$((skipped + 1))
     continue
   fi
