@@ -39,7 +39,7 @@ let
     case "$js_path" in
       http*) js_url="$js_path" ;;
       /*) js_url="$base$js_path" ;;
-      *) js_url="$base/$js_path" ;;
+      *) js_url="$base/''${js_path#./}" ;;
     esac
 
     js=$(curl -sf "$js_url") || { echo "FAIL: JS loader $js_url not served"; exit 1; }
@@ -52,7 +52,14 @@ let
     case "$wasm_ref" in
       http*) wasm_url="$wasm_ref" ;;
       /*) wasm_url="$base$wasm_ref" ;;
-      *) wasm_url="$base$(dirname "$js_path")/$wasm_ref" ;;
+      *)
+        js_dir=$(dirname "''${js_path#./}")
+        if [ "$js_dir" = "." ]; then
+          wasm_url="$base/''${wasm_ref#./}"
+        else
+          wasm_url="$base/$js_dir/''${wasm_ref#./}"
+        fi
+        ;;
     esac
 
     magic=$(curl -sf "$wasm_url" | head -c4 | od -An -tx1 | tr -d ' \n')
