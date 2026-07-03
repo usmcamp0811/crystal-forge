@@ -250,6 +250,12 @@ web-ui-screenshots-mr-comment:
         SCREENSHOT_MD="${SCREENSHOT_MD}${SUMMARY_CONTENT}\n\n---\n\n"
       fi
 
+      # Prepend the non-blocking design-parity (design drift) summary
+      if [ -f web-ui-screenshots/design-drift-summary.md ]; then
+        DRIFT_CONTENT=$(cat web-ui-screenshots/design-drift-summary.md | sed 's/\\/\\\\/g')
+        SCREENSHOT_MD="${SCREENSHOT_MD}${DRIFT_CONTENT}\n\n---\n\n"
+      fi
+
       SCREENSHOT_MD="${SCREENSHOT_MD}The following screenshots were captured during the web UI check:\n\n"
       for f in web-ui-screenshots/*.png; do
         [ -f "$f" ] || continue
@@ -292,6 +298,34 @@ web-ui-screenshots-mr-comment:
           if [ -n "$MARKDOWN" ] && [ "$MARKDOWN" != "null" ]; then
             SCREENSHOT_MD="${SCREENSHOT_MD}### ${FILENAME}\n${MARKDOWN}\n\n"
             UPLOADED=$((UPLOADED + 1))
+          fi
+        done
+      fi
+
+      # Attach design-parity montages (design target | real Dioxus, side by side)
+      if [ -d web-ui-screenshots/montages ]; then
+        MONTAGE_COUNT=$(find web-ui-screenshots/montages -maxdepth 1 -type f -name '*.png' | wc -l)
+      else
+        MONTAGE_COUNT=0
+      fi
+      if [ "$MONTAGE_COUNT" -gt 0 ]; then
+        SCREENSHOT_MD="${SCREENSHOT_MD}---\n\n## Design Parity Montages (${MONTAGE_COUNT})\n\nLeft = design example target · Right = real Dioxus UI (same shared fixture). Non-blocking.\n\n"
+        MUP=0
+        for f in web-ui-screenshots/montages/*.png; do
+          [ -f "$f" ] || continue
+          if [ "$MUP" -ge 26 ]; then
+            SCREENSHOT_MD="${SCREENSHOT_MD}*...and $((MONTAGE_COUNT - 26)) more (see job artifacts).*\n\n"
+            break
+          fi
+          FILENAME=$(basename "$f" .png)
+          echo "Uploading montage: $FILENAME"
+          UPLOAD_RESP=$(curl -s --header "${AUTH_HEADER}" \
+            --form "file=@$f" \
+            "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/uploads" 2>/dev/null || echo "")
+          MARKDOWN=$(echo "$UPLOAD_RESP" | jq -r '.markdown' 2>/dev/null || echo "")
+          if [ -n "$MARKDOWN" ] && [ "$MARKDOWN" != "null" ]; then
+            SCREENSHOT_MD="${SCREENSHOT_MD}### ${FILENAME}\n${MARKDOWN}\n\n"
+            MUP=$((MUP + 1))
           fi
         done
       fi

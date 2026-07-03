@@ -23,7 +23,49 @@ let
   testDir = ./tests;
   coverageManifest = ./coverage-manifest.json;
   baselinesDir = ./baselines;
+  designParityDir = ./design-parity;
   CF_TEST_SERVER_PORT = 3000;
+
+  # ── Design-parity harness (non-blocking) ────────────────────────────────────
+  # Vendor the design example's CDN dependencies so the tracked design gold
+  # standard (docs/design/CrystalForge) renders fully offline inside the check
+  # VM. The SRI hashes match the <script integrity=...> tags in
+  # crystal-forge.html.
+  reactUmd = pkgs.fetchurl {
+    url = "https://unpkg.com/react@18.3.1/umd/react.development.js";
+    hash = "sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L";
+  };
+  reactDomUmd = pkgs.fetchurl {
+    url = "https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js";
+    hash = "sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm";
+  };
+  babelStandalone = pkgs.fetchurl {
+    url = "https://unpkg.com/@babel/standalone@7.29.0/babel.min.js";
+    hash = "sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y";
+  };
+
+  designExampleSrc = inputs.self + "/docs/design/CrystalForge";
+
+  # Offline copy of the design example with the three CDN <script> tags rewritten
+  # to the vendored local files so Playwright can render it with no network.
+  designExampleOffline = pkgs.runCommand "cf-design-example-offline" { } ''
+    mkdir -p $out/vendor
+    cp -r ${designExampleSrc}/. $out/
+    chmod -R u+w $out
+    cp ${reactUmd} $out/vendor/react.development.js
+    cp ${reactDomUmd} $out/vendor/react-dom.development.js
+    cp ${babelStandalone} $out/vendor/babel.min.js
+
+    # Rewrite CDN script srcs to vendored paths and drop SRI/crossorigin so the
+    # local files load without integrity/CORS checks.
+    ${pkgs.gnused}/bin/sed -i -E \
+      -e 's#src="https://unpkg.com/react@[^"]*"#src="vendor/react.development.js"#' \
+      -e 's#src="https://unpkg.com/react-dom@[^"]*"#src="vendor/react-dom.development.js"#' \
+      -e 's#src="https://unpkg.com/@babel/standalone@[^"]*"#src="vendor/babel.min.js"#' \
+      -e 's# integrity="[^"]*"##g' \
+      -e 's# crossorigin="anonymous"##g' \
+      $out/crystal-forge.html
+  '';
 
   # Explicit web-ui build verification (AC from TASK-8.12, preserved here):
   # index.html is served, it references a JS loader, the loader is served, and
@@ -417,6 +459,13 @@ in pkgs.testers.runNixOSTest {
     machine.succeed("cp ${coverageManifest} /tmp/web-ui-tests/coverage-manifest.json")
     machine.succeed("mkdir -p /tmp/baselines && cp -r ${baselinesDir}/. /tmp/baselines/")
 
+    # Design-parity harness inputs: scripts + manifest (read by integration-test.js
+    # at /tmp/web-ui-tests/design-parity/manifest.json) and the offline design
+    # example bundle.
+    machine.succeed("mkdir -p /tmp/web-ui-tests/design-parity")
+    machine.succeed("cp -r ${designParityDir}/. /tmp/web-ui-tests/design-parity/")
+    machine.succeed("mkdir -p /tmp/design-example && cp -r ${designExampleOffline}/. /tmp/design-example/")
+
     test_profile = "ci_fast"
 
     # Run the integration test script
@@ -455,6 +504,40 @@ in pkgs.testers.runNixOSTest {
 
     if machine.execute("test -d /tmp/screenshots/diffs")[0] == 0:
         machine.copy_from_vm("/tmp/screenshots/diffs", "screenshots")
+
+    # === Phase 4c: Design Parity Harness (NON-BLOCKING) ===
+    # Render the tracked design example (offline, shared fixture) for the primary
+    # views/themes, then compare against the real Dioxus captures produced above.
+    # This only reports a directional design-drift metric; it never fails.
+    print("=== Phase 4c: Design Parity Harness (non-blocking) ===")
+    try:
+        machine.succeed("mkdir -p /tmp/design-targets /tmp/design-parity")
+        machine.succeed(
+            "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/generate-design-targets.js "
+            "/tmp/design-example /tmp/web-ui-tests/design-parity/manifest.json /tmp/design-targets "
+            "> /tmp/web-ui-tests/design-targets.log 2>&1 || true"
+        )
+        print(machine.succeed("cat /tmp/web-ui-tests/design-targets.log || true"))
+        machine.succeed(
+            "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/compare-design-parity.js "
+            "/tmp/web-ui-tests/design-parity/manifest.json /tmp/design-targets "
+            "/tmp/screenshots/design-parity /tmp/design-parity "
+            "> /tmp/web-ui-tests/design-parity.log 2>&1 || true"
+        )
+        print(machine.succeed("cat /tmp/web-ui-tests/design-parity.log || true"))
+
+        # Copy design-parity artifacts out (report, summary, montages, raw sides).
+        for report_file in ["design-drift-report.json", "design-drift-summary.md"]:
+            if machine.execute(f"test -f /tmp/design-parity/{report_file}")[0] == 0:
+                machine.copy_from_vm(f"/tmp/design-parity/{report_file}", "screenshots")
+        if machine.execute("test -d /tmp/design-parity/montages")[0] == 0:
+            machine.copy_from_vm("/tmp/design-parity/montages", "screenshots")
+        if machine.execute("test -d /tmp/design-targets")[0] == 0:
+            machine.copy_from_vm("/tmp/design-targets", "screenshots")
+        if machine.execute("test -d /tmp/screenshots/design-parity")[0] == 0:
+            machine.copy_from_vm("/tmp/screenshots/design-parity", "screenshots")
+    except Exception as e:
+        print(f"warning: design-parity harness error (non-blocking): {e}")
 
     ok_count = sum(1 for r in results if r.get("ok"))
 

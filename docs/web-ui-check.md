@@ -85,10 +85,44 @@ The web-ui check reports a **non-blocking design parity gauge** in
 - which fixture file should be used to align the design example;
 - the current policy (`non-blocking-gauge`).
 
-TASK-139 does not make rendered-design pixel comparison a hard gate. A future
-task can add a rendered design-example artifact and compare it against the
-Playwright screenshots once the design examples consistently consume
-`design-fixtures.json`.
+### Rendered design-parity harness (non-blocking)
+
+The check also renders the tracked design example itself and compares it,
+per view and theme, against the real Dioxus UI. Both sides are backed by the
+shared golden fixture (`docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json`),
+so a difference indicates real UI/design drift rather than data differences.
+
+| Path | Purpose |
+| --- | --- |
+| `checks/web-ui/design-parity/manifest.json` | Maps each primary view to the design example's `view` name and the real Dioxus route; lists themes and the compare method |
+| `checks/web-ui/design-parity/generate-design-targets.js` | Playwright renders the offline design example per `view`+`theme` → `<view>--<theme>.design.png` |
+| `checks/web-ui/design-parity/compare-design-parity.js` | Normalizes both sides and scores drift (ImageMagick RMSE) → report, summary, montages |
+
+Flow inside the check (Phase 4c):
+
+1. `integration-test.js` captures the real Dioxus views (`<view>--<theme>.dioxus.png`)
+   by seeding `cf.ui.theme` and loading each route so the app applies its own
+   theme through the real CF theme path.
+2. The design example is vendored offline (React/ReactDOM/Babel are pinned via
+   `fetchurl` and its CDN `<script>` tags rewritten to local files), then rendered
+   headlessly for each `view`+`theme` using the `?view=&theme=` hook in `app.jsx`.
+3. Each pair is normalized (resized to a common width, flattened) and scored with
+   `compare -metric RMSE`. Lower drift = closer to the design.
+
+Outputs (in `screenshots/`, exposed as MR artifacts):
+
+- `design-drift-report.json` — per view/theme drift + similarity, averages, worst offenders.
+- `design-drift-summary.md` — table + overall similarity, prepended to the MR comment.
+- `montages/<view>--<theme>.montage.png` — side-by-side (design target | real Dioxus).
+- `design-targets/` and `design-parity/` — raw target and Dioxus captures.
+
+This is **non-blocking**: it never fails the check. It is a directional gauge —
+React and Dioxus will never be pixel-identical, so treat the number as "how far
+from the design" and inspect the montages for real drift.
+
+To add a view to the parity harness, add an entry to
+`checks/web-ui/design-parity/manifest.json` (`designView` must be a valid design
+example view name; `route` must be a real Dioxus route).
 
 ### Approving baselines
 
@@ -151,10 +185,11 @@ documented in the manifest's `exclusions`.
 
 `flake-check: [web-ui]` builds the check and exposes
 `web-ui-screenshots/` (screenshots, `results.json`, `visual-report.json`,
-`visual-summary.md`, `diffs/`) as artifacts. The
-`web-ui-screenshots-mr-comment` job posts/updates an MR comment with the
-coverage + visual/design-parity summary, all themed step screenshots, and up to
-20 diff images.
+`visual-summary.md`, `diffs/`, plus `design-drift-report.json`,
+`design-drift-summary.md`, `montages/`, `design-targets/`, `design-parity/`) as
+artifacts. The `web-ui-screenshots-mr-comment` job posts/updates an MR comment
+with the coverage + visual + non-blocking design-parity summary, all themed step
+screenshots, up to 20 diff images, and up to 26 design-parity montages.
 
 ## Known issues
 

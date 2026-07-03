@@ -6933,6 +6933,47 @@ const steps = [
     });
   }
 
+  // ── Design-parity capture pass (non-blocking) ───────────────────────────────
+  // Capture the real Dioxus UI for the primary views in both themes so the
+  // design-parity harness can compare them against the design-example targets.
+  // These captures never fail the check; compare-design-parity.js scores drift.
+  const designParityDir = `${outputDir}/design-parity`;
+  let designParityCaptured = 0;
+  try {
+    const parityManifestPath = path.join(__dirname, "design-parity", "manifest.json");
+    if (fs.existsSync(parityManifestPath)) {
+      const parityManifest = JSON.parse(fs.readFileSync(parityManifestPath, "utf8"));
+      const parityThemes = parityManifest.settings.themes || ["dark", "light"];
+      fs.mkdirSync(designParityDir, { recursive: true });
+      const parityPage = await context.newPage();
+      for (const view of parityManifest.views) {
+        for (const theme of parityThemes) {
+          const name = `${view.name}--${theme}`;
+          try {
+            // Seed the CF theme, then load the route so the app applies its own
+            // theme through the real cf.ui.theme path (not a forced attribute).
+            await parityPage.goto(`${baseUrl}/?ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
+            await parityPage.evaluate((t) => localStorage.setItem("cf.ui.theme", t), theme);
+            await parityPage.goto(`${baseUrl}${view.route}?ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
+            await parityPage.waitForTimeout(2000);
+            await parityPage.screenshot({ path: `${designParityDir}/${name}.dioxus.png` });
+            designParityCaptured += 1;
+            console.log(`  OK design-parity capture: ${name}`);
+          } catch (err) {
+            console.error(`  design-parity capture failed (non-blocking): ${name} - ${err.message}`);
+            try {
+              await parityPage.screenshot({ path: `${designParityDir}/${name}.dioxus.png` });
+            } catch (_) {}
+          }
+        }
+      }
+      await parityPage.close();
+    }
+  } catch (err) {
+    console.error(`Design-parity capture pass error (non-blocking): ${err.message}`);
+  }
+  console.log(`Design-parity Dioxus captures: ${designParityCaptured}`);
+
   await context.close();
   await browser.close();
 
