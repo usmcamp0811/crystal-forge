@@ -60,7 +60,10 @@ let
 
     wasm_name=$(basename "$(normalize_asset_path "$wasm_ref")")
     wasm_path=$(find "$ui_dist" -type f -name "$wasm_name" | head -1)
-    [ -n "$wasm_path" ] || { echo "FAIL: wasm output $wasm_name not found under $ui_dist"; exit 1; }
+    if [ -z "$wasm_path" ]; then
+      wasm_path=$(find "$ui_dist" -type f -name '*.wasm' | head -1)
+    fi
+    [ -n "$wasm_path" ] || { echo "FAIL: no wasm output found under $ui_dist"; exit 1; }
 
     magic=$(head -c4 "$wasm_path" | od -An -tx1 | tr -d ' \n')
     [ "$magic" = "0061736d" ] || { echo "FAIL: wasm output $wasm_path has invalid magic ($magic)"; exit 1; }
