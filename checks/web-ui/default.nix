@@ -4,13 +4,12 @@
 # Crystal Forge server (PostgreSQL + gitserver), with:
 # - Explicit build verification (served index.html/JS loader, packaged WASM magic header)
 # - Semantic assertions + screenshots per coverage-manifest.json step
-# - Visual regression against approved baselines in ./baselines
-#   (ImageMagick compare; "strict" steps gate, "advisory" steps report)
+# - Design-parity visual comparison: Dioxus screenshots vs rendered design
+#   example targets (docs/design/CrystalForge, vendored offline, non-blocking)
 # - OSCAL and SARIF export validation against vendored schemas
 #
 # Coverage is defined in ./coverage-manifest.json — the check fails if the
-# steps in tests/integration-test.js drift from the manifest. See
-# docs/web-ui-check.md for the baseline approval workflow.
+# steps in tests/integration-test.js drift from the manifest.
 #
 # Optional legacy "mega" phases (Attic/S3 cache + builder pytest suites) are
 # opt-in via CF_WEB_UI_RUN_MEGA_PHASES=1 (interactive runs only — the env var
@@ -22,7 +21,6 @@
 let
   testDir = ./tests;
   coverageManifest = ./coverage-manifest.json;
-  baselinesDir = ./baselines;
   designParityDir = ./design-parity;
   CF_TEST_SERVER_PORT = 3000;
 
@@ -453,10 +451,9 @@ in pkgs.testers.runNixOSTest {
     machine.succeed("mkdir -p /tmp/screenshots")
     machine.succeed("mkdir -p /tmp/web-ui-tests")
 
-    # Copy test files, coverage manifest, and approved baselines into the VM
+    # Copy test files and coverage manifest into the VM
     machine.succeed("cp -r ${testDir}/* /tmp/web-ui-tests/")
     machine.succeed("cp ${coverageManifest} /tmp/web-ui-tests/coverage-manifest.json")
-    machine.succeed("mkdir -p /tmp/baselines && cp -r ${baselinesDir}/. /tmp/baselines/")
 
     # Design-parity harness inputs: scripts + manifest (read by integration-test.js
     # at /tmp/web-ui-tests/design-parity/manifest.json) and the offline design
@@ -471,7 +468,7 @@ in pkgs.testers.runNixOSTest {
     machine.succeed(
         f"nohup env CF_UI_TEST_PROFILE={test_profile} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
           toString CF_TEST_SERVER_PORT
-        } /tmp/screenshots /tmp/baselines > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
+        } /tmp/screenshots > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )
     machine.wait_until_succeeds(
         "test -f /tmp/screenshots/results.json -o -f /tmp/screenshots/fatal.json",
@@ -501,14 +498,13 @@ in pkgs.testers.runNixOSTest {
         except Exception as e:
             print(f"warning: could not copy {report_file}: {e}")
 
-    if machine.execute("test -d /tmp/screenshots/diffs")[0] == 0:
-        machine.copy_from_vm("/tmp/screenshots/diffs", "screenshots")
-
-    # === Phase 4c: Design Parity Harness (NON-BLOCKING) ===
+    # === Visual Design-Parity Comparison (NON-BLOCKING) ===
     # Render the tracked design example (offline, shared fixture) for the primary
-    # views/themes, then compare against the real Dioxus captures produced above.
-    # This only reports a directional design-drift metric; it never fails.
-    print("=== Phase 4c: Design Parity Harness (non-blocking) ===")
+    # views/themes, then compare against the real Dioxus captures produced by the
+    # integration test above. This is the primary visual comparison — the design
+    # example IS the baseline. Results are reported as a directional drift gauge
+    # and a summary matrix, but the check never fails on visual mismatch alone.
+    print("=== Design-Parity Visual Comparison (design vs Dioxus, non-blocking) ===")
     try:
         machine.succeed("mkdir -p /tmp/design-targets /tmp/design-parity")
         machine.succeed(
@@ -525,12 +521,15 @@ in pkgs.testers.runNixOSTest {
         )
         print(machine.succeed("cat /tmp/web-ui-tests/design-parity.log || true"))
 
-        # Copy design-parity artifacts out (report, summary, montages, raw sides).
+        # Copy design-parity artifacts out (report, summary, montages, matrix grid, raw sides).
         for report_file in ["design-drift-report.json", "design-drift-summary.md"]:
             if machine.execute(f"test -f /tmp/design-parity/{report_file}")[0] == 0:
                 machine.copy_from_vm(f"/tmp/design-parity/{report_file}", "screenshots")
         if machine.execute("test -d /tmp/design-parity/montages")[0] == 0:
             machine.copy_from_vm("/tmp/design-parity/montages", "screenshots")
+        for grid_file in ["design-parity-matrix.png"]:
+            if machine.execute(f"test -f /tmp/design-parity/{grid_file}")[0] == 0:
+                machine.copy_from_vm(f"/tmp/design-parity/{grid_file}", "screenshots")
         if machine.execute("test -d /tmp/design-targets")[0] == 0:
             machine.copy_from_vm("/tmp/design-targets", "screenshots")
         if machine.execute("test -d /tmp/screenshots/design-parity")[0] == 0:

@@ -131,6 +131,26 @@ function main() {
     }
   }
 
+  // ── Combined matrix grid (montage of all per-view montages) ────────────────
+  // Creates a single 6-column grid image showing all montages side-by-side so
+  // the MR comment has one compact visual to glance at.
+  const gridPath = path.join(outDir, "design-parity-matrix.png");
+  try {
+    const existing = fs
+      .readdirSync(montageDir)
+      .filter((f) => f.endsWith(".montage.png"))
+      .sort()
+      .map((f) => path.join(montageDir, f));
+    if (existing.length > 0) {
+      const cols = Math.min(6, existing.length);
+      sh(
+        `montage "${existing.join('" "')}" -tile ${cols}x -geometry +2+2 -background '#111827' "${gridPath}" 2>&1 || true`,
+      );
+    }
+  } catch (_) {
+    // Grid creation is best-effort; don't let it fail the comparison.
+  }
+
   const compared = rows.filter((r) => r.status === "compared");
   const avgDrift = compared.length
     ? Number(
@@ -145,8 +165,9 @@ function main() {
     .map((r) => ({ name: r.name, drift: r.drift }));
 
   const report = {
-    version: 1,
+    version: 2,
     blocking: false,
+    gridImage: fs.existsSync(gridPath) ? "design-parity-matrix.png" : null,
     themes,
     counts: {
       views: manifest.views.length,
@@ -208,6 +229,9 @@ function main() {
         )
         .join("\n"),
   );
+  if (fs.existsSync(gridPath)) {
+    md.push("**Visual matrix:** All comparison montages tiled in a single grid image.");
+  }
   fs.writeFileSync(path.join(outDir, "design-drift-summary.md"), md.join("\n\n") + "\n");
 
   console.log("=== Design Parity ===");

@@ -7,15 +7,15 @@
  * 3. Logs in with that user
  * 4. Takes screenshots of all major authenticated routes
  *
- * Usage: node integration-test.js <baseUrl> <outputDir> [baselinesDir]
+ * Usage: node integration-test.js <baseUrl> <outputDir>
  *
  * Coverage and profiles are driven by coverage-manifest.json (same directory):
  * every step defined below must exist in the manifest and vice versa, and the
  * ci_fast profile is the set of manifest steps whose profiles include
- * "ci_fast". Screenshots are captured and compared for every theme listed in
- * manifest settings.visualThemes so the approved baseline set covers both dark
- * and light mode. Screenshots are compared to approved baselines
- * (baselinesDir) with ImageMagick per the manifest's visualDiff settings.
+ * "ci_fast". Themed screenshots are captured for every theme listed in
+ * manifest settings.visualThemes and later compared against the design example
+ * targets (generated offline by generate-design-targets.js) to produce a
+ * non-blocking design-drift report and visual parity grid for the MR.
  */
 const { chromium } = require("playwright");
 const fs = require("fs");
@@ -24,7 +24,6 @@ const { execSync } = require("child_process");
 
 const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
-const baselinesDir = process.argv[4] || "";
 
 const MANIFEST = JSON.parse(
   fs.readFileSync(path.join(__dirname, "coverage-manifest.json"), "utf8"),
@@ -48,70 +47,7 @@ function fatal(message) {
   process.exit(1);
 }
 
-/**
- * Compare a captured screenshot against its approved baseline using
- * ImageMagick. Returns { status, diffRatio?, diffPixels?, error? } where
- * status is one of: skipped | new | match | diff | error.
- */
-function compareToBaseline(name, step) {
-  const policy = step && step.baseline ? step.baseline : "none";
-  if (policy === "none" || !baselinesDir) return { status: "skipped", policy };
 
-  const baselinePath = `${baselinesDir}/${name}.png`;
-  const actualPath = `${outputDir}/${name}.png`;
-  if (!fs.existsSync(baselinePath)) return { status: "new", policy };
-  if (!fs.existsSync(actualPath)) return { status: "error", policy, error: "no screenshot captured" };
-
-  const diffDir = `${outputDir}/diffs`;
-  fs.mkdirSync(diffDir, { recursive: true });
-  const diffPath = `${diffDir}/${name}.diff.png`;
-  const fuzz = MANIFEST.settings.visualDiff.fuzzPercent;
-  const maxRatio =
-    step.maxDiffPixelRatio !== undefined
-      ? step.maxDiffPixelRatio
-      : MANIFEST.settings.visualDiff.maxDiffPixelRatio;
-
-  let aeOut;
-  try {
-    // compare exits 0 (identical), 1 (different), 2 (error); AE count goes to stderr.
-    aeOut = execSync(
-      `compare -metric AE -fuzz ${fuzz}% "${baselinePath}" "${actualPath}" "${diffPath}" 2>&1 || true`,
-      { encoding: "utf8", shell: "/bin/sh" },
-    ).trim();
-  } catch (err) {
-    return { status: "error", policy, error: `compare failed: ${err.message}` };
-  }
-
-  const diffPixels = Number.parseFloat(aeOut);
-  if (!Number.isFinite(diffPixels)) {
-    // Dimension mismatch or corrupt image — treat as a full visual difference.
-    return { status: "diff", policy, diffRatio: 1, error: `compare: ${aeOut.slice(0, 200)}` };
-  }
-
-  let totalPixels;
-  try {
-    const dims = execSync(`identify -format "%w %h" "${actualPath}"`, {
-      encoding: "utf8",
-      shell: "/bin/sh",
-    })
-      .trim()
-      .split(" ")
-      .map(Number);
-    totalPixels = dims[0] * dims[1];
-  } catch (_) {
-    totalPixels = 1920 * 1080;
-  }
-
-  const diffRatio = totalPixels > 0 ? diffPixels / totalPixels : 1;
-  if (diffRatio <= maxRatio) {
-    // Clean up empty diff images for matches to keep artifacts small.
-    try {
-      fs.unlinkSync(diffPath);
-    } catch (_) {}
-    return { status: "match", policy, diffRatio, diffPixels };
-  }
-  return { status: "diff", policy, diffRatio, diffPixels };
-}
 
 async function applyVisualTheme(page, theme) {
   await page.evaluate((themeName) => {
@@ -136,17 +72,8 @@ async function captureThemedBaselines(page, step, visualThemes) {
     await page.screenshot({ path: outputPath });
 
     const stats = fs.statSync(outputPath);
-    const visual = compareToBaseline(captureName, step);
-    const visualNote =
-      visual.status === "skipped"
-        ? ""
-        : ` [baseline: ${visual.status}${
-            visual.diffRatio !== undefined
-              ? ` ${(visual.diffRatio * 100).toFixed(3)}%`
-              : ""
-          }]`;
-    console.log(`  OK: ${captureName}.png (${stats.size} bytes)${visualNote}`);
-    visuals.push({ name: captureName, theme, ...visual });
+    console.log(`  OK: ${captureName}.png (${stats.size} bytes)`);
+    visuals.push({ name: captureName, theme });
   }
 
   return visuals;
@@ -6865,7 +6792,7 @@ const steps = [
   console.log("Starting Crystal Forge Web UI Integration Test");
   console.log(`  Base URL: ${baseUrl}`);
   console.log(`  Output: ${outputDir}`);
-  console.log(`  Baselines: ${baselinesDir || "(none — visual comparison disabled)"}`);
+  console.log("  Visual: design-parity comparison (design example vs Dioxus)");
   console.log(`  Profile: ${testProfile}`);
   console.log(`  Steps: ${stepsToRun.length}`);
   const visualThemes = MANIFEST.settings.visualThemes || ["dark", "light"];
@@ -6978,41 +6905,24 @@ const steps = [
   await browser.close();
 
   // ── Visual report ──────────────────────────────────────────────────────────
-  const visualCounts = { match: 0, diff: 0, new: 0, skipped: 0, error: 0 };
-  const visualFailures = [];
-  for (const r of results) {
-    for (const visual of r.visuals || []) {
-      visualCounts[visual.status] = (visualCounts[visual.status] || 0) + 1;
-      if (visual.policy !== "strict" || visual.status === "match") continue;
-      visualFailures.push({
-        name: visual.name,
-        status: visual.status,
-        diffRatio: visual.diffRatio ?? null,
-      });
-    }
-  }
-
   const okCount = results.filter((r) => r.ok).length;
   const failCount = results.filter((r) => !r.ok).length;
   const designReferenced = stepsToRun.filter((s) => s.designRef).length;
-  const designGauge = {
-    policy: DESIGN_FIXTURE ? DESIGN_FIXTURE.policy : "unconfigured",
-    fixturePath: DESIGN_FIXTURE ? DESIGN_FIXTURE.path : null,
-    stepsWithDesignRef: designReferenced,
-    totalSteps: stepsToRun.length,
-    percentWithDesignRef:
-      stepsToRun.length > 0 ? Number(((designReferenced / stepsToRun.length) * 100).toFixed(1)) : 0,
-    note: DESIGN_FIXTURE ? DESIGN_FIXTURE.note : null,
-  };
+  const themed = results.flatMap((r) => r.visuals || []);
 
   const visualReport = {
     profile: testProfile,
-    baselinesDir: baselinesDir || null,
     visualThemes,
-    designGauge,
-    thresholds: MANIFEST.settings.visualDiff,
-    counts: visualCounts,
-    failures: visualFailures,
+    designGauge: {
+      policy: DESIGN_FIXTURE ? DESIGN_FIXTURE.policy : "unconfigured",
+      fixturePath: DESIGN_FIXTURE ? DESIGN_FIXTURE.path : null,
+      stepsWithDesignRef: designReferenced,
+      totalSteps: stepsToRun.length,
+      percentWithDesignRef:
+        stepsToRun.length > 0 ? Number(((designReferenced / stepsToRun.length) * 100).toFixed(1)) : 0,
+      note: DESIGN_FIXTURE ? DESIGN_FIXTURE.note : null,
+    },
+    themedCaptures: themed.length,
     steps: results.map((r) => ({ name: r.name, ok: r.ok, visuals: r.visuals })),
   };
   fs.writeFileSync(
@@ -7021,24 +6931,11 @@ const steps = [
   );
 
   // Markdown summary consumed by the MR-comment CI job.
-  const changed = results
-    .flatMap((r) => r.visuals || [])
-    .filter((visual) => visual.status === "diff")
-    .map((visual) => `\`${visual.name}\` (${((visual.diffRatio ?? 1) * 100).toFixed(2)}%)`);
   const md = [
     `**Web UI check** — profile \`${testProfile}\`: ${okCount}/${results.length} steps passed.`,
-    `**Visual themes** — ${visualThemes.map((theme) => `\`${theme}\``).join(" and ")} baselines captured for each covered step.`,
-    `**Design parity gauge** — ${designGauge.stepsWithDesignRef}/${designGauge.totalSteps} checked steps map to docs/design references using \`${designGauge.fixturePath || "no fixture"}\` (${designGauge.policy}).`,
-    `**Visual baselines** — ${visualCounts.match} match · ${visualCounts.diff} differ · ${visualCounts.new} new (no baseline) · ${visualCounts.skipped} skipped.`,
+    `**Themed captures** — ${themed.length} screenshots (${visualThemes.join(", ")}) captured for design-parity comparison.`,
+    `Design-drift scoring is computed by \`compare-design-parity.js\` against the design example targets and posted as a visual parity grid below.`,
   ];
-  if (visualFailures.length) {
-    md.push(
-      `**Strict visual failures** — ${visualFailures.map((f) => `\`${f.name}\``).join(", ")}`,
-    );
-  }
-  if (changed.length) {
-    md.push(`**Changed vs baseline (advisory)** — ${changed.join(", ")}`);
-  }
   fs.writeFileSync(`${outputDir}/visual-summary.md`, md.join("\n\n") + "\n");
 
   // Write results (the Nix driver waits on this file — keep it last so all
@@ -7050,7 +6947,7 @@ const steps = [
   console.log(`  Passed: ${okCount}/${results.length}`);
   console.log(`  Failed: ${failCount}/${results.length}`);
   console.log(
-    `  Visual: ${visualCounts.match} match, ${visualCounts.diff} diff, ${visualCounts.new} new, ${visualCounts.skipped} skipped`,
+    `  Themed captures: ${themed.length} screenshots (${visualThemes.join(", ")})`,
   );
 
   if (failCount > 0) {
@@ -7060,13 +6957,6 @@ const steps = [
       console.log(`  - ${r.name}: ${r.error}`);
     }
     // Don't exit with error - let the test script analyze results
-  }
-  if (visualFailures.length > 0) {
-    console.log("");
-    console.log("Strict visual failures:");
-    for (const f of visualFailures) {
-      console.log(`  - ${f.name}: ${f.status}`);
-    }
   }
 })().catch((err) => {
   console.error(`Fatal error: ${err.message}`);

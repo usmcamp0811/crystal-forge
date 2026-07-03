@@ -274,42 +274,26 @@ web-ui-screenshots-mr-comment:
         fi
       done
 
-      # Attach visual baseline diff images (changed steps only, capped to 20)
-      if [ -d web-ui-screenshots/diffs ]; then
-        DIFF_COUNT=$(find web-ui-screenshots/diffs -maxdepth 1 -type f -name '*.png' | wc -l)
-      else
-        DIFF_COUNT=0
-      fi
-      if [ "$DIFF_COUNT" -gt 0 ]; then
-        SCREENSHOT_MD="${SCREENSHOT_MD}---\n\n## Visual Baseline Diffs (${DIFF_COUNT})\n\nRed areas differ from the approved baseline in \`checks/web-ui/baselines/\`.\n\n"
-        UPLOADED=0
-        for f in web-ui-screenshots/diffs/*.png; do
-          [ -f "$f" ] || continue
-          if [ "$UPLOADED" -ge 20 ]; then
-            SCREENSHOT_MD="${SCREENSHOT_MD}*...and $((DIFF_COUNT - 20)) more (see job artifacts).*\n\n"
-            break
-          fi
-          FILENAME=$(basename "$f" .png)
-          echo "Uploading diff: $FILENAME"
-          UPLOAD_RESP=$(curl -s --header "${AUTH_HEADER}" \
-            --form "file=@$f" \
-            "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/uploads" 2>/dev/null || echo "")
-          MARKDOWN=$(echo "$UPLOAD_RESP" | jq -r '.markdown' 2>/dev/null || echo "")
-          if [ -n "$MARKDOWN" ] && [ "$MARKDOWN" != "null" ]; then
-            SCREENSHOT_MD="${SCREENSHOT_MD}### ${FILENAME}\n${MARKDOWN}\n\n"
-            UPLOADED=$((UPLOADED + 1))
-          fi
-        done
+      # Attach the design-parity matrix grid (combined view — primary visual)
+      if [ -f web-ui-screenshots/design-parity-matrix.png ]; then
+        echo "Uploading design-parity matrix grid"
+        UPLOAD_RESP=$(curl -s --header "${AUTH_HEADER}" \
+          --form "file=@web-ui-screenshots/design-parity-matrix.png" \
+          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/uploads" 2>/dev/null || echo "")
+        MATRIX_MD=$(echo "$UPLOAD_RESP" | jq -r '.markdown' 2>/dev/null || echo "")
+        if [ -n "$MATRIX_MD" ] && [ "$MATRIX_MD" != "null" ]; then
+          SCREENSHOT_MD="${SCREENSHOT_MD}---\n\n## Design Parity Matrix\n\nLeft = design example target · Right = real Dioxus UI (same shared fixture). Non-blocking.\n\n${MATRIX_MD}\n\n"
+        fi
       fi
 
-      # Attach design-parity montages (design target | real Dioxus, side by side)
+      # Attach per-view design-parity montages (design target | real Dioxus)
       if [ -d web-ui-screenshots/montages ]; then
         MONTAGE_COUNT=$(find web-ui-screenshots/montages -maxdepth 1 -type f -name '*.png' | wc -l)
       else
         MONTAGE_COUNT=0
       fi
       if [ "$MONTAGE_COUNT" -gt 0 ]; then
-        SCREENSHOT_MD="${SCREENSHOT_MD}---\n\n## Design Parity Montages (${MONTAGE_COUNT})\n\nLeft = design example target · Right = real Dioxus UI (same shared fixture). Non-blocking.\n\n"
+        SCREENSHOT_MD="${SCREENSHOT_MD}## Per-View Montages (${MONTAGE_COUNT})\n\nSide-by-side comparisons showing design (left) vs Dioxus (right) for each view and theme.\n\n"
         MUP=0
         for f in web-ui-screenshots/montages/*.png; do
           [ -f "$f" ] || continue
