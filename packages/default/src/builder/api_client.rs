@@ -517,6 +517,14 @@ impl BuilderApiClient {
             return Ok(None);
         }
 
+        if response.status() == reqwest::StatusCode::GONE {
+            anyhow::bail!(
+                "Builder session {} has been superseded (410 Gone). \
+                 Re-establish identity to obtain a new session.",
+                self.builder_session_id,
+            );
+        }
+
         if response.status() == reqwest::StatusCode::CONFLICT {
             warn!(
                 "⚠️  Server reports incompatible execution strategy (409 Conflict). \

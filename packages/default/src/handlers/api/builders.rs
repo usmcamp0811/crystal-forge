@@ -1420,9 +1420,9 @@ pub async fn get_next_job(
             tracing::warn!(
                 builder_id = %builder_id,
                 error = %e,
-                "rejected next-job claim from superseded builder session"
+                "rejected next-job claim from superseded builder session (410 Gone)"
             );
-            StatusCode::CONFLICT
+            StatusCode::GONE
         } else {
             tracing::error!("Failed to claim job atomically: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -1945,24 +1945,15 @@ pub async fn complete_job(
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?
     };
 
-    // Verify the job is assigned to this builder
-    let job = builders::get_build_job_by_id(&state.pool, &job_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    // Mark the job complete before any derivation/cache side effects. This
-    // proves the builder still owns the active job lease after any possible
-    // session takeover; stale processes must not mutate derivation/cache state.
-    let completed_job = builders::mark_job_complete(
+    // Perform atomic completion (job + derivation update in one transaction).
+    // Idempotent: if the job is already 'success' with matching builder+session,
+    // this is a safe no-op (allows retry after transient failure).
+    let completed_job = builders::complete_job_atomic(
         &state.pool,
         &job_id,
         &builder_id,
         verified.builder_session_id.as_ref(),
+        request.output_path.as_deref(),
     )
     .await
     .map_err(|err| {
@@ -1975,24 +1966,8 @@ pub async fn complete_job(
         StatusCode::CONFLICT
     })?;
 
-    // Perform derivation completion + cache-push queueing server-side.
+    // Best-effort cache-push queueing after atomic commit.
     if let Some(ref store_path) = request.output_path {
-        if let Err(e) = crate::queries::derivations::mark_target_build_complete(
-            &state.pool,
-            completed_job.derivation_id,
-            store_path,
-        )
-        .await
-        {
-            tracing::error!(
-                "Failed to mark derivation {} complete for job {}: {}",
-                completed_job.derivation_id,
-                job_id,
-                e
-            );
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-
         let cache_destination =
             crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
                 .await

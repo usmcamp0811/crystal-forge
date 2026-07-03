@@ -467,8 +467,7 @@ pub async fn update_builder_heartbeat(
         SET last_heartbeat_at = now(), status = 'active', updated_at = now()
         WHERE id = $1
           AND (
-                $2::uuid IS NULL
-                OR current_session_id IS NULL
+                (current_session_id IS NULL AND $2::uuid IS NULL)
                 OR current_session_id = $2
           )
         "#,
@@ -978,13 +977,21 @@ pub async fn claim_next_job_atomic(
     .context("Failed to lock builder session for claim")?
     .ok_or_else(|| anyhow::anyhow!("builder_not_found"))?;
 
-    if let Some(builder_session_id) = builder_session_id
-        && current_session_id != Some(*builder_session_id)
-    {
-        tx.rollback()
-            .await
-            .context("Failed to rollback superseded builder claim")?;
-        bail!("builder_session_mismatch");
+    match (current_session_id, builder_session_id) {
+        // Legacy sessionless: both sides have no session → allowed
+        (None, None) => {}
+        // Session match: builder supplied a session that matches the current one
+        (Some(current), Some(supplied)) if current == *supplied => {}
+        // All other combinations are mismatches:
+        //   (Some(_), None)     – current has a session but builder didn't supply one
+        //   (None, Some(_))     – builder supplied a session but current has none
+        //   (Some(a), Some(b))  – sessions don't match
+        _ => {
+            tx.rollback()
+                .await
+                .context("Failed to rollback superseded builder claim")?;
+            bail!("builder_session_mismatch");
+        }
     }
 
     // 1. Count active jobs for this builder
@@ -1132,6 +1139,106 @@ pub async fn mark_job_complete(
     let job = get_build_job_by_id(pool, job_id).await?.ok_or_else(|| {
         anyhow::anyhow!("Build job disappeared after successful complete transition")
     })?;
+
+    Ok(job)
+}
+
+/// Atomically mark a build job and its derivation as complete in a single transaction.
+///
+/// This prevents the inconsistent state where `build_jobs` says `'success'` but
+/// `derivations` still says `'build_in_progress'`. The derivation update and job
+/// transition either both succeed or both roll back.
+///
+/// **Idempotent**: If the job is already `'success'` with matching builder+session,
+/// this returns `Ok` without modifying anything. This allows safe retry by the
+/// caller after a transient failure in a prior attempt.
+///
+/// After commit, the caller should perform best-effort cache-push queueing
+/// (not included here).
+pub async fn complete_job_atomic(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+    store_path: Option<&str>,
+) -> Result<BuildJob> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin completion transaction")?;
+
+    // Lock the job row and check current status for idempotency guard.
+    let (derivation_id, status) = sqlx::query_as::<_, (i32, String)>(
+        r#"
+        SELECT derivation_id, status
+        FROM build_jobs
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to lock job for completion")?
+    .ok_or_else(|| anyhow::anyhow!("Build job not found"))?;
+
+    if status == "success" {
+        // Idempotent: already completed. No need to touch derivations again.
+        tx.commit()
+            .await
+            .context("Failed to commit idempotent completion transaction")?;
+        return get_build_job_by_id(pool, job_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Build job disappeared on idempotent completion"));
+    }
+
+    if status != "building" {
+        bail!("Build job status is '{status}', expected 'building' or 'success'");
+    }
+
+    // Guarded transition: job must be 'building' and owned by builder+session.
+    let updated = sqlx::query_as::<_, (i32,)>(
+        r#"
+        UPDATE build_jobs
+        SET status = 'success',
+            completed_at = now(),
+            updated_at = now()
+        WHERE id = $1
+          AND builder_id = $2
+          AND (builder_session_id IS NULL OR builder_session_id = $3)
+          AND status = 'building'
+        RETURNING derivation_id
+        "#,
+    )
+    .bind(job_id)
+    .bind(builder_id)
+    .bind(builder_session_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to mark job complete")?;
+
+    updated.ok_or_else(|| {
+        anyhow::anyhow!("Build job not owned by this builder or session mismatch")
+    })?;
+
+    // Update derivation in the same transaction.
+    if let Some(store_path) = store_path {
+        crate::queries::derivations::mark_target_build_complete(
+            &mut *tx,
+            derivation_id,
+            store_path,
+        )
+        .await
+        .context("Failed to mark derivation complete")?;
+    }
+
+    tx.commit()
+        .await
+        .context("Failed to commit completion transaction")?;
+
+    let job = get_build_job_by_id(pool, job_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Build job disappeared after completion"))?;
 
     Ok(job)
 }
@@ -3143,6 +3250,88 @@ mod tests {
         assert_eq!(claimed_by_current.builder_id, Some(builder.id));
         assert_eq!(claimed_by_current.builder_session_id, Some(session_b));
         assert_eq!(claimed_by_current.status, "building");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_sessionless_claim_rejected_when_session_established() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+        let builder = create_active_test_builder(&pool, "sessionless-vs-established-builder").await;
+        let session = Uuid::new_v4();
+
+        // Verify builder starts sessionless (current_session_id = NULL)
+        let fresh = get_builder_by_id(&pool, &builder.id)
+            .await
+            .expect("fresh builder fetch should succeed")
+            .expect("fresh builder should exist");
+        assert_eq!(
+            fresh.current_session_id, None,
+            "test builder must start without a session"
+        );
+
+        // Establish a session
+        establish_builder_session(&pool, &builder.id, &session, 60, "established session")
+            .await
+            .expect("session should establish");
+
+        let queued_job = create_queued_job(
+            &pool,
+            "https://example.com/sessionless-vs-established.git",
+            "sessionless-vs-established",
+            &format!("se-{}", Uuid::new_v4().simple()),
+            now,
+            "drv-sessionless-vs-established",
+            10.0,
+            now,
+        )
+        .await;
+
+        // Sessionless claim (None) after session is established → must be rejected
+        let sessionless_claim = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            builder.max_concurrent_jobs,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
+        )
+        .await;
+
+        assert!(
+            sessionless_claim
+                .expect_err("sessionless claim after session establishment must be rejected")
+                .to_string()
+                .contains("builder_session_mismatch"),
+            "legacy sessionless claim must not bypass established session guard"
+        );
+
+        // Job must still be queued and unclaimed
+        let unchanged = get_build_job_by_id(&pool, &queued_job)
+            .await
+            .expect("queued job fetch should succeed")
+            .expect("queued job should exist");
+        assert_eq!(unchanged.status, "queued");
+        assert_eq!(unchanged.builder_id, None);
+        assert_eq!(unchanged.builder_session_id, None);
+
+        // Established session must still be able to claim the job
+        let claimed = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            builder.max_concurrent_jobs,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            Some(&session),
+        )
+        .await
+        .expect("established session claim should succeed")
+        .expect("established session should receive the queued job");
+
+        assert_eq!(claimed.id, queued_job);
+        assert_eq!(claimed.builder_id, Some(builder.id));
+        assert_eq!(claimed.builder_session_id, Some(session));
+        assert_eq!(claimed.status, "building");
     }
 
     #[tokio::test]
