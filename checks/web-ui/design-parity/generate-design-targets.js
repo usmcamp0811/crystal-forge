@@ -49,7 +49,9 @@ async function main() {
   }
   const baseFileUrl = "file://" + htmlPath;
 
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({
+    args: ["--allow-file-access-from-files"],
+  });
   const context = await browser.newContext({
     viewport,
     timezoneId: "UTC",
