@@ -711,6 +711,46 @@ pub async fn requeue_orphaned_building_jobs_with_reason(
     Ok(recovered)
 }
 
+const REQUEUE_BUILDER_ASSIGNED_BUILDING_JOBS_SQL: &str = r#"
+        UPDATE build_jobs bj
+        SET status = 'queued',
+            builder_id = NULL,
+            started_at = NULL,
+            logs = RIGHT(
+                COALESCE(logs, ''),
+                GREATEST(
+                    0,
+                    (10 * 1024 * 1024 - OCTET_LENGTH(E'\n\nRecovery: re-queued from building by ' || $2)) / 4
+                )
+            ) || E'\n\nRecovery: re-queued from building by ' || $2,
+            updated_at = now()
+        WHERE bj.status = 'building'
+          AND bj.builder_id = $1
+        RETURNING bj.*
+        "#;
+
+/// Re-queue jobs that were assigned to this builder in a previous process.
+///
+/// API builders keep active work only in-process. If the service restarts after
+/// claiming a job, the replacement process resolves the same builder ID and
+/// resumes heartbeats, so generic orphan recovery will not see the builder as
+/// offline. Startup recovery must therefore clear stale `building` assignments
+/// for this specific builder identity before the new process starts polling.
+pub async fn requeue_builder_assigned_building_jobs_with_reason(
+    pool: &PgPool,
+    builder_id: &Uuid,
+    reason: &str,
+) -> Result<Vec<BuildJob>> {
+    let recovered = sqlx::query_as::<_, BuildJob>(REQUEUE_BUILDER_ASSIGNED_BUILDING_JOBS_SQL)
+        .bind(builder_id)
+        .bind(reason)
+        .fetch_all(pool)
+        .await
+        .context("Failed to re-queue builder-assigned building jobs")?;
+
+    Ok(recovered)
+}
+
 // =============================================================================
 // BUILD JOB QUERIES (Work Queue Operations)
 // =============================================================================
@@ -1536,6 +1576,32 @@ mod tests {
                 "verified-source claim SQL must cover metadata outer joins: {sql}"
             );
         }
+    }
+
+    #[test]
+    fn builder_startup_recovery_targets_only_same_builder_building_jobs() {
+        let sql = REQUEUE_BUILDER_ASSIGNED_BUILDING_JOBS_SQL;
+
+        assert!(
+            sql.contains("WHERE bj.status = 'building'"),
+            "startup recovery must only requeue in-flight jobs: {sql}"
+        );
+        assert!(
+            sql.contains("AND bj.builder_id = $1"),
+            "startup recovery must only requeue jobs assigned to the resolving builder: {sql}"
+        );
+        assert!(
+            sql.contains("builder_id = NULL"),
+            "startup recovery must clear stale builder ownership: {sql}"
+        );
+        assert!(
+            sql.contains("status = 'queued'"),
+            "startup recovery must put stale jobs back on the queue: {sql}"
+        );
+        assert!(
+            sql.contains("Recovery: re-queued from building by"),
+            "startup recovery must append an auditable recovery log: {sql}"
+        );
     }
 
     async fn queue_test_pool() -> PgPool {
@@ -2610,6 +2676,80 @@ mod tests {
             .expect("stale job status lookup should succeed")
             .expect("stale job should exist");
         assert_eq!(stale_status, "queued");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_requeue_builder_assigned_building_jobs_recovers_restart_stale_job() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+
+        let restarting_builder =
+            create_active_test_builder(&pool, "restart-recovery-builder").await;
+        let other_builder = create_active_test_builder(&pool, "restart-other-builder").await;
+
+        let stale_job = create_queued_job(
+            &pool,
+            "https://example.com/restart-stale.git",
+            "restart-stale",
+            &format!("restartstale{}", Uuid::new_v4().simple()),
+            now,
+            "drv-restart-stale",
+            1.0,
+            now,
+        )
+        .await;
+        assign_job_to_builder(&pool, &stale_job, &restarting_builder.id)
+            .await
+            .expect("stale job should be assigned to restarting builder");
+
+        let other_job = create_queued_job(
+            &pool,
+            "https://example.com/restart-other.git",
+            "restart-other",
+            &format!("restartother{}", Uuid::new_v4().simple()),
+            now,
+            "drv-restart-other",
+            1.0,
+            now,
+        )
+        .await;
+        assign_job_to_builder(&pool, &other_job, &other_builder.id)
+            .await
+            .expect("other job should remain assigned to another active builder");
+
+        let recovered = requeue_builder_assigned_building_jobs_with_reason(
+            &pool,
+            &restarting_builder.id,
+            "builder startup recovery",
+        )
+        .await
+        .expect("startup recovery should succeed");
+
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].id, stale_job);
+
+        let stale_row = get_build_job_by_id(&pool, &stale_job)
+            .await
+            .expect("stale job fetch should succeed")
+            .expect("stale job should exist");
+        assert_eq!(stale_row.status, "queued");
+        assert_eq!(stale_row.builder_id, None);
+        assert!(
+            stale_row
+                .logs
+                .as_deref()
+                .unwrap_or_default()
+                .contains("builder startup recovery"),
+            "startup recovery should append an auditable log"
+        );
+
+        let other_row = get_build_job_by_id(&pool, &other_job)
+            .await
+            .expect("other job fetch should succeed")
+            .expect("other job should exist");
+        assert_eq!(other_row.status, "building");
+        assert_eq!(other_row.builder_id, Some(other_builder.id));
     }
 
     #[tokio::test]

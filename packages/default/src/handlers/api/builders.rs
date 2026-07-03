@@ -500,6 +500,32 @@ pub async fn resolve_builder_id(
         "resolved builder ID from public key"
     );
 
+    let recovered_jobs = builders::requeue_builder_assigned_building_jobs_with_reason(
+        &state.pool,
+        &builder_id,
+        "builder startup recovery",
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(
+            builder_id = %builder_id,
+            error = %e,
+            "failed to recover builder-assigned building jobs during startup"
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to recover stale builder jobs".to_string(),
+        )
+    })?;
+
+    if !recovered_jobs.is_empty() {
+        tracing::warn!(
+            builder_id = %builder_id,
+            recovered_jobs = recovered_jobs.len(),
+            "re-queued builder-assigned building jobs during builder startup"
+        );
+    }
+
     Ok(Json(ResolveBuilderIdResponse { builder_id }))
 }
 
