@@ -299,22 +299,38 @@ web-ui-screenshots-mr-comment:
 
       # Find existing comment by this bot to update (overwrite previous screenshots)
       EXISTING_COMMENTS=$(curl -s --header "${AUTH_HEADER}" \
-        "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes")
+        "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes" || echo "[]")
+
+      if ! echo "$EXISTING_COMMENTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        echo "WARNING: could not read MR notes with CI job token; screenshots remain available as job artifacts"
+        echo "${SCREENSHOT_MD}" > web-ui-screenshots/mr-comment.md
+        exit 0
+      fi
 
       COMMENT_ID=$(echo "$EXISTING_COMMENTS" | jq -r '.[] | select(.body | contains("Web UI Screenshots")) | .id' | head -1)
 
       if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
-        curl -s -X PUT --header "${AUTH_HEADER}" \
+        COMMENT_RESP=$(curl -s -X PUT --header "${AUTH_HEADER}" \
           --header "Content-Type: application/json" \
           --data "{\"body\": $SUMMARY_ESCAPED}" \
-          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes/$COMMENT_ID"
-        echo "Updated existing MR comment ($COMMENT_ID) with new screenshots"
+          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes/$COMMENT_ID" || echo "")
+        if echo "$COMMENT_RESP" | jq -e '.id' >/dev/null 2>&1; then
+          echo "Updated existing MR comment ($COMMENT_ID) with new screenshots"
+        else
+          echo "WARNING: MR comment update failed; screenshots remain available as job artifacts"
+          echo "${SCREENSHOT_MD}" > web-ui-screenshots/mr-comment.md
+        fi
       else
-        curl -s -X POST --header "${AUTH_HEADER}" \
+        COMMENT_RESP=$(curl -s -X POST --header "${AUTH_HEADER}" \
           --header "Content-Type: application/json" \
           --data "{\"body\": $SUMMARY_ESCAPED}" \
-          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes"
-        echo "Posted new MR comment with web UI screenshots"
+          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes" || echo "")
+        if echo "$COMMENT_RESP" | jq -e '.id' >/dev/null 2>&1; then
+          echo "Posted new MR comment with web UI screenshots"
+        else
+          echo "WARNING: MR comment creation failed; screenshots remain available as job artifacts"
+          echo "${SCREENSHOT_MD}" > web-ui-screenshots/mr-comment.md
+        fi
       fi
   dependencies:
     - flake-check
