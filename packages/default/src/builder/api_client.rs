@@ -1,8 +1,8 @@
 use crate::config::BuilderConfig;
 use crate::models::builders::{
-    BuildFailurePhase, BuildProgressRequest, NextJobRequest, NextJobResponse,
-    RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
-    ResolveBuilderIdResponse,
+    BuildFailurePhase, BuildProgressRequest, EstablishBuilderSessionRequest,
+    EstablishBuilderSessionResponse, NextJobRequest, NextJobResponse, RemoteBuildExecutionStrategy,
+    ReportMetricsRequest, ResolveBuilderIdRequest, ResolveBuilderIdResponse,
 };
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -53,6 +53,7 @@ pub struct BuilderApiClient {
     client: Client,
     server_url: String,
     builder_id: Uuid,
+    builder_session_id: Uuid,
     signing_key: SigningKey,
     supported_execution_strategies: Vec<RemoteBuildExecutionStrategy>,
 }
@@ -60,6 +61,10 @@ pub struct BuilderApiClient {
 impl BuilderApiClient {
     pub fn builder_id(&self) -> Uuid {
         self.builder_id
+    }
+
+    pub fn builder_session_id(&self) -> Uuid {
+        self.builder_session_id
     }
 
     /// Create a new API client from configuration.
@@ -85,13 +90,29 @@ impl BuilderApiClient {
             .build()
             .context("Failed to create HTTP client")?;
 
+        let builder_session_id = Uuid::new_v4();
+
         let builder_id = match config.builder_id {
-            Some(builder_id) => builder_id,
+            Some(builder_id) => {
+                Self::establish_builder_session_with_retry(
+                    &client,
+                    &server_url,
+                    &signing_key,
+                    builder_id,
+                    builder_session_id,
+                    config.resolve_retry_interval,
+                    config.resolve_retry_max_interval,
+                    config.resolve_max_attempts,
+                )
+                .await?;
+                builder_id
+            }
             None => {
                 Self::resolve_builder_id_with_retry(
                     &client,
                     &server_url,
                     &signing_key,
+                    builder_session_id,
                     config.resolve_retry_interval,
                     config.resolve_retry_max_interval,
                     config.resolve_max_attempts,
@@ -104,6 +125,7 @@ impl BuilderApiClient {
             client,
             server_url,
             builder_id,
+            builder_session_id,
             signing_key,
             supported_execution_strategies: config.supported_execution_strategies.clone(),
         })
@@ -120,6 +142,7 @@ impl BuilderApiClient {
         client: &Client,
         server_url: &str,
         signing_key: &SigningKey,
+        builder_session_id: Uuid,
         retry_interval: std::time::Duration,
         max_interval: std::time::Duration,
         max_attempts: u32,
@@ -130,7 +153,9 @@ impl BuilderApiClient {
 
         loop {
             attempt += 1;
-            match Self::resolve_builder_id(client, server_url, signing_key).await {
+            match Self::resolve_builder_id(client, server_url, signing_key, builder_session_id)
+                .await
+            {
                 Ok(builder_id) => {
                     if attempt > 1 {
                         info!(
@@ -222,6 +247,103 @@ impl BuilderApiClient {
         )
     }
 
+    async fn establish_builder_session_with_retry(
+        client: &Client,
+        server_url: &str,
+        signing_key: &SigningKey,
+        builder_id: Uuid,
+        builder_session_id: Uuid,
+        retry_interval: std::time::Duration,
+        max_interval: std::time::Duration,
+        max_attempts: u32,
+    ) -> Result<()> {
+        let mut delay = retry_interval.max(std::time::Duration::from_secs(1));
+        let mut attempt: u32 = 0;
+
+        loop {
+            attempt += 1;
+            match Self::establish_builder_session(
+                client,
+                server_url,
+                signing_key,
+                builder_id,
+                builder_session_id,
+            )
+            .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if max_attempts != 0 && attempt >= max_attempts {
+                        anyhow::bail!(
+                            "Builder session establishment failed after {} attempt(s): {}",
+                            attempt,
+                            e
+                        );
+                    }
+
+                    warn!(
+                        "⏳ Builder session not ready yet (attempt {}): {}. Retrying in {:?}.",
+                        attempt, e, delay
+                    );
+
+                    tokio::time::sleep(delay).await;
+                    delay = std::cmp::min(delay.saturating_mul(2), max_interval);
+                }
+            }
+        }
+    }
+
+    async fn establish_builder_session(
+        client: &Client,
+        server_url: &str,
+        signing_key: &SigningKey,
+        builder_id: Uuid,
+        builder_session_id: Uuid,
+    ) -> Result<()> {
+        let path = format!("/api/v1/builders/{}/session", builder_id);
+        let url = format!("{}{}", server_url, path);
+        let body = serde_json::to_vec(&EstablishBuilderSessionRequest {
+            session_id: builder_session_id,
+        })?;
+        let (signature, timestamp) =
+            Self::sign_bootstrap_request(signing_key, "POST", &path, &body);
+
+        let response = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("X-Builder-ID", builder_id.to_string())
+            .header("X-Builder-Session-ID", builder_session_id.to_string())
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .body(body)
+            .send()
+            .await
+            .context("Failed to establish builder session")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!(
+                "Builder session establishment failed with status {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        let established: EstablishBuilderSessionResponse = response
+            .json()
+            .await
+            .context("Failed to decode builder session response")?;
+        if established.session_id != builder_session_id {
+            anyhow::bail!("server returned mismatched builder session ID");
+        }
+
+        Ok(())
+    }
+
     /// Return the builder public key (base64) derived from configured private key.
     pub fn public_key_base64(&self) -> String {
         base64::engine::general_purpose::STANDARD
@@ -252,11 +374,13 @@ impl BuilderApiClient {
         client: &Client,
         server_url: &str,
         signing_key: &SigningKey,
+        builder_session_id: Uuid,
     ) -> Result<Uuid> {
         let path = "/api/v1/builders/resolve-id";
         let url = format!("{}{}", server_url, path);
         let body = serde_json::to_vec(&ResolveBuilderIdRequest {
             public_key: Self::public_key_base64_for(signing_key),
+            session_id: Some(builder_session_id),
         })?;
         let (signature, timestamp) = Self::sign_bootstrap_request(signing_key, "POST", path, &body);
 
@@ -265,6 +389,7 @@ impl BuilderApiClient {
             .header("Content-Type", "application/json")
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
+            .header("X-Builder-Session-ID", builder_session_id.to_string())
             .body(body)
             .send()
             .await
@@ -287,6 +412,9 @@ impl BuilderApiClient {
             .json()
             .await
             .context("Failed to decode builder ID resolution response")?;
+        if resolved.session_id != Some(builder_session_id) {
+            anyhow::bail!("server returned mismatched builder session ID");
+        }
         Ok(resolved.builder_id)
     }
 
@@ -302,6 +430,7 @@ impl BuilderApiClient {
             .post(&url)
             .header("Content-Type", "application/json")
             .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
             .body(body)
@@ -369,6 +498,7 @@ impl BuilderApiClient {
 
         request
             .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
             .header("Content-Type", "application/json")
@@ -433,6 +563,7 @@ impl BuilderApiClient {
             .post(&url)
             .header("Content-Type", "application/json")
             .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
             .body(body)
@@ -470,6 +601,7 @@ impl BuilderApiClient {
             .client
             .get(&url)
             .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
             .timeout(DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT)
@@ -511,6 +643,7 @@ impl BuilderApiClient {
             .client
             .post(&url)
             .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
             .timeout(DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT)
@@ -545,6 +678,7 @@ impl BuilderApiClient {
             .client
             .post(&url)
             .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
             .send()
@@ -587,6 +721,7 @@ impl BuilderApiClient {
             .post(&url)
             .header("Content-Type", "application/json")
             .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
             .body(body)
@@ -642,6 +777,7 @@ impl BuilderApiClient {
             .post(&url)
             .header("Content-Type", "application/json")
             .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
             .body(body)
@@ -679,6 +815,7 @@ impl BuilderApiClient {
             .client
             .get(&url)
             .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
             .send()
@@ -726,6 +863,7 @@ impl BuilderApiClient {
             .client
             .post(&url)
             .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
             .body("")
@@ -770,6 +908,7 @@ impl BuilderApiClient {
             .post(&url)
             .header("Content-Type", "application/json")
             .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
             .header("X-Signature", signature)
             .header("X-Timestamp", timestamp)
             .body(body)
@@ -822,6 +961,13 @@ impl BuilderApiClient {
         request.headers_mut().insert(
             "X-Builder-ID",
             builder_id.parse().context("invalid X-Builder-ID header")?,
+        );
+        request.headers_mut().insert(
+            "X-Builder-Session-ID",
+            self.builder_session_id
+                .to_string()
+                .parse()
+                .context("invalid X-Builder-Session-ID header")?,
         );
         request.headers_mut().insert(
             "X-Signature",
@@ -965,6 +1111,7 @@ mod tests {
             client: Client::new(),
             server_url: "http://localhost:8080".to_string(),
             builder_id,
+            builder_session_id: Uuid::new_v4(),
             signing_key: key,
             supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
         };
@@ -1016,6 +1163,7 @@ mod tests {
             client: Client::new(),
             server_url: format!("http://{addr}"),
             builder_id: Uuid::new_v4(),
+            builder_session_id: Uuid::new_v4(),
             signing_key: SigningKey::generate(&mut rand::thread_rng()),
             supported_execution_strategies: vec![
                 RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
@@ -1046,7 +1194,11 @@ mod tests {
     fn test_bootstrap_signature_uses_public_key_identity_without_builder_id() {
         let key = SigningKey::generate(&mut rand::thread_rng());
         let public_key = BuilderApiClient::public_key_base64_for(&key);
-        let body = serde_json::to_vec(&ResolveBuilderIdRequest { public_key }).unwrap();
+        let body = serde_json::to_vec(&ResolveBuilderIdRequest {
+            public_key,
+            session_id: Some(Uuid::new_v4()),
+        })
+        .unwrap();
 
         let (signature, timestamp) = BuilderApiClient::sign_bootstrap_request(
             &key,

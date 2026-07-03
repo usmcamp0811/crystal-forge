@@ -70,6 +70,12 @@ pub struct Builder {
     pub max_memory_mb: Option<i32>,
     pub max_concurrent_jobs: i32,
     pub enabled: bool,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub current_session_id: Option<Uuid>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub current_session_started_at: Option<DateTime<Utc>>,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -159,12 +165,31 @@ pub struct UpdateBuilderPublicKeyRequest {
 pub struct ResolveBuilderIdRequest {
     /// Base64-encoded Ed25519 public key derived from the builder's local private key.
     pub public_key: String,
+    /// Per-process session UUID generated on builder startup.
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
 }
 
 /// Response returned when a builder public key has been registered/approved.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolveBuilderIdResponse {
     pub builder_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Uuid>,
+}
+
+/// Request to establish a process/session for a configured builder ID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EstablishBuilderSessionRequest {
+    pub session_id: Uuid,
+}
+
+/// Response returned after establishing a builder process/session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EstablishBuilderSessionResponse {
+    pub builder_id: Uuid,
+    pub session_id: Uuid,
+    pub recovered_jobs: usize,
 }
 
 /// Request to update builder environment assignments
@@ -323,6 +348,9 @@ impl std::fmt::Display for BuildJobStatus {
 pub struct BuildJob {
     pub id: Uuid,
     pub builder_id: Option<Uuid>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub builder_session_id: Option<Uuid>,
     pub derivation_id: i32,
     pub environment_id: Option<Uuid>,
     pub status: String, // Will be parsed to BuildJobStatus

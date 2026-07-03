@@ -32,17 +32,18 @@ use crate::handlers::builder_request::{
 };
 use crate::models::builders::{
     AppendLogsRequest, BuildJob, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary,
-    BuilderWithEnvironments, CreateBuilderRequest, EvaluatorFingerprint,
-    KeypairRegeneratedResponse, NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest,
-    ResolveBuilderIdRequest, ResolveBuilderIdResponse, SourceInputDeliveryMode,
-    UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
-    VerifiedSourceIdentity,
+    BuilderWithEnvironments, CreateBuilderRequest, EstablishBuilderSessionRequest,
+    EstablishBuilderSessionResponse, EvaluatorFingerprint, KeypairRegeneratedResponse,
+    NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
+    ResolveBuilderIdResponse, SourceInputDeliveryMode, UpdateBuilderEnvironmentsRequest,
+    UpdateBuilderPublicKeyRequest, UpdateBuilderRequest, VerifiedSourceIdentity,
 };
 use crate::models::public_key::PublicKey;
 use crate::queries::builders;
 
 const NIX_STORE_EXPORT_ARG_BYTES_LIMIT: usize = 128 * 1024;
 const ATTIC_PUSH_PATH_CHUNK_SIZE: usize = 200;
+const BUILDER_SESSION_STALE_TIMEOUT_SECS: i64 = 60;
 
 fn parse_derivation_requisites(stdout: &[u8], drv_path: &str) -> Vec<String> {
     let mut paths = Vec::new();
@@ -500,9 +501,18 @@ pub async fn resolve_builder_id(
         "resolved builder ID from public key"
     );
 
-    let recovered_jobs = builders::requeue_builder_assigned_building_jobs_with_reason(
+    let Some(session_id) = request.session_id else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Builder session_id is required".to_string(),
+        ));
+    };
+
+    let recovered_jobs = builders::establish_builder_session(
         &state.pool,
         &builder_id,
+        &session_id,
+        BUILDER_SESSION_STALE_TIMEOUT_SECS,
         "builder startup recovery",
     )
     .await
@@ -510,11 +520,15 @@ pub async fn resolve_builder_id(
         tracing::error!(
             builder_id = %builder_id,
             error = %e,
-            "failed to recover builder-assigned building jobs during startup"
+            "failed to establish builder session during startup"
         );
+        let message = e.to_string();
+        if message.contains("active_builder_session_exists") {
+            return (StatusCode::CONFLICT, message);
+        }
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to recover stale builder jobs".to_string(),
+            "Failed to establish builder session".to_string(),
         )
     })?;
 
@@ -526,7 +540,86 @@ pub async fn resolve_builder_id(
         );
     }
 
-    Ok(Json(ResolveBuilderIdResponse { builder_id }))
+    Ok(Json(ResolveBuilderIdResponse {
+        builder_id,
+        session_id: Some(session_id),
+    }))
+}
+
+/// POST /api/v1/builders/:id/session - Establish a process/session for a configured builder ID.
+pub async fn establish_builder_session(
+    State(state): State<CFState>,
+    Path(builder_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<EstablishBuilderSessionResponse>, (StatusCode, String)> {
+    let path = format!("/api/v1/builders/{}/session", builder_id);
+    let verified = authenticate_builder_request_allow_inactive(
+        &headers,
+        body.clone(),
+        "POST",
+        &path,
+        &state.pool,
+    )
+    .await
+    .map_err(|status| (status, "Builder authentication failed".to_string()))?;
+
+    if verified.builder_id != builder_id {
+        return Err((StatusCode::FORBIDDEN, "Builder ID mismatch".to_string()));
+    }
+
+    let request: EstablishBuilderSessionRequest = serde_json::from_slice(&body).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid builder session request".to_string(),
+        )
+    })?;
+
+    if verified.builder_session_id != Some(request.session_id) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Builder session header does not match request body".to_string(),
+        ));
+    }
+
+    let recovered_jobs = builders::establish_builder_session(
+        &state.pool,
+        &builder_id,
+        &request.session_id,
+        BUILDER_SESSION_STALE_TIMEOUT_SECS,
+        "builder startup recovery",
+    )
+    .await
+    .map_err(|e| {
+        let message = e.to_string();
+        if message.contains("active_builder_session_exists") {
+            (StatusCode::CONFLICT, message)
+        } else {
+            tracing::error!(builder_id = %builder_id, error = %e, "failed to establish builder session");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to establish builder session".to_string(),
+            )
+        }
+    })?;
+
+    Ok(Json(EstablishBuilderSessionResponse {
+        builder_id,
+        session_id: request.session_id,
+        recovered_jobs: recovered_jobs.len(),
+    }))
+}
+
+fn builder_owns_job_session(
+    job: &BuildJob,
+    builder_id: Uuid,
+    builder_session_id: Option<Uuid>,
+) -> bool {
+    job.builder_id == Some(builder_id)
+        && match job.builder_session_id {
+            Some(job_session_id) => builder_session_id == Some(job_session_id),
+            None => true,
+        }
 }
 
 fn builder_id_for_resolved_builder(builder: Option<Builder>) -> Result<Uuid, (StatusCode, String)> {
@@ -1070,21 +1163,26 @@ pub async fn finalize_cancelled_job(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(builder_id) {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id) {
         return Err(StatusCode::FORBIDDEN);
     }
 
-    builders::finalize_cancelled_job(&state.pool, &job_id, &builder_id)
-        .await
-        .map_err(|err| {
-            tracing::warn!(
-                builder_id = %builder_id,
-                job_id = %job_id,
-                error = %err,
-                "Rejected finalize-cancelled transition due to lease/state mismatch"
-            );
-            StatusCode::CONFLICT
-        })?;
+    builders::finalize_cancelled_job(
+        &state.pool,
+        &job_id,
+        &builder_id,
+        verified.builder_session_id.as_ref(),
+    )
+    .await
+    .map_err(|err| {
+        tracing::warn!(
+            builder_id = %builder_id,
+            job_id = %job_id,
+            error = %err,
+            "Rejected finalize-cancelled transition due to lease/state mismatch"
+        );
+        StatusCode::CONFLICT
+    })?;
 
     cleanup_build_log_channel(&state, job_id).await;
     Ok(StatusCode::OK)
@@ -1233,9 +1331,13 @@ pub async fn builder_heartbeat(
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // Update heartbeat timestamp (marks builder as active)
-    builders::update_builder_heartbeat(&state.pool, &builder_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    builders::update_builder_heartbeat(
+        &state.pool,
+        &builder_id,
+        verified.builder_session_id.as_ref(),
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Record metrics
     builders::record_builder_metrics(&state.pool, &builder_id, &metrics)
@@ -1310,6 +1412,7 @@ pub async fn get_next_job(
         builder.max_concurrent_jobs,
         &environment_ids,
         execution_strategy,
+        verified.builder_session_id.as_ref(),
     )
     .await
     .map_err(|e| {
@@ -1472,7 +1575,7 @@ pub async fn build_progress(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(builder_id) {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id) {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -1555,7 +1658,9 @@ pub async fn download_job_derivation_archive(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(builder_id) || job.status != "building" {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id)
+        || job.status != "building"
+    {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -1695,7 +1800,9 @@ pub async fn publish_job_derivation_closure(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(builder_id) || job.status != "building" {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id)
+        || job.status != "building"
+    {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -1788,7 +1895,7 @@ pub async fn start_job(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(builder_id) {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id) {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -1835,7 +1942,7 @@ pub async fn complete_job(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(builder_id) {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id) {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -1881,17 +1988,22 @@ pub async fn complete_job(
     }
 
     // Mark job as complete
-    builders::mark_job_complete(&state.pool, &job_id, &builder_id)
-        .await
-        .map_err(|err| {
-            tracing::warn!(
-                builder_id = %builder_id,
-                job_id = %job_id,
-                error = %err,
-                "Rejected complete transition due to lease/state mismatch"
-            );
-            StatusCode::CONFLICT
-        })?;
+    builders::mark_job_complete(
+        &state.pool,
+        &job_id,
+        &builder_id,
+        verified.builder_session_id.as_ref(),
+    )
+    .await
+    .map_err(|err| {
+        tracing::warn!(
+            builder_id = %builder_id,
+            job_id = %job_id,
+            error = %err,
+            "Rejected complete transition due to lease/state mismatch"
+        );
+        StatusCode::CONFLICT
+    })?;
 
     cleanup_build_log_channel(&state, job_id).await;
 
@@ -1936,7 +2048,7 @@ pub async fn fail_job(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(builder_id) {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id) {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -1947,6 +2059,7 @@ pub async fn fail_job(
         &state.pool,
         &job_id,
         &builder_id,
+        verified.builder_session_id.as_ref(),
         failure_message.as_deref(),
     )
     .await
@@ -2079,7 +2192,7 @@ pub async fn append_job_logs(
             "Build job not found for log append".to_string(),
         ))?;
 
-    if job.builder_id != Some(builder_id) {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id) {
         return Err((
             StatusCode::FORBIDDEN,
             "Builder cannot append logs for a job assigned to another builder".to_string(),
@@ -2098,32 +2211,39 @@ pub async fn append_job_logs(
     }
 
     // Append logs with per-job size cap enforcement.
-    builders::append_job_logs_with_limits(&state.pool, &job_id, &request.logs, max_total_bytes)
-        .await
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("log_size_limit_exceeded") {
-                (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    format!("Total job logs would exceed {} byte limit", max_total_bytes),
-                )
-            } else if msg.contains("invalid_job_status") {
-                (
-                    StatusCode::CONFLICT,
-                    "Cannot append logs for job in current status".to_string(),
-                )
-            } else if msg.contains("job_not_found") {
-                (
-                    StatusCode::NOT_FOUND,
-                    "Build job not found for log append".to_string(),
-                )
-            } else {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to append logs due to internal server error".to_string(),
-                )
-            }
-        })?;
+    builders::append_job_logs_with_limits_for_builder(
+        &state.pool,
+        &job_id,
+        &builder_id,
+        verified.builder_session_id.as_ref(),
+        &request.logs,
+        max_total_bytes,
+    )
+    .await
+    .map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("log_size_limit_exceeded") {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("Total job logs would exceed {} byte limit", max_total_bytes),
+            )
+        } else if msg.contains("invalid_job_status") {
+            (
+                StatusCode::CONFLICT,
+                "Cannot append logs for job in current status".to_string(),
+            )
+        } else if msg.contains("job_not_found") {
+            (
+                StatusCode::NOT_FOUND,
+                "Build job not found for log append".to_string(),
+            )
+        } else {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to append logs due to internal server error".to_string(),
+            )
+        }
+    })?;
 
     if let Some(tx) = get_or_create_build_log_channel(&state, job_id).await {
         let log_msg = BuildStreamMessage::Log {
@@ -2181,7 +2301,10 @@ enum BuildStreamMessage {
 
 enum BuildLogStreamPrincipal {
     Viewer,
-    Builder(Uuid),
+    Builder {
+        builder_id: Uuid,
+        builder_session_id: Option<Uuid>,
+    },
 }
 
 /// WebSocket endpoint for real-time build log streaming
@@ -2230,11 +2353,14 @@ async fn authorize_build_log_stream(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(verified.builder_id) {
+    if !builder_owns_job_session(&job, verified.builder_id, verified.builder_session_id) {
         return Err(StatusCode::FORBIDDEN);
     }
 
-    Ok(BuildLogStreamPrincipal::Builder(verified.builder_id))
+    Ok(BuildLogStreamPrincipal::Builder {
+        builder_id: verified.builder_id,
+        builder_session_id: verified.builder_session_id,
+    })
 }
 
 async fn handle_log_stream(
@@ -2273,7 +2399,10 @@ async fn handle_log_stream(
                 }
             }
         }
-        BuildLogStreamPrincipal::Builder(builder_id) => {
+        BuildLogStreamPrincipal::Builder {
+            builder_id,
+            builder_session_id,
+        } => {
             if !replay_initial_build_log_history(&mut socket, &state, job_id, false).await {
                 return;
             }
@@ -2311,9 +2440,11 @@ async fn handle_log_stream(
 
                         match parsed {
                             BuildStreamMessage::Log { message } => {
-                                if let Err(e) = builders::append_job_logs_with_limits(
+                                if let Err(e) = builders::append_job_logs_with_limits_for_builder(
                                     &state.pool,
                                     &job_id,
+                                    &builder_id,
+                                    builder_session_id.as_ref(),
                                     &message,
                                     max_total_bytes,
                                 )
@@ -2608,6 +2739,7 @@ mod tests {
             general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes());
         let body = serde_json::to_vec(&ResolveBuilderIdRequest {
             public_key: public_key_base64.clone(),
+            session_id: Some(Uuid::new_v4()),
         })
         .expect("resolve request should serialize");
         let payload =
@@ -2643,6 +2775,8 @@ mod tests {
             max_memory_mb: Some(8192),
             max_concurrent_jobs: 1,
             enabled,
+            current_session_id: None,
+            current_session_started_at: None,
             last_heartbeat_at: None,
             created_at: now,
             updated_at: now,
@@ -2916,6 +3050,7 @@ mod tests {
             general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes());
         let body = serde_json::to_vec(&ResolveBuilderIdRequest {
             public_key: public_key_base64.clone(),
+            session_id: Some(Uuid::new_v4()),
         })
         .expect("resolve request should serialize");
 

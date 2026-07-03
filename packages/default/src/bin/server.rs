@@ -484,6 +484,10 @@ async fn main() -> anyhow::Result<()> {
         )
         // Builder-authenticated endpoints
         .route(
+            "/api/v1/builders/:id/session",
+            post(builders::establish_builder_session),
+        )
+        .route(
             "/api/v1/builders/:id/heartbeat",
             post(builders::builder_heartbeat),
         )

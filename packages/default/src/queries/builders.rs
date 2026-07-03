@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use sqlx::PgPool;
@@ -18,6 +19,7 @@ use crate::models::public_key::PublicKey;
 const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
+        builder_session_id = $2,
         status = 'building',
         started_at = NOW(),
         updated_at = NOW()
@@ -43,6 +45,7 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
 const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
+        builder_session_id = $3,
         status = 'building',
         started_at = NOW(),
         updated_at = NOW()
@@ -69,6 +72,7 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
 const CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
+        builder_session_id = $3,
         status = 'building',
         started_at = NOW(),
         updated_at = NOW()
@@ -101,6 +105,7 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL: &str = r#"
 const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
+        builder_session_id = $4,
         status = 'building',
         started_at = NOW(),
         updated_at = NOW()
@@ -451,18 +456,32 @@ pub async fn delete_builder(pool: &PgPool, builder_id: &Uuid) -> Result<()> {
 }
 
 /// Update builder heartbeat timestamp
-pub async fn update_builder_heartbeat(pool: &PgPool, builder_id: &Uuid) -> Result<()> {
-    sqlx::query!(
+pub async fn update_builder_heartbeat(
+    pool: &PgPool,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+) -> Result<()> {
+    let result = sqlx::query(
         r#"
         UPDATE builders
         SET last_heartbeat_at = now(), status = 'active', updated_at = now()
         WHERE id = $1
+          AND (
+                $2::uuid IS NULL
+                OR current_session_id IS NULL
+                OR current_session_id = $2
+          )
         "#,
-        builder_id
     )
+    .bind(builder_id)
+    .bind(builder_session_id)
     .execute(pool)
     .await
     .context("Failed to update builder heartbeat")?;
+
+    if result.rows_affected() == 0 {
+        bail!("Builder heartbeat rejected due to session mismatch");
+    }
 
     Ok(())
 }
@@ -676,6 +695,7 @@ pub async fn requeue_orphaned_building_jobs_with_reason(
         UPDATE build_jobs bj
         SET status = 'queued',
             builder_id = NULL,
+            builder_session_id = NULL,
             started_at = NULL,
             logs = RIGHT(
                 COALESCE(logs, ''),
@@ -715,6 +735,7 @@ const REQUEUE_BUILDER_ASSIGNED_BUILDING_JOBS_SQL: &str = r#"
         UPDATE build_jobs bj
         SET status = 'queued',
             builder_id = NULL,
+            builder_session_id = NULL,
             started_at = NULL,
             logs = RIGHT(
                 COALESCE(logs, ''),
@@ -726,8 +747,90 @@ const REQUEUE_BUILDER_ASSIGNED_BUILDING_JOBS_SQL: &str = r#"
             updated_at = now()
         WHERE bj.status = 'building'
           AND bj.builder_id = $1
+          AND bj.builder_session_id IS DISTINCT FROM $3
         RETURNING bj.*
         "#;
+
+/// Establish a builder process/session and recover only stale work from older sessions.
+pub async fn establish_builder_session(
+    pool: &PgPool,
+    builder_id: &Uuid,
+    builder_session_id: &Uuid,
+    stale_timeout_secs: i64,
+    reason: &str,
+) -> Result<Vec<BuildJob>> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin builder session transaction")?;
+
+    let current: Option<(Option<Uuid>, Option<DateTime<Utc>>, String)> = sqlx::query_as(
+        r#"
+        SELECT current_session_id, last_heartbeat_at, status
+        FROM builders
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(builder_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to lock builder for session establishment")?;
+
+    let Some((current_session_id, last_heartbeat_at, status)) = current else {
+        bail!("Builder not found");
+    };
+
+    let cutoff = Utc::now() - chrono::Duration::seconds(stale_timeout_secs);
+    let heartbeat_is_fresh = last_heartbeat_at.is_some_and(|heartbeat| heartbeat > cutoff);
+    let different_active_session = current_session_id
+        .map(|session_id| session_id != *builder_session_id)
+        .unwrap_or(false)
+        && heartbeat_is_fresh;
+    let fresh_legacy_session =
+        current_session_id.is_none() && status == "active" && heartbeat_is_fresh;
+
+    if different_active_session || fresh_legacy_session {
+        bail!(
+            "active_builder_session_exists: builder {} has a fresh active session",
+            builder_id
+        );
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE builders
+        SET current_session_id = $2,
+            current_session_started_at = CASE
+                WHEN current_session_id IS DISTINCT FROM $2 THEN now()
+                ELSE current_session_started_at
+            END,
+            last_heartbeat_at = now(),
+            status = 'active',
+            updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(builder_id)
+    .bind(builder_session_id)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to update builder session")?;
+
+    let recovered = sqlx::query_as::<_, BuildJob>(REQUEUE_BUILDER_ASSIGNED_BUILDING_JOBS_SQL)
+        .bind(builder_id)
+        .bind(reason)
+        .bind(builder_session_id)
+        .fetch_all(&mut *tx)
+        .await
+        .context("Failed to re-queue builder-assigned building jobs for stale session")?;
+
+    tx.commit()
+        .await
+        .context("Failed to commit builder session transaction")?;
+
+    Ok(recovered)
+}
 
 /// Re-queue jobs that were assigned to this builder in a previous process.
 ///
@@ -744,6 +847,7 @@ pub async fn requeue_builder_assigned_building_jobs_with_reason(
     let recovered = sqlx::query_as::<_, BuildJob>(REQUEUE_BUILDER_ASSIGNED_BUILDING_JOBS_SQL)
         .bind(builder_id)
         .bind(reason)
+        .bind(Option::<Uuid>::None)
         .fetch_all(pool)
         .await
         .context("Failed to re-queue builder-assigned building jobs")?;
@@ -851,6 +955,7 @@ pub async fn claim_next_job_atomic(
     max_concurrent_jobs: i32,
     environment_ids: &[Uuid],
     execution_strategy: RemoteBuildExecutionStrategy,
+    builder_session_id: Option<&Uuid>,
 ) -> Result<Option<BuildJob>> {
     // Start transaction for atomic count + claim
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
@@ -887,6 +992,7 @@ pub async fn claim_next_job_atomic(
             RemoteBuildExecutionStrategy::ServerDerivation => {
                 sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL)
                     .bind(builder_id)
+                    .bind(builder_session_id)
                     .fetch_optional(&mut *tx)
                     .await
                     .context("Failed to claim job (wildcard server_derivation) in transaction")?
@@ -895,6 +1001,7 @@ pub async fn claim_next_job_atomic(
                 sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL)
                     .bind(builder_id)
                     .bind(true)
+                    .bind(builder_session_id)
                     .fetch_optional(&mut *tx)
                     .await
                     .context(
@@ -909,6 +1016,7 @@ pub async fn claim_next_job_atomic(
                 sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL)
                     .bind(builder_id)
                     .bind(environment_ids)
+                    .bind(builder_session_id)
                     .fetch_optional(&mut *tx)
                     .await
                     .context("Failed to claim job (filtered server_derivation) in transaction")?
@@ -918,6 +1026,7 @@ pub async fn claim_next_job_atomic(
                     .bind(builder_id)
                     .bind(environment_ids)
                     .bind(true)
+                    .bind(builder_session_id)
                     .fetch_optional(&mut *tx)
                     .await
                     .context(
@@ -943,6 +1052,7 @@ pub async fn assign_job_to_builder(
         r#"
         UPDATE build_jobs
         SET builder_id = $2,
+            builder_session_id = NULL,
             status = 'building',
             started_at = now(),
             updated_at = now()
@@ -967,6 +1077,7 @@ pub async fn mark_job_complete(
     pool: &PgPool,
     job_id: &Uuid,
     builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
 ) -> Result<BuildJob> {
     let result = sqlx::query(
         r#"
@@ -976,11 +1087,13 @@ pub async fn mark_job_complete(
             updated_at = now()
         WHERE id = $1
           AND builder_id = $2
+          AND (builder_session_id IS NULL OR builder_session_id = $3)
           AND status = 'building'
         "#,
     )
     .bind(job_id)
     .bind(builder_id)
+    .bind(builder_session_id)
     .execute(pool)
     .await
     .context("Failed to mark job as complete")?;
@@ -1012,6 +1125,37 @@ pub async fn append_job_logs_with_limits(
     new_logs: &str,
     max_total_log_bytes: usize,
 ) -> Result<()> {
+    append_job_logs_with_limits_guarded(pool, job_id, None, None, new_logs, max_total_log_bytes)
+        .await
+}
+
+pub async fn append_job_logs_with_limits_for_builder(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+    new_logs: &str,
+    max_total_log_bytes: usize,
+) -> Result<()> {
+    append_job_logs_with_limits_guarded(
+        pool,
+        job_id,
+        Some(builder_id),
+        builder_session_id,
+        new_logs,
+        max_total_log_bytes,
+    )
+    .await
+}
+
+async fn append_job_logs_with_limits_guarded(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: Option<&Uuid>,
+    builder_session_id: Option<&Uuid>,
+    new_logs: &str,
+    max_total_log_bytes: usize,
+) -> Result<()> {
     let updated = sqlx::query_scalar::<_, Uuid>(
         r#"
         UPDATE build_jobs
@@ -1019,6 +1163,8 @@ pub async fn append_job_logs_with_limits(
             updated_at = now()
         WHERE id = $1
           AND status IN ('queued', 'building')
+          AND ($4::uuid IS NULL OR builder_id = $4)
+          AND (builder_session_id IS NULL OR builder_session_id = $5)
           AND OCTET_LENGTH(COALESCE(logs, '')) + OCTET_LENGTH($2) <= $3
         RETURNING id
         "#,
@@ -1026,6 +1172,8 @@ pub async fn append_job_logs_with_limits(
     .bind(job_id)
     .bind(new_logs)
     .bind(max_total_log_bytes as i64)
+    .bind(builder_id)
+    .bind(builder_session_id)
     .fetch_optional(pool)
     .await
     .context("Failed to append job logs with limits")?;
@@ -1243,6 +1391,7 @@ pub async fn mark_job_failed_with_retry(
     pool: &PgPool,
     job_id: &Uuid,
     builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
     error_message: Option<&str>,
 ) -> Result<BuildJob> {
     // First, get the current job state
@@ -1252,11 +1401,13 @@ pub async fn mark_job_failed_with_retry(
         FROM build_jobs
         WHERE id = $1
           AND builder_id = $2
+          AND (builder_session_id IS NULL OR builder_session_id = $3)
           AND status = 'building'
         "#,
     )
     .bind(job_id)
     .bind(builder_id)
+    .bind(builder_session_id)
     .fetch_optional(pool)
     .await
     .context("Failed to load owned building job for fail transition")?
@@ -1276,17 +1427,20 @@ pub async fn mark_job_failed_with_retry(
                 retry_count = retry_count + 1,
                 priority_weight = $2,
                 builder_id = NULL,
+                builder_session_id = NULL,
                 started_at = NULL,
                 created_at = now(),
                 updated_at = now()
             WHERE id = $1
               AND builder_id = $3
+              AND (builder_session_id IS NULL OR builder_session_id = $4)
               AND status = 'building'
             "#,
         )
         .bind(job_id)
         .bind(new_priority)
         .bind(builder_id)
+        .bind(builder_session_id)
         .execute(pool)
         .await
         .context("Failed to re-queue job for retry")?;
@@ -1310,11 +1464,13 @@ pub async fn mark_job_failed_with_retry(
                 updated_at = now()
             WHERE id = $1
               AND builder_id = $2
+              AND (builder_session_id IS NULL OR builder_session_id = $3)
               AND status = 'building'
             "#,
         )
         .bind(job_id)
         .bind(builder_id)
+        .bind(builder_session_id)
         .execute(pool)
         .await
         .context("Failed to mark job as permanently failed")?;
@@ -1451,6 +1607,7 @@ pub async fn finalize_cancelled_job(
     pool: &PgPool,
     job_id: &Uuid,
     builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
 ) -> Result<BuildJob> {
     let result = sqlx::query(
         r#"
@@ -1460,11 +1617,13 @@ pub async fn finalize_cancelled_job(
             updated_at   = now()
         WHERE id = $1
           AND builder_id = $2
+          AND (builder_session_id IS NULL OR builder_session_id = $3)
           AND status IN ('cancelling', 'cancelled')
         "#,
     )
     .bind(job_id)
     .bind(builder_id)
+    .bind(builder_session_id)
     .execute(pool)
     .await
     .context("Failed to finalize cancelled job")?;
@@ -1593,6 +1752,14 @@ mod tests {
         assert!(
             sql.contains("builder_id = NULL"),
             "startup recovery must clear stale builder ownership: {sql}"
+        );
+        assert!(
+            sql.contains("builder_session_id = NULL"),
+            "startup recovery must clear stale builder session ownership: {sql}"
+        );
+        assert!(
+            sql.contains("AND bj.builder_session_id IS DISTINCT FROM $3"),
+            "startup recovery must not requeue jobs owned by the current session: {sql}"
         );
         assert!(
             sql.contains("status = 'queued'"),
@@ -1874,6 +2041,7 @@ mod tests {
             builder.max_concurrent_jobs,
             &[],
             RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
         )
         .await
         .expect("Failed to claim next job")
@@ -1943,6 +2111,7 @@ mod tests {
             builder.max_concurrent_jobs,
             &[],
             RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
         )
         .await
         .expect("Failed to claim after prioritize")
@@ -2125,6 +2294,7 @@ mod tests {
                 builder_a.max_concurrent_jobs,
                 &[],
                 RemoteBuildExecutionStrategy::ServerDerivation,
+                None,
             ),
             claim_next_job_atomic(
                 &pool,
@@ -2132,6 +2302,7 @@ mod tests {
                 builder_b.max_concurrent_jobs,
                 &[],
                 RemoteBuildExecutionStrategy::ServerDerivation,
+                None,
             )
         );
 
@@ -2275,7 +2446,7 @@ mod tests {
         assert!(builder.last_heartbeat_at.is_none());
 
         // Update heartbeat
-        update_builder_heartbeat(&pool, &builder.id)
+        update_builder_heartbeat(&pool, &builder.id, None)
             .await
             .expect("Failed to update heartbeat");
 
@@ -2683,10 +2854,45 @@ mod tests {
     async fn test_requeue_builder_assigned_building_jobs_recovers_restart_stale_job() {
         let pool = queue_test_pool().await;
         let now = Utc::now();
+        let old_session = Uuid::new_v4();
+        let new_session = Uuid::new_v4();
+        let other_session = Uuid::new_v4();
 
         let restarting_builder =
             create_active_test_builder(&pool, "restart-recovery-builder").await;
         let other_builder = create_active_test_builder(&pool, "restart-other-builder").await;
+
+        sqlx::query(
+            r#"
+            UPDATE builders
+            SET current_session_id = $2,
+                current_session_started_at = now() - interval '10 minutes',
+                last_heartbeat_at = now() - interval '10 minutes',
+                status = 'active'
+            WHERE id = $1
+            "#,
+        )
+        .bind(restarting_builder.id)
+        .bind(old_session)
+        .execute(&pool)
+        .await
+        .expect("old restarting builder session should be recorded as stale");
+
+        sqlx::query(
+            r#"
+            UPDATE builders
+            SET current_session_id = $2,
+                current_session_started_at = now(),
+                last_heartbeat_at = now(),
+                status = 'active'
+            WHERE id = $1
+            "#,
+        )
+        .bind(other_builder.id)
+        .bind(other_session)
+        .execute(&pool)
+        .await
+        .expect("other builder session should remain active");
 
         let stale_job = create_queued_job(
             &pool,
@@ -2699,9 +2905,15 @@ mod tests {
             now,
         )
         .await;
-        assign_job_to_builder(&pool, &stale_job, &restarting_builder.id)
-            .await
-            .expect("stale job should be assigned to restarting builder");
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'building', builder_id = $2, builder_session_id = $3 WHERE id = $1",
+        )
+        .bind(stale_job)
+        .bind(restarting_builder.id)
+        .bind(old_session)
+        .execute(&pool)
+        .await
+        .expect("stale job should be assigned to old restarting session");
 
         let other_job = create_queued_job(
             &pool,
@@ -2714,13 +2926,21 @@ mod tests {
             now,
         )
         .await;
-        assign_job_to_builder(&pool, &other_job, &other_builder.id)
-            .await
-            .expect("other job should remain assigned to another active builder");
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'building', builder_id = $2, builder_session_id = $3 WHERE id = $1",
+        )
+        .bind(other_job)
+        .bind(other_builder.id)
+        .bind(other_session)
+        .execute(&pool)
+        .await
+        .expect("other job should remain assigned to another active builder session");
 
-        let recovered = requeue_builder_assigned_building_jobs_with_reason(
+        let recovered = establish_builder_session(
             &pool,
             &restarting_builder.id,
+            &new_session,
+            60,
             "builder startup recovery",
         )
         .await
@@ -2735,6 +2955,7 @@ mod tests {
             .expect("stale job should exist");
         assert_eq!(stale_row.status, "queued");
         assert_eq!(stale_row.builder_id, None);
+        assert_eq!(stale_row.builder_session_id, None);
         assert!(
             stale_row
                 .logs
@@ -2750,6 +2971,49 @@ mod tests {
             .expect("other job should exist");
         assert_eq!(other_row.status, "building");
         assert_eq!(other_row.builder_id, Some(other_builder.id));
+        assert_eq!(other_row.builder_session_id, Some(other_session));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_establish_builder_session_rejects_overlap_with_fresh_session() {
+        let pool = queue_test_pool().await;
+        let active_session = Uuid::new_v4();
+        let overlapping_session = Uuid::new_v4();
+        let builder = create_active_test_builder(&pool, "fresh-overlap-builder").await;
+
+        sqlx::query(
+            r#"
+            UPDATE builders
+            SET current_session_id = $2,
+                current_session_started_at = now(),
+                last_heartbeat_at = now(),
+                status = 'active'
+            WHERE id = $1
+            "#,
+        )
+        .bind(builder.id)
+        .bind(active_session)
+        .execute(&pool)
+        .await
+        .expect("fresh active builder session should be recorded");
+
+        let result = establish_builder_session(
+            &pool,
+            &builder.id,
+            &overlapping_session,
+            60,
+            "builder startup recovery",
+        )
+        .await;
+
+        assert!(
+            result
+                .expect_err("overlapping fresh session should be rejected")
+                .to_string()
+                .contains("active_builder_session_exists"),
+            "fresh active session should prevent unsafe recovery"
+        );
     }
 
     #[tokio::test]
@@ -2965,7 +3229,7 @@ mod tests {
             .await
             .expect("builder B should claim requeued job");
 
-        let stale_complete = mark_job_complete(&pool, &job_id, &builder_a.id).await;
+        let stale_complete = mark_job_complete(&pool, &job_id, &builder_a.id, None).await;
         assert!(
             stale_complete.is_err(),
             "stale builder A completion must be rejected"
@@ -3027,6 +3291,7 @@ mod tests {
             &pool,
             &job_id,
             &builder_a.id,
+            None,
             Some("late failure from stale builder"),
         )
         .await;
