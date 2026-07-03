@@ -3,7 +3,7 @@ id: TASK-377
 title: >-
   Implement ServerBundledArchive source delivery for verified source
   re-evaluation
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-03 15:49'
 updated_date: '2026-07-03 15:49'
@@ -48,6 +48,12 @@ Implement `SourceInputDeliveryMode::ServerBundledArchive` so the server provides
 - [ ] #8 Unit tests for the archive endpoint and builder extraction logic
 - [ ] #9 Existing source_re_evaluate_verified tests continue to pass with LocalGitWorktree unchanged
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.5 on gray in ~/code/crystal-forge/TASK-377-server-bundled-archive
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
