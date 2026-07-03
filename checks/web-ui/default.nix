@@ -444,7 +444,8 @@ in pkgs.testers.runNixOSTest {
     # Copy screenshots + visual reports out
     for r in results:
         if r.get("ok"):
-            machine.copy_from_vm(f"/tmp/screenshots/{r['name']}.png", "screenshots")
+            for visual in r.get("visuals", []):
+                machine.copy_from_vm(f"/tmp/screenshots/{visual['name']}.png", "screenshots")
 
     for report_file in ["results.json", "visual-report.json", "visual-summary.md"]:
         try:
