@@ -32,14 +32,21 @@ let
     set -euo pipefail
     base="$1"
 
+    normalize_asset_path() {
+      local p="$1"
+      p="''${p#./}"
+      p="''${p#/./}"
+      p="''${p#/}"
+      printf '%s' "$p"
+    }
+
     index=$(curl -sf "$base/") || { echo "FAIL: index.html not served"; exit 1; }
 
     js_path=$(printf '%s' "$index" | grep -oE '(src|href)="[^"]+\.js"' | head -1 | sed -E 's/^(src|href)="//; s/"$//')
     [ -n "$js_path" ] || { echo "FAIL: no JS loader reference in index.html"; exit 1; }
     case "$js_path" in
       http*) js_url="$js_path" ;;
-      /*) js_url="$base$js_path" ;;
-      *) js_url="$base/''${js_path#./}" ;;
+      *) js_url="$base/$(normalize_asset_path "$js_path")" ;;
     esac
 
     js=$(curl -sf "$js_url") || { echo "FAIL: JS loader $js_url not served"; exit 1; }
@@ -51,13 +58,14 @@ let
     [ -n "$wasm_ref" ] || { echo "FAIL: no .wasm reference found in loader or index"; exit 1; }
     case "$wasm_ref" in
       http*) wasm_url="$wasm_ref" ;;
-      /*) wasm_url="$base$wasm_ref" ;;
+      /*) wasm_url="$base/$(normalize_asset_path "$wasm_ref")" ;;
       *)
-        js_dir=$(dirname "''${js_path#./}")
+        js_dir=$(dirname "$(normalize_asset_path "$js_path")")
+        wasm_rel=$(normalize_asset_path "$wasm_ref")
         if [ "$js_dir" = "." ]; then
-          wasm_url="$base/''${wasm_ref#./}"
+          wasm_url="$base/$wasm_rel"
         else
-          wasm_url="$base/$js_dir/''${wasm_ref#./}"
+          wasm_url="$base/$js_dir/$wasm_rel"
         fi
         ;;
     esac
