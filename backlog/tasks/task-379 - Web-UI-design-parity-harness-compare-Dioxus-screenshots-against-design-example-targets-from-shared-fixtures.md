@@ -3,9 +3,10 @@ id: TASK-379
 title: >-
   Web UI design-parity harness: compare Dioxus screenshots against
   design-example targets from shared fixtures
-status: Backlog
+status: In Progress
 assignee: []
 created_date: '2026-07-03 20:03'
+updated_date: '2026-07-03 20:05'
 labels:
   - web-ui
   - ci
@@ -64,3 +65,9 @@ For now this MUST NOT fail the web-ui check; it is a non-blocking design-parity 
 - The real Dioxus web-ui check already pins viewport 1920x1080, UTC, en-US, and captures dark+light themed screenshots.
 - The Dioxus app must be backed by the same fixture data for the compared views; this likely requires routing the relevant API endpoints to fixture-derived responses in the harnessed steps (mirroring existing `page.route` mocks) so both sides render the same records.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-agent on this host in ~/code/crystal-forge/TASK-139-web-ui-check-optimization (implemented on the TASK-139 branch / MR !292 per user direction, since it extends the web-ui check under review there).
+<!-- SECTION:NOTES:END -->
