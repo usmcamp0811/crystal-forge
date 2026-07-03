@@ -251,7 +251,7 @@ const POLICY_CUSTOM = [
   },
 ];
 
-const POLICIES = [...POLICY_BUILTIN, ...POLICY_CUSTOM];
+const POLICIES = (typeof __fx === "function" && __fx("policies")) || [...POLICY_BUILTIN, ...POLICY_CUSTOM];
 
 // Per-policy usage rollup
 function policyUsage(policyId) {
