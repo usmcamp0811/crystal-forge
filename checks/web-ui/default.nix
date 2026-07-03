@@ -29,19 +29,18 @@ let
   # ── Design-parity harness (non-blocking) ────────────────────────────────────
   # Vendor the design example's CDN dependencies so the tracked design gold
   # standard (docs/design/CrystalForge) renders fully offline inside the check
-  # VM. The SRI hashes match the <script integrity=...> tags in
-  # crystal-forge.html.
+  # VM. sha256 hashes from nix-prefetch-url.
   reactUmd = pkgs.fetchurl {
     url = "https://unpkg.com/react@18.3.1/umd/react.development.js";
-    hash = "sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L";
+    sha256 = "0zsfq9pj3pbpiz9p6k6qflwd33s24kwflbdjxqn8pvdhdkpqyd18";
   };
   reactDomUmd = pkgs.fetchurl {
     url = "https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js";
-    hash = "sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm";
+    sha256 = "1r09hyz12n03w6fvcnv93ri0mv16wljgkpq4laqqpnrrkig4l17r";
   };
   babelStandalone = pkgs.fetchurl {
     url = "https://unpkg.com/@babel/standalone@7.29.0/babel.min.js";
-    hash = "sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y";
+    sha256 = "186f1mfjlcs49p0j0hss1m9cxpbpw9a12imli7kmr48953iaj8r6";
   };
 
   designExampleSrc = inputs.self + "/docs/design/CrystalForge";
