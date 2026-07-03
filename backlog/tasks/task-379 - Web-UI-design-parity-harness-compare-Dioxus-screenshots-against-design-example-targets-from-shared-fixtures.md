@@ -3,10 +3,10 @@ id: TASK-379
 title: >-
   Web UI design-parity harness: compare Dioxus screenshots against
   design-example targets from shared fixtures
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-07-03 20:03'
-updated_date: '2026-07-03 20:05'
+updated_date: '2026-07-03 20:17'
 labels:
   - web-ui
   - ci
@@ -18,12 +18,20 @@ labels:
 milestone: ui-views-system-detail
 dependencies: []
 references:
-  - checks/web-ui
+  - checks/web-ui/design-parity
   - docs/design/CrystalForge
   - docs/design/CrystalForge/fixtures/README.md
   - checks/web-ui/coverage-manifest.json
-  - checks/web-ui/design-fixtures.json
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/292'
+modified_files:
+  - docs/design/CrystalForge/app.jsx
+  - checks/web-ui/design-parity/manifest.json
+  - checks/web-ui/design-parity/generate-design-targets.js
+  - checks/web-ui/design-parity/compare-design-parity.js
+  - checks/web-ui/tests/integration-test.js
+  - checks/web-ui/default.nix
+  - .gitlab-ci.yml
+  - docs/web-ui-check.md
 priority: high
 ordinal: 323000
 ---
@@ -69,5 +77,19 @@ For now this MUST NOT fail the web-ui check; it is a non-blocking design-parity 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: opencode-agent on this host in ~/code/crystal-forge/TASK-139-web-ui-check-optimization (implemented on the TASK-139 branch / MR !292 per user direction, since it extends the web-ui check under review there).
+Implemented on the TASK-139 branch / MR !292 (commit ac7e3028).
+
+Design-parity harness (non-blocking):
+- Added a backward-compatible `?view=&theme=` (and `window.__CF_TARGET`) render hook to `docs/design/CrystalForge/app.jsx`; seeds initial topView/theme/density/sidebar and suppresses the setup coach overlay for clean parity screenshots. No behavior change when no params are provided.
+- Added `checks/web-ui/design-parity/manifest.json` mapping 13 primary views to (design example view name) + (real Dioxus route), themes dark+light, non-blocking, ImageMagick RMSE normalized compare (resizeWidth 960).
+- `generate-design-targets.js`: Playwright renders the offline design example per view/theme -> `<view>--<theme>.design.png`.
+- `compare-design-parity.js`: normalizes both sides (resize+flatten) and scores with `compare -metric RMSE`; writes `design-drift-report.json`, `design-drift-summary.md`, and side-by-side `montages/`. Wrapped so it never fails the check.
+- `integration-test.js`: new Phase capturing real Dioxus parity screenshots (`<view>--<theme>.dioxus.png`) by seeding `cf.ui.theme` then loading each route so the app applies its own theme via the real CF theme path.
+- `default.nix`: vendors React/ReactDOM/Babel via pinned `fetchurl` (SRI from crystal-forge.html) and builds an offline design bundle (`designExampleOffline`) with CDN <script> tags rewritten to local files, so the example renders with no network in the VM. Added Phase 4c to run generator + comparison and copy artifacts (report, summary, montages, design-targets, design-parity) into $out/screenshots. Non-blocking.
+- `.gitlab-ci.yml`: MR comment now prepends the design-drift summary and uploads up to 26 montages.
+- Documented the harness in `docs/web-ui-check.md`.
+
+Lightweight validation only (no heavy builds per instruction): nix-instantiate --parse, node --check on all JS, manifest JSON parse, git diff --check — all pass.
+
+Pending: authoritative MR !292 `flake-check: [web-ui]` run to confirm the offline design example renders and the drift metric/montages are produced. First-iteration scope note: Dioxus captures currently use the app's own route rendering (real backend/seeded data); exact byte-for-byte fixture alignment of the Dioxus side (routing APIs to fixture-derived responses) is a candidate follow-up refinement.
 <!-- SECTION:NOTES:END -->
