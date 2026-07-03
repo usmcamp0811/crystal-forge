@@ -1,10 +1,11 @@
 ---
 id: TASK-378
 title: Harden Agent Observability and Configurable Heartbeat Reliability
-status: Backlog
+status: To Do
 assignee:
   - '@ai-agent'
 created_date: '2026-07-03 16:39'
+updated_date: '2026-07-03 16:56'
 labels:
   - agents
   - heartbeat
