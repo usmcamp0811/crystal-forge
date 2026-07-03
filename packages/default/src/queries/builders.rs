@@ -1150,27 +1150,30 @@ pub async fn mark_job_complete(
 /// transition either both succeed or both roll back.
 ///
 /// **Idempotent**: If the job is already `'success'` with matching builder+session,
-/// this returns `Ok` without modifying anything. This allows safe retry by the
-/// caller after a transient failure in a prior attempt.
+/// this returns `Ok((job, false))` without modifying anything. Ownership is validated
+/// before the idempotent check so a superseded builder cannot supply a different
+/// `store_path` and queue a bogus cache push.
 ///
-/// After commit, the caller should perform best-effort cache-push queueing
-/// (not included here).
+/// The returned boolean is `true` when this call performed a new transition
+/// (`building → success`). The caller should only queue best-effort cache-push side
+/// effects when `true`; idempotent retries reuse the originally persisted store path
+/// and must not accept a newly supplied request path.
 pub async fn complete_job_atomic(
     pool: &PgPool,
     job_id: &Uuid,
     builder_id: &Uuid,
     builder_session_id: Option<&Uuid>,
     store_path: Option<&str>,
-) -> Result<BuildJob> {
+) -> Result<(BuildJob, bool)> {
     let mut tx = pool
         .begin()
         .await
         .context("Failed to begin completion transaction")?;
 
-    // Lock the job row and check current status for idempotency guard.
-    let (derivation_id, status) = sqlx::query_as::<_, (i32, String)>(
+    // Lock the job row and read all fields needed for ownership validation.
+    let row = sqlx::query_as::<_, (i32, String, Option<Uuid>, Option<Uuid>)>(
         r#"
-        SELECT derivation_id, status
+        SELECT derivation_id, status, builder_id, builder_session_id
         FROM build_jobs
         WHERE id = $1
         FOR UPDATE
@@ -1182,14 +1185,30 @@ pub async fn complete_job_atomic(
     .context("Failed to lock job for completion")?
     .ok_or_else(|| anyhow::anyhow!("Build job not found"))?;
 
+    let (derivation_id, status, job_builder_id, job_session_id) = row;
+
+    // Validate builder ownership BEFORE any status check. This prevents a
+    // superseded or unrelated builder from exploiting the idempotent path
+    // to queue a cache push with a different store path.
+    if job_builder_id != Some(*builder_id) {
+        bail!("Build job not owned by this builder");
+    }
+    match (job_session_id, builder_session_id) {
+        (None, None) => {}              // legacy sessionless match
+        (Some(j), Some(b)) if j == *b => {} // exact session match
+        _ => bail!("Builder session mismatch"),
+    }
+
     if status == "success" {
-        // Idempotent: already completed. No need to touch derivations again.
+        // Idempotent: already completed by this exact builder+session.
+        // Return false so the caller knows not to queue a new cache push.
         tx.commit()
             .await
             .context("Failed to commit idempotent completion transaction")?;
-        return get_build_job_by_id(pool, job_id)
+        let job = get_build_job_by_id(pool, job_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Build job disappeared on idempotent completion"));
+            .ok_or_else(|| anyhow::anyhow!("Build job disappeared on idempotent completion"))?;
+        return Ok((job, false));
     }
 
     if status != "building" {
@@ -1197,6 +1216,7 @@ pub async fn complete_job_atomic(
     }
 
     // Guarded transition: job must be 'building' and owned by builder+session.
+    // Uses exact session matching (same semantics as claims and heartbeats).
     let updated = sqlx::query_as::<_, (i32,)>(
         r#"
         UPDATE build_jobs
@@ -1205,7 +1225,10 @@ pub async fn complete_job_atomic(
             updated_at = now()
         WHERE id = $1
           AND builder_id = $2
-          AND (builder_session_id IS NULL OR builder_session_id = $3)
+          AND (
+                (builder_session_id IS NULL AND $3::uuid IS NULL)
+                OR builder_session_id = $3
+          )
           AND status = 'building'
         RETURNING derivation_id
         "#,
@@ -1240,7 +1263,7 @@ pub async fn complete_job_atomic(
         .await?
         .ok_or_else(|| anyhow::anyhow!("Build job disappeared after completion"))?;
 
-    Ok(job)
+    Ok((job, true))
 }
 
 /// Append logs to a job

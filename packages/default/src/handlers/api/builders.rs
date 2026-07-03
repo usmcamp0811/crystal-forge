@@ -1947,8 +1947,9 @@ pub async fn complete_job(
 
     // Perform atomic completion (job + derivation update in one transaction).
     // Idempotent: if the job is already 'success' with matching builder+session,
-    // this is a safe no-op (allows retry after transient failure).
-    let completed_job = builders::complete_job_atomic(
+    // this is a safe no-op. The returned bool indicates whether this was a new
+    // completion (true) or an idempotent retry (false).
+    let (completed_job, is_new) = builders::complete_job_atomic(
         &state.pool,
         &job_id,
         &builder_id,
@@ -1966,28 +1967,32 @@ pub async fn complete_job(
         StatusCode::CONFLICT
     })?;
 
-    // Best-effort cache-push queueing after atomic commit.
-    if let Some(ref store_path) = request.output_path {
-        let cache_destination =
-            crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
-                .await
-                .ok()
-                .and_then(|dests| dests.into_iter().next().map(|d| d.name));
+    // Best-effort cache-push queueing only for new completions.
+    // Idempotent retries use the originally persisted store path and must not
+    // queue a new push from a potentially different request path.
+    if is_new {
+        if let Some(ref store_path) = request.output_path {
+            let cache_destination =
+                crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
+                    .await
+                    .ok()
+                    .and_then(|dests| dests.into_iter().next().map(|d| d.name));
 
-        if let Err(e) = crate::queries::cache_push::create_cache_push_job(
-            &state.pool,
-            completed_job.derivation_id,
-            store_path,
-            cache_destination.as_deref(),
-        )
-        .await
-        {
-            tracing::warn!(
-                "Failed to queue cache push for derivation {} (job {}): {}",
+            if let Err(e) = crate::queries::cache_push::create_cache_push_job(
+                &state.pool,
                 completed_job.derivation_id,
-                job_id,
-                e
-            );
+                store_path,
+                cache_destination.as_deref(),
+            )
+            .await
+            {
+                tracing::warn!(
+                    "Failed to queue cache push for derivation {} (job {}): {}",
+                    completed_job.derivation_id,
+                    job_id,
+                    e
+                );
+            }
         }
     }
 
