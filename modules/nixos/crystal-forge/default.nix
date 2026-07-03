@@ -41,6 +41,7 @@
           eval_check_cache = cfg.server.eval_check_cache;
           allow_private_cache_test_targets =
             cfg.server.allow_private_cache_test_targets;
+          remote_build_execution_strategy = cfg.build.remote_execution_strategy;
         }
         // lib.optionalAttrs (cfg.server.role_mapping != {}) {
           role_mapping = cfg.server.role_mapping;
@@ -131,7 +132,13 @@
     }
     // lib.optionalAttrs cfg.build.enable {
       builder =
-        {enable_api_mode = cfg.build.api_mode;}
+        {
+          enable_api_mode = cfg.build.api_mode;
+          supported_execution_strategies = cfg.build.supported_execution_strategies;
+          source_mirror_root = toString cfg.build.source_mirror_root;
+          source_worktree_root = toString cfg.build.source_worktree_root;
+          cleanup_source_worktrees = cfg.build.cleanup_source_worktrees;
+        }
         // lib.optionalAttrs cfg.build.api_mode {
           private_key_path =
             if cfg.build.api_key_file != null
@@ -1040,6 +1047,67 @@ in {
           **Note**: Builder API mode is required.
         '';
         example = "https://crystal-forge.example.com";
+      };
+
+      remote_execution_strategy = lib.mkOption {
+        type = lib.types.enum ["server_derivation" "source_re_evaluate_verified"];
+        default = "server_derivation";
+        description = lib.mdDoc ''
+          Default remote build execution strategy for API builders.
+
+          - `server_derivation` (default): the server evaluates and provides the
+            authoritative `.drv`; the builder realizes it via cache/closure
+            transport.
+          - `source_re_evaluate_verified`: the server records the expected
+            toplevel `.drvPath`; the builder evaluates immutable source from a
+            local Git worktree (created from a bare mirror at the exact
+            authorized commit) and only builds when its locally evaluated
+            `.drvPath` matches the server-authorized value. Builders must be
+            configured with source access before selecting this strategy.
+
+          Builders must advertise support for whichever strategy is selected via
+          `supported_execution_strategies`.
+        '';
+      };
+
+      supported_execution_strategies = lib.mkOption {
+        type = lib.types.listOf (
+          lib.types.enum ["server_derivation" "source_re_evaluate_verified"]
+        );
+        default = ["server_derivation"];
+        description = lib.mdDoc ''
+          Remote build strategies this builder will accept. Jobs using a strategy
+          not listed here are rejected explicitly (no silent fallback).
+        '';
+        example = ["server_derivation" "source_re_evaluate_verified"];
+      };
+
+      source_mirror_root = lib.mkOption {
+        type = lib.types.path;
+        default = "/var/lib/crystal-forge/flake-mirrors";
+        description = lib.mdDoc ''
+          Root directory containing local bare Git mirrors used by verified
+          source re-evaluation builds. Colocated server/builder deployments may
+          share this root to avoid duplicate clones.
+        '';
+      };
+
+      source_worktree_root = lib.mkOption {
+        type = lib.types.path;
+        default = "/var/lib/crystal-forge/flake-worktrees";
+        description = lib.mdDoc ''
+          Root directory containing detached Git worktrees checked out at exact
+          authorized commit SHAs for verified source re-evaluation builds.
+        '';
+      };
+
+      cleanup_source_worktrees = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = lib.mdDoc ''
+          Remove detached source worktrees under `source_worktree_root` after a
+          build and its reporting/cache-push lifecycle complete.
+        '';
       };
     };
 

@@ -11,7 +11,7 @@ use axum::{
         Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose};
@@ -19,6 +19,7 @@ use bytes::Bytes;
 use ed25519_dalek::{Signature, Verifier};
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -31,15 +32,18 @@ use crate::handlers::builder_request::{
 };
 use crate::models::builders::{
     AppendLogsRequest, BuildJob, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary,
-    BuilderWithEnvironments, CreateBuilderRequest, KeypairRegeneratedResponse,
-    ReportMetricsRequest, ResolveBuilderIdRequest, ResolveBuilderIdResponse,
-    UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
+    BuilderWithEnvironments, CreateBuilderRequest, EstablishBuilderSessionRequest,
+    EstablishBuilderSessionResponse, EvaluatorFingerprint, KeypairRegeneratedResponse,
+    NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
+    ResolveBuilderIdResponse, SourceInputDeliveryMode, UpdateBuilderEnvironmentsRequest,
+    UpdateBuilderPublicKeyRequest, UpdateBuilderRequest, VerifiedSourceIdentity,
 };
 use crate::models::public_key::PublicKey;
 use crate::queries::builders;
 
 const NIX_STORE_EXPORT_ARG_BYTES_LIMIT: usize = 128 * 1024;
 const ATTIC_PUSH_PATH_CHUNK_SIZE: usize = 200;
+const BUILDER_SESSION_STALE_TIMEOUT_SECS: i64 = 60;
 
 fn parse_derivation_requisites(stdout: &[u8], drv_path: &str) -> Vec<String> {
     let mut paths = Vec::new();
@@ -172,6 +176,99 @@ async fn resolve_cache_destinations_for_derivation(
 
     destinations.retain(|destination| destination.enabled);
     Ok(destinations)
+}
+
+async fn verified_source_identity_for_derivation(
+    pool: &sqlx::PgPool,
+    derivation: &crate::derivations::Derivation,
+) -> anyhow::Result<Option<VerifiedSourceIdentity>> {
+    let Some(commit_id) = derivation.commit_id else {
+        return Ok(None);
+    };
+    let commit = crate::queries::commits::get_commit_by_id(pool, commit_id).await?;
+
+    let flake = crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await?;
+
+    let mirror_id = source_mirror_id(&flake.repo_url);
+
+    Ok(Some(VerifiedSourceIdentity {
+        repo_url: flake.repo_url,
+        commit_hash: commit.git_commit_hash,
+        flake_target: source_flake_target_for_derivation(derivation),
+        mirror_id: Some(mirror_id),
+        mirror_path: None,
+        worktree_path: None,
+        lock_hash: None,
+        archive_url: None,
+        archive_sha256: None,
+    }))
+}
+
+fn current_evaluator_fingerprint() -> EvaluatorFingerprint {
+    EvaluatorFingerprint {
+        nix_version: std::env::var("NIX_VERSION").unwrap_or_else(|_| "unknown".to_string()),
+        pure_eval: true,
+        lockfile_mutation_allowed: false,
+    }
+}
+
+fn source_flake_target_for_derivation(derivation: &crate::derivations::Derivation) -> String {
+    let target = derivation
+        .derivation_target
+        .as_deref()
+        .and_then(|target| target.split_once('#').map(|(_, attr)| attr.to_string()))
+        .or_else(|| derivation.derivation_target.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "nixosConfigurations.{}.config.system.build.toplevel",
+                derivation.derivation_name
+            )
+        });
+
+    if matches!(
+        derivation.derivation_type,
+        crate::derivations::DerivationType::NixOS
+    ) && target.starts_with("nixosConfigurations.")
+        && !target.contains(".config.system.build.toplevel")
+    {
+        format!("{target}.config.system.build.toplevel")
+    } else {
+        target
+    }
+}
+
+fn source_mirror_id(repo_url: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(repo_url.as_bytes());
+    let short = digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("repo-{short}")
+}
+
+fn parse_next_job_request(body: &[u8]) -> Result<NextJobRequest, StatusCode> {
+    if body.is_empty() {
+        return Ok(legacy_next_job_request());
+    }
+
+    serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+fn legacy_next_job_request() -> NextJobRequest {
+    NextJobRequest {
+        protocol_version: 1,
+        supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
+    }
+}
+
+fn next_job_request_for_method(method: &Method, body: &[u8]) -> Result<NextJobRequest, StatusCode> {
+    if *method == Method::GET {
+        return Ok(legacy_next_job_request());
+    }
+
+    parse_next_job_request(body)
 }
 
 fn apply_cache_destination_env(
@@ -404,7 +501,125 @@ pub async fn resolve_builder_id(
         "resolved builder ID from public key"
     );
 
-    Ok(Json(ResolveBuilderIdResponse { builder_id }))
+    let Some(session_id) = request.session_id else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Builder session_id is required".to_string(),
+        ));
+    };
+
+    let recovered_jobs = builders::establish_builder_session(
+        &state.pool,
+        &builder_id,
+        &session_id,
+        BUILDER_SESSION_STALE_TIMEOUT_SECS,
+        "builder startup recovery",
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(
+            builder_id = %builder_id,
+            error = %e,
+            "failed to establish builder session during startup"
+        );
+        let message = e.to_string();
+        if message.contains("active_builder_session_exists") {
+            return (StatusCode::CONFLICT, message);
+        }
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to establish builder session".to_string(),
+        )
+    })?;
+
+    if !recovered_jobs.is_empty() {
+        tracing::warn!(
+            builder_id = %builder_id,
+            recovered_jobs = recovered_jobs.len(),
+            "re-queued builder-assigned building jobs during builder startup"
+        );
+    }
+
+    Ok(Json(ResolveBuilderIdResponse {
+        builder_id,
+        session_id: Some(session_id),
+    }))
+}
+
+/// POST /api/v1/builders/:id/session - Establish a process/session for a configured builder ID.
+pub async fn establish_builder_session(
+    State(state): State<CFState>,
+    Path(builder_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<EstablishBuilderSessionResponse>, (StatusCode, String)> {
+    let path = format!("/api/v1/builders/{}/session", builder_id);
+    let verified = authenticate_builder_request_allow_inactive(
+        &headers,
+        body.clone(),
+        "POST",
+        &path,
+        &state.pool,
+    )
+    .await
+    .map_err(|status| (status, "Builder authentication failed".to_string()))?;
+
+    if verified.builder_id != builder_id {
+        return Err((StatusCode::FORBIDDEN, "Builder ID mismatch".to_string()));
+    }
+
+    let request: EstablishBuilderSessionRequest = serde_json::from_slice(&body).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid builder session request".to_string(),
+        )
+    })?;
+
+    if verified.builder_session_id != Some(request.session_id) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Builder session header does not match request body".to_string(),
+        ));
+    }
+
+    let recovered_jobs = builders::establish_builder_session(
+        &state.pool,
+        &builder_id,
+        &request.session_id,
+        BUILDER_SESSION_STALE_TIMEOUT_SECS,
+        "builder startup recovery",
+    )
+    .await
+    .map_err(|e| {
+        let message = e.to_string();
+        if message.contains("active_builder_session_exists") {
+            (StatusCode::CONFLICT, message)
+        } else {
+            tracing::error!(builder_id = %builder_id, error = %e, "failed to establish builder session");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to establish builder session".to_string(),
+            )
+        }
+    })?;
+
+    Ok(Json(EstablishBuilderSessionResponse {
+        builder_id,
+        session_id: request.session_id,
+        recovered_jobs: recovered_jobs.len(),
+    }))
+}
+
+fn builder_owns_job_session(
+    job: &BuildJob,
+    builder_id: Uuid,
+    builder_session_id: Option<Uuid>,
+) -> bool {
+    job.builder_id == Some(builder_id)
+        && match job.builder_session_id {
+            Some(job_session_id) => builder_session_id == Some(job_session_id),
+            None => true,
+        }
 }
 
 fn builder_id_for_resolved_builder(builder: Option<Builder>) -> Result<Uuid, (StatusCode, String)> {
@@ -948,21 +1163,26 @@ pub async fn finalize_cancelled_job(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(builder_id) {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id) {
         return Err(StatusCode::FORBIDDEN);
     }
 
-    builders::finalize_cancelled_job(&state.pool, &job_id, &builder_id)
-        .await
-        .map_err(|err| {
-            tracing::warn!(
-                builder_id = %builder_id,
-                job_id = %job_id,
-                error = %err,
-                "Rejected finalize-cancelled transition due to lease/state mismatch"
-            );
-            StatusCode::CONFLICT
-        })?;
+    builders::finalize_cancelled_job(
+        &state.pool,
+        &job_id,
+        &builder_id,
+        verified.builder_session_id.as_ref(),
+    )
+    .await
+    .map_err(|err| {
+        tracing::warn!(
+            builder_id = %builder_id,
+            job_id = %job_id,
+            error = %err,
+            "Rejected finalize-cancelled transition due to lease/state mismatch"
+        );
+        StatusCode::CONFLICT
+    })?;
 
     cleanup_build_log_channel(&state, job_id).await;
     Ok(StatusCode::OK)
@@ -1111,9 +1331,13 @@ pub async fn builder_heartbeat(
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // Update heartbeat timestamp (marks builder as active)
-    builders::update_builder_heartbeat(&state.pool, &builder_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    builders::update_builder_heartbeat(
+        &state.pool,
+        &builder_id,
+        verified.builder_session_id.as_ref(),
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Record metrics
     builders::record_builder_metrics(&state.pool, &builder_id, &metrics)
@@ -1125,7 +1349,7 @@ pub async fn builder_heartbeat(
         message: "Heartbeat recorded".to_string(),
     }))
 }
-/// GET /api/v1/builders/:id/next-job - Get next job for builder
+/// GET/POST /api/v1/builders/:id/next-job - Get next job for builder
 ///
 /// This endpoint implements the load-based job assignment logic:
 /// 1. Filter jobs by builder's environment assignments (or all if no assignments)
@@ -1134,12 +1358,15 @@ pub async fn builder_heartbeat(
 pub async fn get_next_job(
     State(state): State<CFState>,
     Path(builder_id): Path<Uuid>,
+    method: Method,
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<Json<crate::models::builders::NextJobResponse>, StatusCode> {
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/next-job", builder_id);
-    let verified = authenticate_builder_request(&headers, body, "GET", &path, &state.pool).await?;
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), method.as_str(), &path, &state.pool)
+            .await?;
 
     // Verify the builder_id matches
     if verified.builder_id != builder_id {
@@ -1156,6 +1383,21 @@ pub async fn get_next_job(
         return Err(StatusCode::NOT_FOUND);
     }
 
+    let next_job_request = next_job_request_for_method(&method, &body)?;
+    let execution_strategy = state.server_config.remote_build_execution_strategy;
+    if !next_job_request
+        .supported_execution_strategies
+        .contains(&execution_strategy)
+    {
+        tracing::warn!(
+            builder_id = %builder_id,
+            ?execution_strategy,
+            supported = ?next_job_request.supported_execution_strategies,
+            "builder does not support configured remote execution strategy; returning 409 Conflict"
+        );
+        return Err(StatusCode::CONFLICT);
+    }
+
     // Get builder's environment assignments (empty = wildcard)
     let environment_ids = builders::get_builder_environment_ids(&state.pool, &builder_id)
         .await
@@ -1169,11 +1411,22 @@ pub async fn get_next_job(
         &builder_id,
         builder.max_concurrent_jobs,
         &environment_ids,
+        execution_strategy,
+        verified.builder_session_id.as_ref(),
     )
     .await
     .map_err(|e| {
-        tracing::error!("Failed to claim job atomically: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
+        if e.to_string().contains("builder_session_mismatch") {
+            tracing::warn!(
+                builder_id = %builder_id,
+                error = %e,
+                "rejected next-job claim from superseded builder session (410 Gone)"
+            );
+            StatusCode::GONE
+        } else {
+            tracing::error!("Failed to claim job atomically: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
     })?;
 
     let Some(job) = job else {
@@ -1184,17 +1437,79 @@ pub async fn get_next_job(
 
     // Embed the derivation build payload so the remote builder needs no DB access.
     let derivation =
-        crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+        match crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
             .await
-            .map_err(|e| {
+        {
+            Ok(derivation) => derivation,
+            Err(e) => {
                 tracing::error!(
                     "Failed to load derivation {} for claimed job {}: {}",
                     job.derivation_id,
                     job.id,
                     e
                 );
+                requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+                    .await
+                    .map_err(|err| {
+                        tracing::error!(
+                            job_id = %job.id,
+                            "failed to requeue job after derivation load error: {err}"
+                        );
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?;
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        };
+
+    let source = match verified_source_identity_for_derivation(&state.pool, &derivation).await {
+        Ok(source) => source,
+        Err(e) => {
+            tracing::error!(
+                job_id = %job.id,
+                derivation_id = derivation.id,
+                "failed to assemble verified source identity; requeueing claimed job: {e}"
+            );
+            requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+                .await
+                .map_err(|err| {
+                    tracing::error!(
+                        job_id = %job.id,
+                        "failed to requeue job after source identity assembly error: {err}"
+                    );
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    let expected_drv_path = derivation.derivation_path.clone();
+    let source_input_delivery = match execution_strategy {
+        RemoteBuildExecutionStrategy::ServerDerivation => SourceInputDeliveryMode::None,
+        RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
+            SourceInputDeliveryMode::LocalGitWorktree
+        }
+    };
+
+    if execution_strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
+        && (source.is_none() || expected_drv_path.is_none())
+    {
+        tracing::error!(
+            job_id = %job.id,
+            derivation_id = derivation.id,
+            has_source = source.is_some(),
+            has_expected_drv_path = expected_drv_path.is_some(),
+            "claimed source-verified job is missing required manifest metadata; requeueing"
+        );
+        requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    job_id = %job.id,
+                    "failed to requeue job after manifest assembly error: {e}"
+                );
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     let payload = crate::models::builders::BuildJobDerivation {
         id: derivation.id,
@@ -1205,12 +1520,42 @@ pub async fn get_next_job(
         },
         derivation_path: derivation.derivation_path.clone(),
         store_path: derivation.store_path.clone(),
+        execution_strategy,
+        source,
+        source_input_delivery,
+        expected_drv_path,
+        evaluator: Some(current_evaluator_fingerprint()),
     };
 
     Ok(Json(crate::models::builders::NextJobResponse {
         job,
         derivation: payload,
     }))
+}
+
+async fn requeue_claimed_job_after_manifest_error(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE build_jobs
+        SET status = 'queued',
+            builder_id = NULL,
+            started_at = NULL,
+            updated_at = NOW()
+        WHERE id = $1
+          AND builder_id = $2
+          AND status = 'building'
+        "#,
+    )
+    .bind(job_id)
+    .bind(builder_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/progress - Build progress heartbeat
@@ -1239,7 +1584,7 @@ pub async fn build_progress(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(builder_id) {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id) {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -1260,6 +1605,8 @@ pub async fn build_progress(
 pub struct JobStatusRequest {
     #[serde(default)]
     pub status: Option<String>,
+    #[serde(default)]
+    pub failure_phase: Option<String>,
     pub error_message: Option<String>,
 }
 
@@ -1267,6 +1614,7 @@ fn parse_job_status_request(body: &[u8]) -> Result<JobStatusRequest, serde_json:
     if body.is_empty() {
         return Ok(JobStatusRequest {
             status: None,
+            failure_phase: None,
             error_message: None,
         });
     }
@@ -1277,7 +1625,16 @@ fn parse_job_status_request(body: &[u8]) -> Result<JobStatusRequest, serde_json:
 fn fallback_job_status_request_for_invalid_details() -> JobStatusRequest {
     JobStatusRequest {
         status: None,
+        failure_phase: Some("build".to_string()),
         error_message: Some("builder reported failure with invalid failure details".to_string()),
+    }
+}
+
+fn format_failure_message(request: &JobStatusRequest) -> Option<String> {
+    let message = request.error_message.clone()?;
+    match request.failure_phase.as_deref() {
+        Some(phase) if !phase.trim().is_empty() => Some(format!("[{phase}] {message}")),
+        _ => Some(message),
     }
 }
 
@@ -1310,7 +1667,9 @@ pub async fn download_job_derivation_archive(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(builder_id) || job.status != "building" {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id)
+        || job.status != "building"
+    {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -1450,7 +1809,9 @@ pub async fn publish_job_derivation_closure(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(builder_id) || job.status != "building" {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id)
+        || job.status != "building"
+    {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -1543,7 +1904,7 @@ pub async fn start_job(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(builder_id) {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id) {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -1584,69 +1945,56 @@ pub async fn complete_job(
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?
     };
 
-    // Verify the job is assigned to this builder
-    let job = builders::get_build_job_by_id(&state.pool, &job_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    // Perform atomic completion (job + derivation update in one transaction).
+    // Idempotent: if the job is already 'success' with matching builder+session,
+    // this is a safe no-op. The returned bool indicates whether this was a new
+    // completion (true) or an idempotent retry (false).
+    let (completed_job, is_new) = builders::complete_job_atomic(
+        &state.pool,
+        &job_id,
+        &builder_id,
+        verified.builder_session_id.as_ref(),
+        request.output_path.as_deref(),
+    )
+    .await
+    .map_err(|err| {
+        tracing::warn!(
+            builder_id = %builder_id,
+            job_id = %job_id,
+            error = %err,
+            "Rejected complete transition due to lease/state mismatch"
+        );
+        StatusCode::CONFLICT
+    })?;
 
-    if job.builder_id != Some(builder_id) {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    // Best-effort cache-push queueing only for new completions.
+    // Idempotent retries use the originally persisted store path and must not
+    // queue a new push from a potentially different request path.
+    if is_new {
+        if let Some(ref store_path) = request.output_path {
+            let cache_destination =
+                crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
+                    .await
+                    .ok()
+                    .and_then(|dests| dests.into_iter().next().map(|d| d.name));
 
-    // Perform derivation completion + cache-push queueing server-side.
-    if let Some(ref store_path) = request.output_path {
-        if let Err(e) = crate::queries::derivations::mark_target_build_complete(
-            &state.pool,
-            job.derivation_id,
-            store_path,
-        )
-        .await
-        {
-            tracing::error!(
-                "Failed to mark derivation {} complete for job {}: {}",
-                job.derivation_id,
-                job_id,
-                e
-            );
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            if let Err(e) = crate::queries::cache_push::create_cache_push_job(
+                &state.pool,
+                completed_job.derivation_id,
+                store_path,
+                cache_destination.as_deref(),
+            )
+            .await
+            {
+                tracing::warn!(
+                    "Failed to queue cache push for derivation {} (job {}): {}",
+                    completed_job.derivation_id,
+                    job_id,
+                    e
+                );
+            }
         }
-
-        let cache_destination =
-            crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
-                .await
-                .ok()
-                .and_then(|dests| dests.into_iter().next().map(|d| d.name));
-
-        if let Err(e) = crate::queries::cache_push::create_cache_push_job(
-            &state.pool,
-            job.derivation_id,
-            store_path,
-            cache_destination.as_deref(),
-        )
-        .await
-        {
-            tracing::warn!(
-                "Failed to queue cache push for derivation {} (job {}): {}",
-                job.derivation_id,
-                job_id,
-                e
-            );
-        }
     }
-
-    // Mark job as complete
-    builders::mark_job_complete(&state.pool, &job_id, &builder_id)
-        .await
-        .map_err(|err| {
-            tracing::warn!(
-                builder_id = %builder_id,
-                job_id = %job_id,
-                error = %err,
-                "Rejected complete transition due to lease/state mismatch"
-            );
-            StatusCode::CONFLICT
-        })?;
 
     cleanup_build_log_channel(&state, job_id).await;
 
@@ -1691,16 +2039,19 @@ pub async fn fail_job(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(builder_id) {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id) {
         return Err(StatusCode::FORBIDDEN);
     }
+
+    let failure_message = format_failure_message(&request);
 
     // Mark job as failed with retry logic
     let updated_job = builders::mark_job_failed_with_retry(
         &state.pool,
         &job_id,
         &builder_id,
-        request.error_message.as_deref(),
+        verified.builder_session_id.as_ref(),
+        failure_message.as_deref(),
     )
     .await
     .map_err(|err| {
@@ -1724,8 +2075,7 @@ pub async fn fail_job(
         {
             Ok(derivation) => {
                 let err = anyhow::anyhow!(
-                    request
-                        .error_message
+                    failure_message
                         .clone()
                         .unwrap_or_else(|| "build failed".to_string())
                 );
@@ -1833,7 +2183,7 @@ pub async fn append_job_logs(
             "Build job not found for log append".to_string(),
         ))?;
 
-    if job.builder_id != Some(builder_id) {
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id) {
         return Err((
             StatusCode::FORBIDDEN,
             "Builder cannot append logs for a job assigned to another builder".to_string(),
@@ -1852,32 +2202,39 @@ pub async fn append_job_logs(
     }
 
     // Append logs with per-job size cap enforcement.
-    builders::append_job_logs_with_limits(&state.pool, &job_id, &request.logs, max_total_bytes)
-        .await
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("log_size_limit_exceeded") {
-                (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    format!("Total job logs would exceed {} byte limit", max_total_bytes),
-                )
-            } else if msg.contains("invalid_job_status") {
-                (
-                    StatusCode::CONFLICT,
-                    "Cannot append logs for job in current status".to_string(),
-                )
-            } else if msg.contains("job_not_found") {
-                (
-                    StatusCode::NOT_FOUND,
-                    "Build job not found for log append".to_string(),
-                )
-            } else {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to append logs due to internal server error".to_string(),
-                )
-            }
-        })?;
+    builders::append_job_logs_with_limits_for_builder(
+        &state.pool,
+        &job_id,
+        &builder_id,
+        verified.builder_session_id.as_ref(),
+        &request.logs,
+        max_total_bytes,
+    )
+    .await
+    .map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("log_size_limit_exceeded") {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("Total job logs would exceed {} byte limit", max_total_bytes),
+            )
+        } else if msg.contains("invalid_job_status") {
+            (
+                StatusCode::CONFLICT,
+                "Cannot append logs for job in current status".to_string(),
+            )
+        } else if msg.contains("job_not_found") {
+            (
+                StatusCode::NOT_FOUND,
+                "Build job not found for log append".to_string(),
+            )
+        } else {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to append logs due to internal server error".to_string(),
+            )
+        }
+    })?;
 
     if let Some(tx) = get_or_create_build_log_channel(&state, job_id).await {
         let log_msg = BuildStreamMessage::Log {
@@ -1905,6 +2262,7 @@ pub async fn append_job_logs(
 const BUILD_LOG_WS_CHANNEL_BUFFER: usize = 1024;
 const MAX_BUILD_LOG_WS_CHANNELS: usize = 2048;
 const BUILD_LOG_HISTORY_BUFFER: usize = 4000;
+const PERSISTED_BUILD_LOG_REPLAY_CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -1934,7 +2292,10 @@ enum BuildStreamMessage {
 
 enum BuildLogStreamPrincipal {
     Viewer,
-    Builder(Uuid),
+    Builder {
+        builder_id: Uuid,
+        builder_session_id: Option<Uuid>,
+    },
 }
 
 /// WebSocket endpoint for real-time build log streaming
@@ -1983,11 +2344,14 @@ async fn authorize_build_log_stream(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if job.builder_id != Some(verified.builder_id) {
+    if !builder_owns_job_session(&job, verified.builder_id, verified.builder_session_id) {
         return Err(StatusCode::FORBIDDEN);
     }
 
-    Ok(BuildLogStreamPrincipal::Builder(verified.builder_id))
+    Ok(BuildLogStreamPrincipal::Builder {
+        builder_id: verified.builder_id,
+        builder_session_id: verified.builder_session_id,
+    })
 }
 
 async fn handle_log_stream(
@@ -2008,25 +2372,13 @@ async fn handle_log_stream(
         return;
     };
 
-    let history_snapshot = {
-        let history = state.build_log_history.lock().await;
-        history.get(&job_id).cloned().unwrap_or_default()
-    };
-
-    for frame in history_snapshot {
-        if let Err(e) = socket.send(Message::Text(frame.into())).await {
-            tracing::debug!(
-                "Failed to replay build log history to websocket for job {}: {}",
-                job_id,
-                e
-            );
-            return;
-        }
-    }
-
     match principal {
         BuildLogStreamPrincipal::Viewer => {
             let mut rx = tx.subscribe();
+            if !replay_initial_build_log_history(&mut socket, &state, job_id, true).await {
+                return;
+            }
+
             while let Ok(frame) = rx.recv().await {
                 if let Err(e) = socket.send(Message::Text(frame)).await {
                     tracing::debug!(
@@ -2038,7 +2390,14 @@ async fn handle_log_stream(
                 }
             }
         }
-        BuildLogStreamPrincipal::Builder(builder_id) => {
+        BuildLogStreamPrincipal::Builder {
+            builder_id,
+            builder_session_id,
+        } => {
+            if !replay_initial_build_log_history(&mut socket, &state, job_id, false).await {
+                return;
+            }
+
             let max_chunk_bytes = state.server_config.max_build_log_chunk_mb * 1024 * 1024;
             let max_total_bytes = state.server_config.max_build_log_size_mb * 1024 * 1024;
 
@@ -2072,9 +2431,11 @@ async fn handle_log_stream(
 
                         match parsed {
                             BuildStreamMessage::Log { message } => {
-                                if let Err(e) = builders::append_job_logs_with_limits(
+                                if let Err(e) = builders::append_job_logs_with_limits_for_builder(
                                     &state.pool,
                                     &job_id,
+                                    &builder_id,
+                                    builder_session_id.as_ref(),
                                     &message,
                                     max_total_bytes,
                                 )
@@ -2175,6 +2536,101 @@ async fn handle_log_stream(
     tracing::info!("WebSocket connection closed for job {}", job_id);
 }
 
+async fn replay_initial_build_log_history(
+    socket: &mut WebSocket,
+    state: &CFState,
+    job_id: Uuid,
+    include_persisted_logs: bool,
+) -> bool {
+    for frame in initial_build_log_history_snapshot(state, job_id, include_persisted_logs).await {
+        if let Err(e) = socket.send(Message::Text(frame.into())).await {
+            tracing::debug!(
+                "Failed to replay build log history to websocket for job {}: {}",
+                job_id,
+                e
+            );
+            return false;
+        }
+    }
+
+    true
+}
+
+async fn initial_build_log_history_snapshot(
+    state: &CFState,
+    job_id: Uuid,
+    include_persisted_logs: bool,
+) -> Vec<String> {
+    let in_memory_snapshot = {
+        let history = state.build_log_history.lock().await;
+        history.get(&job_id).cloned().unwrap_or_default()
+    };
+
+    if !in_memory_snapshot.is_empty() {
+        return in_memory_snapshot;
+    }
+
+    if !include_persisted_logs {
+        return Vec::new();
+    }
+
+    match builders::get_build_job_by_id(&state.pool, &job_id).await {
+        Ok(Some(job)) => persisted_build_log_frames(job.logs.as_deref()),
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load persisted build logs for websocket replay on job {}: {}",
+                job_id,
+                e
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn persisted_build_log_frames(logs: Option<&str>) -> Vec<String> {
+    let Some(logs) = logs.filter(|logs| !logs.is_empty()) else {
+        return Vec::new();
+    };
+
+    split_utf8_chunks(logs, PERSISTED_BUILD_LOG_REPLAY_CHUNK_BYTES)
+        .filter_map(|chunk| {
+            serde_json::to_string(&BuildStreamMessage::Log {
+                message: chunk.to_string(),
+            })
+            .ok()
+        })
+        .collect()
+}
+
+fn split_utf8_chunks(input: &str, max_chunk_bytes: usize) -> impl Iterator<Item = &str> {
+    let max_chunk_bytes = max_chunk_bytes.max(1);
+    let mut start = 0;
+
+    std::iter::from_fn(move || {
+        if start >= input.len() {
+            return None;
+        }
+
+        let mut end = (start + max_chunk_bytes).min(input.len());
+        while end > start && !input.is_char_boundary(end) {
+            end -= 1;
+        }
+
+        if end == start {
+            end = input[start..]
+                .char_indices()
+                .nth(1)
+                .map(|(idx, _)| start + idx)
+                .unwrap_or(input.len());
+        }
+
+        let chunk = &input[start..end];
+        start = end;
+        Some(chunk)
+    })
+}
+
 fn broadcast_build_stream_message(
     tx: &tokio::sync::broadcast::Sender<String>,
     msg: &BuildStreamMessage,
@@ -2237,7 +2693,7 @@ async fn record_build_stream_message(state: &CFState, job_id: Uuid, msg: &BuildS
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
-    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
     use base64::engine::{Engine, general_purpose};
     use chrono::{Duration, Utc};
     use ed25519_dalek::{Signer, SigningKey};
@@ -2246,15 +2702,24 @@ mod tests {
 
     use super::BuildStreamMessage;
     use super::builder_id_for_resolved_builder;
+    use super::canonical_signature_payload;
     use super::chunk_derivation_archive_paths;
     use super::fallback_job_status_request_for_invalid_details;
+    use super::format_failure_message;
     use super::map_create_builder_error;
+    use super::next_job_request_for_method;
     use super::parse_derivation_requisites;
     use super::parse_job_status_request;
-    use super::canonical_signature_payload;
+    use super::parse_next_job_request;
+    use super::persisted_build_log_frames;
+    use super::source_flake_target_for_derivation;
     use super::verify_builder_resolve_request;
     use crate::builder::api_client::BuilderApiClient;
-    use crate::models::builders::{Builder, BuilderStatus, ResolveBuilderIdRequest};
+    use crate::derivations::{Derivation, DerivationType};
+    use crate::models::builders::{
+        Builder, BuilderStatus, NextJobRequest, RemoteBuildExecutionStrategy,
+        ResolveBuilderIdRequest,
+    };
     use crate::models::public_key::PublicKey;
 
     fn signed_resolve_request(
@@ -2265,6 +2730,7 @@ mod tests {
             general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes());
         let body = serde_json::to_vec(&ResolveBuilderIdRequest {
             public_key: public_key_base64.clone(),
+            session_id: Some(Uuid::new_v4()),
         })
         .expect("resolve request should serialize");
         let payload =
@@ -2300,9 +2766,41 @@ mod tests {
             max_memory_mb: Some(8192),
             max_concurrent_jobs: 1,
             enabled,
+            current_session_id: None,
+            current_session_started_at: None,
             last_heartbeat_at: None,
             created_at: now,
             updated_at: now,
+        }
+    }
+
+    fn test_derivation(
+        derivation_type: DerivationType,
+        name: &str,
+        target: Option<&str>,
+    ) -> Derivation {
+        Derivation {
+            id: 1,
+            commit_id: Some(1),
+            derivation_type,
+            derivation_name: name.to_string(),
+            derivation_path: None,
+            scheduled_at: None,
+            completed_at: None,
+            started_at: None,
+            attempt_count: 0,
+            evaluation_duration_ms: None,
+            error_message: None,
+            pname: None,
+            version: None,
+            status_id: 1,
+            derivation_target: target.map(str::to_string),
+            build_elapsed_seconds: None,
+            build_current_target: None,
+            build_last_activity_seconds: None,
+            build_last_heartbeat: None,
+            cf_agent_enabled: None,
+            store_path: None,
         }
     }
 
@@ -2356,6 +2854,80 @@ mod tests {
     }
 
     #[test]
+    fn empty_next_job_body_defaults_to_legacy_server_derivation_only() {
+        let request = parse_next_job_request(b"").expect("empty request is legacy-compatible");
+
+        assert_eq!(request.protocol_version, 1);
+        assert_eq!(
+            request.supported_execution_strategies,
+            vec![RemoteBuildExecutionStrategy::ServerDerivation]
+        );
+    }
+
+    #[test]
+    fn legacy_get_next_job_request_defaults_to_protocol_v1_server_derivation_only() {
+        let request = next_job_request_for_method(&Method::GET, b"")
+            .expect("legacy GET request should be accepted");
+
+        assert_eq!(request.protocol_version, 1);
+        assert_eq!(
+            request.supported_execution_strategies,
+            vec![RemoteBuildExecutionStrategy::ServerDerivation]
+        );
+    }
+
+    #[test]
+    fn next_job_body_accepts_explicit_verified_source_capability() {
+        let body = serde_json::to_vec(&NextJobRequest {
+            protocol_version: 2,
+            supported_execution_strategies: vec![
+                RemoteBuildExecutionStrategy::ServerDerivation,
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            ],
+        })
+        .expect("request should serialize");
+
+        let request = parse_next_job_request(&body).expect("request should parse");
+
+        assert_eq!(request.protocol_version, 2);
+        assert!(
+            request
+                .supported_execution_strategies
+                .contains(&RemoteBuildExecutionStrategy::SourceReEvaluateVerified)
+        );
+    }
+
+    #[test]
+    fn verified_source_target_expands_nixos_configuration_to_toplevel() {
+        let derivation = test_derivation(
+            DerivationType::NixOS,
+            "webb",
+            Some("nixosConfigurations.webb"),
+        );
+
+        assert_eq!(
+            source_flake_target_for_derivation(&derivation),
+            "nixosConfigurations.webb.config.system.build.toplevel"
+        );
+    }
+
+    #[test]
+    fn verified_source_target_preserves_full_nixos_toplevel_target() {
+        let derivation = test_derivation(
+            DerivationType::NixOS,
+            "webb",
+            Some(
+                "git+ssh://git@example.invalid/repo#nixosConfigurations.webb.config.system.build.toplevel",
+            ),
+        );
+
+        assert_eq!(
+            source_flake_target_for_derivation(&derivation),
+            "nixosConfigurations.webb.config.system.build.toplevel"
+        );
+    }
+
+    #[test]
     fn build_stream_requires_explicit_type_discriminator() {
         let ambiguous_metrics_json =
             r#"{"cpu_percent":10.0,"ram_used_mb":100,"ram_total_mb":200,"timestamp":"t"}"#;
@@ -2368,12 +2940,61 @@ mod tests {
     }
 
     #[test]
+    fn persisted_build_logs_replay_as_typed_log_frames() {
+        let frames = persisted_build_log_frames(Some("line 1\nline 2\n"));
+
+        assert_eq!(frames.len(), 1);
+        let parsed = serde_json::from_str::<BuildStreamMessage>(&frames[0])
+            .expect("persisted log frame should deserialize");
+        assert!(matches!(
+            parsed,
+            BuildStreamMessage::Log { message } if message == "line 1\nline 2\n"
+        ));
+    }
+
+    #[test]
+    fn persisted_build_logs_replay_without_splitting_multibyte_chars() {
+        let frames = persisted_build_log_frames(Some("é".repeat(40_000).as_str()));
+
+        assert!(frames.len() > 1);
+        let replayed = frames
+            .iter()
+            .map(|frame| {
+                match serde_json::from_str::<BuildStreamMessage>(frame)
+                    .expect("persisted log frame should deserialize")
+                {
+                    BuildStreamMessage::Log { message } => message,
+                    _ => panic!("persisted replay should only create log frames"),
+                }
+            })
+            .collect::<String>();
+
+        assert_eq!(replayed, "é".repeat(40_000));
+    }
+
+    #[test]
     fn job_status_request_accepts_failure_body_without_status() {
         let parsed = parse_job_status_request(br#"{"error_message":"nix build failed"}"#)
             .expect("failure body without status should remain accepted");
 
         assert_eq!(parsed.status, None);
+        assert_eq!(parsed.failure_phase, None);
         assert_eq!(parsed.error_message.as_deref(), Some("nix build failed"));
+    }
+
+    #[test]
+    fn job_status_request_accepts_failure_phase() {
+        let parsed = parse_job_status_request(
+            br#"{"failure_phase":"derivation_mismatch","error_message":"drv mismatch"}"#,
+        )
+        .expect("failure body with phase should parse");
+
+        assert_eq!(parsed.status, None);
+        assert_eq!(parsed.failure_phase.as_deref(), Some("derivation_mismatch"));
+        assert_eq!(
+            format_failure_message(&parsed).as_deref(),
+            Some("[derivation_mismatch] drv mismatch")
+        );
     }
 
     #[test]
@@ -2382,6 +3003,7 @@ mod tests {
             .expect("empty failure body should still allow job failure reporting");
 
         assert_eq!(parsed.status, None);
+        assert_eq!(parsed.failure_phase, None);
         assert_eq!(parsed.error_message, None);
     }
 
@@ -2393,6 +3015,7 @@ mod tests {
         let fallback = fallback_job_status_request_for_invalid_details();
 
         assert_eq!(fallback.status, None);
+        assert_eq!(fallback.failure_phase.as_deref(), Some("build"));
         assert_eq!(
             fallback.error_message.as_deref(),
             Some("builder reported failure with invalid failure details")
@@ -2418,6 +3041,7 @@ mod tests {
             general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes());
         let body = serde_json::to_vec(&ResolveBuilderIdRequest {
             public_key: public_key_base64.clone(),
+            session_id: Some(Uuid::new_v4()),
         })
         .expect("resolve request should serialize");
 

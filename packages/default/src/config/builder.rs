@@ -1,3 +1,4 @@
+use crate::models::builders::RemoteBuildExecutionStrategy;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -45,6 +46,21 @@ pub struct BuilderConfig {
     /// startup never crashes the service or blocks a NixOS switch — it just
     /// keeps logging until an admin registers/enables the builder.
     pub resolve_max_attempts: u32,
+
+    /// Explicit remote build strategies this builder is willing to execute.
+    /// The default preserves the existing production behavior and prevents
+    /// accidental source re-evaluation jobs from silently falling back.
+    pub supported_execution_strategies: Vec<RemoteBuildExecutionStrategy>,
+
+    /// Root containing local bare Git mirrors used by verified source builds.
+    pub source_mirror_root: PathBuf,
+
+    /// Root containing detached worktrees at authorized commit SHAs.
+    pub source_worktree_root: PathBuf,
+
+    /// Whether to remove detached source worktrees after the build/reporting
+    /// path finishes. Defaults to true to avoid unbounded growth.
+    pub cleanup_source_worktrees: bool,
 }
 
 impl Default for BuilderConfig {
@@ -59,6 +75,10 @@ impl Default for BuilderConfig {
             resolve_retry_interval: Duration::from_secs(10),
             resolve_retry_max_interval: Duration::from_secs(300),
             resolve_max_attempts: 0, // retry forever by default
+            supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
+            source_mirror_root: PathBuf::from("/var/lib/crystal-forge/flake-mirrors"),
+            source_worktree_root: PathBuf::from("/var/lib/crystal-forge/flake-worktrees"),
+            cleanup_source_worktrees: true,
         }
     }
 }
@@ -92,6 +112,10 @@ impl BuilderConfig {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("builder.server_url not configured"))
     }
+
+    pub fn supports_execution_strategy(&self, strategy: RemoteBuildExecutionStrategy) -> bool {
+        self.supported_execution_strategies.contains(&strategy)
+    }
 }
 
 #[cfg(test)]
@@ -107,5 +131,17 @@ mod tests {
         };
 
         assert!(config.is_api_mode_ready());
+    }
+
+    #[test]
+    fn default_builder_supports_only_server_derivation() {
+        let config = BuilderConfig::default();
+
+        assert!(config.supports_execution_strategy(RemoteBuildExecutionStrategy::ServerDerivation));
+        assert!(
+            !config.supports_execution_strategy(
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified
+            )
+        );
     }
 }

@@ -484,10 +484,17 @@ async fn main() -> anyhow::Result<()> {
         )
         // Builder-authenticated endpoints
         .route(
+            "/api/v1/builders/:id/session",
+            post(builders::establish_builder_session),
+        )
+        .route(
             "/api/v1/builders/:id/heartbeat",
             post(builders::builder_heartbeat),
         )
-        .route("/api/v1/builders/:id/next-job", get(builders::get_next_job))
+        .route(
+            "/api/v1/builders/:id/next-job",
+            get(builders::get_next_job).post(builders::get_next_job),
+        )
         .route(
             "/api/v1/builders/:id/jobs/:job_id/start",
             post(builders::start_job),

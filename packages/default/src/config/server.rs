@@ -1,3 +1,4 @@
+use crate::models::builders::RemoteBuildExecutionStrategy;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +101,17 @@ pub struct ServerConfig {
     /// Default: false (secure-by-default SSRF posture).
     #[serde(default)]
     pub allow_private_cache_test_targets: bool,
+
+    /// Default remote build execution strategy for API builders.
+    /// Defaults to `server_derivation`; set to `source_re_evaluate_verified`
+    /// only for builders explicitly configured with source access/capability.
+    /// Builders must advertise support for whichever strategy is selected.
+    #[serde(default = "default_remote_build_execution_strategy")]
+    pub remote_build_execution_strategy: RemoteBuildExecutionStrategy,
+}
+
+fn default_remote_build_execution_strategy() -> RemoteBuildExecutionStrategy {
+    RemoteBuildExecutionStrategy::ServerDerivation
 }
 
 // Default value functions for serde
@@ -156,6 +168,7 @@ impl Default for ServerConfig {
             failed_build_log_retention_days: default_failed_build_log_retention_days(),
             commit_cache_retention_days: default_commit_cache_retention_days(),
             allow_private_cache_test_targets: false,
+            remote_build_execution_strategy: default_remote_build_execution_strategy(),
         }
     }
 }
@@ -240,6 +253,15 @@ mod tests {
     fn execution_mode_defaults_to_real() {
         let cfg = ServerConfig::default();
         assert_eq!(cfg.execution_mode, ExecutionMode::Real);
+    }
+
+    #[test]
+    fn remote_build_strategy_defaults_to_server_derivation() {
+        let cfg = ServerConfig::default();
+        assert_eq!(
+            cfg.remote_build_execution_strategy,
+            RemoteBuildExecutionStrategy::ServerDerivation
+        );
     }
 
     #[test]

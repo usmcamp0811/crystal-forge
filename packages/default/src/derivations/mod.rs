@@ -109,7 +109,10 @@ impl Derivation {
                 _ => DerivationType::NixOS,
             },
             derivation_name: payload.derivation_name.clone(),
-            derivation_path: payload.derivation_path.clone(),
+            derivation_path: payload
+                .expected_drv_path
+                .clone()
+                .or_else(|| payload.derivation_path.clone()),
             scheduled_at: None,
             completed_at: None,
             started_at: None,
