@@ -960,6 +960,33 @@ pub async fn claim_next_job_atomic(
     // Start transaction for atomic count + claim
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
+    // Lock and validate the persistent builder row before counting or claiming.
+    // This makes session takeover atomic with the claim path: once a newer
+    // process establishes `current_session_id`, an older process cannot pass
+    // authentication and then claim a job with its obsolete session.
+    let current_session_id: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT current_session_id
+        FROM builders
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(builder_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to lock builder session for claim")?
+    .ok_or_else(|| anyhow::anyhow!("builder_not_found"))?;
+
+    if let Some(builder_session_id) = builder_session_id
+        && current_session_id != Some(*builder_session_id)
+    {
+        tx.rollback()
+            .await
+            .context("Failed to rollback superseded builder claim")?;
+        bail!("builder_session_mismatch");
+    }
+
     // 1. Count active jobs for this builder
     // Note: We don't use FOR UPDATE here because it doesn't work with COUNT(*).
     // The atomicity is ensured by the transaction and FOR UPDATE SKIP LOCKED on the job claim.
@@ -1735,6 +1762,22 @@ mod tests {
                 "verified-source claim SQL must cover metadata outer joins: {sql}"
             );
         }
+    }
+
+    #[test]
+    fn claim_next_job_atomic_locks_builder_session_before_claiming() {
+        let source = include_str!("builders.rs");
+
+        assert!(
+            source.contains("SELECT current_session_id")
+                && source.contains("FROM builders")
+                && source.contains("FOR UPDATE"),
+            "claim path must lock the builder row before queue mutation"
+        );
+        assert!(
+            source.contains("builder_session_mismatch"),
+            "claim path must reject superseded builder sessions"
+        );
     }
 
     #[test]
@@ -3014,6 +3057,92 @@ mod tests {
                 .contains("active_builder_session_exists"),
             "fresh active session should prevent unsafe recovery"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_superseded_builder_session_cannot_claim_new_jobs() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+        let builder = create_active_test_builder(&pool, "superseded-session-builder").await;
+        let session_a = Uuid::new_v4();
+        let session_b = Uuid::new_v4();
+
+        establish_builder_session(&pool, &builder.id, &session_a, 60, "session A startup")
+            .await
+            .expect("session A should establish");
+
+        sqlx::query(
+            r#"
+            UPDATE builders
+            SET last_heartbeat_at = now() - interval '10 minutes',
+                current_session_started_at = now() - interval '10 minutes'
+            WHERE id = $1
+            "#,
+        )
+        .bind(builder.id)
+        .execute(&pool)
+        .await
+        .expect("session A should be made stale");
+
+        let queued_job = create_queued_job(
+            &pool,
+            "https://example.com/superseded-session.git",
+            "superseded-session",
+            &format!("superseded{}", Uuid::new_v4().simple()),
+            now,
+            "drv-superseded-session",
+            10.0,
+            now,
+        )
+        .await;
+
+        establish_builder_session(&pool, &builder.id, &session_b, 60, "session B startup")
+            .await
+            .expect("session B should take over stale session A");
+
+        let superseded_claim = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            builder.max_concurrent_jobs,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            Some(&session_a),
+        )
+        .await;
+
+        assert!(
+            superseded_claim
+                .expect_err("superseded session A must be rejected")
+                .to_string()
+                .contains("builder_session_mismatch"),
+            "obsolete sessions must not claim after takeover"
+        );
+
+        let unchanged = get_build_job_by_id(&pool, &queued_job)
+            .await
+            .expect("queued job fetch should succeed")
+            .expect("queued job should exist");
+        assert_eq!(unchanged.status, "queued");
+        assert_eq!(unchanged.builder_id, None);
+        assert_eq!(unchanged.builder_session_id, None);
+
+        let claimed_by_current = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            builder.max_concurrent_jobs,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            Some(&session_b),
+        )
+        .await
+        .expect("current session B claim should succeed")
+        .expect("current session B should receive the queued job");
+
+        assert_eq!(claimed_by_current.id, queued_job);
+        assert_eq!(claimed_by_current.builder_id, Some(builder.id));
+        assert_eq!(claimed_by_current.builder_session_id, Some(session_b));
+        assert_eq!(claimed_by_current.status, "building");
     }
 
     #[tokio::test]

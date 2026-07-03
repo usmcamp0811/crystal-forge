@@ -1416,8 +1416,17 @@ pub async fn get_next_job(
     )
     .await
     .map_err(|e| {
-        tracing::error!("Failed to claim job atomically: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
+        if e.to_string().contains("builder_session_mismatch") {
+            tracing::warn!(
+                builder_id = %builder_id,
+                error = %e,
+                "rejected next-job claim from superseded builder session"
+            );
+            StatusCode::CONFLICT
+        } else {
+            tracing::error!("Failed to claim job atomically: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
     })?;
 
     let Some(job) = job else {
@@ -1946,49 +1955,10 @@ pub async fn complete_job(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Perform derivation completion + cache-push queueing server-side.
-    if let Some(ref store_path) = request.output_path {
-        if let Err(e) = crate::queries::derivations::mark_target_build_complete(
-            &state.pool,
-            job.derivation_id,
-            store_path,
-        )
-        .await
-        {
-            tracing::error!(
-                "Failed to mark derivation {} complete for job {}: {}",
-                job.derivation_id,
-                job_id,
-                e
-            );
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-
-        let cache_destination =
-            crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
-                .await
-                .ok()
-                .and_then(|dests| dests.into_iter().next().map(|d| d.name));
-
-        if let Err(e) = crate::queries::cache_push::create_cache_push_job(
-            &state.pool,
-            job.derivation_id,
-            store_path,
-            cache_destination.as_deref(),
-        )
-        .await
-        {
-            tracing::warn!(
-                "Failed to queue cache push for derivation {} (job {}): {}",
-                job.derivation_id,
-                job_id,
-                e
-            );
-        }
-    }
-
-    // Mark job as complete
-    builders::mark_job_complete(
+    // Mark the job complete before any derivation/cache side effects. This
+    // proves the builder still owns the active job lease after any possible
+    // session takeover; stale processes must not mutate derivation/cache state.
+    let completed_job = builders::mark_job_complete(
         &state.pool,
         &job_id,
         &builder_id,
@@ -2004,6 +1974,47 @@ pub async fn complete_job(
         );
         StatusCode::CONFLICT
     })?;
+
+    // Perform derivation completion + cache-push queueing server-side.
+    if let Some(ref store_path) = request.output_path {
+        if let Err(e) = crate::queries::derivations::mark_target_build_complete(
+            &state.pool,
+            completed_job.derivation_id,
+            store_path,
+        )
+        .await
+        {
+            tracing::error!(
+                "Failed to mark derivation {} complete for job {}: {}",
+                completed_job.derivation_id,
+                job_id,
+                e
+            );
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        let cache_destination =
+            crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
+                .await
+                .ok()
+                .and_then(|dests| dests.into_iter().next().map(|d| d.name));
+
+        if let Err(e) = crate::queries::cache_push::create_cache_push_job(
+            &state.pool,
+            completed_job.derivation_id,
+            store_path,
+            cache_destination.as_deref(),
+        )
+        .await
+        {
+            tracing::warn!(
+                "Failed to queue cache push for derivation {} (job {}): {}",
+                completed_job.derivation_id,
+                job_id,
+                e
+            );
+        }
+    }
 
     cleanup_build_log_channel(&state, job_id).await;
 
