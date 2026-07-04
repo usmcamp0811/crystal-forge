@@ -378,6 +378,115 @@ let
     '';
   };
 
+  runUiDev = pkgs.writeShellApplication {
+    name = "run-ui-dev";
+    runtimeInputs = with pkgs; [ nix coreutils procps curl postgresql dioxus-cli ];
+    text = ''
+      set -euo pipefail
+
+      PROJECT_ROOT="''${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+      FIXTURE_PATH="$PROJECT_ROOT/docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json"
+
+      # ── 1. Ensure PostgreSQL is running ──────────────────────────────
+      if ! pg_isready -h 127.0.0.1 -p 3042 -U crystal_forge -d crystal_forge &>/dev/null; then
+        echo "📦 PostgreSQL is not running. Starting via db-only..."
+        nix run "$PROJECT_ROOT#devScripts.db-only" -- up -d 2>&1 &
+        # shellcheck disable=SC2034  # referenced indirectly by 'wait' in cleanup
+        _DB_COMPOSE_PID=$!
+        echo "⏳ Waiting for PostgreSQL to be ready..."
+        for i in $(seq 1 30); do
+          if pg_isready -h 127.0.0.1 -p 3042 -U crystal_forge -d crystal_forge &>/dev/null; then
+            echo "✅ PostgreSQL is ready!"
+            break
+          fi
+          if [ "$i" -eq 30 ]; then
+            echo "❌ PostgreSQL failed to start. Check process-compose logs."
+            exit 1
+          fi
+          sleep 1
+        done
+      else
+        echo "✅ PostgreSQL is already running."
+      fi
+
+      # ── 2. Ensure config and keys exist ──────────────────────────────
+      if [ ! -f "''${CRYSTAL_FORGE_CONFIG:-}" ]; then
+        echo "🔧 Generating server config..."
+        CRYSTAL_FORGE_CONFIG="$(${generateConfigMock}/bin/generate-config)"
+        export CRYSTAL_FORGE_CONFIG
+      fi
+      CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+      if [ ! -f "$CF_KEY_DIR/cache-encryption.key" ]; then
+        echo "🔑 Generating cache encryption key..."
+        mkdir -p "$CF_KEY_DIR"
+        head -c 48 /dev/urandom | base64 > "$CF_KEY_DIR/cache-encryption.key"
+        chmod 600 "$CF_KEY_DIR/cache-encryption.key"
+      fi
+      CACHE_ENCRYPTION_KEY="$(cat "$CF_KEY_DIR/cache-encryption.key")"
+      export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="$CACHE_ENCRYPTION_KEY"
+
+      # ── 3. Validate fixture file ─────────────────────────────────────
+      if [ ! -f "$FIXTURE_PATH" ]; then
+        echo "❌ Fixture file not found at: $FIXTURE_PATH"
+        exit 1
+      fi
+      echo "📦 Fixture: $FIXTURE_PATH"
+
+      # ── 4. Start Crystal Forge server in background ─────────────────
+      echo "🚀 Starting Crystal Forge server with fixture data..."
+      export FIXTURE_JSON_PATH="$FIXTURE_PATH"
+      export AUTH_MODE="dev"
+      export CRYSTAL_FORGE__SERVER__EXECUTION_MODE="mock"
+      export RUST_LOG="info,crystal_forge::fixtures::seed=debug"
+
+      # Trap cleanup on exit
+      cleanup() {
+        echo ""
+        echo "🛑 Shutting down..."
+        if [ -n "''${SERVER_PID:-}" ]; then
+          kill "$SERVER_PID" 2>/dev/null || true
+          wait "$SERVER_PID" 2>/dev/null || true
+        fi
+        echo "👋 Goodbye!"
+      }
+      trap cleanup EXIT INT TERM
+
+      if [ "''${1:-}" == "--dev" ]; then
+        echo "   (dev mode — building from source)"
+        nix run "$PROJECT_ROOT#server" &
+      else
+        ${pkgs.crystal-forge.default.server}/bin/server &
+      fi
+      SERVER_PID=$!
+
+      # Wait for server to be ready
+      echo "⏳ Waiting for server to be ready..."
+      for i in $(seq 1 60); do
+        if curl -sf http://127.0.0.1:3445/status >/dev/null 2>&1; then
+          echo "✅ Server is ready at http://127.0.0.1:3445"
+          break
+        fi
+        if [ "$i" -eq 60 ]; then
+          echo "❌ Server failed to start. Check logs."
+          exit 1
+        fi
+        sleep 2
+      done
+
+      # ── 5. Start Dioxus dev server ──────────────────────────────────
+      echo ""
+      echo "🌐 Starting Dioxus web UI dev server..."
+      echo "   API server: http://127.0.0.1:3445"
+      echo "   UI dev server: http://localhost:8080"
+      echo ""
+      echo "   Press Ctrl+C to stop everything."
+      echo ""
+
+      cd "$PROJECT_ROOT/packages/default"
+      exec dx serve
+    '';
+  };
+
   runBuilderMock = pkgs.writeShellApplication {
     name = "run-builder-mock";
     runtimeInputs = [ pkgs.nix pkgs.coreutils ];
@@ -973,7 +1082,7 @@ let
   };
 in full-stack.config.outputs.package // {
   inherit runServer runAgent runBuilder simulatePush startBuilderApi
-    bootstrapDevBuilder envExports;
+    runUiDev bootstrapDevBuilder envExports;
   db-only = dbOnly.config.outputs.package;
   server-only = server-only.config.outputs.package;
   server-stack-mock = server-stack-mock.config.outputs.package;

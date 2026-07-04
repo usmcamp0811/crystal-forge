@@ -1078,7 +1078,10 @@ fn parse_relative_time(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 mod tests {
     use super::*;
 
+    /// Verifies the fixture JSON fully deserializes into our structs.
+    /// Run manually from the repo root: `cargo test test_deserialize_fixture_json -- --include-ignored`
     #[test]
+    #[ignore = "requires docs/ tree not present in Nix sandbox"]
     fn test_deserialize_fixture_json() {
         // Look for the fixture file in several common locations
         let candidates = [
