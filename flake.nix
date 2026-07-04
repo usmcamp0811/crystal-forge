@@ -50,8 +50,7 @@
           inherit inputs;
         };
 
-        # nix build .#design-targets  → ./result/ contains the screenshots
-        # nix run   .#design-targets  → builds + opens ./result/ in $BROWSER / ls
+        # nix build .#design-targets  → ./result/<view>--<theme>.design.png
         packages.design-targets = import ./packages/design-targets/default.nix {
           lib = channels.nixpkgs.lib;
           pkgs = channels.nixpkgs;

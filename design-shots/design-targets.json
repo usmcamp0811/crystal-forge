@@ -1,0 +1,186 @@
+{
+  "results": [
+    {
+      "name": "dashboard--dark",
+      "view": "dashboard",
+      "theme": "dark",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "dashboard--light",
+      "view": "dashboard",
+      "theme": "light",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "systems--dark",
+      "view": "systems",
+      "theme": "dark",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "systems--light",
+      "view": "systems",
+      "theme": "light",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "builds--dark",
+      "view": "builds",
+      "theme": "dark",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "builds--light",
+      "view": "builds",
+      "theme": "light",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "evaluations--dark",
+      "view": "evaluations",
+      "theme": "dark",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "evaluations--light",
+      "view": "evaluations",
+      "theme": "light",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "flakes--dark",
+      "view": "flakes",
+      "theme": "dark",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "flakes--light",
+      "view": "flakes",
+      "theme": "light",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "environments--dark",
+      "view": "environments",
+      "theme": "dark",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "environments--light",
+      "view": "environments",
+      "theme": "light",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "caches--dark",
+      "view": "caches",
+      "theme": "dark",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "caches--light",
+      "view": "caches",
+      "theme": "light",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "builders--dark",
+      "view": "builders",
+      "theme": "dark",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "builders--light",
+      "view": "builders",
+      "theme": "light",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "policies--dark",
+      "view": "policies",
+      "theme": "dark",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "policies--light",
+      "view": "policies",
+      "theme": "light",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "compliance--dark",
+      "view": "compliance",
+      "theme": "dark",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "compliance--light",
+      "view": "compliance",
+      "theme": "light",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "cves--dark",
+      "view": "cves",
+      "theme": "dark",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "cves--light",
+      "view": "cves",
+      "theme": "light",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "scanning--dark",
+      "view": "scanning",
+      "theme": "dark",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "scanning--light",
+      "view": "scanning",
+      "theme": "light",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "admin--dark",
+      "view": "admin",
+      "theme": "dark",
+      "ok": true,
+      "error": null
+    },
+    {
+      "name": "admin--light",
+      "view": "admin",
+      "theme": "light",
+      "ok": true,
+      "error": null
+    }
+  ]
+}

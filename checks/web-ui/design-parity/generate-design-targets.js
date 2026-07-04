@@ -49,8 +49,15 @@ async function main() {
   }
   const baseFileUrl = "file://" + htmlPath;
 
+  // --allow-file-access-from-files: lets Chromium load file:// subresources.
+  // --no-sandbox + --disable-dev-shm-usage: required inside Nix sandbox /
+  // containers where /dev/shm is absent and the kernel sandbox is unavailable.
   const browser = await chromium.launch({
-    args: ["--allow-file-access-from-files"],
+    args: [
+      "--allow-file-access-from-files",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+    ],
   });
   const context = await browser.newContext({
     viewport,

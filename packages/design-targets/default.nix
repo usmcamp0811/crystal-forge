@@ -1,22 +1,12 @@
 # Design target screenshots package
 #
-# Builds the design example screenshots (one per view × theme) inside a
-# minimal NixOS VM and writes them to the Nix store so the result is
-# reproducible and cacheable.
+# Runs Playwright + Chromium headless inside a plain Nix sandbox (no VM).
+# All dependencies are pinned store paths; result is fully cached.
 #
-# Build:
-#   nix build .#design-targets
-#   ls result/
+#   nix build .#design-targets   → ./result/ has <view>--<theme>.design.png
 #
-# Run (opens the output directory):
-#   nix run .#design-targets
-#
-# Custom fixtures:
-#   nix build .#design-targets --override-input fixtures path:/path/to/custom-fixtures.json
-#   (or pass fixture path at build time via the fixturesFile argument)
 { lib, pkgs, inputs, ... }:
 let
-  # ── Vendored offline design example (same as web-ui check) ──────────────────
   reactUmd = pkgs.fetchurl {
     url = "https://unpkg.com/react@18.3.1/umd/react.development.js";
     sha256 = "0zsfq9pj3pbpiz9p6k6qflwd33s24kwflbdjxqn8pvdhdkpqyd18";
@@ -36,8 +26,8 @@ let
     mkdir -p $out/vendor
     cp -r ${designExampleSrc}/. $out/
     chmod -R u+w $out
-    cp ${reactUmd}      $out/vendor/react.development.js
-    cp ${reactDomUmd}   $out/vendor/react-dom.development.js
+    cp ${reactUmd}        $out/vendor/react.development.js
+    cp ${reactDomUmd}     $out/vendor/react-dom.development.js
     cp ${babelStandalone} $out/vendor/babel.min.js
     ${pkgs.gnused}/bin/sed -i -E \
       -e 's#src="https://unpkg.com/react@[^"]*"#src="vendor/react.development.js"#' \
@@ -50,42 +40,24 @@ let
 
   parityDir = "${inputs.self}/checks/web-ui/design-parity";
 
-in pkgs.testers.runNixOSTest {
-  name = "crystal-forge-design-targets";
-
-  nodes.machine = {
-    virtualisation.memorySize = 2048;
-    virtualisation.cores = 2;
-
-    environment.systemPackages = [
-      pkgs.chromium
-      pkgs.nodejs
-      pkgs.playwright-test
-      pkgs.imagemagick
-    ];
-
-    environment.variables = {
-      NODE_PATH               = "${pkgs.playwright-test}/lib/node_modules";
+in pkgs.runCommand "crystal-forge-design-targets"
+  {
+    nativeBuildInputs = [ pkgs.nodejs pkgs.playwright-test ];
+    env = {
       PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+      NODE_PATH                = "${pkgs.playwright-test}/lib/node_modules";
+      # Chromium needs /dev/shm; tell it to use /tmp instead when the sandbox
+      # doesn't provide a real shm.
+      CHROMIUM_FLAGS           = "--no-sandbox --disable-dev-shm-usage";
     };
-  };
+  }
+  ''
+    mkdir -p $out
 
-  testScript = ''
-    machine.wait_for_unit("multi-user.target")
+    node ${parityDir}/generate-design-targets.js \
+      ${designExampleOffline} \
+      ${parityDir}/manifest.json \
+      $out
 
-    machine.succeed("mkdir -p /tmp/design-example /tmp/design-parity /tmp/out")
-    machine.succeed("cp -r ${designExampleOffline}/. /tmp/design-example/")
-    machine.succeed("cp -r ${parityDir}/. /tmp/design-parity/")
-
-    print("Generating design target screenshots...")
-    machine.succeed(
-      "${pkgs.nodejs}/bin/node /tmp/design-parity/generate-design-targets.js "
-      "/tmp/design-example "
-      "/tmp/design-parity/manifest.json "
-      "/tmp/out "
-      "2>&1"
-    )
-
-    machine.copy_from_vm("/tmp/out", "")
-  '';
-}
+    echo "Design targets written to $out"
+  ''
