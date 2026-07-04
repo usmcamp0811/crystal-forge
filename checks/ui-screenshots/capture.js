@@ -582,25 +582,24 @@ async function main() {
     // CRITICAL: iterate in REVERSE order so the catch-all (last in array) is
     // registered FIRST. Playwright calls matching handlers in LIFO order (last
     // registered runs first), so specific patterns must be registered last.
+    // NOTE: do NOT mutate r.pattern — it persists across theme iterations.
     for (const r of routes.slice().reverse()) {
-      const label = typeof r.pattern === "string" ? r.pattern :
-                    typeof r.pattern === "function" ? (r.pattern._label || "fn") :
-                    r.pattern.source;
-      if (typeof r.pattern === "function") {
-        // Wrap the predicate to add debug logging
-        const origPred = r.pattern;
-        r.pattern = (url) => {
-          const matches = origPred(url);
-          // Log first-time matches for non-auth paths
-          const path = url.pathname;
-          if (matches && !path.startsWith('/api/auth/') && label !== '/api/v1/*') {
-            console.log(`      PREDICATE MATCH ${label.padEnd(45)} ${path}`);
+      const pattern = r.pattern;
+      const label = typeof pattern === "string" ? pattern :
+                    typeof pattern === "function" ? (pattern._label || "fn") :
+                    pattern.source;
+      const matchPattern = typeof pattern === "function"
+        ? (url) => {
+            const matches = pattern(url);
+            const path = url.pathname;
+            if (matches && !path.startsWith('/api/auth/') && label !== '/api/v1/*') {
+              console.log(`      PREDICATE MATCH ${label.padEnd(45)} ${path}`);
+            }
+            return matches;
           }
-          return matches;
-        };
-      }
+        : pattern;
       try {
-        await page.route(r.pattern, async (route) => {
+        await page.route(matchPattern, async (route) => {
           const req = route.request();
           const url = req.url();
           const pathPart = url.replace(/^.*\/\/[^/]+/, '');
@@ -613,7 +612,6 @@ async function main() {
             }
           } catch (err) {
             console.error(`    ROUTE FAIL ${label} ${pathPart}: ${err.message}`);
-            // Fall through to next matching handler (e.g. catch-all)
             await route.fallback().catch(() => {});
           }
         });
