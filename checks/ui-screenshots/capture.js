@@ -578,28 +578,17 @@ async function main() {
     });
     const page = await context.newPage();
 
-    // Install all API intercepts (with debug logging).
+    // Install all API intercepts.
     // CRITICAL: iterate in REVERSE order so the catch-all (last in array) is
     // registered FIRST. Playwright calls matching handlers in LIFO order (last
     // registered runs first), so specific patterns must be registered last.
-    // NOTE: do NOT mutate r.pattern — it persists across theme iterations.
     for (const r of routes.slice().reverse()) {
       const pattern = r.pattern;
       const label = typeof pattern === "string" ? pattern :
                     typeof pattern === "function" ? (pattern._label || "fn") :
                     pattern.source;
-      const matchPattern = typeof pattern === "function"
-        ? (url) => {
-            const matches = pattern(url);
-            const path = url.pathname;
-            if (matches && !path.startsWith('/api/auth/') && label !== '/api/v1/*') {
-              console.log(`      PREDICATE MATCH ${label.padEnd(45)} ${path}`);
-            }
-            return matches;
-          }
-        : pattern;
       try {
-        await page.route(matchPattern, async (route) => {
+        await page.route(pattern, async (route) => {
           const req = route.request();
           const url = req.url();
           const pathPart = url.replace(/^.*\/\/[^/]+/, '');
