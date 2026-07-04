@@ -57,6 +57,7 @@ async function main() {
       "--allow-file-access-from-files",
       "--no-sandbox",
       "--disable-dev-shm-usage",
+      "--disable-setuid-sandbox",
     ],
   });
   const context = await browser.newContext({

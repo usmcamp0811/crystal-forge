@@ -40,16 +40,16 @@ let
 
   parityDir = "${inputs.self}/checks/web-ui/design-parity";
 
+# __noChroot = true: Chromium needs /proc and clone(2) which the Nix sandbox
+# blocks. All inputs are still pinned store paths so the result is
+# deterministic even without the chroot. Requires sandbox = relaxed or false
+# in nix.conf (this repo's NixOS config already sets sandbox = relaxed).
 in pkgs.runCommand "crystal-forge-design-targets"
   {
-    nativeBuildInputs = [ pkgs.nodejs pkgs.playwright-test ];
-    env = {
-      PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
-      NODE_PATH                = "${pkgs.playwright-test}/lib/node_modules";
-      # Chromium needs /dev/shm; tell it to use /tmp instead when the sandbox
-      # doesn't provide a real shm.
-      CHROMIUM_FLAGS           = "--no-sandbox --disable-dev-shm-usage";
-    };
+    __noChroot               = true;
+    nativeBuildInputs        = [ pkgs.nodejs pkgs.playwright-test ];
+    PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+    NODE_PATH                = "${pkgs.playwright-test}/lib/node_modules";
   }
   ''
     mkdir -p $out
@@ -58,6 +58,4 @@ in pkgs.runCommand "crystal-forge-design-targets"
       ${designExampleOffline} \
       ${parityDir}/manifest.json \
       $out
-
-    echo "Design targets written to $out"
   ''
