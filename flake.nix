@@ -44,6 +44,11 @@
           oscal-fixture = channels.nixpkgs.crystal-forge.oscal-fixture;
           oscal-1-1-2-schemas = channels.nixpkgs.crystal-forge.oscal-1-1-2-schemas;
         };
+        apps.generate-design-targets = import ./apps/generate-design-targets/default.nix {
+          lib = channels.nixpkgs.lib;
+          pkgs = channels.nixpkgs;
+          inherit inputs;
+        };
       };
     };
 }
