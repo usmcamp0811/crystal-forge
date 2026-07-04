@@ -4,6 +4,7 @@ title: Optimize Nix Checks - Reduce CI Check Count and Execution Time
 status: Backlog
 assignee: []
 created_date: '2026-02-28 02:51'
+updated_date: '2026-07-04 14:32'
 labels:
   - performance
   - ci
@@ -325,6 +326,12 @@ checks = {
 - [ ] #9 Documentation updated with new check structure and debugging guide
 - [ ] #10 Developer feedback collected and positive
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-07-04: Fixed capture.js fixture data mapping — buildRoutes now properly transforms design-example fixture data (crystal-forge.fixtures.json) into Dioxus API DTO shapes. Key fixes: UUID generation for IDs, health/deployment/build status enum variant mapping (PascalCase/snake_case), correct data source keys (cves.stats, builds.active, evaluations.active), proper EnvironmentSummary/FlakeRegistryItem shapes, hardening routes with correct types, CveFleetStats flat struct, ScanningStatsResponse field mapping, changed catch-all from [] to {}. nix build .#ui-screenshots produces 26/26 populated screenshots (previously empty). Commit 31635b3c pushed to MR !292.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
