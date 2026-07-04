@@ -7,7 +7,7 @@ use crate::state::app_state::{AppState, AuthFetchState};
 
 /// Check if UI check mock auth mode is enabled via query param.
 /// Only available in debug builds to prevent production auth bypass.
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "ui_fixture_mode"))]
 pub fn ui_check_mock_auth_enabled() -> bool {
     web_sys::window()
         .and_then(|w| w.location().search().ok())
@@ -15,7 +15,7 @@ pub fn ui_check_mock_auth_enabled() -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(any(debug_assertions, feature = "ui_fixture_mode")))]
 pub fn ui_check_mock_auth_enabled() -> bool {
     false
 }

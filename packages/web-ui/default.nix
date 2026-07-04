@@ -171,4 +171,28 @@ let
     '';
   };
 
-in web-app // { inherit desktop-app dx-serve; }
+  # Same as web-app but built with --features ui_fixture_mode so that
+  # ?ui_check_auth=1 works in a release build (used by nix build .#ui-screenshots).
+  web-app-fixture = web-app.overrideAttrs (old: {
+    pname = "crystal-forge-web-ui-fixture";
+    buildPhase = ''
+      export XDG_DATA_HOME=$PWD
+      mkdir -p $XDG_DATA_HOME/dioxus/wasm-bindgen
+      ln -s ${pkgs.wasm-bindgen-cli_0_2_108}/bin/wasm-bindgen $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.108
+
+      ${pkgs.tailwindcss_4}/bin/tailwindcss \
+        -i ${./tailwind.css} \
+        -o ./assets/tailwind.min.css \
+        --minify
+
+      dx bundle --platform web --release --features ui_fixture_mode
+    '';
+    installPhase = ''
+      mkdir -p $out/public
+      cp -r target/dx/${appName}/release/web/public/* $out/public/
+      cp ./assets/tailwind.min.css $out/public/tailwind.min.css
+      cp ./assets/tailwind.min.css $out/public/assets/tailwind.min.css
+    '';
+  });
+
+in web-app // { inherit desktop-app dx-serve web-app-fixture; }
