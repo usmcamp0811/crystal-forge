@@ -49,6 +49,14 @@
           pkgs = channels.nixpkgs;
           inherit inputs;
         };
+
+        # nix build .#design-targets  → ./result/ contains the screenshots
+        # nix run   .#design-targets  → builds + opens ./result/ in $BROWSER / ls
+        packages.design-targets = import ./packages/design-targets/default.nix {
+          lib = channels.nixpkgs.lib;
+          pkgs = channels.nixpkgs;
+          inherit inputs;
+        };
       };
     };
 }
