@@ -4,7 +4,7 @@ title: Optimize Nix Checks - Reduce CI Check Count and Execution Time
 status: Backlog
 assignee: []
 created_date: '2026-02-28 02:51'
-updated_date: '2026-07-04 14:32'
+updated_date: '2026-07-04 15:02'
 labels:
   - performance
   - ci
@@ -330,7 +330,29 @@ checks = {
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-07-04: Fixed capture.js fixture data mapping — buildRoutes now properly transforms design-example fixture data (crystal-forge.fixtures.json) into Dioxus API DTO shapes. Key fixes: UUID generation for IDs, health/deployment/build status enum variant mapping (PascalCase/snake_case), correct data source keys (cves.stats, builds.active, evaluations.active), proper EnvironmentSummary/FlakeRegistryItem shapes, hardening routes with correct types, CveFleetStats flat struct, ScanningStatsResponse field mapping, changed catch-all from [] to {}. nix build .#ui-screenshots produces 26/26 populated screenshots (previously empty). Commit 31635b3c pushed to MR !292.
+## Route matching root cause
+
+The `capture.js` route matching was broken due to **two independent bugs**:
+
+### Bug 1: Playwright LIFO ordering (critical)
+
+Playwright calls matching route handlers in **reverse registration order** (last registered runs first).
+
+The route table in `buildRoutes()` listed specific patterns first and catch-all last — logical for reading. But `page.route()` was called in that array order, meaning the catch-all was **registered last** and therefore **ran first**. It called `route.fulfill({})` for every `/api/v1/...` request, and the chain terminated — no specific handler ever executed.
+
+**Fix**: iterate `routes.slice().reverse()` so the catch-all (last in array) is registered first (runs last) and specific patterns are registered last (run first).
+
+### Bug 2: r.pattern mutation across theme iterations
+
+The predicate debug wrapper (added in 4ce233ba) mutated `r.pattern` — it replaced the original function with a wrapped version. This mutation persisted across theme iterations (dark → light). On the second iteration, `r.pattern._label` was undefined (the wrap function didn't have `_label`), causing all route labels to display as "fn".
+
+**Fix**: use a local `const pattern` variable, compute `label` from it once, and pass it directly. Never mutate `r.pattern`.
+
+## Verification
+
+`nix build .#ui-screenshots` produces 26/26 populated screenshots (70-150KB each, not empty).
+All route labels in logs show correct endpoint names (no "ROUTE fn" or "ROUTE /api/v1/*").
+MR CI pipeline pending for final verification.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
