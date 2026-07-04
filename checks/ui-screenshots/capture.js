@@ -555,11 +555,31 @@ async function main() {
     });
     const page = await context.newPage();
 
-    // Install all API intercepts
+    // Install all API intercepts (with debug logging)
     for (const r of routes) {
-      await page.route(r.pattern, route =>
-        route.fulfill({ status: 200, contentType: "application/json",
-                        body: JSON.stringify(r.body) }));
+      try {
+        await page.route(r.pattern, async (route) => {
+        const req = route.request();
+        const url = req.url();
+        const pathPart = url.replace(/^.*\/\/[^/]+/, '');
+        const bodyStr = JSON.stringify(r.body);
+        const preview = bodyStr.length > 100 ? bodyStr.slice(0, 100) + '...' : bodyStr;
+        try {
+          await route.fulfill({ status: 200, contentType: "application/json",
+                                body: bodyStr });
+          // Only log non-auth routes to reduce noise
+          if (!url.includes('/api/auth/')) {
+            console.log(`    ROUTE ${r.pattern.padEnd(45)} ${pathPart} → ${preview}`);
+          }
+        } catch (err) {
+          console.error(`    ROUTE FAIL ${r.pattern} ${pathPart}: ${err.message}`);
+          // Fall through to next matching route
+          await route.continue().catch(() => {});
+        }
+      });
+      } catch (regErr) {
+        console.error(`    ROUTE REGISTRATION FAIL ${r.pattern}: ${regErr.message}`);
+      }
     }
 
     for (const view of VIEWS) {
