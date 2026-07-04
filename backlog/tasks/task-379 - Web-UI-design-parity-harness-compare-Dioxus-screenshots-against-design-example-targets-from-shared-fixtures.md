@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-07-03 20:03'
-updated_date: '2026-07-03 20:17'
+updated_date: '2026-07-04 01:37'
 labels:
   - web-ui
   - ci
@@ -92,4 +92,20 @@ Design-parity harness (non-blocking):
 Lightweight validation only (no heavy builds per instruction): nix-instantiate --parse, node --check on all JS, manifest JSON parse, git diff --check — all pass.
 
 Pending: authoritative MR !292 `flake-check: [web-ui]` run to confirm the offline design example renders and the drift metric/montages are produced. First-iteration scope note: Dioxus captures currently use the app's own route rendering (real backend/seeded data); exact byte-for-byte fixture alignment of the Dioxus side (routing APIs to fixture-derived responses) is a candidate follow-up refinement.
+
+CI pipeline 2650887037 (commit 6f1bcf82) passed — flake-check: [web-ui] succeeded in 757s.
+
+Final harness results:
+- 26/26 views compared (13 views × dark + light), 0 missing, 0 errors
+- Average similarity: 88.0% (avgDrift 0.1204)
+- Worst: environments--light (drift 0.22); light mode consistently drifts more than dark (~0.13 vs ~0.10)
+- design-parity-matrix.png grid image generated and uploaded to MR comment
+- All non-blocking — check never fails on visual mismatch
+
+Also shipped in this batch:
+- Design example IS now the visual baseline (deleted 106 stored Dioxus-vs-Dioxus PNGs)
+- nix run .#generate-design-targets -- --out-dir <dir> [--fixtures <json>] app added
+- bash docs/design/CrystalForge/serve.sh for local preview
+- --allow-file-access-from-files Chromium flag fixed the black left-side montage issue
+- sha256 hashes replaced invalid sha384 hashes in fetchurl (Nix doesn't support sha384)
 <!-- SECTION:NOTES:END -->
