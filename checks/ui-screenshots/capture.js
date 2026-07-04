@@ -403,16 +403,28 @@ function buildRoutes(fixtures) {
   // ══════════════════════════════════════════════════════════════════════════
   // ROUTE TABLE — order matters: more-specific patterns first
   //
-  // Uses RegExp so matching is unambiguous (Playwright glob ** semantics vary).
-  // Patterns match against the URL pathname (not full URL).
+  // Uses functions returning boolean.  Playwright calls the function with the
+  // URL object and uses the return value.  This is unambiguous — no glob or
+  // regex surprise.
   // ══════════════════════════════════════════════════════════════════════════
 
-  // Helper: build a regex that matches an exact API path prefix in a full URL.
-  // /api/v1/foo/bar → matches http://.../api/v1/foo/bar optionally followed by ?query or /further/path
-  function apiPath(path) {
-    // Escape regex special chars, then allow optional query string suffix
-    const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`^https?://[^/]+${escaped}([?/]|$)`);
+  // Helper: build a predicate that matches an exact API path prefix.
+  // e.g. matchPath("/api/v1/foo/bar") matches http://HOST/api/v1/foo/bar
+  // optionally followed by ?query or /further/path.
+  function matchPath(path) {
+    const fn = (url) => {
+      const p = url.pathname;
+      return p === path || p.startsWith(path + "/") || p.startsWith(path + "?");
+    };
+    fn._label = path;
+    return fn;
+  }
+
+  // Match an exact path or prefix (used for simple route names like /api/v1/systems).
+  function matchPrefix(path) {
+    const fn = (url) => url.pathname.startsWith(path);
+    fn._label = path + "*";
+    return fn;
   }
 
   // whoami: Role must be PascalCase ("Admin"), auth_mode snake_case ("local").
@@ -426,96 +438,96 @@ function buildRoutes(fixtures) {
   return [
     // ── auth ──────────────────────────────────────────────────────────────────
     // whoami returns a valid session → WASM skips login redirect automatically.
-    { pattern: /^https?:\/\/[^/]+\/api\/auth\/whoami([?/]|$)/,           body: whoami },
-    { pattern: /^https?:\/\/[^/]+\/api\/auth\/setup-status([?/]|$)/,     body: { requires_setup: false, allow_registration: false } },
-    { pattern: /^https?:\/\/[^/]+\/api\/auth\b/,                          body: whoami },
+    { pattern: matchPath("/api/auth/whoami"),                              body: whoami },
+    { pattern: matchPath("/api/auth/setup-status"),                        body: { requires_setup: false, allow_registration: false } },
+    { pattern: matchPrefix("/api/auth/"),                                  body: whoami },
 
     // ── admin (specific before catch-all) ─────────────────────────────────────
-    { pattern: apiPath("/api/v1/admin/config-health"),                    body: { status: "ok", issues: [] } },
-    { pattern: apiPath("/api/v1/admin/setup-progress"),                   body: { complete: true } },
-    { pattern: apiPath("/api/v1/admin/users"),                            body: adminUsers },
-    { pattern: apiPath("/api/v1/admin/server-info"),                      body: { version: "0.1.0-fixture", uptime_secs: 3600 } },
-    { pattern: apiPath("/api/v1/admin/classification-config"),            body: { enabled: false, categories: [] } },
-    { pattern: apiPath("/api/v1/admin/oidc-mappings"),                    body: [] },
-    { pattern: apiPath("/api/v1/admin/audit-events"),                     body: { items: [], total: 0, page: 1, per_page: 50 } },
-    { pattern: apiPath("/api/v1/admin/setup-wizard/dismiss"),             body: {} },
-    { pattern: apiPath("/api/v1/admin/setup-wizard/agent-acknowledge"),   body: {} },
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/admin\b/,                    body: {} },
+    { pattern: matchPath("/api/v1/admin/config-health"),                   body: { status: "ok", issues: [] } },
+    { pattern: matchPath("/api/v1/admin/setup-progress"),                  body: { complete: true } },
+    { pattern: matchPath("/api/v1/admin/users"),                           body: adminUsers },
+    { pattern: matchPath("/api/v1/admin/server-info"),                     body: { version: "0.1.0-fixture", uptime_secs: 3600 } },
+    { pattern: matchPath("/api/v1/admin/classification-config"),           body: { enabled: false, categories: [] } },
+    { pattern: matchPath("/api/v1/admin/oidc-mappings"),                   body: [] },
+    { pattern: matchPath("/api/v1/admin/audit-events"),                    body: { items: [], total: 0, page: 1, per_page: 50 } },
+    { pattern: matchPath("/api/v1/admin/setup-wizard/dismiss"),            body: {} },
+    { pattern: matchPath("/api/v1/admin/setup-wizard/agent-acknowledge"),  body: {} },
+    { pattern: matchPrefix("/api/v1/admin/"),                              body: {} },
 
     // ── dashboard ─────────────────────────────────────────────────────────────
-    { pattern: apiPath("/api/v1/dashboard/summary"),                      body: dashSummary },
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/dashboard\b/,                 body: dashSummary },
+    { pattern: matchPath("/api/v1/dashboard/summary"),                     body: dashSummary },
+    { pattern: matchPrefix("/api/v1/dashboard/"),                          body: dashSummary },
 
     // ── systems ───────────────────────────────────────────────────────────────
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/systems\b/,                   body: { items: systems, total: systems.length, page: 1, per_page: 200 } },
+    { pattern: matchPrefix("/api/v1/systems"),                             body: { items: systems, total: systems.length, page: 1, per_page: 200 } },
 
     // ── environments ──────────────────────────────────────────────────────────
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/environments\/policies-map\b/, body: [] },
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/environments\b/,              body: envs },
+    { pattern: matchPath("/api/v1/environments/policies-map"),             body: [] },
+    { pattern: matchPrefix("/api/v1/environments"),                        body: envs },
 
     // ── flakes ────────────────────────────────────────────────────────────────
-    { pattern: apiPath("/api/v1/flakes/timelines"),                       body: flakeTimelines },
-    { pattern: apiPath("/api/v1/flakes/sync"),                            body: {} },
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/flakes\//,                    body: {} },
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/flakes\b/,                    body: flakeItems },
+    { pattern: matchPath("/api/v1/flakes/timelines"),                      body: flakeTimelines },
+    { pattern: matchPath("/api/v1/flakes/sync"),                           body: {} },
+    { pattern: matchPrefix("/api/v1/flakes/"),                             body: {} },
+    { pattern: matchPrefix("/api/v1/flakes"),                              body: flakeItems },
 
     // ── builds ────────────────────────────────────────────────────────────────
-    { pattern: apiPath("/api/v1/build-jobs/recent"),                      body: buildItems.slice(0, 5) },
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/build-jobs\b/,                body: { total: buildItems.length, page: 1, limit: 25, items: buildItems } },
+    { pattern: matchPath("/api/v1/build-jobs/recent"),                     body: buildItems.slice(0, 5) },
+    { pattern: matchPrefix("/api/v1/build-jobs"),                          body: { total: buildItems.length, page: 1, limit: 25, items: buildItems } },
 
     // ── evaluations (commits) ─────────────────────────────────────────────────
-    { pattern: apiPath("/api/v1/commits/eval-queue"),                     body: evalQueueFlat },
-    { pattern: apiPath("/api/v1/commits/eval-history"),                   body: { items: evalHistory.slice(0, 10).map(e => ({
+    { pattern: matchPath("/api/v1/commits/eval-queue"),                    body: evalQueueFlat },
+    { pattern: matchPath("/api/v1/commits/eval-history"),                  body: { items: evalHistory.slice(0, 10).map(e => ({
       id: e.id || 0, flake_name: e.flake || "", commit_hash: e.commit || "",
       status: mapEvalStatus(e.status), system_count: e.systemCount || 0,
       queued_at: parseTimeAgo(e.startedAt, now), started_at: parseTimeAgo(e.startedAt, now),
       completed_at: parseTimeAgo(e.completedAt, null),
     })), total: 0, page: 1, limit: 25 } },
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/commits\b/,                   body: {} },
+    { pattern: matchPrefix("/api/v1/commits/"),                            body: {} },
 
     // ── CVEs ──────────────────────────────────────────────────────────────────
-    { pattern: apiPath("/api/v1/cves/summary"),                           body: cveDashSummary },
-    { pattern: apiPath("/api/v1/cves/stats"),                             body: cveFleetStats },
-    { pattern: apiPath("/api/v1/cves/top-systems"),                       body: [] },
-    { pattern: apiPath("/api/v1/cves/scan-freshness"),                    body: [] },
-    { pattern: apiPath("/api/v1/cves/vulnerabilities"),                   body: [] },
-    { pattern: apiPath("/api/v1/cves/grouped"),                           body: { items: [], total: 0, page: 1, per_page: 50 } },
-    { pattern: apiPath("/api/v1/cves/packages"),                          body: [] },
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/cves\b/,                      body: cveItems },
+    { pattern: matchPath("/api/v1/cves/summary"),                          body: cveDashSummary },
+    { pattern: matchPath("/api/v1/cves/stats"),                            body: cveFleetStats },
+    { pattern: matchPath("/api/v1/cves/top-systems"),                      body: [] },
+    { pattern: matchPath("/api/v1/cves/scan-freshness"),                   body: [] },
+    { pattern: matchPath("/api/v1/cves/vulnerabilities"),                  body: [] },
+    { pattern: matchPath("/api/v1/cves/grouped"),                          body: { items: [], total: 0, page: 1, per_page: 50 } },
+    { pattern: matchPath("/api/v1/cves/packages"),                         body: [] },
+    { pattern: matchPrefix("/api/v1/cves"),                                body: cveItems },
 
     // ── policies ──────────────────────────────────────────────────────────────
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/policies\b/,                  body: policies },
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/deployment-policies\b/,       body: { policies, total: policies.length, limit: 25, offset: 0 } },
+    { pattern: matchPrefix("/api/v1/policies"),                            body: policies },
+    { pattern: matchPrefix("/api/v1/deployment-policies"),                 body: { policies, total: policies.length, limit: 25, offset: 0 } },
 
     // ── compliance ────────────────────────────────────────────────────────────
-    { pattern: apiPath("/api/v1/compliance/bundles"),                     body: [] },
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/compliance\b/,                body: {} },
+    { pattern: matchPath("/api/v1/compliance/bundles"),                    body: [] },
+    { pattern: matchPrefix("/api/v1/compliance/"),                         body: {} },
 
     // ── caches ────────────────────────────────────────────────────────────────
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/caches\b/,                    body: cacheItems },
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/cache-push-jobs\b/,           body: { items: [], total: 0, page: 1, limit: 25 } },
+    { pattern: matchPrefix("/api/v1/caches"),                              body: cacheItems },
+    { pattern: matchPrefix("/api/v1/cache-push-jobs"),                     body: { items: [], total: 0, page: 1, limit: 25 } },
 
     // ── builders ──────────────────────────────────────────────────────────────
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/builders\b/,                  body: builders },
+    { pattern: matchPrefix("/api/v1/builders"),                            body: builders },
 
     // ── scanning ──────────────────────────────────────────────────────────────
-    { pattern: apiPath("/api/v1/scanning/stats"),                         body: scanningStatsResponse },
-    { pattern: apiPath("/api/v1/scanning/queue"),                         body: [] },
-    { pattern: apiPath("/api/v1/scanning/systems"),                       body: [] },
-    { pattern: apiPath("/api/v1/scanning/activity"),                      body: [] },
-    { pattern: apiPath("/api/v1/scanning/schedule"),                      body: { interval_minutes: 1440, enabled: false } },
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/scanning\b/,                  body: {} },
+    { pattern: matchPath("/api/v1/scanning/stats"),                        body: scanningStatsResponse },
+    { pattern: matchPath("/api/v1/scanning/queue"),                        body: [] },
+    { pattern: matchPath("/api/v1/scanning/systems"),                      body: [] },
+    { pattern: matchPath("/api/v1/scanning/activity"),                     body: [] },
+    { pattern: matchPath("/api/v1/scanning/schedule"),                     body: { interval_minutes: 1440, enabled: false } },
+    { pattern: matchPrefix("/api/v1/scanning/"),                           body: {} },
 
     // ── hardening ─────────────────────────────────────────────────────────────
-    { pattern: apiPath("/api/v1/hardening/summary"),                      body: hardFleetSummary },
-    { pattern: apiPath("/api/v1/hardening/top-services"),                 body: hardTopServices },
-    { pattern: apiPath("/api/v1/hardening/systems"),                      body: [] },
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\/hardening\b/,                 body: {} },
+    { pattern: matchPath("/api/v1/hardening/summary"),                     body: hardFleetSummary },
+    { pattern: matchPath("/api/v1/hardening/top-services"),                body: hardTopServices },
+    { pattern: matchPath("/api/v1/hardening/systems"),                     body: [] },
+    { pattern: matchPrefix("/api/v1/hardening/"),                          body: {} },
 
     // ── catch-all (MUST be last) ──────────────────────────────────────────────
     // Returns {} instead of [] because most endpoints expect objects.
     // Array-returning endpoints are listed specifically above.
-    { pattern: /^https?:\/\/[^/]+\/api\/v1\b/,                            body: {} },
+    { pattern: matchPrefix("/api/v1/"),                                    body: {} },
   ];
 }
 
@@ -568,7 +580,9 @@ async function main() {
 
     // Install all API intercepts (with debug logging)
     for (const r of routes) {
-      const label = typeof r.pattern === "string" ? r.pattern : r.pattern.source;
+      const label = typeof r.pattern === "string" ? r.pattern :
+                    typeof r.pattern === "function" ? (r.pattern._label || "fn") :
+                    r.pattern.source;
       try {
         await page.route(r.pattern, async (route) => {
           const req = route.request();
