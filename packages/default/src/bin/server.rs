@@ -8,14 +8,13 @@ use axum::{
     Router,
     routing::{delete, get, patch, post, put},
 };
-use axum::middleware;
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
     auth::dev_mode::{
         ensure_bootstrap_oidc_admin_mapping, ensure_dev_users, ensure_local_bootstrap_admin,
     },
     config::CrystalForgeConfig,
-    fixtures::{FixtureDb, fixture_middleware},
+    fixtures::seed_from_fixture,
     flake::commits::initialize_flake_commits,
     handlers::{
         agent::{heartbeat, state},
@@ -149,24 +148,19 @@ async fn main() -> anyhow::Result<()> {
     let queue_notifier = Arc::new(QueueNotifier::new());
     info!("🔔 Initialized event-driven queue notification system");
 
-    // Load fixture routes if FIXTURE_ROUTES_JSON is set.
-    let fixture_db = match std::env::var("FIXTURE_ROUTES_JSON") {
-        Ok(path) if !path.is_empty() => {
-            match FixtureDb::load(&path) {
-                Ok(db) => {
-                    info!("📦 Fixture mode enabled — {} routes loaded", db.route_count());
-                    db
-                }
-                Err(e) => {
-                    warn!("📦 Failed to load fixture routes: {}", e);
-                    FixtureDb::empty()
-                }
+    // Seed database from fixture JSON if FIXTURE_JSON_PATH is set.
+    if let Ok(path) = std::env::var("FIXTURE_JSON_PATH") {
+        if !path.is_empty() {
+            info!("📦 Fixture seeding enabled — loading from {}", path);
+            if let Err(e) = seed_from_fixture(&pool, std::path::Path::new(&path)).await {
+                warn!("📦 Fixture seeding failed (continuing): {}", e);
+            } else {
+                info!("📦 Fixture seeding complete");
             }
         }
-        _ => FixtureDb::empty(),
-    };
+    }
 
-    let state = CFState::new(pool, server_cfg.clone(), queue_notifier.clone(), fixture_db);
+    let state = CFState::new(pool, server_cfg.clone(), queue_notifier.clone());
     let state_arc = Arc::new(state.clone());
 
     spawn_background_tasks(
@@ -717,12 +711,6 @@ async fn main() -> anyhow::Result<()> {
     {
         app = app.fallback(get(ui::serve_ui));
     }
-
-    // Add fixture middleware (intercepts /api/ GET requests if FIXTURE_ROUTES_JSON is set)
-    app = app.layer(middleware::from_fn_with_state(
-        state.clone(),
-        fixture_middleware,
-    ));
 
     // Add CORS layer for development (allows frontend dev server to talk to backend)
     // In production, the UI is served from the same origin, so this is permissive for dev

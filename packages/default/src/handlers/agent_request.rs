@@ -128,7 +128,6 @@ pub async fn authenticate_agent_request(
 }
 
 use crate::config::ServerConfig;
-use crate::fixtures::FixtureDb;
 use crate::queue::QueueNotifier;
 
 /// Shared server state containing authorized signing keys for current-system auth
@@ -146,8 +145,6 @@ pub struct CFState {
         tokio::sync::Mutex<std::collections::HashMap<Uuid, tokio::sync::broadcast::Sender<String>>>,
     >,
     pub build_log_history: Arc<tokio::sync::Mutex<std::collections::HashMap<Uuid, Vec<String>>>>,
-    /// Pre-computed fixture API responses (optional).
-    pub fixture_db: FixtureDb,
 }
 
 impl CFState {
@@ -155,7 +152,6 @@ impl CFState {
         pool: PgPool,
         server_config: ServerConfig,
         queue_notifier: Arc<QueueNotifier>,
-        fixture_db: FixtureDb,
     ) -> Self {
         Self {
             pool,
@@ -166,7 +162,6 @@ impl CFState {
             eval_log_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             build_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             build_log_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-            fixture_db,
         }
     }
 
@@ -178,12 +173,6 @@ impl CFState {
 impl FromRef<CFState> for PgPool {
     fn from_ref(state: &CFState) -> PgPool {
         state.pool.clone()
-    }
-}
-
-impl FromRef<CFState> for FixtureDb {
-    fn from_ref(state: &CFState) -> FixtureDb {
-        state.fixture_db.clone()
     }
 }
 
