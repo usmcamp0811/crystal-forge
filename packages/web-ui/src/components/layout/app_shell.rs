@@ -18,7 +18,7 @@ use crate::theme;
 
 /// Check if UI check mock auth mode is enabled via query param.
 /// Only available in debug builds to prevent production auth bypass.
-#[cfg(any(debug_assertions, feature = "ui_fixture_mode"))]
+#[cfg(debug_assertions)]
 fn ui_check_mock_auth_enabled() -> bool {
     web_sys::window()
         .and_then(|w| w.location().search().ok())
@@ -26,12 +26,12 @@ fn ui_check_mock_auth_enabled() -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(any(debug_assertions, feature = "ui_fixture_mode")))]
+#[cfg(not(debug_assertions))]
 fn ui_check_mock_auth_enabled() -> bool {
     false
 }
 
-#[cfg(any(debug_assertions, feature = "ui_fixture_mode"))]
+#[cfg(debug_assertions)]
 fn ui_check_mock_auth_role() -> Role {
     let search = web_sys::window()
         .and_then(|w| w.location().search().ok())
@@ -47,12 +47,12 @@ fn ui_check_mock_auth_role() -> Role {
     }
 }
 
-#[cfg(not(any(debug_assertions, feature = "ui_fixture_mode")))]
+#[cfg(not(debug_assertions))]
 fn ui_check_mock_auth_role() -> Role {
     Role::Admin
 }
 
-#[cfg(any(debug_assertions, feature = "ui_fixture_mode"))]
+#[cfg(debug_assertions)]
 fn ui_check_mock_auth_context() -> AuthContext {
     AuthContext {
         is_authenticated: true,
@@ -119,8 +119,8 @@ pub fn AppShell() -> Element {
     let mut auth_context = state.auth.clone();
     drop(state);
 
-    // In debug builds or ui_fixture_mode, allow mock auth for screenshot tests
-    #[cfg(any(debug_assertions, feature = "ui_fixture_mode"))]
+    // In debug builds, allow mock auth for screenshot tests
+    #[cfg(debug_assertions)]
     if auth_context.is_none() && ui_check_mock_auth_enabled() {
         let mock = ui_check_mock_auth_context();
         app_state.write().auth = Some(mock.clone());

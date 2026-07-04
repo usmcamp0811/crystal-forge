@@ -3,12 +3,11 @@
 //! Handles fetching and hydrating the auth context on application startup.
 
 use crate::api::client;
-use crate::api::models::{AuthContext, AuthMode, AuthUser, Role};
 use crate::state::app_state::{AppState, AuthFetchState};
 
 /// Check if UI check mock auth mode is enabled via query param.
 /// Only available in debug builds to prevent production auth bypass.
-#[cfg(any(debug_assertions, feature = "ui_fixture_mode"))]
+#[cfg(debug_assertions)]
 pub fn ui_check_mock_auth_enabled() -> bool {
     web_sys::window()
         .and_then(|w| w.location().search().ok())
@@ -16,7 +15,7 @@ pub fn ui_check_mock_auth_enabled() -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(any(debug_assertions, feature = "ui_fixture_mode")))]
+#[cfg(not(debug_assertions))]
 pub fn ui_check_mock_auth_enabled() -> bool {
     false
 }
@@ -31,21 +30,9 @@ pub fn init_auth(mut app_state: dioxus::prelude::Signal<AppState>) {
 
     use_effect(move || {
         spawn(async move {
-            // Skip API call if mock auth is enabled (for screenshot tests).
-            // Set both auth and auth_fetch_state atomically so app_shell never
-            // sees Loaded + auth=None (which triggers a login redirect).
+            // Skip API call if mock auth is enabled (for screenshot tests in debug builds)
             if ui_check_mock_auth_enabled() {
                 let mut state = app_state.write();
-                state.auth = Some(AuthContext {
-                    is_authenticated: true,
-                    user: Some(AuthUser {
-                        id: "ui-check-user".to_string(),
-                        email: "ui-check@example.com".to_string(),
-                        display_name: Some("UI Check".to_string()),
-                    }),
-                    roles: vec![Role::Admin],
-                    auth_mode: AuthMode::Local,
-                });
                 state.auth_fetch_state = AuthFetchState::Loaded;
                 return;
             }
