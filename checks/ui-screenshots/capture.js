@@ -583,23 +583,33 @@ async function main() {
       const label = typeof r.pattern === "string" ? r.pattern :
                     typeof r.pattern === "function" ? (r.pattern._label || "fn") :
                     r.pattern.source;
+      if (typeof r.pattern === "function") {
+        // Wrap the predicate to add debug logging
+        const origPred = r.pattern;
+        r.pattern = (url) => {
+          const matches = origPred(url);
+          // Log first-time matches for non-auth paths
+          const path = url.pathname;
+          if (matches && !path.startsWith('/api/auth/') && label !== '/api/v1/*') {
+            console.log(`      PREDICATE MATCH ${label.padEnd(45)} ${path}`);
+          }
+          return matches;
+        };
+      }
       try {
         await page.route(r.pattern, async (route) => {
           const req = route.request();
           const url = req.url();
           const pathPart = url.replace(/^.*\/\/[^/]+/, '');
           const bodyStr = JSON.stringify(r.body);
-          const preview = bodyStr.length > 100 ? bodyStr.slice(0, 100) + '...' : bodyStr;
           try {
             await route.fulfill({ status: 200, contentType: "application/json",
                                   body: bodyStr });
-            // Only log non-auth routes to reduce noise
             if (!url.includes('/api/auth/')) {
               console.log(`    ROUTE ${label.padEnd(50)} ${pathPart}`);
             }
           } catch (err) {
             console.error(`    ROUTE FAIL ${label} ${pathPart}: ${err.message}`);
-            // Fall through to next matching route
             await route.continue().catch(() => {});
           }
         });
