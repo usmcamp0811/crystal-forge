@@ -578,8 +578,11 @@ async function main() {
     });
     const page = await context.newPage();
 
-    // Install all API intercepts (with debug logging)
-    for (const r of routes) {
+    // Install all API intercepts (with debug logging).
+    // CRITICAL: iterate in REVERSE order so the catch-all (last in array) is
+    // registered FIRST. Playwright calls matching handlers in LIFO order (last
+    // registered runs first), so specific patterns must be registered last.
+    for (const r of routes.slice().reverse()) {
       const label = typeof r.pattern === "string" ? r.pattern :
                     typeof r.pattern === "function" ? (r.pattern._label || "fn") :
                     r.pattern.source;
@@ -610,7 +613,8 @@ async function main() {
             }
           } catch (err) {
             console.error(`    ROUTE FAIL ${label} ${pathPart}: ${err.message}`);
-            await route.continue().catch(() => {});
+            // Fall through to next matching handler (e.g. catch-all)
+            await route.fallback().catch(() => {});
           }
         });
       } catch (regErr) {
