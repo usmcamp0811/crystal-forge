@@ -56,6 +56,13 @@
           pkgs = channels.nixpkgs;
           inherit inputs;
         };
+
+        # nix build .#ui-screenshots  → ./result/<view>--<theme>.png (Dioxus UI)
+        packages.ui-screenshots = import ./checks/ui-screenshots/default.nix {
+          lib = channels.nixpkgs.lib;
+          pkgs = channels.nixpkgs;
+          inherit inputs;
+        };
       };
     };
 }
