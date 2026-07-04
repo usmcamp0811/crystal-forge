@@ -8,12 +8,14 @@ use axum::{
     Router,
     routing::{delete, get, patch, post, put},
 };
+use axum::middleware;
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
     auth::dev_mode::{
         ensure_bootstrap_oidc_admin_mapping, ensure_dev_users, ensure_local_bootstrap_admin,
     },
     config::CrystalForgeConfig,
+    fixtures::{FixtureDb, fixture_middleware},
     flake::commits::initialize_flake_commits,
     handlers::{
         agent::{heartbeat, state},
@@ -147,7 +149,24 @@ async fn main() -> anyhow::Result<()> {
     let queue_notifier = Arc::new(QueueNotifier::new());
     info!("🔔 Initialized event-driven queue notification system");
 
-    let state = CFState::new(pool, server_cfg.clone(), queue_notifier.clone());
+    // Load fixture routes if FIXTURE_ROUTES_JSON is set.
+    let fixture_db = match std::env::var("FIXTURE_ROUTES_JSON") {
+        Ok(path) if !path.is_empty() => {
+            match FixtureDb::load(&path) {
+                Ok(db) => {
+                    info!("📦 Fixture mode enabled — {} routes loaded", db.route_count());
+                    db
+                }
+                Err(e) => {
+                    warn!("📦 Failed to load fixture routes: {}", e);
+                    FixtureDb::empty()
+                }
+            }
+        }
+        _ => FixtureDb::empty(),
+    };
+
+    let state = CFState::new(pool, server_cfg.clone(), queue_notifier.clone(), fixture_db);
     let state_arc = Arc::new(state.clone());
 
     spawn_background_tasks(
@@ -698,6 +717,12 @@ async fn main() -> anyhow::Result<()> {
     {
         app = app.fallback(get(ui::serve_ui));
     }
+
+    // Add fixture middleware (intercepts /api/ GET requests if FIXTURE_ROUTES_JSON is set)
+    app = app.layer(middleware::from_fn_with_state(
+        state.clone(),
+        fixture_middleware,
+    ));
 
     // Add CORS layer for development (allows frontend dev server to talk to backend)
     // In production, the UI is served from the same origin, so this is permissive for dev
