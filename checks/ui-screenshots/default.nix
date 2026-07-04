@@ -18,7 +18,7 @@ let
   captureScript = "${inputs.self}/checks/ui-screenshots/capture.js";
   # Use the fixture-mode build: same WASM but compiled with --features ui_fixture_mode
   # so that ?ui_check_auth=1 bypasses the login screen in release mode.
-  webUiPublic   = "${pkgs.crystal-forge.web-app-fixture}/public";
+  webUiPublic   = "${pkgs.crystal-forge.web-ui.web-app-fixture}/public";
 
 in pkgs.runCommand "crystal-forge-ui-screenshots"
   {
