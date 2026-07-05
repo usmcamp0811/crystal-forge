@@ -1680,7 +1680,10 @@ pub struct UpdateSystemRequest {
     /// Tri-state heartbeat interval in seconds. Omitting the key preserves the persisted value;
     /// sending `null` clears it (falls back to server default of 600s); sending a value sets it.
     /// Valid range: 15-900 seconds.
-    #[serde(default)]
+    ///
+    /// `skip_serializing_if` is required: without it, `Unset` serializes as `null`,
+    /// which the server interprets as `Clear` and wipes the stored override.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
     pub heartbeat_interval_secs: FieldUpdate<i32>,
 }
 
@@ -2458,4 +2461,80 @@ pub struct UpdateClassificationBannerRequest {
     pub enabled: bool,
     pub level: String,
     pub custom_text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn field_update_default_is_unset() {
+        let value: FieldUpdate<i32> = FieldUpdate::default();
+        assert_eq!(value, FieldUpdate::Unset);
+    }
+
+    #[test]
+    fn update_system_request_omits_unset_heartbeat_interval() {
+        // Unset must be omitted entirely: serializing as `null` would be
+        // interpreted as Clear by the server, wiping the stored override
+        // during unrelated edits (the original P1-3 bug).
+        let request = UpdateSystemRequest {
+            hostname: "web01".into(),
+            fqdn: None,
+            system_configuration_name: None,
+            environment: None,
+            flake_name: None,
+            deployment_policy: "manual".into(),
+            heartbeat_interval_secs: FieldUpdate::Unset,
+        };
+
+        let value = serde_json::to_value(request).expect("request should serialize");
+        assert!(
+            !value
+                .as_object()
+                .expect("request serializes as object")
+                .contains_key("heartbeat_interval_secs"),
+            "Unset heartbeat_interval_secs must be omitted from the payload"
+        );
+    }
+
+    #[test]
+    fn update_system_request_serializes_clear_heartbeat_interval_as_null() {
+        let request = UpdateSystemRequest {
+            hostname: "web01".into(),
+            fqdn: None,
+            system_configuration_name: None,
+            environment: None,
+            flake_name: None,
+            deployment_policy: "manual".into(),
+            heartbeat_interval_secs: FieldUpdate::Clear,
+        };
+
+        let value = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(
+            value.get("heartbeat_interval_secs"),
+            Some(&serde_json::Value::Null),
+            "Clear must serialize as explicit null"
+        );
+    }
+
+    #[test]
+    fn update_system_request_serializes_set_heartbeat_interval_as_value() {
+        let request = UpdateSystemRequest {
+            hostname: "web01".into(),
+            fqdn: None,
+            system_configuration_name: None,
+            environment: None,
+            flake_name: None,
+            deployment_policy: "manual".into(),
+            heartbeat_interval_secs: FieldUpdate::Set(120),
+        };
+
+        let value = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(
+            value.get("heartbeat_interval_secs"),
+            Some(&serde_json::json!(120)),
+            "Set(120) must serialize as 120"
+        );
+    }
 }

@@ -27,12 +27,13 @@ const HEARTBEAT_RETRY_BASE_MS: u64 = 2_000;
 /// Maximum jitter added to the sleep interval to avoid thundering herd (seconds).
 const HEARTBEAT_JITTER_MAX_SECS: u64 = 30;
 
-/// System reboot threshold: if host uptime at agent startup is below this value
-/// (seconds), we classify the startup event as a full system reboot rather than
-/// an agent service restart.
+/// Recent-boot hint threshold (seconds). INFORMATIONAL ONLY: used to phrase the
+/// startup log message. Authoritative reboot classification happens server-side
+/// by comparing the persisted boot_id sent in every heartbeat payload.
 const REBOOT_UPTIME_THRESHOLD_SECS: u64 = 300; // 5 minutes
 
-/// Returns `true` when `uptime_secs` indicates the system recently booted.
+/// Returns `true` when `uptime_secs` suggests the host booted recently.
+/// This is a log-phrasing hint, never a definitive reboot classification.
 fn is_reboot_by_uptime(uptime_secs: u64) -> bool {
     uptime_secs < REBOOT_UPTIME_THRESHOLD_SECS
 }
@@ -55,8 +56,8 @@ struct AgentState {
     /// Store path from the last successfully sent heartbeat, used to deduplicate
     /// inotify events that fire for the same derivation.
     last_reported_store_path: Option<String>,
-    /// Host uptime recorded at agent startup (seconds). Used to decide whether
-    /// a service restart is also a system reboot.
+    /// Host uptime recorded at agent startup (seconds). Informational log hint
+    /// only; authoritative reboot classification is server-side via boot_id.
     startup_uptime_secs: u64,
 }
 
@@ -73,14 +74,6 @@ impl AgentState {
         })
     }
 
-    /// Returns `true` when the agent appears to have started due to a full system
-    /// reboot rather than just a service restart.
-    ///
-    /// We compare the current host uptime against a small threshold: if the host
-    /// has been up for fewer than 5 minutes it almost certainly just booted.
-    fn is_system_reboot(&self) -> bool {
-        is_reboot_by_uptime(self.startup_uptime_secs)
-    }
 }
 
 #[tokio::main]
@@ -322,10 +315,12 @@ pub async fn post_system_heartbeat_with_deployment(
     };
 
     let heartbeat_interval_secs = log_response.heartbeat_interval_secs;
-    
-    // P1-2: Update shared interval state if server provided override and we have a sender
+
+    // P1-2: Update shared interval state if server provided override and we have a sender.
+    // update_interval only notifies receivers when the value actually changes, so a
+    // periodic heartbeat returning the current interval never wakes its own select!.
     if let (Some(interval), Some(tx)) = (heartbeat_interval_secs, interval_tx) {
-        let _ = tx.send(interval);
+        update_interval(tx, interval);
     }
 
     // Process deployment with our deployment manager
@@ -427,31 +422,60 @@ async fn handle_current_system_event(
     }
 }
 
-/// The periodic heartbeat loop. Sleeps for the server-provided interval (or the
-/// default 600s) with a small random jitter to spread agent check-ins.
+/// The periodic heartbeat loop. Sleeps for the current interval from the watch
+/// channel (with a small random jitter), then posts a heartbeat.
 ///
-/// P1-2: Uses tokio::select! to interrupt sleep when the interval changes via
-/// the watch channel, so new intervals take effect immediately.
+/// P1-2 (corrected structure):
+/// - **Sleep first, post second.** The startup heartbeat in `watch_system`
+///   already covered the initial POST, so the loop never needs an extra
+///   leading heartbeat.
+/// - `borrow_and_update()` marks the current value as seen so a value sent
+///   before the loop's `changed()` await (e.g. by the startup heartbeat)
+///   cannot cause a spurious immediate wake-up.
+/// - An interval change during the sleep interrupts it and *reschedules* the
+///   next heartbeat with the new interval via `continue` — it does NOT post
+///   immediately. Combined with `update_interval` (send_if_modified), this
+///   prevents the loop from being woken by its own unchanged-interval sends
+///   and collapsing into back-to-back heartbeat requests.
 async fn run_periodic_heartbeat_loop(
     agent_state: Arc<Mutex<AgentState>>,
-    initial_interval: u64,
     mut interval_rx: watch::Receiver<u64>,
     interval_tx: watch::Sender<u64>,
 ) -> Result<()> {
-    // Initial delay before the first heartbeat (avoid hammering the server right
-    // after agent startup since the inotify event on startup already sends one).
-    let initial_delay = jittered_interval(initial_interval);
-    sleep(Duration::from_secs(initial_delay)).await;
+    info!(
+        "💓 Starting heartbeat loop (interval: {}s)...",
+        *interval_rx.borrow()
+    );
 
-    info!("💓 Starting heartbeat loop (initial interval: {initial_interval}s)...");
-    
     loop {
+        // borrow_and_update marks the value as seen so changed() below only
+        // fires for values sent AFTER this point.
+        let current_interval = *interval_rx.borrow_and_update();
+        let sleep_secs = jittered_interval(current_interval);
+        info!("💓 Next heartbeat in {sleep_secs}s");
+
+        tokio::select! {
+            _ = sleep(Duration::from_secs(sleep_secs)) => {
+                // Normal expiration: fall through and post the heartbeat.
+            }
+            changed = interval_rx.changed() => {
+                if changed.is_err() {
+                    // All senders dropped; shut the loop down cleanly.
+                    return Ok(());
+                }
+                let new_interval = *interval_rx.borrow();
+                info!(
+                    "💓 Heartbeat interval changed during sleep: {current_interval}s → {new_interval}s (rescheduling)"
+                );
+                // Reschedule with the new interval; do NOT post immediately.
+                continue;
+            }
+        }
+
         let current_system = match readlink_path("/run/current-system") {
             Ok(p) => p,
             Err(e) => {
                 error!("❌ Failed to read /run/current-system for heartbeat: {e}");
-                let current_interval = *interval_rx.borrow();
-                sleep(Duration::from_secs(current_interval)).await;
                 continue;
             }
         };
@@ -464,19 +488,9 @@ async fn run_periodic_heartbeat_loop(
         )
         .await
         {
-            Ok(HeartbeatResult::Sent {
-                heartbeat_interval_secs: Some(server_interval),
-            }) => {
-                let old_interval = *interval_rx.borrow();
-                if server_interval != old_interval {
-                    info!("💓 Heartbeat interval updated by server: {old_interval}s → {server_interval}s");
-                }
-                // interval_tx.send already called inside post_system_heartbeat_with_deployment
-            }
-            Ok(HeartbeatResult::Sent {
-                heartbeat_interval_secs: None,
-            }) => {
-                // Server provided no override; keep current interval.
+            Ok(HeartbeatResult::Sent { .. }) => {
+                // Any interval override was already applied to the channel via
+                // update_interval (which only notifies on real changes).
             }
             Ok(HeartbeatResult::Failed) => {
                 // Heartbeat failed after all retries (already logged); retain current interval.
@@ -485,23 +499,23 @@ async fn run_periodic_heartbeat_loop(
                 error!("❌ Heartbeat loop error: {e}");
             }
         }
-
-        // P1-2: Use select! to allow interval changes to interrupt the sleep.
-        let current_interval = *interval_rx.borrow();
-        let sleep_secs = jittered_interval(current_interval);
-        info!("💓 Next heartbeat in {sleep_secs}s");
-        
-        tokio::select! {
-            _ = sleep(Duration::from_secs(sleep_secs)) => {
-                // Normal sleep expiration; continue to next heartbeat
-            }
-            _ = interval_rx.changed() => {
-                let new_interval = *interval_rx.borrow();
-                info!("💓 Heartbeat interval changed during sleep: {current_interval}s → {new_interval}s (interrupting sleep)");
-                // Loop will restart with new interval
-            }
-        }
     }
+}
+
+/// Updates the shared interval watch channel, notifying receivers ONLY when the
+/// value actually changes. `watch::Sender::send` notifies unconditionally, which
+/// would cause the periodic loop's `select!` on `changed()` to wake immediately
+/// after every successful heartbeat (a heartbeat storm). `send_if_modified`
+/// avoids that by comparing before writing.
+fn update_interval(tx: &watch::Sender<u64>, new_interval: u64) {
+    tx.send_if_modified(|current| {
+        if *current == new_interval {
+            false
+        } else {
+            *current = new_interval;
+            true
+        }
+    });
 }
 
 /// Returns `interval_secs` plus a uniform random jitter in `[0, HEARTBEAT_JITTER_MAX_SECS)`.
@@ -523,6 +537,10 @@ fn rand_jitter() -> u64 {
 
 /// Runs the inotify watch loop: watches `/run` for `current-system` changes.
 ///
+/// The startup heartbeat is performed by `watch_system` BEFORE the periodic
+/// loop is spawned (so the loop adopts the server-provided interval); this
+/// function only handles subsequent inotify events.
+///
 /// P1-2: Passes the interval sender to event handlers so deployment-triggered
 /// heartbeats can update the shared interval state immediately.
 async fn watch_for_system_changes(
@@ -531,30 +549,6 @@ async fn watch_for_system_changes(
     interval_tx: &watch::Sender<u64>,
 ) -> Result<()> {
     info!("Watching /run for changes to current-system...");
-
-    // Report initial state at startup, distinguishing reboot vs agent restart.
-    let is_reboot = {
-        let state = agent_state.lock().await;
-        state.is_system_reboot()
-    };
-    let startup_context = if is_reboot {
-        info!("🔄 System reboot detected (host uptime low at startup)");
-        "startup"
-    } else {
-        info!("🔄 Agent service restart detected (host uptime normal)");
-        "agent_restart"
-    };
-
-    if let Ok(current_system) = readlink_path("/run/current-system") {
-        let _ = handle_current_system_event(
-            OsStr::new("current-system"),
-            startup_context,
-            agent_state.clone(),
-            Some(interval_tx),
-        )
-        .await;
-        // P1-2: Startup heartbeat updates interval_tx if server provides override
-    }
 
     loop {
         for event in inotify.read_events()? {
@@ -595,40 +589,49 @@ pub async fn watch_system(agent_state: Arc<Mutex<AgentState>>) -> Result<()> {
     // The startup heartbeat (below) will update it if the server provides an override.
     let (interval_tx, interval_rx) = watch::channel(DEFAULT_HEARTBEAT_INTERVAL_SECS);
 
-    // Perform startup heartbeat to determine initial interval before spawning the loop.
-    let initial_interval = {
-        let is_reboot = {
-            let state = agent_state.lock().await;
-            state.is_system_reboot()
-        };
-        let startup_context = if is_reboot {
-            info!("🔄 System reboot detected (host uptime low at startup)");
-            "startup"
+    // Informational only: reboot vs agent-restart is classified authoritatively
+    // by the SERVER via the persisted boot_id sent in every heartbeat payload.
+    // The uptime hint here is a log aid, never a definitive classification.
+    {
+        let state = agent_state.lock().await;
+        if is_reboot_by_uptime(state.startup_uptime_secs) {
+            info!(
+                "🔄 Agent started shortly after boot (host uptime {}s); server classifies via boot_id",
+                state.startup_uptime_secs
+            );
         } else {
-            info!("🔄 Agent service restart detected (host uptime normal)");
-            "agent_restart"
-        };
-
-        if let Ok(current_system) = readlink_path("/run/current-system") {
-            let _ = handle_current_system_event(
-                OsStr::new("current-system"),
-                startup_context,
-                agent_state.clone(),
-                Some(&interval_tx),
-            )
-            .await;
+            info!(
+                "🔄 Agent started (host uptime {}s); server classifies restart type via boot_id",
+                state.startup_uptime_secs
+            );
         }
+    }
 
-        // Use the current value from the channel (updated by startup heartbeat if server sent override)
+    // Perform the startup heartbeat BEFORE spawning the periodic loop so the loop
+    // adopts the server-provided interval from its very first sleep.
+    // handle_current_system_event resolves /run/current-system itself (P2-7: no
+    // redundant outer read_link) and logs any failure.
+    if let Err(e) = handle_current_system_event(
+        OsStr::new("current-system"),
+        "startup",
+        agent_state.clone(),
+        Some(&interval_tx),
+    )
+    .await
+    {
+        error!("❌ Startup heartbeat failed: {e}");
+    }
+
+    info!(
+        "💓 Heartbeat interval after startup: {}s",
         *interval_rx.borrow()
-    };
+    );
 
-    info!("💓 Heartbeat interval after startup: {initial_interval}s");
-
-    // Spawn the periodic heartbeat loop with the initial interval and watch channel.
+    // Spawn the periodic heartbeat loop with the watch channel. The loop reads
+    // the interval from the channel (marked seen via borrow_and_update), so the
+    // startup override is adopted for the first sleep with no spurious wake-up.
     tokio::spawn(run_periodic_heartbeat_loop(
         agent_state.clone(),
-        initial_interval,
         interval_rx,
         interval_tx.clone(),
     ));
@@ -661,66 +664,114 @@ mod tests {
     }
 
     #[test]
-    fn is_system_reboot_detection_uses_uptime_threshold() {
-        // Low uptime (< 300s) → system reboot
+    fn uptime_hint_thresholds() {
+        // INFORMATIONAL log hint only: authoritative classification is
+        // server-side via boot_id. This just pins the phrasing threshold.
+        assert!(is_reboot_by_uptime(60));
+        assert!(is_reboot_by_uptime(299));
+        assert!(!is_reboot_by_uptime(300));
+        assert!(!is_reboot_by_uptime(86400));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Watch channel behavior (P1-2 / heartbeat storm prevention)
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn unchanged_interval_does_not_wake_receiver() {
+        let (tx, mut rx) = watch::channel(600u64);
+        // Mark the initial value as seen, like the loop's borrow_and_update.
+        let _ = *rx.borrow_and_update();
+
+        // Sending the SAME value must not notify: otherwise every successful
+        // periodic heartbeat would wake its own select! and cause a storm.
+        update_interval(&tx, 600);
+
+        let woke = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
         assert!(
-            is_reboot_by_uptime(60),
-            "uptime=60 must be classified as reboot"
-        );
-        assert!(
-            is_reboot_by_uptime(299),
-            "uptime=299 must be classified as reboot"
-        );
-        // High uptime → agent restart only
-        assert!(
-            !is_reboot_by_uptime(300),
-            "uptime=300 must be classified as agent restart"
-        );
-        assert!(
-            !is_reboot_by_uptime(86400),
-            "uptime=86400 must be classified as agent restart"
+            woke.is_err(),
+            "unchanged interval must not wake the receiver (heartbeat storm)"
         );
     }
 
-    #[test]
-    fn heartbeat_result_sent_carries_interval() {
-        let result = HeartbeatResult::Sent {
-            heartbeat_interval_secs: Some(120),
-        };
-        match result {
-            HeartbeatResult::Sent {
-                heartbeat_interval_secs: Some(interval),
-            } => {
-                assert_eq!(interval, 120, "interval must match");
-            }
-            _ => panic!("expected HeartbeatResult::Sent with interval"),
-        }
+    #[tokio::test]
+    async fn changed_interval_wakes_receiver_with_new_value() {
+        let (tx, mut rx) = watch::channel(600u64);
+        let _ = *rx.borrow_and_update();
+
+        update_interval(&tx, 30);
+
+        let woke = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
+        assert!(
+            woke.is_ok(),
+            "a genuinely changed interval must wake the receiver"
+        );
+        assert_eq!(*rx.borrow_and_update(), 30);
     }
 
-    #[test]
-    fn heartbeat_result_sent_can_have_no_interval() {
-        let result = HeartbeatResult::Sent {
-            heartbeat_interval_secs: None,
-        };
-        match result {
-            HeartbeatResult::Sent {
-                heartbeat_interval_secs: None,
-            } => {
-                // OK
-            }
-            _ => panic!("expected HeartbeatResult::Sent with None"),
-        }
+    #[tokio::test]
+    async fn value_sent_before_borrow_and_update_is_marked_seen() {
+        // Models the startup flow: the startup heartbeat sends the interval
+        // BEFORE the periodic loop first reads the channel. borrow_and_update
+        // must mark it seen so the loop's first select! does not wake instantly.
+        let (tx, mut rx) = watch::channel(600u64);
+        update_interval(&tx, 120);
+
+        // Loop adopts the startup value...
+        assert_eq!(*rx.borrow_and_update(), 120);
+
+        // ...and does NOT get a spurious wake-up for it.
+        let woke = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
+        assert!(
+            woke.is_err(),
+            "startup value must be marked seen; no spurious wake-up"
+        );
     }
 
-    #[test]
-    fn heartbeat_result_failed_is_distinct() {
-        let result = HeartbeatResult::Failed;
-        match result {
-            HeartbeatResult::Failed => {
-                // OK
+    #[tokio::test]
+    async fn interval_change_interrupts_sleep_and_reschedules_without_posting() {
+        // Models the loop body: sleep vs changed(). A change during the sleep
+        // must take the `changed` branch (reschedule) instead of falling
+        // through to the post branch.
+        let (tx, mut rx) = watch::channel(600u64);
+        let current_interval = *rx.borrow_and_update();
+        assert_eq!(current_interval, 600);
+
+        let interrupted = tokio::spawn(async move {
+            tokio::select! {
+                _ = sleep(Duration::from_secs(current_interval)) => false,
+                changed = rx.changed() => {
+                    assert!(changed.is_ok());
+                    // Reschedule path: the loop would `continue` here, not post.
+                    true
+                }
             }
-            _ => panic!("expected HeartbeatResult::Failed"),
-        }
+        });
+
+        // Change the interval shortly after the sleep starts.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        update_interval(&tx, 30);
+
+        let took_reschedule_branch = tokio::time::timeout(Duration::from_secs(2), interrupted)
+            .await
+            .expect("select must resolve well before the 600s sleep")
+            .expect("task must not panic");
+        assert!(
+            took_reschedule_branch,
+            "interval change must interrupt the sleep via the changed() branch"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_sender_ends_changed_wait_with_error() {
+        // The loop treats a closed channel as shutdown.
+        let (tx, mut rx) = watch::channel(600u64);
+        let _ = *rx.borrow_and_update();
+        drop(tx);
+        assert!(
+            rx.changed().await.is_err(),
+            "changed() must error once all senders are dropped"
+        );
     }
 }
 

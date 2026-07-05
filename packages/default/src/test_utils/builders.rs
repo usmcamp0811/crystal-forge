@@ -392,6 +392,7 @@ impl SystemStateBuilder {
             nixos_version: self.nixos_version.clone(),
             agent_compatible: self.agent_compatible,
             partial_data: self.partial_data,
+            boot_id: Some(format!("test-boot-id-{}", self.hostname)),
         }
     }
 }

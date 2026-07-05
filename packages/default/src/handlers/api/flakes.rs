@@ -3191,7 +3191,7 @@ mod task_221_integration_tests {
     async fn test_update_system_metadata_persists_config_name() {
         let pool = get_test_pool().await;
         use crate::queries::systems::{
-            get_system_detail_by_id, update_system_metadata, FqdnUpdate,
+            FqdnUpdate, HeartbeatIntervalUpdate, get_system_detail_by_id, update_system_metadata,
         };
         let flake = make_flake(&pool, "test-sysmeta", "cf_systems_only").await;
         let system = make_system(&pool, "host-meta", Some(flake.id), None).await;

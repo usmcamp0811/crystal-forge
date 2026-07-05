@@ -1330,7 +1330,10 @@ pub struct UpdateSystemRequest {
     /// Tri-state heartbeat interval in seconds. Omitting the key preserves the persisted value;
     /// sending `null` clears it (falls back to server default of 600s); sending a value sets it.
     /// Valid range: 15-900 seconds.
-    #[serde(default)]
+    ///
+    /// `skip_serializing_if` is required: without it, `Unset` serializes as `null`,
+    /// which a receiving server interprets as `Clear` and wipes the stored override.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
     pub heartbeat_interval_secs: FieldUpdate<i32>,
 }
 
@@ -1832,6 +1835,97 @@ mod tests {
     fn field_update_default_is_unset() {
         let value: FieldUpdate<String> = FieldUpdate::default();
         assert_eq!(value, FieldUpdate::Unset);
+    }
+
+    #[test]
+    fn update_system_request_omitted_heartbeat_interval_is_unset() {
+        // Older/partial clients that don't send `heartbeat_interval_secs` must not clear it.
+        let json = r#"{"hostname":"web01","deployment_policy":"manual"}"#;
+        let req: UpdateSystemRequest = serde_json::from_str(json)
+            .expect("payload without heartbeat_interval_secs should deserialize");
+        assert_eq!(req.heartbeat_interval_secs, FieldUpdate::Unset);
+    }
+
+    #[test]
+    fn update_system_request_null_heartbeat_interval_is_clear() {
+        let json =
+            r#"{"hostname":"web01","heartbeat_interval_secs":null,"deployment_policy":"manual"}"#;
+        let req: UpdateSystemRequest = serde_json::from_str(json)
+            .expect("payload with null heartbeat_interval_secs should deserialize");
+        assert_eq!(req.heartbeat_interval_secs, FieldUpdate::Clear);
+    }
+
+    #[test]
+    fn update_system_request_value_heartbeat_interval_is_set() {
+        let json =
+            r#"{"hostname":"web01","heartbeat_interval_secs":120,"deployment_policy":"manual"}"#;
+        let req: UpdateSystemRequest = serde_json::from_str(json)
+            .expect("payload with heartbeat_interval_secs value should deserialize");
+        assert_eq!(req.heartbeat_interval_secs, FieldUpdate::Set(120));
+    }
+
+    #[test]
+    fn update_system_request_omits_unset_heartbeat_interval() {
+        // Unset must be omitted entirely: serializing as `null` would be
+        // interpreted as Clear by the receiving server (the original P1-3 bug).
+        let request = UpdateSystemRequest {
+            hostname: "web01".into(),
+            fqdn: FieldUpdate::Unset,
+            system_configuration_name: None,
+            environment: None,
+            flake_name: None,
+            deployment_policy: "manual".into(),
+            heartbeat_interval_secs: FieldUpdate::Unset,
+        };
+
+        let value = serde_json::to_value(request).expect("request should serialize");
+        assert!(
+            !value
+                .as_object()
+                .expect("request serializes as object")
+                .contains_key("heartbeat_interval_secs"),
+            "Unset heartbeat_interval_secs must be omitted from the payload"
+        );
+    }
+
+    #[test]
+    fn update_system_request_serializes_clear_heartbeat_interval_as_null() {
+        let request = UpdateSystemRequest {
+            hostname: "web01".into(),
+            fqdn: FieldUpdate::Unset,
+            system_configuration_name: None,
+            environment: None,
+            flake_name: None,
+            deployment_policy: "manual".into(),
+            heartbeat_interval_secs: FieldUpdate::Clear,
+        };
+
+        let value = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(
+            value.get("heartbeat_interval_secs"),
+            Some(&serde_json::Value::Null),
+            "Clear must serialize as explicit null"
+        );
+    }
+
+    #[test]
+    fn update_system_request_serializes_set_heartbeat_interval_as_value() {
+        let request = UpdateSystemRequest {
+            hostname: "web01".into(),
+            fqdn: FieldUpdate::Unset,
+            system_configuration_name: None,
+            environment: None,
+            flake_name: None,
+            deployment_policy: "manual".into(),
+            heartbeat_interval_secs: FieldUpdate::Set(120),
+        };
+
+        let value = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(
+            value.get("heartbeat_interval_secs"),
+            Some(&serde_json::json!(120)),
+            "Set(120) must serialize as 120"
+        );
     }
 
     #[test]

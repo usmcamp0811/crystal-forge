@@ -4,11 +4,18 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-pub async fn insert_system_state(
-    pool: &PgPool,
+/// Insert a full system state row.
+///
+/// Accepts any Postgres executor so callers can run it against a pool or
+/// inside a transaction (e.g. atomically with the boot_id update).
+pub async fn insert_system_state<'e, E>(
+    executor: E,
     state: &SystemState,
     version_compatible: bool,
-) -> Result<()> {
+) -> Result<()>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let change_reason = match state.change_reason.as_str() {
         "heartbeat" => "startup",
         other => other,
@@ -77,7 +84,7 @@ pub async fn insert_system_state(
     .bind(&state.nixos_version)
     .bind(version_compatible)  // $29
     .bind(!version_compatible) // $30 - partial_data flag
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(|e| anyhow::anyhow!("SQL error: {e:?}"))?;
 
@@ -362,6 +369,7 @@ mod tests {
             nixos_version: Some("23.05".to_string()),
             agent_compatible: Some(true),
             partial_data: Some(false),
+            boot_id: Some("test-boot-id".to_string()),
         };
 
         let json = serde_json::to_vec(&current_state).unwrap();

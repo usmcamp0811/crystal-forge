@@ -5,8 +5,8 @@ use crate::models::agent_heartbeats::AgentHeartbeat;
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::{get_caches_for_environment, get_global_caches};
 use crate::queries::systems::{
-    deactivate_duplicate_active_systems_by_public_key, get_agent_desired_target_by_hostname,
-    get_system_heartbeat_interval_secs, update_boot_id,
+    BootIdChange, deactivate_duplicate_active_systems_by_public_key,
+    get_agent_desired_target_by_hostname, get_system_heartbeat_interval_secs, update_boot_id_tx,
 };
 use crate::queries::{agent_heartbeat::insert_agent_heartbeat, system_states::insert_system_state};
 use axum::response::Response;
@@ -143,39 +143,75 @@ pub async fn log(
         agent_request.system.hostname, payload
     );
 
-    // P2-6: Update boot_id and detect reboot if boot_id is present
-    if let Some(ref new_boot_id) = payload.boot_id {
-        match update_boot_id(&pool, &payload.hostname, new_boot_id).await {
-            Ok(true) => {
-                info!("🔄 System reboot detected for {} (boot_id changed)", payload.hostname);
-            }
-            Ok(false) => {
-                // boot_id unchanged or first heartbeat from this system
-            }
+    // Classify heartbeat vs state change (read-only; safe outside the transaction).
+    let heartbeat_or_state = AgentHeartbeat::from_system_state_if_heartbeat(&payload, &pool).await;
+
+    // P2-6 (atomic): the boot_id update and the heartbeat/state insert share one
+    // transaction. If the insert fails and we return an error, the boot_id write
+    // rolls back too — so the agent's retry still observes the boot_id change and
+    // the reboot event is not lost.
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            debug!("❌ failed to begin heartbeat transaction: {e:?}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let boot_id_change = if let Some(ref new_boot_id) = payload.boot_id {
+        match update_boot_id_tx(&mut tx, &payload.hostname, new_boot_id).await {
+            Ok(change) => Some(change),
             Err(e) => {
-                debug!("Failed to update boot_id for {}: {e}", payload.hostname);
+                debug!("❌ failed to update boot_id for {}: {e:?}", payload.hostname);
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }
+    } else {
+        None // Older agent that does not send boot_id
+    };
+
+    match &heartbeat_or_state {
+        Ok(heartbeat) => {
+            // This is a heartbeat - insert to heartbeats table
+            if let Err(e) = insert_agent_heartbeat(&mut *tx, heartbeat).await {
+                debug!("❌ failed to insert heartbeat: {e:?}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }
+        Err(state_change_reason) => {
+            info!("🔍 Heartbeat became state change: {}", state_change_reason);
+            // State changed - insert full state record
+            if let Err(e) = insert_system_state(&mut *tx, &payload, version_compatible).await {
+                debug!("❌ failed to insert system state: {e:?}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         }
     }
 
-    match AgentHeartbeat::from_system_state_if_heartbeat(&payload, &pool).await {
-        Ok(heartbeat) => {
-            // This is a heartbeat - insert to heartbeats table
-            if let Err(e) = insert_agent_heartbeat(&pool, &heartbeat).await {
-                debug!("❌ failed to insert heartbeat: {e:?}");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-            info!("💓 Heartbeat recorded for {}", payload.hostname);
+    if let Err(e) = tx.commit().await {
+        debug!("❌ failed to commit heartbeat transaction: {e:?}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Log only after the commit so we never report events that rolled back.
+    match boot_id_change {
+        Some(BootIdChange::Changed) => {
+            info!(
+                "🔄 System reboot detected for {} (boot_id changed)",
+                payload.hostname
+            );
         }
-        Err(_state_change_reason) => {
-            info!("🔍 Heartbeat became state change: {}", _state_change_reason);
-            // State changed - insert full state record
-            if let Err(e) = insert_system_state(&pool, &payload, version_compatible).await {
-                debug!("❌ failed to insert system state: {e:?}");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-            info!("📊 State change recorded for {}", payload.hostname);
+        Some(BootIdChange::Initialized) => {
+            debug!(
+                "boot_id initialized for {} (first heartbeat with boot_id; not a reboot)",
+                payload.hostname
+            );
         }
+        Some(BootIdChange::Unchanged) | None => {}
+    }
+    match heartbeat_or_state {
+        Ok(_) => info!("💓 Heartbeat recorded for {}", payload.hostname),
+        Err(_) => info!("📊 State change recorded for {}", payload.hostname),
     }
 
     // Fetch desired target for this system. Manual systems only receive fresh,

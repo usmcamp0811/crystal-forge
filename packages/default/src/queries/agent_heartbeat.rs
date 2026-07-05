@@ -1,8 +1,14 @@
 use crate::models::agent_heartbeats::AgentHeartbeat;
 use anyhow::Result;
-use sqlx::PgPool;
 
-pub async fn insert_agent_heartbeat(pool: &PgPool, heartbeat: &AgentHeartbeat) -> Result<()> {
+/// Insert an agent heartbeat row.
+///
+/// Accepts any Postgres executor so callers can run it against a pool or
+/// inside a transaction (e.g. atomically with the boot_id update).
+pub async fn insert_agent_heartbeat<'e, E>(executor: E, heartbeat: &AgentHeartbeat) -> Result<()>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     sqlx::query!(
         r#"
        INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash)
@@ -13,7 +19,7 @@ pub async fn insert_agent_heartbeat(pool: &PgPool, heartbeat: &AgentHeartbeat) -
         heartbeat.agent_version,
         heartbeat.agent_build_hash
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
 
     Ok(())

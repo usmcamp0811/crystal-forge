@@ -195,6 +195,9 @@ impl SystemState {
             // ───── Agent Compatibility (defaults for V1) ─────
             agent_compatible: Some(true),
             partial_data: Some(false),
+
+            // ───── Reboot Detection (not present in V1) ─────
+            boot_id: None,
         }
     }
 
@@ -277,6 +280,9 @@ impl SystemState {
             // Agent compatibility
             agent_compatible: Some(true),
             partial_data: Some(false),
+
+            // Reboot detection (deterministic test value)
+            boot_id: Some(format!("test-boot-id-{}", hostname)),
         })
     }
 

@@ -396,18 +396,47 @@ pub async fn get_system_heartbeat_interval_secs(
     Ok(result.flatten())
 }
 
-/// Update the boot_id for a system, used for reboot detection.
-/// Returns true if the boot_id changed (indicating a system reboot).
-pub async fn update_boot_id(
-    pool: &PgPool,
+/// Outcome of comparing an incoming boot_id against the persisted value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootIdChange {
+    /// No boot_id was stored yet (first heartbeat from an upgraded agent, or
+    /// the system row did not exist). NOT a reboot.
+    Initialized,
+    /// The stored boot_id matches the incoming one: agent restart/reconnect.
+    Unchanged,
+    /// The stored boot_id differs from the incoming one: host reboot.
+    Changed,
+}
+
+/// Classify a boot_id transition. Pure function so the initialization-vs-reboot
+/// distinction is unit-testable without a database.
+pub fn classify_boot_id_change(old_boot_id: Option<&str>, new_boot_id: &str) -> BootIdChange {
+    match old_boot_id {
+        None => BootIdChange::Initialized,
+        Some(old) if old == new_boot_id => BootIdChange::Unchanged,
+        Some(_) => BootIdChange::Changed,
+    }
+}
+
+/// Update the boot_id for a system inside an existing transaction, used for
+/// reboot detection.
+///
+/// Runs on `&mut Transaction` so the boot_id write commits atomically with the
+/// heartbeat/state insert: if the later insert fails and the transaction rolls
+/// back, the boot_id is untouched and the agent's retry still detects the reboot.
+///
+/// Returns [`BootIdChange::Initialized`] when no previous boot_id was stored —
+/// the first heartbeat from an upgraded agent must NOT be reported as a reboot.
+pub async fn update_boot_id_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     hostname: &str,
     new_boot_id: &str,
-) -> Result<bool> {
+) -> Result<BootIdChange> {
     #[derive(sqlx::FromRow)]
     struct BootIdUpdate {
         old_boot_id: Option<String>,
     }
-    
+
     let result = sqlx::query_as::<_, BootIdUpdate>(
         "WITH old_value AS (
              SELECT boot_id FROM systems WHERE hostname = $2
@@ -419,16 +448,14 @@ pub async fn update_boot_id(
     )
     .bind(new_boot_id)
     .bind(hostname)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await?;
-    
-    // Returns true if boot_id changed (reboot occurred)
-    let rebooted = match result {
-        Some(update) => update.old_boot_id.as_deref() != Some(new_boot_id),
-        None => false, // No system found
-    };
-    
-    Ok(rebooted)
+
+    Ok(match result {
+        Some(update) => classify_boot_id_change(update.old_boot_id.as_deref(), new_boot_id),
+        // No system row matched; nothing was stored.
+        None => BootIdChange::Initialized,
+    })
 }
 
 pub async fn get_desired_target_by_id(pool: &PgPool, system_id: i32) -> Result<Option<String>> {
@@ -2134,6 +2161,155 @@ mod tests {
             detail.generation,
             Some(74),
             "detail query should expose latest persisted generation"
+        );
+
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Boot ID classification (P2-6)
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn boot_id_first_observation_is_initialized_not_changed() {
+        // The first heartbeat from an upgraded agent must NOT count as a reboot.
+        assert_eq!(
+            classify_boot_id_change(None, "boot-aaa"),
+            BootIdChange::Initialized
+        );
+    }
+
+    #[test]
+    fn boot_id_same_value_is_unchanged() {
+        assert_eq!(
+            classify_boot_id_change(Some("boot-aaa"), "boot-aaa"),
+            BootIdChange::Unchanged
+        );
+    }
+
+    #[test]
+    fn boot_id_different_value_is_changed() {
+        assert_eq!(
+            classify_boot_id_change(Some("boot-aaa"), "boot-bbb"),
+            BootIdChange::Changed
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn update_boot_id_tx_first_write_is_initialized() {
+        let pool = test_pool_from_env().await;
+        let hostname = format!("task378-bootid-init-{}", Uuid::new_v4());
+        let system = make_test_system(&pool, &hostname).await;
+
+        let mut tx = pool.begin().await.expect("begin tx");
+        let change = update_boot_id_tx(&mut tx, &hostname, "boot-1")
+            .await
+            .expect("update_boot_id_tx should succeed");
+        tx.commit().await.expect("commit tx");
+
+        assert_eq!(
+            change,
+            BootIdChange::Initialized,
+            "first stored boot_id must be Initialized, not Changed"
+        );
+
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn update_boot_id_tx_detects_unchanged_and_changed() {
+        let pool = test_pool_from_env().await;
+        let hostname = format!("task378-bootid-change-{}", Uuid::new_v4());
+        let system = make_test_system(&pool, &hostname).await;
+
+        // Seed initial boot_id.
+        let mut tx = pool.begin().await.expect("begin tx");
+        update_boot_id_tx(&mut tx, &hostname, "boot-1")
+            .await
+            .expect("seed boot_id");
+        tx.commit().await.expect("commit tx");
+
+        // Same boot_id → Unchanged.
+        let mut tx = pool.begin().await.expect("begin tx");
+        let unchanged = update_boot_id_tx(&mut tx, &hostname, "boot-1")
+            .await
+            .expect("update with same boot_id");
+        tx.commit().await.expect("commit tx");
+        assert_eq!(unchanged, BootIdChange::Unchanged);
+
+        // Different boot_id → Changed.
+        let mut tx = pool.begin().await.expect("begin tx");
+        let changed = update_boot_id_tx(&mut tx, &hostname, "boot-2")
+            .await
+            .expect("update with new boot_id");
+        tx.commit().await.expect("commit tx");
+        assert_eq!(changed, BootIdChange::Changed);
+
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn update_boot_id_tx_rolls_back_with_failed_insert() {
+        // P2-6 atomicity: if the heartbeat/state insert fails after the boot_id
+        // update, rolling back the transaction must leave the stored boot_id
+        // untouched so the agent's retry still detects the reboot.
+        let pool = test_pool_from_env().await;
+        let hostname = format!("task378-bootid-rollback-{}", Uuid::new_v4());
+        let system = make_test_system(&pool, &hostname).await;
+
+        // Seed boot-1 (committed).
+        let mut tx = pool.begin().await.expect("begin tx");
+        update_boot_id_tx(&mut tx, &hostname, "boot-1")
+            .await
+            .expect("seed boot_id");
+        tx.commit().await.expect("commit tx");
+
+        // Update to boot-2 but roll back (simulating a failed heartbeat insert).
+        let mut tx = pool.begin().await.expect("begin tx");
+        let change = update_boot_id_tx(&mut tx, &hostname, "boot-2")
+            .await
+            .expect("update inside doomed tx");
+        assert_eq!(change, BootIdChange::Changed);
+        tx.rollback().await.expect("rollback tx");
+
+        // Stored boot_id must still be boot-1.
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT boot_id FROM systems WHERE hostname = $1")
+                .bind(&hostname)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch stored boot_id");
+        assert_eq!(
+            stored.as_deref(),
+            Some("boot-1"),
+            "rolled-back boot_id update must not persist"
+        );
+
+        // The retry must therefore still classify boot-2 as Changed.
+        let mut tx = pool.begin().await.expect("begin tx");
+        let retry = update_boot_id_tx(&mut tx, &hostname, "boot-2")
+            .await
+            .expect("retry update");
+        tx.commit().await.expect("commit tx");
+        assert_eq!(
+            retry,
+            BootIdChange::Changed,
+            "retry after rollback must still detect the reboot"
         );
 
         sqlx::query("DELETE FROM systems WHERE id = $1")
