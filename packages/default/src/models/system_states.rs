@@ -130,6 +130,12 @@ pub struct SystemState {
     // ───── Agent Compatibility ─────
     pub agent_compatible: Option<bool>,
     pub partial_data: Option<bool>,
+    
+    // ───── Reboot Detection ─────
+    /// Linux kernel boot UUID from /proc/sys/kernel/random/boot_id.
+    /// Used to distinguish system reboots from agent restarts.
+    #[serde(default)]
+    pub boot_id: Option<String>,
 }
 
 impl SystemState {
@@ -348,6 +354,9 @@ impl SystemState {
         let (generation, generation_matches_current_store_path) =
             current_system_generation_info(store_path);
 
+        debug!("🔍 reading boot_id");
+        let boot_id = read_trimmed("/proc/sys/kernel/random/boot_id")?;
+
         Ok(SystemState {
             id: None,
             timestamp: Some(Utc::now()),
@@ -381,6 +390,7 @@ impl SystemState {
             nixos_version,
             agent_compatible: Some(true), // Default to compatible
             partial_data: Some(false),    // Default to complete data
+            boot_id,
         })
     }
 }

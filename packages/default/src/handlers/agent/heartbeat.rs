@@ -6,7 +6,7 @@ use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::{get_caches_for_environment, get_global_caches};
 use crate::queries::systems::{
     deactivate_duplicate_active_systems_by_public_key, get_agent_desired_target_by_hostname,
-    get_system_heartbeat_interval_secs,
+    get_system_heartbeat_interval_secs, update_boot_id,
 };
 use crate::queries::{agent_heartbeat::insert_agent_heartbeat, system_states::insert_system_state};
 use axum::response::Response;
@@ -142,6 +142,21 @@ pub async fn log(
         "System state received from {}: {}",
         agent_request.system.hostname, payload
     );
+
+    // P2-6: Update boot_id and detect reboot if boot_id is present
+    if let Some(ref new_boot_id) = payload.boot_id {
+        match update_boot_id(&pool, &payload.hostname, new_boot_id).await {
+            Ok(true) => {
+                info!("🔄 System reboot detected for {} (boot_id changed)", payload.hostname);
+            }
+            Ok(false) => {
+                // boot_id unchanged or first heartbeat from this system
+            }
+            Err(e) => {
+                debug!("Failed to update boot_id for {}: {e}", payload.hostname);
+            }
+        }
+    }
 
     match AgentHeartbeat::from_system_state_if_heartbeat(&payload, &pool).await {
         Ok(heartbeat) => {
