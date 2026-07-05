@@ -495,7 +495,10 @@ let
       # ── 4. Start Crystal Forge server in background ─────────────────
       echo "🚀 Starting Crystal Forge server with fixture data..."
       export FIXTURE_JSON_PATH="$FIXTURE_PATH"
-      export AUTH_MODE="dev"
+      export AUTH_MODE="local"
+      export CRYSTAL_FORGE_LOCAL_BOOTSTRAP_USERNAME="admin"
+      export CRYSTAL_FORGE_LOCAL_BOOTSTRAP_PASSWORD="password"
+      export CRYSTAL_FORGE_LOCAL_BOOTSTRAP_EMAIL="admin@crystal-forge.local"
       export CRYSTAL_FORGE__SERVER__EXECUTION_MODE="mock"
       export RUST_LOG="info,crystal_forge::fixtures::seed=debug"
 
