@@ -1,12 +1,12 @@
 use crate::handlers::agent_request::{
-    CFState, authenticate_agent_request, deserialize_system_state_versioned,
+    authenticate_agent_request, deserialize_system_state_versioned, CFState,
 };
 use crate::models::agent_heartbeats::AgentHeartbeat;
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::{get_caches_for_environment, get_global_caches};
 use crate::queries::systems::{
-    BootIdChange, deactivate_duplicate_active_systems_by_public_key,
-    get_agent_desired_target_by_hostname, get_system_heartbeat_interval_secs, update_boot_id_tx,
+    deactivate_duplicate_active_systems_by_public_key, get_agent_desired_target_by_hostname,
+    get_system_heartbeat_interval_secs, update_boot_id_tx, BootIdChange,
 };
 use crate::queries::{agent_heartbeat::insert_agent_heartbeat, system_states::insert_system_state};
 use axum::response::Response;
@@ -162,7 +162,10 @@ pub async fn log(
         match update_boot_id_tx(&mut tx, &payload.hostname, new_boot_id).await {
             Ok(change) => Some(change),
             Err(e) => {
-                debug!("❌ failed to update boot_id for {}: {e:?}", payload.hostname);
+                debug!(
+                    "❌ failed to update boot_id for {}: {e:?}",
+                    payload.hostname
+                );
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         }
@@ -234,7 +237,10 @@ pub async fn log(
         let per_system = get_system_heartbeat_interval_secs(&pool, &agent_request.system.hostname)
             .await
             .unwrap_or_else(|e| {
-                debug!("Failed to fetch heartbeat_interval_secs for {}: {e}", agent_request.system.hostname);
+                debug!(
+                    "Failed to fetch heartbeat_interval_secs for {}: {e}",
+                    agent_request.system.hostname
+                );
                 None
             });
         let interval = per_system

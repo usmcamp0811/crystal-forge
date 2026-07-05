@@ -1,8 +1,8 @@
-use anyhow::{Context, Result, bail};
-use base64::Engine;
+use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use crystal_forge::config::CrystalForgeConfig;
-use crystal_forge::deployment::agent::{AgentDeploymentManager, DeploymentResult, readlink_path};
+use crystal_forge::deployment::agent::{readlink_path, AgentDeploymentManager, DeploymentResult};
 use crystal_forge::handlers::agent::heartbeat::LogResponse;
 use crystal_forge::models::system_states::SystemState;
 use ed25519_dalek::{Signer, SigningKey};
@@ -10,8 +10,8 @@ use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use reqwest::blocking::Client;
 use serde_json::Value;
 use std::{ffi::OsStr, fs, path::PathBuf, process::Command, sync::Arc};
-use tokio::sync::{Mutex, watch};
-use tokio::time::{Duration, sleep};
+use tokio::sync::{watch, Mutex};
+use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -73,7 +73,6 @@ impl AgentState {
             startup_uptime_secs,
         })
     }
-
 }
 
 #[tokio::main]
@@ -221,10 +220,7 @@ pub fn post_system_state_change(current_system: &OsStr, context: &str) -> Result
 
 /// Posts heartbeat to the server with retry (exponential backoff) and returns the
 /// `LogResponse` including `heartbeat_interval_secs` when present.
-async fn post_heartbeat_with_retry(
-    current_system: &OsStr,
-    context: &str,
-) -> Result<LogResponse> {
+async fn post_heartbeat_with_retry(current_system: &OsStr, context: &str) -> Result<LogResponse> {
     let cfg = CrystalForgeConfig::load()?;
     let client_cfg = &cfg.client;
 
@@ -276,14 +272,12 @@ async fn post_heartbeat_with_retry(
                     last_err = anyhow::anyhow!("server responded with {status}: {body}");
                     continue;
                 }
-                
+
                 // P2-4: Catch deserialization errors inside the retry loop so they can be retried
                 match resp.json::<LogResponse>().await {
                     Ok(log_response) => return Ok(log_response),
                     Err(e) => {
-                        warn!(
-                            "Heartbeat response deserialization failed (attempt {attempt}): {e}"
-                        );
+                        warn!("Heartbeat response deserialization failed (attempt {attempt}): {e}");
                         last_err = anyhow::anyhow!("failed to parse LogResponse: {e}");
                         continue;
                     }
@@ -332,7 +326,10 @@ pub async fn post_system_heartbeat_with_deployment(
 
     match deployment_result {
         DeploymentResult::SuccessFromCache { ref cache_url } => {
-            info!("✅ Deployment completed successfully from cache: {}", cache_url);
+            info!(
+                "✅ Deployment completed successfully from cache: {}",
+                cache_url
+            );
             drop(state);
             post_system_state_change(current_system, "cf_deployment")?;
         }
@@ -774,5 +771,3 @@ mod tests {
         );
     }
 }
-
-

@@ -81,11 +81,11 @@ pub fn EditSystemModal(
             .unwrap_or_default()
     });
 
-    // Seed heartbeat interval from the persisted system value; fall back to the agent
-    // default (600s) when the column is NULL (no per-system override set yet).
-    let mut heartbeat_interval_sec = use_signal(|| {
-        system.heartbeat_interval_secs.unwrap_or(600)
-    });
+    // Seed heartbeat interval from the persisted system value.
+    // 0 is a sentinel meaning "use server default" (NULL in the database).
+    // When the system has no per-system override (heartbeat_interval_secs is None),
+    // we show "Use server default" (0) so the user can see the current state.
+    let mut heartbeat_interval_sec = use_signal(|| system.heartbeat_interval_secs.unwrap_or(0));
     let mut tags_draft = use_signal(String::new);
 
     // Sync FQDN when hostname or environment changes
@@ -115,15 +115,20 @@ pub fn EditSystemModal(
     let handle_save = move |_| {
         is_saving.set(true);
 
-        // FieldUpdate semantics: only send Set(value) when changed from original.
-        // This prevents the UI from clearing fields that other clients may have set.
+        // FieldUpdate semantics for heartbeat_interval_secs:
+        // - Sentinel 0 → Clear (set DB column to NULL → agent uses server default)
+        // - Any other value that differs from original → Set(value)
+        // - Unchanged → Unset (omit the field; server preserves stored value)
         let current_heartbeat_interval = *heartbeat_interval_sec.read();
-        let original_heartbeat_interval = system.heartbeat_interval_secs.unwrap_or(600);
-        
-        let heartbeat_interval = if current_heartbeat_interval != original_heartbeat_interval {
-            FieldUpdate::Set(current_heartbeat_interval)
-        } else {
+        let original_heartbeat_interval = system.heartbeat_interval_secs.unwrap_or(0);
+
+        let heartbeat_interval = if current_heartbeat_interval == original_heartbeat_interval {
             FieldUpdate::Unset
+        } else if current_heartbeat_interval == 0 {
+            // User selected "Use server default" → clear the per-system override.
+            FieldUpdate::Clear
+        } else {
+            FieldUpdate::Set(current_heartbeat_interval)
         };
 
         let request = UpdateSystemRequest {
@@ -418,14 +423,16 @@ pub fn EditSystemModal(
                                         heartbeat_interval_sec.set(value);
                                     }
                                 },
-                                option { value: "30", selected: *heartbeat_interval_sec.read() == 30, "30 seconds" }
-                                option { value: "60", selected: *heartbeat_interval_sec.read() == 60, "1 minute" }
-                                option { value: "90", selected: *heartbeat_interval_sec.read() == 90, "90 seconds" }
+                                // Sentinel 0 = "use server default" (clears the per-system DB override).
+                                option { value: "0",   selected: *heartbeat_interval_sec.read() == 0,   "Use server default" }
+                                option { value: "30",  selected: *heartbeat_interval_sec.read() == 30,  "30 seconds" }
+                                option { value: "60",  selected: *heartbeat_interval_sec.read() == 60,  "1 minute" }
+                                option { value: "90",  selected: *heartbeat_interval_sec.read() == 90,  "90 seconds" }
                                 option { value: "120", selected: *heartbeat_interval_sec.read() == 120, "2 minutes" }
                                 option { value: "300", selected: *heartbeat_interval_sec.read() == 300, "5 minutes" }
-                                option { value: "600", selected: *heartbeat_interval_sec.read() == 600, "10 minutes (default)" }
+                                option { value: "600", selected: *heartbeat_interval_sec.read() == 600, "10 minutes" }
                             }
-                            p { class: "help", "Agent heartbeat cadence. Takes effect on the agent's next check-in after saving." }
+                            p { class: "help", "Agent heartbeat cadence. \"Use server default\" clears any per-system override (server default is 600 s). Takes effect on the agent's next check-in after saving." }
                         }
                         div {
                             class: "field",
