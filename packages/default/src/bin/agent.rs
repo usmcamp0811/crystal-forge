@@ -10,7 +10,7 @@ use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use reqwest::blocking::Client;
 use serde_json::Value;
 use std::{ffi::OsStr, fs, path::PathBuf, process::Command, sync::Arc};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use tokio::time::{Duration, sleep};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -304,10 +304,13 @@ async fn post_heartbeat_with_retry(
 /// Posts heartbeat and handles deployment responses.
 /// Returns HeartbeatResult::Sent on success (with optional interval override) or
 /// HeartbeatResult::Failed if all retry attempts were exhausted.
+///
+/// P1-2: If an interval_tx sender is provided, updates it with the server's interval.
 pub async fn post_system_heartbeat_with_deployment(
     current_system: &OsStr,
     context: &str,
     agent_state: Arc<Mutex<AgentState>>,
+    interval_tx: Option<&watch::Sender<u64>>,
 ) -> Result<HeartbeatResult> {
     info!("Posting heartbeat ({context})");
     let log_response = match post_heartbeat_with_retry(current_system, context).await {
@@ -319,6 +322,11 @@ pub async fn post_system_heartbeat_with_deployment(
     };
 
     let heartbeat_interval_secs = log_response.heartbeat_interval_secs;
+    
+    // P1-2: Update shared interval state if server provided override and we have a sender
+    if let (Some(interval), Some(tx)) = (heartbeat_interval_secs, interval_tx) {
+        let _ = tx.send(interval);
+    }
 
     // Process deployment with our deployment manager
     let mut state = agent_state.lock().await;
@@ -366,10 +374,12 @@ pub async fn post_system_heartbeat_with_deployment(
 /// has not changed since the last confirmed report (deduplication guard).
 ///
 /// P1-1: Only updates the deduplication state when the server confirms receipt.
+/// P1-2: Updates shared interval state via watch channel when provided.
 async fn handle_current_system_event(
     name: &OsStr,
     context: &str,
     agent_state: Arc<Mutex<AgentState>>,
+    interval_tx: Option<&watch::Sender<u64>>,
 ) -> Result<Option<u64>> {
     if name != OsStr::new("current-system") {
         return Ok(None);
@@ -393,6 +403,7 @@ async fn handle_current_system_event(
         current_system.as_os_str(),
         context,
         agent_state.clone(),
+        interval_tx,
     )
     .await?;
 
@@ -418,20 +429,28 @@ async fn handle_current_system_event(
 
 /// The periodic heartbeat loop. Sleeps for the server-provided interval (or the
 /// default 600s) with a small random jitter to spread agent check-ins.
-async fn run_periodic_heartbeat_loop(agent_state: Arc<Mutex<AgentState>>) -> Result<()> {
+///
+/// P1-2: Uses tokio::select! to interrupt sleep when the interval changes via
+/// the watch channel, so new intervals take effect immediately.
+async fn run_periodic_heartbeat_loop(
+    agent_state: Arc<Mutex<AgentState>>,
+    initial_interval: u64,
+    mut interval_rx: watch::Receiver<u64>,
+    interval_tx: watch::Sender<u64>,
+) -> Result<()> {
     // Initial delay before the first heartbeat (avoid hammering the server right
     // after agent startup since the inotify event on startup already sends one).
-    let initial_delay = jittered_interval(DEFAULT_HEARTBEAT_INTERVAL_SECS);
+    let initial_delay = jittered_interval(initial_interval);
     sleep(Duration::from_secs(initial_delay)).await;
 
-    let mut current_interval = DEFAULT_HEARTBEAT_INTERVAL_SECS;
-
-    info!("💓 Starting heartbeat loop (initial interval: {current_interval}s)...");
+    info!("💓 Starting heartbeat loop (initial interval: {initial_interval}s)...");
+    
     loop {
         let current_system = match readlink_path("/run/current-system") {
             Ok(p) => p,
             Err(e) => {
                 error!("❌ Failed to read /run/current-system for heartbeat: {e}");
+                let current_interval = *interval_rx.borrow();
                 sleep(Duration::from_secs(current_interval)).await;
                 continue;
             }
@@ -441,16 +460,18 @@ async fn run_periodic_heartbeat_loop(agent_state: Arc<Mutex<AgentState>>) -> Res
             current_system.as_os_str(),
             "heartbeat",
             agent_state.clone(),
+            Some(&interval_tx),
         )
         .await
         {
             Ok(HeartbeatResult::Sent {
                 heartbeat_interval_secs: Some(server_interval),
             }) => {
-                if server_interval != current_interval {
-                    info!("💓 Heartbeat interval updated by server: {current_interval}s → {server_interval}s");
+                let old_interval = *interval_rx.borrow();
+                if server_interval != old_interval {
+                    info!("💓 Heartbeat interval updated by server: {old_interval}s → {server_interval}s");
                 }
-                current_interval = server_interval;
+                // interval_tx.send already called inside post_system_heartbeat_with_deployment
             }
             Ok(HeartbeatResult::Sent {
                 heartbeat_interval_secs: None,
@@ -465,9 +486,21 @@ async fn run_periodic_heartbeat_loop(agent_state: Arc<Mutex<AgentState>>) -> Res
             }
         }
 
+        // P1-2: Use select! to allow interval changes to interrupt the sleep.
+        let current_interval = *interval_rx.borrow();
         let sleep_secs = jittered_interval(current_interval);
         info!("💓 Next heartbeat in {sleep_secs}s");
-        sleep(Duration::from_secs(sleep_secs)).await;
+        
+        tokio::select! {
+            _ = sleep(Duration::from_secs(sleep_secs)) => {
+                // Normal sleep expiration; continue to next heartbeat
+            }
+            _ = interval_rx.changed() => {
+                let new_interval = *interval_rx.borrow();
+                info!("💓 Heartbeat interval changed during sleep: {current_interval}s → {new_interval}s (interrupting sleep)");
+                // Loop will restart with new interval
+            }
+        }
     }
 }
 
@@ -489,9 +522,13 @@ fn rand_jitter() -> u64 {
 }
 
 /// Runs the inotify watch loop: watches `/run` for `current-system` changes.
+///
+/// P1-2: Passes the interval sender to event handlers so deployment-triggered
+/// heartbeats can update the shared interval state immediately.
 async fn watch_for_system_changes(
     inotify: &mut Inotify,
     agent_state: Arc<Mutex<AgentState>>,
+    interval_tx: &watch::Sender<u64>,
 ) -> Result<()> {
     info!("Watching /run for changes to current-system...");
 
@@ -509,16 +546,14 @@ async fn watch_for_system_changes(
     };
 
     if let Ok(current_system) = readlink_path("/run/current-system") {
-        if let Ok(Some(interval)) = handle_current_system_event(
+        let _ = handle_current_system_event(
             OsStr::new("current-system"),
             startup_context,
             agent_state.clone(),
+            Some(interval_tx),
         )
-        .await
-        {
-            // Update stored interval if server provided one at startup.
-            let _ = interval; // handled by heartbeat loop
-        }
+        .await;
+        // P1-2: Startup heartbeat updates interval_tx if server provides override
     }
 
     loop {
@@ -531,6 +566,7 @@ async fn watch_for_system_changes(
                         &name,
                         "config_change",
                         agent_state.clone(),
+                        Some(interval_tx),
                     )
                     .await
                     {
@@ -544,6 +580,10 @@ async fn watch_for_system_changes(
 
 /// Initializes an inotify watcher on `/run` for "current-system" and records updates
 /// to the system state in the database.
+///
+/// P1-2: Creates a watch channel for the heartbeat interval. The startup heartbeat
+/// determines the initial value, which the periodic loop adopts immediately. Both
+/// deployment-triggered and periodic heartbeats can update the channel.
 pub async fn watch_system(agent_state: Arc<Mutex<AgentState>>) -> Result<()> {
     let mut inotify = Inotify::init(InitFlags::empty())?;
     inotify.add_watch(
@@ -551,11 +591,50 @@ pub async fn watch_system(agent_state: Arc<Mutex<AgentState>>) -> Result<()> {
         AddWatchFlags::IN_CREATE | AddWatchFlags::IN_MOVED_TO,
     )?;
 
-    // Spawn the periodic heartbeat loop.
-    tokio::spawn(run_periodic_heartbeat_loop(agent_state.clone()));
+    // P1-2: Create watch channel with default interval.
+    // The startup heartbeat (below) will update it if the server provides an override.
+    let (interval_tx, interval_rx) = watch::channel(DEFAULT_HEARTBEAT_INTERVAL_SECS);
+
+    // Perform startup heartbeat to determine initial interval before spawning the loop.
+    let initial_interval = {
+        let is_reboot = {
+            let state = agent_state.lock().await;
+            state.is_system_reboot()
+        };
+        let startup_context = if is_reboot {
+            info!("🔄 System reboot detected (host uptime low at startup)");
+            "startup"
+        } else {
+            info!("🔄 Agent service restart detected (host uptime normal)");
+            "agent_restart"
+        };
+
+        if let Ok(current_system) = readlink_path("/run/current-system") {
+            let _ = handle_current_system_event(
+                OsStr::new("current-system"),
+                startup_context,
+                agent_state.clone(),
+                Some(&interval_tx),
+            )
+            .await;
+        }
+
+        // Use the current value from the channel (updated by startup heartbeat if server sent override)
+        *interval_rx.borrow()
+    };
+
+    info!("💓 Heartbeat interval after startup: {initial_interval}s");
+
+    // Spawn the periodic heartbeat loop with the initial interval and watch channel.
+    tokio::spawn(run_periodic_heartbeat_loop(
+        agent_state.clone(),
+        initial_interval,
+        interval_rx,
+        interval_tx.clone(),
+    ));
 
     // Watch for inotify current-system change events.
-    watch_for_system_changes(&mut inotify, agent_state).await
+    watch_for_system_changes(&mut inotify, agent_state, &interval_tx).await
 }
 
 #[cfg(test)]
