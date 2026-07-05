@@ -255,6 +255,18 @@ impl ServerConfig {
             );
         }
 
+        // P2-5: Validate heartbeat interval is within acceptable range
+        const MIN_HEARTBEAT_INTERVAL_SECS: u64 = 15;
+        const MAX_HEARTBEAT_INTERVAL_SECS: u64 = 900;
+        if self.heartbeat_interval_secs < MIN_HEARTBEAT_INTERVAL_SECS
+            || self.heartbeat_interval_secs > MAX_HEARTBEAT_INTERVAL_SECS
+        {
+            return Err(format!(
+                "heartbeat_interval_secs ({}) must be between {} and {} seconds",
+                self.heartbeat_interval_secs, MIN_HEARTBEAT_INTERVAL_SECS, MAX_HEARTBEAT_INTERVAL_SECS
+            ));
+        }
+
         Ok(())
     }
 }
