@@ -1,11 +1,11 @@
 ---
 id: TASK-378
 title: Harden Agent Observability and Configurable Heartbeat Reliability
-status: To Do
+status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-07-03 16:39'
-updated_date: '2026-07-03 16:56'
+updated_date: '2026-07-05 23:23'
 labels:
   - agents
   - heartbeat
@@ -163,3 +163,19 @@ High. Cross-cuts agent, server, DB, DTOs, and UI. Backwards-compatibility via se
 - Subsumes TASK-279's specification (heartbeat interval via LogResponse).
 - Migration number must follow latest applied (currently 0137).
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: ai-agent on mcamp-workstation in ~/code/crystal-forge/TASK-378-agent-observability-heartbeat
+
+Review feedback (b85b18d9) addressed:
+- P1: startup interval discarded → ALREADY FIXED in bcf37809 via watch::channel
+- P1: failed heartbeat poisons dedup → ALREADY FIXED in bcf37809 via HeartbeatResult::Failed
+- P1: migration 0146 changed health thresholds to interval-derived → FIX PENDING: new migration 0147 to restore fixed 15min/1hr/4hr thresholds
+- P2: response deserialization retried → ALREADY FIXED in bcf37809
+- P2-7: UI 'Use server default' sends Set(600) instead of Clear → FIX PENDING
+- P2 boot-ID: server logs change but doesn't persist system_reboot reason → addressed by boot_id column; authoritative classification noted
+
+Constraint: This is deployed to dev server - DO NOT modify existing migrations, only add new ones (0147+)
+<!-- SECTION:NOTES:END -->
