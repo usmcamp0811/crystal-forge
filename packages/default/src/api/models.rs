@@ -799,6 +799,10 @@ pub struct SystemSummary {
     /// Per-system heartbeat interval in seconds. None means the agent uses the server default (600s).
     #[serde(default)]
     pub heartbeat_interval_secs: Option<i32>,
+    /// Linux kernel boot UUID from /proc/sys/kernel/random/boot_id.
+    /// Used to distinguish system reboots from agent restarts.
+    #[serde(default)]
+    pub boot_id: Option<String>,
 }
 
 /// Full system representation for the detail view.
@@ -851,6 +855,10 @@ pub struct SystemDetail {
     /// Per-system heartbeat interval in seconds. None means the agent uses the server default (600s).
     #[serde(default)]
     pub heartbeat_interval_secs: Option<i32>,
+    /// Linux kernel boot UUID from /proc/sys/kernel/random/boot_id.
+    /// Used to distinguish system reboots from agent restarts.
+    #[serde(default)]
+    pub boot_id: Option<String>,
 }
 
 /// Hardware information subset for system detail.
@@ -1319,9 +1327,11 @@ pub struct UpdateSystemRequest {
     pub environment: Option<String>,
     pub flake_name: Option<String>,
     pub deployment_policy: String,
-    /// Per-system heartbeat interval in seconds. None or 0 stores NULL (server default of 600s).
+    /// Tri-state heartbeat interval in seconds. Omitting the key preserves the persisted value;
+    /// sending `null` clears it (falls back to server default of 600s); sending a value sets it.
+    /// Valid range: 15-900 seconds.
     #[serde(default)]
-    pub heartbeat_interval_secs: Option<i32>,
+    pub heartbeat_interval_secs: FieldUpdate<i32>,
 }
 
 /// Request payload for updating a system's public key.

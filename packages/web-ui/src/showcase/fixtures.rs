@@ -321,6 +321,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             deployment_policy: "auto_latest".to_string(),
             fqdn: None,
             heartbeat_interval_secs: None,
+            boot_id: None,
         },
         // Warning staging system (behind)
         SystemSummary {
@@ -344,6 +345,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             deployment_policy: "manual".to_string(),
             fqdn: None,
             heartbeat_interval_secs: None,
+            boot_id: None,
         },
         // Critical dev system (never deployed)
         SystemSummary {
@@ -367,6 +369,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             deployment_policy: "manual".to_string(),
             fqdn: None,
             heartbeat_interval_secs: None,
+            boot_id: None,
         },
         // Offline system (no environment)
         SystemSummary {
@@ -390,6 +393,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             deployment_policy: "manual".to_string(),
             fqdn: None,
             heartbeat_interval_secs: None,
+            boot_id: None,
         },
         // Healthy system with long hostname (overflow test)
         SystemSummary {
@@ -413,6 +417,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             deployment_policy: "Immediate".to_string(),
             fqdn: None,
             heartbeat_interval_secs: None,
+            boot_id: None,
         },
         // Building state system
         SystemSummary {
@@ -436,6 +441,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             deployment_policy: "pinned".to_string(),
             fqdn: None,
             heartbeat_interval_secs: None,
+            boot_id: None,
         },
     ]
 }

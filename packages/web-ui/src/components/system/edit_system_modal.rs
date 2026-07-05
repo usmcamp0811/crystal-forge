@@ -3,7 +3,7 @@
 //! Matches the design EditSystemModal layout: two-column hostname+environment,
 //! flake assignment section, segmented deployment mode, pinned commit picker.
 
-use crate::api::models::{CommitInfo, SystemDetail, UpdateSystemRequest};
+use crate::api::models::{CommitInfo, FieldUpdate, SystemDetail, UpdateSystemRequest};
 use crate::components::modals::RemoveSystemDialog;
 use dioxus::prelude::*;
 
@@ -115,6 +115,17 @@ pub fn EditSystemModal(
     let handle_save = move |_| {
         is_saving.set(true);
 
+        // FieldUpdate semantics: only send Set(value) when changed from original.
+        // This prevents the UI from clearing fields that other clients may have set.
+        let current_heartbeat_interval = *heartbeat_interval_sec.read();
+        let original_heartbeat_interval = system.heartbeat_interval_secs.unwrap_or(600);
+        
+        let heartbeat_interval = if current_heartbeat_interval != original_heartbeat_interval {
+            FieldUpdate::Set(current_heartbeat_interval)
+        } else {
+            FieldUpdate::Unset
+        };
+
         let request = UpdateSystemRequest {
             hostname: hostname.read().clone(),
             fqdn: if fqdn.read().trim().is_empty() {
@@ -138,7 +149,7 @@ pub fn EditSystemModal(
                 Some(flake_name.read().clone())
             },
             deployment_policy: deployment_policy.read().clone(),
-            heartbeat_interval_secs: Some(*heartbeat_interval_sec.read()),
+            heartbeat_interval_secs: heartbeat_interval,
         };
 
         on_save.call(request);

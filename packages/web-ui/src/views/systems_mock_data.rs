@@ -418,5 +418,6 @@ pub(super) fn build_system_detail(
         created_at: base_time - Duration::days(420),
         updated_at: base_time - Duration::hours(1),
         heartbeat_interval_secs: None,
+        boot_id: None,
     }
 }

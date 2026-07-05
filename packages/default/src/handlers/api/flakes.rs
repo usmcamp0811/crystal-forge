@@ -3205,7 +3205,7 @@ mod task_221_integration_tests {
             Some(flake.id),
             Some("new-config-name"),
             "manual",
-            None,
+            HeartbeatIntervalUpdate::Keep,
         )
         .await
         .expect("update_system_metadata failed");
@@ -3230,7 +3230,7 @@ mod task_221_integration_tests {
         // the DB). The 400 validation for "unknown flake name" happens in update_system_handler
         // before metadata is written. This test verifies the query layer correctly persists a
         // known flake_id and that passing an invalid FK gets a DB error (not a silent NULL).
-        use crate::queries::systems::{update_system_metadata, FqdnUpdate};
+        use crate::queries::systems::{update_system_metadata, FqdnUpdate, HeartbeatIntervalUpdate};
         let flake = make_flake(&pool, "test-sysmeta-fk", "cf_systems_only").await;
         let system = make_system(&pool, "host-fk", Some(flake.id), None).await;
 
@@ -3243,7 +3243,7 @@ mod task_221_integration_tests {
             Some(999999), // non-existent flake_id → FK violation
             None,
             "manual",
-            None,
+            HeartbeatIntervalUpdate::Keep,
         )
         .await;
 

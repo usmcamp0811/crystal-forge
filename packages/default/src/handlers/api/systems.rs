@@ -29,11 +29,12 @@ use crate::queries::system_states::{
     fetch_system_generations, find_generation_store_path_last_seen,
 };
 use crate::queries::systems::{
-    FqdnUpdate, SystemAccessRow, SystemDetailRow, SystemListRow, commit_belongs_to_system_flake,
-    deactivate_system, find_system_access_row, get_system_detail_by_id,
-    get_user_environment_membership_ids, list_recent_commits_for_system, list_system_access_rows,
-    list_system_agent_event_rows, list_system_history_rows, touch_system_updated_at,
-    update_public_key, update_system_desired_target, update_system_metadata,
+    FqdnUpdate, HeartbeatIntervalUpdate, SystemAccessRow, SystemDetailRow, SystemListRow,
+    commit_belongs_to_system_flake, deactivate_system, find_system_access_row,
+    get_system_detail_by_id, get_user_environment_membership_ids,
+    list_recent_commits_for_system, list_system_access_rows, list_system_agent_event_rows,
+    list_system_history_rows, touch_system_updated_at, update_public_key,
+    update_system_desired_target, update_system_metadata,
 };
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
 use crate::services::systems::SystemsListContext;
@@ -758,6 +759,27 @@ pub async fn update_system_handler(
             }
         }
     };
+    
+    // PATCH semantics for heartbeat_interval_secs: omitted key preserves value,
+    // null clears it (falls back to server default 600s), value sets it.
+    // Valid range: 15-900 seconds.
+    const MIN_HEARTBEAT_INTERVAL_SECS: i32 = 15;
+    const MAX_HEARTBEAT_INTERVAL_SECS: i32 = 900;
+    
+    let heartbeat_interval = match &payload.heartbeat_interval_secs {
+        FieldUpdate::Unset => HeartbeatIntervalUpdate::Keep,
+        FieldUpdate::Clear => HeartbeatIntervalUpdate::Clear,
+        FieldUpdate::Set(value) => {
+            if *value < MIN_HEARTBEAT_INTERVAL_SECS || *value > MAX_HEARTBEAT_INTERVAL_SECS {
+                return bad_request(&format!(
+                    "heartbeat_interval_secs must be between {} and {} seconds",
+                    MIN_HEARTBEAT_INTERVAL_SECS, MAX_HEARTBEAT_INTERVAL_SECS
+                ));
+            }
+            HeartbeatIntervalUpdate::Set(*value)
+        }
+    };
+    
     if !matches!(
         payload.deployment_policy.as_str(),
         "manual" | "auto_latest" | "pinned"
@@ -826,7 +848,7 @@ pub async fn update_system_handler(
             .map(str::trim)
             .filter(|value| !value.is_empty()),
         &payload.deployment_policy,
-        payload.heartbeat_interval_secs,
+        heartbeat_interval,
     )
     .await
     .is_err()
@@ -1304,6 +1326,7 @@ fn detail_row_to_api_model(row: SystemDetailRow) -> SystemDetail {
         created_at: row.created_at,
         updated_at: row.updated_at,
         heartbeat_interval_secs: row.heartbeat_interval_secs,
+        boot_id: row.boot_id,
     }
 }
 

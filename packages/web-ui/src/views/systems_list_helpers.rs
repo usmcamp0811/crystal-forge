@@ -166,6 +166,7 @@ mod tests {
             deployment_policy: "manual".to_string(),
             fqdn: None,
             heartbeat_interval_secs: None,
+            boot_id: None,
         }
     }
 

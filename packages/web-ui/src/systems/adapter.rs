@@ -431,6 +431,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             deployment_policy: "auto_latest".to_string(),
             fqdn: None,
             heartbeat_interval_secs: None,
+            boot_id: None,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
@@ -453,6 +454,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             deployment_policy: "manual".to_string(),
             fqdn: None,
             heartbeat_interval_secs: None,
+            boot_id: None,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
@@ -475,6 +477,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             deployment_policy: "manual".to_string(),
             fqdn: None,
             heartbeat_interval_secs: None,
+            boot_id: None,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
@@ -497,6 +500,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             deployment_policy: "manual".to_string(),
             fqdn: None,
             heartbeat_interval_secs: None,
+            boot_id: None,
         },
     ]
 }
@@ -560,6 +564,7 @@ pub fn fallback_system_detail() -> SystemDetail {
         created_at: now,
         updated_at: now,
         heartbeat_interval_secs: None,
+        boot_id: None,
     }
 }
 

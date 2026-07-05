@@ -78,6 +78,20 @@ pub enum FqdnUpdate<'a> {
     Set(&'a str),
 }
 
+/// How an update should treat the `heartbeat_interval_secs` column.
+///
+/// This preserves PATCH semantics: when the client omits `heartbeat_interval_secs` the stored
+/// value must be left untouched, which a plain `Option<i32>` cannot express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeartbeatIntervalUpdate {
+    /// Leave the existing `heartbeat_interval_secs` value unchanged.
+    Keep,
+    /// Set `heartbeat_interval_secs` to NULL (use server default).
+    Clear,
+    /// Set `heartbeat_interval_secs` to the provided value (must be 15-900).
+    Set(i32),
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn update_system_metadata(
     pool: &PgPool,
@@ -88,18 +102,40 @@ pub async fn update_system_metadata(
     flake_id: Option<i32>,
     system_configuration_name: Option<&str>,
     deployment_policy: &str,
-    // Per-system heartbeat interval in seconds. `None` or `Some(0)` stores NULL
-    // (agent uses server-config default). Positive values are stored as-is.
-    heartbeat_interval_secs: Option<i32>,
+    heartbeat_interval_secs: HeartbeatIntervalUpdate,
 ) -> Result<()> {
-    // Normalise: 0 or negative → NULL (use default).
-    let hb_interval = heartbeat_interval_secs.filter(|&v| v > 0);
 
-    // `fqdn` is updated only when the caller explicitly sets or clears it.
-    // `COALESCE($2, systems.fqdn)` would be wrong for the Clear case, so we
-    // branch the SQL on whether the column should be touched at all.
-    match fqdn {
-        FqdnUpdate::Keep => {
+    // Both `fqdn` and `heartbeat_interval_secs` use tri-state update semantics.
+    // We must branch the SQL to avoid touching columns when the caller wants
+    // to preserve their current values (Keep).
+    match (fqdn, heartbeat_interval_secs) {
+        (FqdnUpdate::Keep, HeartbeatIntervalUpdate::Keep) => {
+            // Neither column is touched
+            sqlx::query(
+                "UPDATE systems
+                 SET hostname = $1,
+                     environment_id = $2,
+                     flake_id = $3,
+                     system_configuration_name = $4,
+                     deployment_policy = $5,
+                     updated_at = NOW()
+                  WHERE id = $6",
+            )
+            .bind(hostname)
+            .bind(environment_id)
+            .bind(flake_id)
+            .bind(system_configuration_name)
+            .bind(deployment_policy)
+            .bind(system_id)
+            .execute(pool)
+            .await?;
+        }
+        (FqdnUpdate::Keep, _) => {
+            // Only heartbeat_interval_secs is updated
+            let hb_value = match heartbeat_interval_secs {
+                HeartbeatIntervalUpdate::Set(v) => Some(v),
+                _ => None,
+            };
             sqlx::query(
                 "UPDATE systems
                  SET hostname = $1,
@@ -116,14 +152,46 @@ pub async fn update_system_metadata(
             .bind(flake_id)
             .bind(system_configuration_name)
             .bind(deployment_policy)
-            .bind(hb_interval)
+            .bind(hb_value)
             .bind(system_id)
             .execute(pool)
             .await?;
         }
-        FqdnUpdate::Clear | FqdnUpdate::Set(_) => {
+        (_, HeartbeatIntervalUpdate::Keep) => {
+            // Only fqdn is updated
             let fqdn_value = match fqdn {
                 FqdnUpdate::Set(value) => Some(value),
+                _ => None,
+            };
+            sqlx::query(
+                "UPDATE systems
+                 SET hostname = $1,
+                     fqdn = $2,
+                     environment_id = $3,
+                     flake_id = $4,
+                     system_configuration_name = $5,
+                     deployment_policy = $6,
+                     updated_at = NOW()
+                  WHERE id = $7",
+            )
+            .bind(hostname)
+            .bind(fqdn_value)
+            .bind(environment_id)
+            .bind(flake_id)
+            .bind(system_configuration_name)
+            .bind(deployment_policy)
+            .bind(system_id)
+            .execute(pool)
+            .await?;
+        }
+        (_, _) => {
+            // Both columns are updated
+            let fqdn_value = match fqdn {
+                FqdnUpdate::Set(value) => Some(value),
+                _ => None,
+            };
+            let hb_value = match heartbeat_interval_secs {
+                HeartbeatIntervalUpdate::Set(v) => Some(v),
                 _ => None,
             };
             sqlx::query(
@@ -144,7 +212,7 @@ pub async fn update_system_metadata(
             .bind(flake_id)
             .bind(system_configuration_name)
             .bind(deployment_policy)
-            .bind(hb_interval)
+            .bind(hb_value)
             .bind(system_id)
             .execute(pool)
             .await?;
@@ -326,6 +394,41 @@ pub async fn get_system_heartbeat_interval_secs(
     .fetch_optional(pool)
     .await?;
     Ok(result.flatten())
+}
+
+/// Update the boot_id for a system, used for reboot detection.
+/// Returns true if the boot_id changed (indicating a system reboot).
+pub async fn update_boot_id(
+    pool: &PgPool,
+    hostname: &str,
+    new_boot_id: &str,
+) -> Result<bool> {
+    #[derive(sqlx::FromRow)]
+    struct BootIdUpdate {
+        old_boot_id: Option<String>,
+    }
+    
+    let result = sqlx::query_as::<_, BootIdUpdate>(
+        "WITH old_value AS (
+             SELECT boot_id FROM systems WHERE hostname = $2
+         )
+         UPDATE systems
+         SET boot_id = $1, updated_at = NOW()
+         WHERE hostname = $2
+         RETURNING (SELECT boot_id FROM old_value) as old_boot_id",
+    )
+    .bind(new_boot_id)
+    .bind(hostname)
+    .fetch_optional(pool)
+    .await?;
+    
+    // Returns true if boot_id changed (reboot occurred)
+    let rebooted = match result {
+        Some(update) => update.old_boot_id.as_deref() != Some(new_boot_id),
+        None => false, // No system found
+    };
+    
+    Ok(rebooted)
 }
 
 pub async fn get_desired_target_by_id(pool: &PgPool, system_id: i32) -> Result<Option<String>> {
@@ -671,6 +774,7 @@ pub struct SystemDetailRow {
     pub updated_at: DateTime<Utc>,
     // Heartbeat configuration
     pub heartbeat_interval_secs: Option<i32>,
+    pub boot_id: Option<String>,
 }
 
 /// Fetch system detail from view_system_detail
@@ -710,6 +814,7 @@ pub struct SystemListRow {
     pub deployment_policy: String,
     pub fqdn: Option<String>,
     pub heartbeat_interval_secs: Option<i32>,
+    pub boot_id: Option<String>,
 }
 
 /// Fetch all active systems from view_system_list
@@ -1897,7 +2002,7 @@ mod tests {
             None,
             None,
             "manual",
-            None,
+            HeartbeatIntervalUpdate::Keep,
         )
         .await
         .expect("seed fqdn should succeed");
@@ -1912,7 +2017,7 @@ mod tests {
             None,
             None,
             "auto_latest",
-            None,
+            HeartbeatIntervalUpdate::Keep,
         )
         .await
         .expect("keep update should succeed");
@@ -1955,7 +2060,7 @@ mod tests {
             None,
             None,
             "manual",
-            None,
+            HeartbeatIntervalUpdate::Keep,
         )
         .await
         .expect("seed fqdn should succeed");
@@ -1969,7 +2074,7 @@ mod tests {
             None,
             None,
             "manual",
-            None,
+            HeartbeatIntervalUpdate::Keep,
         )
         .await
         .expect("clear update should succeed");

@@ -1,14 +1,23 @@
--- Add per-system heartbeat interval configuration.
--- When NULL, the agent falls back to the server-config default (600s).
+-- Add per-system heartbeat interval configuration and boot ID tracking.
+-- When heartbeat_interval_secs is NULL, the agent falls back to the server-config default (600s).
 -- Operators set this via the Edit System modal; the server returns it to the
 -- agent in each LogResponse so the agent's sleep loop adjusts automatically.
+--
+-- boot_id is the Linux kernel boot UUID from /proc/sys/kernel/random/boot_id.
+-- Used to distinguish system reboots from agent restarts.
 
 ALTER TABLE public.systems
-    ADD COLUMN IF NOT EXISTS heartbeat_interval_secs integer;
+    ADD COLUMN IF NOT EXISTS heartbeat_interval_secs integer
+        CHECK (heartbeat_interval_secs IS NULL OR (heartbeat_interval_secs >= 15 AND heartbeat_interval_secs <= 900)),
+    ADD COLUMN IF NOT EXISTS boot_id text;
 
 COMMENT ON COLUMN public.systems.heartbeat_interval_secs IS
-    'Per-system agent heartbeat interval in seconds. NULL means use the server default (600s). '
+    'Per-system agent heartbeat interval in seconds. Valid range: 15-900. NULL means use the server default (600s). '
     'Returned to the agent via LogResponse.heartbeat_interval_secs on each heartbeat POST.';
+
+COMMENT ON COLUMN public.systems.boot_id IS
+    'Linux kernel boot UUID from /proc/sys/kernel/random/boot_id. '
+    'Updated on every heartbeat. Change detection distinguishes system reboots from agent restarts.';
 
 -- Append heartbeat_interval_secs to the system detail view using CREATE OR REPLACE.
 -- We append to the SELECT list so existing column ordinals are not disturbed.
@@ -152,9 +161,9 @@ SELECT
     s.deployment_policy,
     CASE
         WHEN lh.heartbeat_timestamp IS NULL THEN 'offline'
-        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '4 hours' THEN 'offline'
-        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '1 hour' THEN 'critical'
-        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '15 minutes' THEN 'warning'
+        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '1 second' * GREATEST(COALESCE(s.heartbeat_interval_secs, 600) * 6, 900) THEN 'offline'
+        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '1 second' * GREATEST(COALESCE(s.heartbeat_interval_secs, 600) * 4, 600) THEN 'critical'
+        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '1 second' * GREATEST(COALESCE(s.heartbeat_interval_secs, 600) * 3, 300) THEN 'warning'
         ELSE 'healthy'
     END AS health_status,
     COALESCE(di.deployment_status, 'unknown') AS deployment_status,
@@ -202,7 +211,8 @@ SELECT
     s.reachability,
     s.fqdn,
     s.system_configuration_name,
-    s.heartbeat_interval_secs
+    s.heartbeat_interval_secs,
+    s.boot_id
 FROM systems s
 LEFT JOIN environments e ON e.id = s.environment_id
 LEFT JOIN latest_system_state lss ON lss.system_id = s.id
@@ -260,9 +270,9 @@ SELECT
     lss.primary_ip_address,
     CASE
         WHEN lh.heartbeat_timestamp IS NULL THEN 'offline'
-        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '4 hours' THEN 'offline'
-        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '1 hour' THEN 'critical'
-        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '15 minutes' THEN 'warning'
+        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '1 second' * GREATEST(COALESCE(s.heartbeat_interval_secs, 600) * 6, 900) THEN 'offline'
+        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '1 second' * GREATEST(COALESCE(s.heartbeat_interval_secs, 600) * 4, 600) THEN 'critical'
+        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '1 second' * GREATEST(COALESCE(s.heartbeat_interval_secs, 600) * 3, 300) THEN 'warning'
         ELSE 'healthy'
     END AS health_status,
     COALESCE(di.deployment_status, 'unknown') AS deployment_status,
@@ -282,7 +292,8 @@ SELECT
     ) AS last_seen,
     s.deployment_policy,
     s.fqdn,
-    s.heartbeat_interval_secs
+    s.heartbeat_interval_secs,
+    s.boot_id
 FROM systems s
 LEFT JOIN environments e ON e.id = s.environment_id
 LEFT JOIN latest_heartbeat lh ON lh.system_id = s.id

@@ -8,8 +8,78 @@
 //! - Client-side DTOs may diverge (e.g. adding UI-only computed fields)
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use uuid::Uuid;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FieldUpdate (PATCH semantics helper)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Tri-state field update semantics for HTTP PATCH requests.
+///
+/// Distinguishes:
+/// - field omitted          → [`FieldUpdate::Unset`]   (preserve stored value)
+/// - field present as null  → [`FieldUpdate::Clear`]   (set to NULL)
+/// - field present + value  → [`FieldUpdate::Set`]     (write the value)
+///
+/// `#[serde(default)]` on the containing field maps an omitted key to `Unset`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldUpdate<T> {
+    /// Field was not present in the payload; leave the stored value unchanged.
+    Unset,
+    /// Field was present and explicitly null; clear the stored value.
+    Clear,
+    /// Field was present with a value; write it.
+    Set(T),
+}
+
+impl<T> Default for FieldUpdate<T> {
+    fn default() -> Self {
+        FieldUpdate::Unset
+    }
+}
+
+impl<T> FieldUpdate<T> {
+    /// Returns true when the payload omitted this field entirely.
+    pub fn is_unset(&self) -> bool {
+        matches!(self, FieldUpdate::Unset)
+    }
+}
+
+impl<'de, T> Deserialize<'de> for FieldUpdate<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // A present key (even `null`) reaches this deserializer; an omitted key
+        // is handled by `#[serde(default)]` on the field, which yields `Unset`.
+        let value = Option::<T>::deserialize(deserializer)?;
+        Ok(match value {
+            Some(inner) => FieldUpdate::Set(inner),
+            None => FieldUpdate::Clear,
+        })
+    }
+}
+
+impl<T> Serialize for FieldUpdate<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Serialize transparently as `null` / value. `Unset` serializes as
+        // `null`; callers that must omit the key should skip it explicitly.
+        match self {
+            FieldUpdate::Set(value) => serializer.serialize_some(value),
+            FieldUpdate::Unset | FieldUpdate::Clear => serializer.serialize_none(),
+        }
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Common Enums
@@ -572,6 +642,10 @@ pub struct SystemSummary {
     /// Per-system heartbeat interval in seconds. None means the agent uses the server default (600s).
     #[serde(default)]
     pub heartbeat_interval_secs: Option<i32>,
+    /// Linux kernel boot UUID from /proc/sys/kernel/random/boot_id.
+    /// Used to distinguish system reboots from agent restarts.
+    #[serde(default)]
+    pub boot_id: Option<String>,
 }
 
 /// Full system representation for the detail view.
@@ -608,6 +682,10 @@ pub struct SystemDetail {
     /// Per-system heartbeat interval in seconds. None means the agent uses the server default (600s).
     #[serde(default)]
     pub heartbeat_interval_secs: Option<i32>,
+    /// Linux kernel boot UUID from /proc/sys/kernel/random/boot_id.
+    /// Used to distinguish system reboots from agent restarts.
+    #[serde(default)]
+    pub boot_id: Option<String>,
 }
 
 /// Hardware information subset for system detail.
@@ -1599,9 +1677,11 @@ pub struct UpdateSystemRequest {
     pub environment: Option<String>,
     pub flake_name: Option<String>,
     pub deployment_policy: String,
-    /// Per-system heartbeat interval in seconds. None or 0 stores NULL (server default 600s).
+    /// Tri-state heartbeat interval in seconds. Omitting the key preserves the persisted value;
+    /// sending `null` clears it (falls back to server default of 600s); sending a value sets it.
+    /// Valid range: 15-900 seconds.
     #[serde(default)]
-    pub heartbeat_interval_secs: Option<i32>,
+    pub heartbeat_interval_secs: FieldUpdate<i32>,
 }
 
 fn default_flake_build_scope() -> String {

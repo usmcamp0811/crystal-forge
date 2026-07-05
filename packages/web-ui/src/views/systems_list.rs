@@ -524,6 +524,7 @@ pub fn SystemsListView() -> Element {
                                         deployment_policy: detail.deployment_policy,
                                         fqdn: detail.fqdn,
                                         heartbeat_interval_secs: detail.heartbeat_interval_secs,
+                                        boot_id: detail.boot_id,
                                     };
 
                                     let mut values = local_systems.read().clone();
