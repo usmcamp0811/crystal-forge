@@ -387,7 +387,36 @@ pub async fn seed_from_fixture(pool: &PgPool, path: &Path) -> Result<()> {
     .await?;
     seed_hardening(pool, &fixture.hardening, &fixture.systems, &system_ids).await?;
 
+    // Dismiss the onboarding coach for every user. The coach panel uses
+    // hardcoded dark inline styles that ignore the light theme, so leaving it
+    // visible pollutes light-mode screenshots with a dark overlay. In a
+    // preseeded fixture/demo state the onboarding flow is already "done".
+    dismiss_onboarding_for_all_users(pool).await?;
+
     tracing::info!("Fixture seeding complete");
+    Ok(())
+}
+
+/// Mark the setup wizard as dismissed and acknowledged for every user so the
+/// onboarding coach overlay never appears in fixture screenshots.
+async fn dismiss_onboarding_for_all_users(pool: &PgPool) -> Result<()> {
+    let affected = sqlx::query(
+        r#"
+        UPDATE users
+        SET setup_wizard_dismissed = TRUE,
+            setup_wizard_agent_acknowledged = TRUE
+        WHERE setup_wizard_dismissed = FALSE
+           OR setup_wizard_agent_acknowledged = FALSE
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to dismiss onboarding coach for users")?
+    .rows_affected();
+
+    if affected > 0 {
+        tracing::info!("Dismissed onboarding coach for {} user(s)", affected);
+    }
     Ok(())
 }
 
@@ -686,12 +715,29 @@ async fn seed_users(pool: &PgPool, admin: &FixtureAdmin) -> Result<Vec<(String, 
         .await?;
 
         let user_id = if let Some(id) = existing {
+            // Ensure the onboarding coach stays dismissed for a clean UI.
+            sqlx::query(
+                r#"
+                UPDATE users
+                SET setup_wizard_dismissed = TRUE,
+                    setup_wizard_agent_acknowledged = TRUE
+                WHERE id = $1
+                "#,
+            )
+            .bind(id)
+            .execute(pool)
+            .await?;
             id
         } else {
+            // Seed users with the setup wizard already dismissed/acknowledged so
+            // the onboarding coach overlay does not appear in screenshots (it uses
+            // hardcoded dark inline styles that ignore the light theme).
             sqlx::query_scalar::<_, Uuid>(
                 r#"
-                INSERT INTO users (username, first_name, last_name, email, user_type, is_active)
-                VALUES ($1, $2, $3, $4, 'human', TRUE)
+                INSERT INTO users
+                    (username, first_name, last_name, email, user_type, is_active,
+                     setup_wizard_dismissed, setup_wizard_agent_acknowledged)
+                VALUES ($1, $2, $3, $4, 'human', TRUE, TRUE, TRUE)
                 RETURNING id
                 "#,
             )

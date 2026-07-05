@@ -399,7 +399,22 @@ function buildRoutes(fixtures) {
 
     // ── admin (specific before catch-all) ─────────────────────────────────────
     { pattern: matchPath("/api/v1/admin/config-health"),                   body: { status: "ok", issues: [] } },
-    { pattern: matchPath("/api/v1/admin/setup-progress"),                  body: { complete: true } },
+    // Setup wizard: report dismissed + fully complete so the onboarding coach
+    // overlay never renders. The coach uses hardcoded dark inline styles that
+    // ignore the light theme, which otherwise pollutes light-mode screenshots.
+    { pattern: matchPath("/api/v1/admin/setup-progress"), body: (() => {
+        const doneStep = { complete: true, count: 1 };
+        return {
+          dismissed: true,
+          agent_acknowledged: true,
+          environment: doneStep,
+          flake: doneStep,
+          builder: doneStep,
+          cache: doneStep,
+          system: doneStep,
+          all_required_complete: true,
+        };
+      })() },
     { pattern: matchPath("/api/v1/admin/users"),                           body: adminUsers },
     { pattern: matchPath("/api/v1/admin/server-info"),                     body: { version: "0.1.0-fixture", uptime_secs: 3600 } },
     { pattern: matchPath("/api/v1/admin/classification-config"),           body: { enabled: false, categories: [] } },
