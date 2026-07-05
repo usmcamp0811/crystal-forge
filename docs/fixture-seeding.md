@@ -39,6 +39,42 @@ Pass `--dev` to rebuild the server from local source instead of the Nix package:
 run-ui-dev --dev
 ```
 
+`run-ui-dev` runs **everything in one foreground process** — you do not need a
+second terminal or a manual `dx serve`. It handles the two things that make a
+bare `dx serve` fail in this repo:
+
+1. **wasm-bindgen version pin** — the project needs wasm-bindgen `0.2.108`, but
+   the devshell's `wasm-bindgen-cli` is newer. The script symlinks the pinned
+   `0.2.108` binary into `$XDG_DATA_HOME/dioxus/wasm-bindgen/` (exactly like the
+   Nix `web-ui` build does) so `dx` uses the right one.
+2. **working directory** — `dx serve` must run from `packages/web-ui`, not the
+   repo root or `packages/default`.
+
+The `dx and dioxus versions are incompatible` message from `dx` is a **non-fatal
+warning** (the Nix build shows it too); it does not stop the build.
+
+### Frontend only (server already running)
+
+If the CF API server is already up (e.g. via `run-ui-dev` in another shell, or
+`server-stack-mock`), you can run just the hot-reload frontend:
+
+```bash
+run-ui-frontend
+```
+
+This pins wasm-bindgen, rebuilds Tailwind, and runs `dx serve` from
+`packages/web-ui` against the server on `http://localhost:3445`.
+
+### Why bare `dx serve` fails
+
+```text
+Build failed: Incorrect wasm-bindgen-cli version:
+project requires version 0.2.108 but version 0.2.121 is installed
+```
+
+Use `run-ui-dev` or `run-ui-frontend` instead of calling `dx serve` directly —
+they set up the pinned toolchain for you.
+
 ---
 
 ## How the seeding works

@@ -378,29 +378,89 @@ let
     '';
   };
 
+  # Frontend-only hot-reload dev server. Pins the exact wasm-bindgen the
+  # project needs (0.2.108) the same way the Nix web-ui build does, then runs
+  # `dx serve` from packages/web-ui. Proxies /api to the running CF server.
+  runUiFrontend = pkgs.writeShellApplication {
+    name = "run-ui-frontend";
+    runtimeInputs = with pkgs; [
+      coreutils
+      dioxus-cli
+      wasm-bindgen-cli_0_2_108
+      tailwindcss_4
+      binaryen
+      lld
+    ];
+    text = ''
+      set -euo pipefail
+
+      PROJECT_ROOT="''${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+      WEB_UI_DIR="$PROJECT_ROOT/packages/web-ui"
+
+      # dx looks for a version-pinned wasm-bindgen under
+      # $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-<version>. Point it at the
+      # pinned 0.2.108 binary so it does not try to download/use the wrong version.
+      export XDG_DATA_HOME="''${XDG_DATA_HOME:-$HOME/.local/share}"
+      mkdir -p "$XDG_DATA_HOME/dioxus/wasm-bindgen"
+      ln -sf "${pkgs.wasm-bindgen-cli_0_2_108}/bin/wasm-bindgen" \
+        "$XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.108"
+
+      # Build the Tailwind stylesheet the app expects.
+      echo "🎨 Building Tailwind CSS..."
+      tailwindcss \
+        -i "$WEB_UI_DIR/tailwind.css" \
+        -o "$WEB_UI_DIR/assets/tailwind.min.css" \
+        --minify
+
+      echo ""
+      echo "🌐 Starting Dioxus web UI dev server (hot reload)..."
+      echo "   UI dev server: http://localhost:8080"
+      echo "   Expects the CF API server on http://localhost:3445 (run: run-ui-dev)"
+      echo ""
+
+      cd "$WEB_UI_DIR"
+      exec dx serve --platform web
+    '';
+  };
+
   runUiDev = pkgs.writeShellApplication {
     name = "run-ui-dev";
-    runtimeInputs = with pkgs; [ nix coreutils procps curl postgresql dioxus-cli ];
+    runtimeInputs = with pkgs; [
+      nix
+      coreutils
+      procps
+      curl
+      postgresql
+      dioxus-cli
+      wasm-bindgen-cli_0_2_108
+      tailwindcss_4
+      binaryen
+      lld
+    ];
     text = ''
       set -euo pipefail
 
       PROJECT_ROOT="''${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
       FIXTURE_PATH="$PROJECT_ROOT/docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json"
+      WEB_UI_DIR="$PROJECT_ROOT/packages/web-ui"
 
       # ── 1. Ensure PostgreSQL is running ──────────────────────────────
+      # Start db-only detached in its own process group so its TUI never grabs
+      # our terminal. If it's already up we skip it.
+      DB_STARTED_BY_US=0
       if ! pg_isready -h 127.0.0.1 -p 3042 -U crystal_forge -d crystal_forge &>/dev/null; then
-        echo "📦 PostgreSQL is not running. Starting via db-only..."
-        nix run "$PROJECT_ROOT#devScripts.db-only" -- up -d 2>&1 &
-        # shellcheck disable=SC2034  # referenced indirectly by 'wait' in cleanup
-        _DB_COMPOSE_PID=$!
-        echo "⏳ Waiting for PostgreSQL to be ready..."
-        for i in $(seq 1 30); do
+        echo "📦 PostgreSQL is not running. Starting db-only (detached)..."
+        setsid nix run "$PROJECT_ROOT#devScripts.db-only" -- up --tui=false \
+          >/tmp/cf-db-only.log 2>&1 < /dev/null &
+        DB_STARTED_BY_US=1
+        echo "⏳ Waiting for PostgreSQL to be ready (logs: /tmp/cf-db-only.log)..."
+        for i in $(seq 1 60); do
           if pg_isready -h 127.0.0.1 -p 3042 -U crystal_forge -d crystal_forge &>/dev/null; then
             echo "✅ PostgreSQL is ready!"
             break
           fi
-          if [ "$i" -eq 30 ]; then
-            echo "❌ PostgreSQL failed to start. Check process-compose logs."
+          if [ "$i" -eq 60 ]; then
+            echo "❌ PostgreSQL failed to start. See /tmp/cf-db-only.log"
             exit 1
           fi
           sleep 1
@@ -439,7 +499,6 @@ let
       export CRYSTAL_FORGE__SERVER__EXECUTION_MODE="mock"
       export RUST_LOG="info,crystal_forge::fixtures::seed=debug"
 
-      # Trap cleanup on exit
       cleanup() {
         echo ""
         echo "🛑 Shutting down..."
@@ -447,19 +506,21 @@ let
           kill "$SERVER_PID" 2>/dev/null || true
           wait "$SERVER_PID" 2>/dev/null || true
         fi
+        if [ "$DB_STARTED_BY_US" -eq 1 ]; then
+          echo "   (PostgreSQL left running — stop with: db-only down)"
+        fi
         echo "👋 Goodbye!"
       }
       trap cleanup EXIT INT TERM
 
       if [ "''${1:-}" == "--dev" ]; then
-        echo "   (dev mode — building from source)"
+        echo "   (dev mode — building server from source)"
         nix run "$PROJECT_ROOT#server" &
       else
         ${pkgs.crystal-forge.default.server}/bin/server &
       fi
       SERVER_PID=$!
 
-      # Wait for server to be ready
       echo "⏳ Waiting for server to be ready..."
       for i in $(seq 1 60); do
         if curl -sf http://127.0.0.1:3445/status >/dev/null 2>&1; then
@@ -467,23 +528,35 @@ let
           break
         fi
         if [ "$i" -eq 60 ]; then
-          echo "❌ Server failed to start. Check logs."
+          echo "❌ Server failed to start."
           exit 1
         fi
         sleep 2
       done
 
-      # ── 5. Start Dioxus dev server ──────────────────────────────────
+      # ── 5. Set up pinned wasm-bindgen + Tailwind for dx serve ────────
+      export XDG_DATA_HOME="''${XDG_DATA_HOME:-$HOME/.local/share}"
+      mkdir -p "$XDG_DATA_HOME/dioxus/wasm-bindgen"
+      ln -sf "${pkgs.wasm-bindgen-cli_0_2_108}/bin/wasm-bindgen" \
+        "$XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.108"
+
+      echo "🎨 Building Tailwind CSS..."
+      tailwindcss \
+        -i "$WEB_UI_DIR/tailwind.css" \
+        -o "$WEB_UI_DIR/assets/tailwind.min.css" \
+        --minify
+
+      # ── 6. Start Dioxus dev server (foreground) ─────────────────────
       echo ""
-      echo "🌐 Starting Dioxus web UI dev server..."
-      echo "   API server: http://127.0.0.1:3445"
+      echo "🌐 Starting Dioxus web UI dev server (hot reload)..."
+      echo "   API server:    http://127.0.0.1:3445"
       echo "   UI dev server: http://localhost:8080"
       echo ""
-      echo "   Press Ctrl+C to stop everything."
+      echo "   Press Ctrl+C to stop the server (PostgreSQL keeps running)."
       echo ""
 
-      cd "$PROJECT_ROOT/packages/default"
-      exec dx serve
+      cd "$WEB_UI_DIR"
+      exec dx serve --platform web
     '';
   };
 
@@ -1082,7 +1155,7 @@ let
   };
 in full-stack.config.outputs.package // {
   inherit runServer runAgent runBuilder simulatePush startBuilderApi
-    runUiDev bootstrapDevBuilder envExports;
+    runUiDev runUiFrontend bootstrapDevBuilder envExports;
   db-only = dbOnly.config.outputs.package;
   server-only = server-only.config.outputs.package;
   server-stack-mock = server-stack-mock.config.outputs.package;
