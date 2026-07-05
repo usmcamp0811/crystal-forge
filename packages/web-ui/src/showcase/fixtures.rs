@@ -320,6 +320,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             last_seen: Some(base_time - chrono::Duration::minutes(2)),
             deployment_policy: "auto_latest".to_string(),
             fqdn: None,
+            heartbeat_interval_secs: None,
         },
         // Warning staging system (behind)
         SystemSummary {
@@ -342,6 +343,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             last_seen: Some(base_time - chrono::Duration::minutes(10)),
             deployment_policy: "manual".to_string(),
             fqdn: None,
+            heartbeat_interval_secs: None,
         },
         // Critical dev system (never deployed)
         SystemSummary {
@@ -364,6 +366,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             last_seen: Some(base_time - chrono::Duration::minutes(45)),
             deployment_policy: "manual".to_string(),
             fqdn: None,
+            heartbeat_interval_secs: None,
         },
         // Offline system (no environment)
         SystemSummary {
@@ -386,6 +389,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             last_seen: Some(base_time - chrono::Duration::hours(24)),
             deployment_policy: "manual".to_string(),
             fqdn: None,
+            heartbeat_interval_secs: None,
         },
         // Healthy system with long hostname (overflow test)
         SystemSummary {
@@ -408,6 +412,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             last_seen: Some(base_time - chrono::Duration::seconds(30)),
             deployment_policy: "Immediate".to_string(),
             fqdn: None,
+            heartbeat_interval_secs: None,
         },
         // Building state system
         SystemSummary {
@@ -430,6 +435,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             last_seen: Some(base_time - chrono::Duration::minutes(1)),
             deployment_policy: "pinned".to_string(),
             fqdn: None,
+            heartbeat_interval_secs: None,
         },
     ]
 }

@@ -826,6 +826,7 @@ pub async fn update_system_handler(
             .map(str::trim)
             .filter(|value| !value.is_empty()),
         &payload.deployment_policy,
+        payload.heartbeat_interval_secs,
     )
     .await
     .is_err()
@@ -1302,6 +1303,7 @@ fn detail_row_to_api_model(row: SystemDetailRow) -> SystemDetail {
         last_seen: row.last_seen,
         created_at: row.created_at,
         updated_at: row.updated_at,
+        heartbeat_interval_secs: row.heartbeat_interval_secs,
     }
 }
 

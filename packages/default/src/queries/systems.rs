@@ -88,7 +88,13 @@ pub async fn update_system_metadata(
     flake_id: Option<i32>,
     system_configuration_name: Option<&str>,
     deployment_policy: &str,
+    // Per-system heartbeat interval in seconds. `None` or `Some(0)` stores NULL
+    // (agent uses server-config default). Positive values are stored as-is.
+    heartbeat_interval_secs: Option<i32>,
 ) -> Result<()> {
+    // Normalise: 0 or negative → NULL (use default).
+    let hb_interval = heartbeat_interval_secs.filter(|&v| v > 0);
+
     // `fqdn` is updated only when the caller explicitly sets or clears it.
     // `COALESCE($2, systems.fqdn)` would be wrong for the Clear case, so we
     // branch the SQL on whether the column should be touched at all.
@@ -101,14 +107,16 @@ pub async fn update_system_metadata(
                      flake_id = $3,
                      system_configuration_name = $4,
                      deployment_policy = $5,
+                     heartbeat_interval_secs = $6,
                      updated_at = NOW()
-                  WHERE id = $6",
+                  WHERE id = $7",
             )
             .bind(hostname)
             .bind(environment_id)
             .bind(flake_id)
             .bind(system_configuration_name)
             .bind(deployment_policy)
+            .bind(hb_interval)
             .bind(system_id)
             .execute(pool)
             .await?;
@@ -126,8 +134,9 @@ pub async fn update_system_metadata(
                      flake_id = $4,
                      system_configuration_name = $5,
                      deployment_policy = $6,
+                     heartbeat_interval_secs = $7,
                      updated_at = NOW()
-                  WHERE id = $7",
+                  WHERE id = $8",
             )
             .bind(hostname)
             .bind(fqdn_value)
@@ -135,6 +144,7 @@ pub async fn update_system_metadata(
             .bind(flake_id)
             .bind(system_configuration_name)
             .bind(deployment_policy)
+            .bind(hb_interval)
             .bind(system_id)
             .execute(pool)
             .await?;
@@ -300,6 +310,22 @@ pub async fn get_agent_desired_target_by_hostname(
     }
 
     Ok(None)
+}
+
+/// Fetch the per-system heartbeat interval from the systems table.
+/// Returns `None` when the system is not found or the column is NULL,
+/// indicating the caller should use the server-config default.
+pub async fn get_system_heartbeat_interval_secs(
+    pool: &PgPool,
+    hostname: &str,
+) -> Result<Option<i32>> {
+    let result = sqlx::query_scalar::<_, Option<i32>>(
+        "SELECT heartbeat_interval_secs FROM systems WHERE hostname = $1",
+    )
+    .bind(hostname)
+    .fetch_optional(pool)
+    .await?;
+    Ok(result.flatten())
 }
 
 pub async fn get_desired_target_by_id(pool: &PgPool, system_id: i32) -> Result<Option<String>> {
@@ -643,6 +669,8 @@ pub struct SystemDetailRow {
     pub last_seen: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    // Heartbeat configuration
+    pub heartbeat_interval_secs: Option<i32>,
 }
 
 /// Fetch system detail from view_system_detail
@@ -681,6 +709,7 @@ pub struct SystemListRow {
     pub last_seen: Option<DateTime<Utc>>,
     pub deployment_policy: String,
     pub fqdn: Option<String>,
+    pub heartbeat_interval_secs: Option<i32>,
 }
 
 /// Fetch all active systems from view_system_list
@@ -1868,6 +1897,7 @@ mod tests {
             None,
             None,
             "manual",
+            None,
         )
         .await
         .expect("seed fqdn should succeed");
@@ -1882,6 +1912,7 @@ mod tests {
             None,
             None,
             "auto_latest",
+            None,
         )
         .await
         .expect("keep update should succeed");
@@ -1924,6 +1955,7 @@ mod tests {
             None,
             None,
             "manual",
+            None,
         )
         .await
         .expect("seed fqdn should succeed");
@@ -1937,6 +1969,7 @@ mod tests {
             None,
             None,
             "manual",
+            None,
         )
         .await
         .expect("clear update should succeed");

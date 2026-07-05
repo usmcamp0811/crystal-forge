@@ -3205,6 +3205,7 @@ mod task_221_integration_tests {
             Some(flake.id),
             Some("new-config-name"),
             "manual",
+            None,
         )
         .await
         .expect("update_system_metadata failed");
@@ -3242,6 +3243,7 @@ mod task_221_integration_tests {
             Some(999999), // non-existent flake_id → FK violation
             None,
             "manual",
+            None,
         )
         .await;
 

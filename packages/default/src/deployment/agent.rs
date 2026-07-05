@@ -138,14 +138,15 @@ impl AgentDeploymentManager {
     pub async fn process_heartbeat_response(
         &mut self,
         response: LogResponse,
-    ) -> Result<DeploymentResult> {
+    ) -> Result<(DeploymentResult, Option<u64>)> {
         debug!("Processing heartbeat response");
 
         self.runtime_caches = response.runtime_caches;
+        let heartbeat_interval_secs = response.heartbeat_interval_secs;
 
         let Some(desired_target) = response.desired_target else {
             debug!("No desired target in heartbeat response");
-            return Ok(DeploymentResult::NoDeploymentNeeded);
+            return Ok((DeploymentResult::NoDeploymentNeeded, heartbeat_interval_secs));
         };
 
         info!("Received desired target: {}", desired_target);
@@ -157,7 +158,7 @@ impl AgentDeploymentManager {
                 desired_target,
                 self.config.post_agent_start_deployment_delay - uptime
             );
-            return Ok(DeploymentResult::NoDeploymentNeeded);
+            return Ok((DeploymentResult::NoDeploymentNeeded, heartbeat_interval_secs));
         }
 
         // Always check the actual running system, not just cached state
@@ -167,7 +168,7 @@ impl AgentDeploymentManager {
         if actual_current == desired_target {
             debug!("Already on target (verified via /run/current-system), skipping deployment");
             self.current_target = Some(desired_target.to_string());
-            return Ok(DeploymentResult::AlreadyOnTarget);
+            return Ok((DeploymentResult::AlreadyOnTarget, heartbeat_interval_secs));
         }
 
         debug!("Current system: {}", actual_current);
@@ -177,14 +178,17 @@ impl AgentDeploymentManager {
             Ok(result) => {
                 info!("Deployment completed successfully");
                 self.current_target = Some(desired_target.to_string());
-                Ok(result)
+                Ok((result, heartbeat_interval_secs))
             }
             Err(e) => {
                 error!("Deployment failed: {:#}", e);
-                Ok(DeploymentResult::Failed {
-                    error: e.to_string(),
-                    desired_target: desired_target.to_string(),
-                })
+                Ok((
+                    DeploymentResult::Failed {
+                        error: e.to_string(),
+                        desired_target: desired_target.to_string(),
+                    },
+                    heartbeat_interval_secs,
+                ))
             }
         }
     }

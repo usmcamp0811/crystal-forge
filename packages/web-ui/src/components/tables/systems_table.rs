@@ -275,16 +275,17 @@ pub fn SystemsTable(
                                             })
                                             .unwrap_or_else(|| "Never".to_string());
 
+                                        let hb_interval = system.heartbeat_interval_secs.unwrap_or(600) as i64;
                                         let next_in = system
                                             .last_seen
-                                            .map(|dt| 60.0 - chrono::Utc::now().signed_duration_since(dt).num_seconds() as f64)
+                                            .map(|dt| hb_interval as f64 - chrono::Utc::now().signed_duration_since(dt).num_seconds() as f64)
                                             .unwrap_or(0.0);
 
                                         rsx! {
                                             div {
                                                 style: "display: flex; align-items: center; gap: 8px;",
                                                 HeartbeatSpinner {
-                                                    interval_sec: 60,
+                                                    interval_sec: hb_interval,
                                                     next_in_sec: next_in,
                                                     size: 20,
                                                     show_label: false,

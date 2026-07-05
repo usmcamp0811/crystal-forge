@@ -81,11 +81,11 @@ pub fn EditSystemModal(
             .unwrap_or_default()
     });
 
-    // Heartbeat interval and tags are NOT yet persisted server-side (no systems.tags or
-    // systems.heartbeat_interval column exists — see TASK-353.1 and TASK-279 follow-ups). These
-    // signals provide design-parity local editing only; the help text marks them as not
-    // saved so operators are not misled. Wire to real persistence once the backend lands.
-    let mut heartbeat_interval_sec = use_signal(|| 60_i32);
+    // Seed heartbeat interval from the persisted system value; fall back to the agent
+    // default (600s) when the column is NULL (no per-system override set yet).
+    let mut heartbeat_interval_sec = use_signal(|| {
+        system.heartbeat_interval_secs.unwrap_or(600)
+    });
     let mut tags_draft = use_signal(String::new);
 
     // Sync FQDN when hostname or environment changes
@@ -138,6 +138,7 @@ pub fn EditSystemModal(
                 Some(flake_name.read().clone())
             },
             deployment_policy: deployment_policy.read().clone(),
+            heartbeat_interval_secs: Some(*heartbeat_interval_sec.read()),
         };
 
         on_save.call(request);
@@ -390,10 +391,8 @@ pub fn EditSystemModal(
                     }
 
                     // Two-column: Heartbeat interval + Tags.
-                    // NOTE: These are editable for design parity but are NOT yet persisted —
-                    // there is no systems.heartbeat_interval or systems.tags column. The help
-                    // text marks them as not-saved so operators are not misled. Follow-ups
-                    // TASK-353.1 (tags) and TASK-279 (heartbeat interval) wire real persistence.
+                    // Heartbeat interval is persisted and returned to the agent via LogResponse.
+                    // Tags are still local-only (no systems.tags column yet — TASK-353.1).
                     div {
                         style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 8px;",
                         "data-testid": "heartbeat-tags-fields",
@@ -413,8 +412,9 @@ pub fn EditSystemModal(
                                 option { value: "90", selected: *heartbeat_interval_sec.read() == 90, "90 seconds" }
                                 option { value: "120", selected: *heartbeat_interval_sec.read() == 120, "2 minutes" }
                                 option { value: "300", selected: *heartbeat_interval_sec.read() == 300, "5 minutes" }
+                                option { value: "600", selected: *heartbeat_interval_sec.read() == 600, "10 minutes (default)" }
                             }
-                            p { class: "help", "Agent heartbeat cadence. Not saved yet — backend field coming soon." }
+                            p { class: "help", "Agent heartbeat cadence. Takes effect on the agent's next check-in after saving." }
                         }
                         div {
                             class: "field",

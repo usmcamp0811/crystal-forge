@@ -569,6 +569,9 @@ pub struct SystemSummary {
     pub deployment_policy: String,
     #[serde(default)]
     pub fqdn: Option<String>,
+    /// Per-system heartbeat interval in seconds. None means the agent uses the server default (600s).
+    #[serde(default)]
+    pub heartbeat_interval_secs: Option<i32>,
 }
 
 /// Full system representation for the detail view.
@@ -602,6 +605,9 @@ pub struct SystemDetail {
     pub last_seen: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Per-system heartbeat interval in seconds. None means the agent uses the server default (600s).
+    #[serde(default)]
+    pub heartbeat_interval_secs: Option<i32>,
 }
 
 /// Hardware information subset for system detail.
@@ -1593,6 +1599,9 @@ pub struct UpdateSystemRequest {
     pub environment: Option<String>,
     pub flake_name: Option<String>,
     pub deployment_policy: String,
+    /// Per-system heartbeat interval in seconds. None or 0 stores NULL (server default 600s).
+    #[serde(default)]
+    pub heartbeat_interval_secs: Option<i32>,
 }
 
 fn default_flake_build_scope() -> String {

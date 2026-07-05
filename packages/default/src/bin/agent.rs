@@ -12,20 +12,62 @@ use serde_json::Value;
 use std::{ffi::OsStr, fs, path::PathBuf, process::Command, sync::Arc};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+/// Default heartbeat interval used when the server provides no override.
+const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 600;
+
+/// Maximum number of retry attempts for a failed heartbeat POST.
+const HEARTBEAT_MAX_RETRIES: u32 = 3;
+
+/// Base delay (ms) for the first retry; doubles each attempt.
+const HEARTBEAT_RETRY_BASE_MS: u64 = 2_000;
+
+/// Maximum jitter added to the sleep interval to avoid thundering herd (seconds).
+const HEARTBEAT_JITTER_MAX_SECS: u64 = 30;
+
+/// System reboot threshold: if host uptime at agent startup is below this value
+/// (seconds), we classify the startup event as a full system reboot rather than
+/// an agent service restart.
+const REBOOT_UPTIME_THRESHOLD_SECS: u64 = 300; // 5 minutes
+
+/// Returns `true` when `uptime_secs` indicates the system recently booted.
+fn is_reboot_by_uptime(uptime_secs: u64) -> bool {
+    uptime_secs < REBOOT_UPTIME_THRESHOLD_SECS
+}
 
 // Agent state that holds the deployment manager
 struct AgentState {
     deployment_manager: AgentDeploymentManager,
+    /// Store path from the last successfully sent heartbeat, used to deduplicate
+    /// inotify events that fire for the same derivation.
+    last_reported_store_path: Option<String>,
+    /// Host uptime recorded at agent startup (seconds). Used to decide whether
+    /// a service restart is also a system reboot.
+    startup_uptime_secs: u64,
 }
 
 impl AgentState {
     fn new() -> Result<Self> {
         let cfg = CrystalForgeConfig::load()?;
         let deployment_manager = AgentDeploymentManager::new(cfg.deployment.clone());
+        let startup_uptime_secs = sysinfo::System::uptime();
 
-        Ok(Self { deployment_manager })
+        Ok(Self {
+            deployment_manager,
+            last_reported_store_path: None,
+            startup_uptime_secs,
+        })
+    }
+
+    /// Returns `true` when the agent appears to have started due to a full system
+    /// reboot rather than just a service restart.
+    ///
+    /// We compare the current host uptime against a small threshold: if the host
+    /// has been up for fewer than 5 minutes it almost certainly just booted.
+    fn is_system_reboot(&self) -> bool {
+        is_reboot_by_uptime(self.startup_uptime_secs)
     }
 }
 
@@ -107,7 +149,7 @@ fn deriver_drv_with_test_fallback(path: &OsStr) -> Result<String> {
     }
 }
 
-/// Creates and signs a system state payload
+/// Creates and signs a system state payload.
 fn create_signed_payload(
     current_system: &OsStr,
     context: &str,
@@ -115,8 +157,6 @@ fn create_signed_payload(
     let cfg = CrystalForgeConfig::load()?;
     let client_cfg = &cfg.client;
     let hostname = hostname::get()?.to_string_lossy().into_owned();
-
-    // Guarantees a .drv (or returns an error)
 
     let current_system_str = current_system.to_string_lossy();
     let payload = SystemState::gather(&hostname, context, current_system_str.as_ref())?;
@@ -138,7 +178,7 @@ fn create_signed_payload(
     Ok((payload, payload_json, signature_b64))
 }
 
-/// Posts system state changes to the server
+/// Posts system state changes to the server (non-heartbeat, no retry).
 pub fn post_system_state_change(current_system: &OsStr, context: &str) -> Result<()> {
     let cfg = CrystalForgeConfig::load()?;
     let client_cfg = &cfg.client;
@@ -146,12 +186,11 @@ pub fn post_system_state_change(current_system: &OsStr, context: &str) -> Result
     let (payload, payload_json, signature_b64) = create_signed_payload(current_system, context)?;
     let hostname = hostname::get()?.to_string_lossy().into_owned();
 
-    // Send to state endpoint
     let client = Client::new();
     let (scheme, port_suffix) = match client_cfg.server_port {
-        443 => ("https", "".to_string()),       // Omit :443 for HTTPS
-        80 => ("http", "".to_string()),         // Omit :80 for HTTP
-        port => ("http", format!(":{}", port)), // Include port for non-standard
+        443 => ("https", "".to_string()),
+        80 => ("http", "".to_string()),
+        port => ("http", format!(":{}", port)),
     };
 
     let url = format!(
@@ -159,7 +198,7 @@ pub fn post_system_state_change(current_system: &OsStr, context: &str) -> Result
         scheme, client_cfg.server_host, port_suffix
     );
 
-    println!("Posting state change to: {}", url);
+    info!("Posting state change ({context}) to: {url}");
     let res = client
         .post(url)
         .header("X-Signature", signature_b64)
@@ -175,19 +214,18 @@ pub fn post_system_state_change(current_system: &OsStr, context: &str) -> Result
     Ok(())
 }
 
-/// Posts heartbeat to the server and handles deployment responses
-pub async fn post_system_heartbeat_with_deployment(
+/// Posts heartbeat to the server with retry (exponential backoff) and returns the
+/// `LogResponse` including `heartbeat_interval_secs` when present.
+async fn post_heartbeat_with_retry(
     current_system: &OsStr,
     context: &str,
-    agent_state: Arc<Mutex<AgentState>>,
-) -> Result<()> {
+) -> Result<LogResponse> {
     let cfg = CrystalForgeConfig::load()?;
     let client_cfg = &cfg.client;
 
-    let (payload, payload_json, signature_b64) = create_signed_payload(current_system, context)?;
+    let (_, payload_json, signature_b64) = create_signed_payload(current_system, context)?;
     let hostname = hostname::get()?.to_string_lossy().into_owned();
 
-    // Send to heartbeat endpoint
     let client = reqwest::Client::new();
     let (scheme, port_suffix) = match client_cfg.server_port {
         443 => ("https", "".to_string()),
@@ -200,179 +238,265 @@ pub async fn post_system_heartbeat_with_deployment(
         scheme, client_cfg.server_host, port_suffix
     );
 
-    println!("Posting heartbeat to: {}", url);
-    let res = client
-        .post(url)
-        .header("X-Signature", signature_b64)
-        .header("X-Key-ID", hostname)
-        .body(payload_json)
-        .send()
-        .await
-        .context("failed to send heartbeat POST")?;
+    let mut last_err: anyhow::Error = anyhow::anyhow!("no attempts made");
+    for attempt in 0..=HEARTBEAT_MAX_RETRIES {
+        if attempt > 0 {
+            let backoff_ms = HEARTBEAT_RETRY_BASE_MS * (1 << (attempt - 1));
+            warn!(
+                "Heartbeat attempt {attempt}/{HEARTBEAT_MAX_RETRIES} failed, retrying in {backoff_ms}ms"
+            );
+            sleep(Duration::from_millis(backoff_ms)).await;
+        }
 
-    if !res.status().is_success() {
-        anyhow::bail!("server responded with {}", res.status());
+        let result = client
+            .post(&url)
+            .header("X-Signature", &signature_b64)
+            .header("X-Key-ID", &hostname)
+            .body(payload_json.clone())
+            .send()
+            .await;
+
+        match result {
+            Err(e) => {
+                warn!("Heartbeat POST network error (attempt {attempt}): {e}");
+                last_err = e.into();
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                if !status.is_success() {
+                    let body = resp.text().await.unwrap_or_default();
+                    warn!(
+                        "Heartbeat POST rejected by server (attempt {attempt}): HTTP {status} — {body}"
+                    );
+                    last_err = anyhow::anyhow!("server responded with {status}: {body}");
+                    continue;
+                }
+                let log_response: LogResponse = resp
+                    .json()
+                    .await
+                    .context("failed to parse LogResponse from server")?;
+                return Ok(log_response);
+            }
+        }
     }
+    Err(last_err)
+}
 
-    // Parse the response for deployment instructions
-    let log_response: LogResponse = res
-        .json()
-        .await
-        .context("failed to parse LogResponse from server")?;
+/// Posts heartbeat and handles deployment responses.
+pub async fn post_system_heartbeat_with_deployment(
+    current_system: &OsStr,
+    context: &str,
+    agent_state: Arc<Mutex<AgentState>>,
+) -> Result<Option<u64>> {
+    info!("Posting heartbeat ({context})");
+    let log_response = match post_heartbeat_with_retry(current_system, context).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            error!("❌ Heartbeat failed after all retries: {e:#}");
+            return Ok(None);
+        }
+    };
+
+    let heartbeat_interval_secs = log_response.heartbeat_interval_secs;
 
     // Process deployment with our deployment manager
     let mut state = agent_state.lock().await;
-    let deployment_result = state
+    let (deployment_result, _) = state
         .deployment_manager
         .process_heartbeat_response(log_response)
         .await?;
 
     match deployment_result {
         DeploymentResult::SuccessFromCache { ref cache_url } => {
-            println!(
-                "✅ Deployment completed successfully from cache: {}",
-                cache_url
-            );
-            // Drop the lock before calling post_system_state_change
+            info!("✅ Deployment completed successfully from cache: {}", cache_url);
             drop(state);
             post_system_state_change(current_system, "cf_deployment")?;
         }
         DeploymentResult::SuccessLocalBuild => {
-            println!("✅ Deployment completed successfully with local build");
-            // Drop the lock before calling post_system_state_change
+            info!("✅ Deployment completed successfully with local build");
             drop(state);
             post_system_state_change(current_system, "cf_deployment")?;
         }
         DeploymentResult::Started { ref unit_name } => {
-            println!("🚀 Deployment started in systemd unit: {}", unit_name);
-            println!("   Agent will restart automatically after deployment completes");
-            // No need to post state change - the agent will restart and report new state
+            info!("🚀 Deployment started in systemd unit: {}", unit_name);
+            info!("   Agent will restart automatically after deployment completes");
         }
         DeploymentResult::Failed {
             ref error,
             ref desired_target,
         } => {
-            eprintln!("❌ Deployment failed for {}: {}", desired_target, error);
+            error!("❌ Deployment failed for {}: {}", desired_target, error);
         }
         DeploymentResult::NoDeploymentNeeded => {
-            println!("ℹ️ No deployment needed");
+            info!("ℹ️ No deployment needed");
         }
         DeploymentResult::AlreadyOnTarget => {
-            println!("ℹ️ Already on target configuration");
+            info!("ℹ️ Already on target configuration");
         }
     }
 
-    Ok(())
+    Ok(heartbeat_interval_secs)
 }
 
-/// Handles an inotify event for a specific file name by reading the current system path
-/// and invoking a callback to record the system state if the event matches "current-system".
-fn report_current_system_derivation<F, R>(
+/// Handles an inotify event for `/run`. Filters to the "current-system" name only,
+/// resolves the symlink, and suppresses the heartbeat if the resolved store path
+/// has not changed since the last confirmed report (deduplication guard).
+async fn handle_current_system_event(
     name: &OsStr,
     context: &str,
-    readlink_fn: F,
-    insert_fn: R,
     agent_state: Arc<Mutex<AgentState>>,
-) -> Result<()>
-where
-    F: Fn(&str) -> Result<PathBuf>,
-    R: Fn(&OsStr, &str) -> Result<()>,
-{
+) -> Result<Option<u64>> {
     if name != OsStr::new("current-system") {
-        return Ok(());
+        return Ok(None);
     }
 
-    let current_system = readlink_fn("/run/current-system")?;
-    println!(
-        "[{}] Current System: {}",
+    let current_system = readlink_path("/run/current-system")?;
+    let current_system_str = current_system.to_string_lossy().into_owned();
+
+    info!("[{context}] Current System: {current_system_str}");
+
+    // Deduplication: skip if the store path hasn't changed.
+    {
+        let state = agent_state.lock().await;
+        if state.last_reported_store_path.as_deref() == Some(&current_system_str) {
+            info!("[{context}] Store path unchanged ({current_system_str}), suppressing duplicate heartbeat");
+            return Ok(None);
+        }
+    }
+
+    let interval = post_system_heartbeat_with_deployment(
+        current_system.as_os_str(),
         context,
-        current_system.to_string_lossy()
-    );
-    insert_fn(current_system.as_os_str(), context)?;
-    Ok(())
-}
-
-/// Runs a loop that watches for inotify events and handles "current-system" changes using
-/// provided readlink and insertion callbacks. Designed for testing and flexibility.
-async fn watch_for_system_changes<F>(
-    inotify: &mut Inotify,
-    readlink_fn: F,
-    agent_state: Arc<Mutex<AgentState>>,
-) -> Result<()>
-where
-    F: Fn(&str) -> Result<PathBuf>,
-{
-    println!("Watching /run for changes to current-system...");
-
-    // Report initial state at startup
-    report_current_system_derivation_async(
-        OsStr::new("current-system"),
-        "startup",
-        &readlink_fn,
         agent_state.clone(),
     )
     .await?;
 
-    loop {
-        for event in inotify.read_events()? {
-            if let Some(name) = event.name {
-                println!("Detected change to /run/current-system");
-                report_current_system_derivation_async(
-                    &name,
-                    "config_change",
-                    &readlink_fn,
-                    agent_state.clone(),
-                )
-                .await?;
-            }
-        }
+    // Record the reported path after a successful send.
+    {
+        let mut state = agent_state.lock().await;
+        state.last_reported_store_path = Some(current_system_str);
     }
+
+    Ok(interval)
 }
 
-async fn run_periodic_heartbeat_loop_with_deployment(
-    agent_state: Arc<Mutex<AgentState>>,
-) -> Result<()> {
-    sleep(Duration::from_secs(600)).await;
-    info!("💓 Starting heartbeat loop with deployment support (every 10m)...");
+/// The periodic heartbeat loop. Sleeps for the server-provided interval (or the
+/// default 600s) with a small random jitter to spread agent check-ins.
+async fn run_periodic_heartbeat_loop(agent_state: Arc<Mutex<AgentState>>) -> Result<()> {
+    // Initial delay before the first heartbeat (avoid hammering the server right
+    // after agent startup since the inotify event on startup already sends one).
+    let initial_delay = jittered_interval(DEFAULT_HEARTBEAT_INTERVAL_SECS);
+    sleep(Duration::from_secs(initial_delay)).await;
+
+    let mut current_interval = DEFAULT_HEARTBEAT_INTERVAL_SECS;
+
+    info!("💓 Starting heartbeat loop (initial interval: {current_interval}s)...");
     loop {
-        if let Err(e) = report_current_system_derivation_async(
-            OsStr::new("current-system"),
+        let current_system = match readlink_path("/run/current-system") {
+            Ok(p) => p,
+            Err(e) => {
+                error!("❌ Failed to read /run/current-system for heartbeat: {e}");
+                sleep(Duration::from_secs(current_interval)).await;
+                continue;
+            }
+        };
+
+        match post_system_heartbeat_with_deployment(
+            current_system.as_os_str(),
             "heartbeat",
-            readlink_path,
             agent_state.clone(),
         )
         .await
         {
-            error!("❌ Heartbeat failed: {e}");
+            Ok(Some(server_interval)) => {
+                if server_interval != current_interval {
+                    info!("💓 Heartbeat interval updated by server: {current_interval}s → {server_interval}s");
+                }
+                current_interval = server_interval;
+            }
+            Ok(None) => {
+                // Heartbeat failed (already logged); retain current interval.
+            }
+            Err(e) => {
+                error!("❌ Heartbeat loop error: {e}");
+            }
         }
-        sleep(Duration::from_secs(600)).await;
+
+        let sleep_secs = jittered_interval(current_interval);
+        info!("💓 Next heartbeat in {sleep_secs}s");
+        sleep(Duration::from_secs(sleep_secs)).await;
     }
 }
 
-async fn report_current_system_derivation_async<F>(
-    name: &OsStr,
-    context: &str,
-    readlink_fn: F,
+/// Returns `interval_secs` plus a uniform random jitter in `[0, HEARTBEAT_JITTER_MAX_SECS)`.
+fn jittered_interval(interval_secs: u64) -> u64 {
+    let jitter = rand_jitter();
+    interval_secs.saturating_add(jitter)
+}
+
+/// Returns a pseudo-random value in `[0, HEARTBEAT_JITTER_MAX_SECS)` using the
+/// low bits of the current system time — no external crate required.
+fn rand_jitter() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    (nanos as u64) % HEARTBEAT_JITTER_MAX_SECS
+}
+
+/// Runs the inotify watch loop: watches `/run` for `current-system` changes.
+async fn watch_for_system_changes(
+    inotify: &mut Inotify,
     agent_state: Arc<Mutex<AgentState>>,
-) -> Result<()>
-where
-    F: Fn(&str) -> Result<PathBuf>,
-{
-    if name != OsStr::new("current-system") {
-        return Ok(());
+) -> Result<()> {
+    info!("Watching /run for changes to current-system...");
+
+    // Report initial state at startup, distinguishing reboot vs agent restart.
+    let is_reboot = {
+        let state = agent_state.lock().await;
+        state.is_system_reboot()
+    };
+    let startup_context = if is_reboot {
+        info!("🔄 System reboot detected (host uptime low at startup)");
+        "startup"
+    } else {
+        info!("🔄 Agent service restart detected (host uptime normal)");
+        "agent_restart"
+    };
+
+    if let Ok(current_system) = readlink_path("/run/current-system") {
+        if let Ok(Some(interval)) = handle_current_system_event(
+            OsStr::new("current-system"),
+            startup_context,
+            agent_state.clone(),
+        )
+        .await
+        {
+            // Update stored interval if server provided one at startup.
+            let _ = interval; // handled by heartbeat loop
+        }
     }
 
-    let current_system = readlink_fn("/run/current-system")?;
-    println!(
-        "[{}] Current System: {}",
-        context,
-        current_system.to_string_lossy()
-    );
-
-    // Use the heartbeat function that handles deployments
-    post_system_heartbeat_with_deployment(current_system.as_os_str(), context, agent_state).await?;
-
-    Ok(())
+    loop {
+        for event in inotify.read_events()? {
+            if let Some(name) = event.name {
+                // Only log and act when it is actually current-system.
+                if name == OsStr::new("current-system") {
+                    info!("Detected change to /run/current-system");
+                    if let Err(e) = handle_current_system_event(
+                        &name,
+                        "config_change",
+                        agent_state.clone(),
+                    )
+                    .await
+                    {
+                        error!("❌ Failed to handle current-system change: {e}");
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Initializes an inotify watcher on `/run` for "current-system" and records updates
@@ -384,54 +508,57 @@ pub async fn watch_system(agent_state: Arc<Mutex<AgentState>>) -> Result<()> {
         AddWatchFlags::IN_CREATE | AddWatchFlags::IN_MOVED_TO,
     )?;
 
-    // Spawn the heartbeat loop with deployment support
-    tokio::spawn(run_periodic_heartbeat_loop_with_deployment(
-        agent_state.clone(),
-    ));
+    // Spawn the periodic heartbeat loop.
+    tokio::spawn(run_periodic_heartbeat_loop(agent_state.clone()));
 
-    // Use deployment-aware watch loop for file system changes
-    watch_for_system_changes(&mut inotify, readlink_path, agent_state.clone()).await
+    // Watch for inotify current-system change events.
+    watch_for_system_changes(&mut inotify, agent_state).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsStr;
-    use std::path::PathBuf;
 
-    #[tokio::test]
-    async fn test_handle_event_triggers_on_current_system() {
-        let agent_state = Arc::new(Mutex::new(AgentState::new().unwrap()));
-
-        let readlink_mock = |_path: &str| Ok(PathBuf::from("/nix/store/fake-system"));
-
-        let result = report_current_system_derivation_async(
-            OsStr::new("current-system"),
-            "test",
-            readlink_mock,
-            agent_state,
-        )
-        .await;
-
-        // Note: This will actually try to contact the server, so it might fail
-        // You may want to mock the HTTP calls for proper unit testing
-        assert!(result.is_ok() || result.is_err()); // Just check it doesn't panic
+    #[test]
+    fn jittered_interval_is_at_least_base() {
+        let base = 600_u64;
+        let result = jittered_interval(base);
+        assert!(result >= base, "jitter must not reduce interval below base");
+        assert!(
+            result < base + HEARTBEAT_JITTER_MAX_SECS,
+            "jitter must not exceed max"
+        );
     }
 
-    #[tokio::test]
-    async fn test_handle_event_ignores_other_files() {
-        let agent_state = Arc::new(Mutex::new(AgentState::new().unwrap()));
+    #[test]
+    fn rand_jitter_within_bounds() {
+        for _ in 0..20 {
+            let j = rand_jitter();
+            assert!(j < HEARTBEAT_JITTER_MAX_SECS, "jitter {j} exceeds max");
+        }
+    }
 
-        let readlink_mock = |_path: &str| panic!("should not be called");
-
-        let result = report_current_system_derivation_async(
-            OsStr::new("other-file"),
-            "test",
-            readlink_mock,
-            agent_state,
-        )
-        .await;
-
-        assert!(result.is_ok());
+    #[test]
+    fn is_system_reboot_detection_uses_uptime_threshold() {
+        // Low uptime (< 300s) → system reboot
+        assert!(
+            is_reboot_by_uptime(60),
+            "uptime=60 must be classified as reboot"
+        );
+        assert!(
+            is_reboot_by_uptime(299),
+            "uptime=299 must be classified as reboot"
+        );
+        // High uptime → agent restart only
+        assert!(
+            !is_reboot_by_uptime(300),
+            "uptime=300 must be classified as agent restart"
+        );
+        assert!(
+            !is_reboot_by_uptime(86400),
+            "uptime=86400 must be classified as agent restart"
+        );
     }
 }
+
+

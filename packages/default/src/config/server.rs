@@ -108,10 +108,23 @@ pub struct ServerConfig {
     /// Builders must advertise support for whichever strategy is selected.
     #[serde(default = "default_remote_build_execution_strategy")]
     pub remote_build_execution_strategy: RemoteBuildExecutionStrategy,
+
+    /// Default agent heartbeat interval in seconds returned via LogResponse when a system
+    /// has no per-system heartbeat_interval_secs configured (systems.heartbeat_interval_secs IS NULL).
+    /// Agents fall back to their compiled-in 600s default when this field is absent from the
+    /// server response, so changing this only affects agents that have checked in after the
+    /// server was updated.
+    /// Default: 600 (10 minutes).
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
 }
 
 fn default_remote_build_execution_strategy() -> RemoteBuildExecutionStrategy {
     RemoteBuildExecutionStrategy::ServerDerivation
+}
+
+fn default_heartbeat_interval_secs() -> u64 {
+    600 // 10 minutes — matches the agent's compiled-in fallback
 }
 
 // Default value functions for serde
@@ -169,6 +182,7 @@ impl Default for ServerConfig {
             commit_cache_retention_days: default_commit_cache_retention_days(),
             allow_private_cache_test_targets: false,
             remote_build_execution_strategy: default_remote_build_execution_strategy(),
+            heartbeat_interval_secs: default_heartbeat_interval_secs(),
         }
     }
 }

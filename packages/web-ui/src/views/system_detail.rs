@@ -728,10 +728,10 @@ pub fn SystemDetailView(id: String) -> Element {
             }
 
             {
-                let heartbeat_interval_sec = 60_i64;
+                let heartbeat_interval_sec = system.heartbeat_interval_secs.unwrap_or(600) as i64;
                 let heartbeat_next_in_sec = system
                     .last_seen
-                    .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
+                    .map(|dt| heartbeat_interval_sec as f64 - now.signed_duration_since(dt).num_seconds() as f64)
                     .unwrap_or(0.0);
                 let uptime_str = format_uptime(system.hardware.uptime_secs.unwrap_or(0));
                 let kernel_str = system.kernel.clone().unwrap_or_else(|| "unknown".to_string());
@@ -1017,12 +1017,7 @@ pub fn SystemDetailView(id: String) -> Element {
                     spawn(async move {
                         match update_system_via_api(
                             system_id,
-                            request.hostname,
-                            request.fqdn,
-                            request.system_configuration_name,
-                            request.environment,
-                            request.flake_name,
-                            request.deployment_policy,
+                            request,
                         )
                         .await
                         {
@@ -1787,9 +1782,10 @@ fn OverviewTab(
     });
     let mut tag_adding = use_signal(|| false);
     let mut tag_draft = use_signal(String::new);
+    let heartbeat_interval_overview_sec = system.heartbeat_interval_secs.unwrap_or(600) as i64;
     let heartbeat_next_in_sec = system
         .last_seen
-        .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
+        .map(|dt| heartbeat_interval_overview_sec as f64 - now.signed_duration_since(dt).num_seconds() as f64)
         .unwrap_or(0.0);
     let fqdn_text = effective_fqdn(&system);
 
@@ -1957,7 +1953,7 @@ fn OverviewTab(
                     class: "hb-panel",
                     style: "margin-top: 16px;",
                     crate::components::HeartbeatSpinner {
-                        interval_sec: 60,
+                        interval_sec: heartbeat_interval_overview_sec,
                         next_in_sec: heartbeat_next_in_sec,
                         size: 56,
                         show_label: true,

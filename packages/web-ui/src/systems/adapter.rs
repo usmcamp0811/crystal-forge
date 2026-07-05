@@ -258,21 +258,8 @@ pub async fn create_system_via_api(
 
 pub async fn update_system_via_api(
     system_id: Uuid,
-    hostname: String,
-    fqdn: Option<String>,
-    system_configuration_name: Option<String>,
-    environment: Option<String>,
-    flake_name: Option<String>,
-    deployment_policy: String,
+    request: UpdateSystemRequest,
 ) -> Result<SystemDetail, String> {
-    let request = UpdateSystemRequest {
-        hostname,
-        fqdn,
-        system_configuration_name,
-        environment,
-        flake_name,
-        deployment_policy,
-    };
 
     match update_system(&system_id, &request).await {
         Ok(detail) => Ok(detail),
@@ -443,6 +430,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             last_seen: Some(now - Duration::minutes(5)),
             deployment_policy: "auto_latest".to_string(),
             fqdn: None,
+            heartbeat_interval_secs: None,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
@@ -464,6 +452,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             last_seen: Some(now - Duration::minutes(10)),
             deployment_policy: "manual".to_string(),
             fqdn: None,
+            heartbeat_interval_secs: None,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
@@ -485,6 +474,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             last_seen: Some(now - Duration::hours(1)),
             deployment_policy: "manual".to_string(),
             fqdn: None,
+            heartbeat_interval_secs: None,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
@@ -506,6 +496,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             last_seen: Some(now - Duration::days(3)),
             deployment_policy: "manual".to_string(),
             fqdn: None,
+            heartbeat_interval_secs: None,
         },
     ]
 }
@@ -568,6 +559,7 @@ pub fn fallback_system_detail() -> SystemDetail {
         last_seen: None,
         created_at: now,
         updated_at: now,
+        heartbeat_interval_secs: None,
     }
 }
 

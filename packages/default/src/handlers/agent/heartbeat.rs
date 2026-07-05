@@ -6,6 +6,7 @@ use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::{get_caches_for_environment, get_global_caches};
 use crate::queries::systems::{
     deactivate_duplicate_active_systems_by_public_key, get_agent_desired_target_by_hostname,
+    get_system_heartbeat_interval_secs,
 };
 use crate::queries::{agent_heartbeat::insert_agent_heartbeat, system_states::insert_system_state};
 use axum::response::Response;
@@ -33,6 +34,10 @@ pub struct LogResponse {
     pub desired_target: Option<String>,
     #[serde(default)]
     pub runtime_caches: Vec<RuntimeCacheConfig>,
+    /// Interval in seconds the agent should sleep between heartbeats.
+    /// Absent when the server cannot determine the value; agent falls back to 600s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_interval_secs: Option<u64>,
 }
 
 fn destination_to_runtime_cache(destination: CacheDestination) -> Option<RuntimeCacheConfig> {
@@ -172,9 +177,25 @@ pub async fn log(
 
     let runtime_caches =
         load_runtime_caches_for_agent(&pool, agent_request.system.environment_id).await;
+
+    // Resolve per-system heartbeat interval, falling back to server-config default.
+    let heartbeat_interval_secs = {
+        let per_system = get_system_heartbeat_interval_secs(&pool, &agent_request.system.hostname)
+            .await
+            .unwrap_or_else(|e| {
+                debug!("Failed to fetch heartbeat_interval_secs for {}: {e}", agent_request.system.hostname);
+                None
+            });
+        let interval = per_system
+            .map(|v| v as u64)
+            .unwrap_or(state.server_config.heartbeat_interval_secs);
+        Some(interval)
+    };
+
     let response = LogResponse {
         desired_target,
         runtime_caches,
+        heartbeat_interval_secs,
     };
 
     // Return JSON response with appropriate status

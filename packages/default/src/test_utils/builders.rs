@@ -560,6 +560,7 @@ impl SystemSummaryBuilder {
             last_seen: self.last_seen,
             deployment_policy: self.deployment_policy.clone(),
             fqdn: None,
+            heartbeat_interval_secs: None,
         }
     }
 }
