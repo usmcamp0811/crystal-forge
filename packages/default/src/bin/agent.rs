@@ -37,6 +37,18 @@ fn is_reboot_by_uptime(uptime_secs: u64) -> bool {
     uptime_secs < REBOOT_UPTIME_THRESHOLD_SECS
 }
 
+/// Result of a heartbeat POST attempt (with retries).
+#[derive(Debug)]
+enum HeartbeatResult {
+    /// Heartbeat was successfully delivered and acknowledged by the server.
+    Sent {
+        /// Server-provided heartbeat interval override (if any).
+        heartbeat_interval_secs: Option<u64>,
+    },
+    /// All retry attempts were exhausted without successful delivery.
+    Failed,
+}
+
 // Agent state that holds the deployment manager
 struct AgentState {
     deployment_manager: AgentDeploymentManager,
@@ -271,11 +283,18 @@ async fn post_heartbeat_with_retry(
                     last_err = anyhow::anyhow!("server responded with {status}: {body}");
                     continue;
                 }
-                let log_response: LogResponse = resp
-                    .json()
-                    .await
-                    .context("failed to parse LogResponse from server")?;
-                return Ok(log_response);
+                
+                // P2-4: Catch deserialization errors inside the retry loop so they can be retried
+                match resp.json::<LogResponse>().await {
+                    Ok(log_response) => return Ok(log_response),
+                    Err(e) => {
+                        warn!(
+                            "Heartbeat response deserialization failed (attempt {attempt}): {e}"
+                        );
+                        last_err = anyhow::anyhow!("failed to parse LogResponse: {e}");
+                        continue;
+                    }
+                }
             }
         }
     }
@@ -283,17 +302,19 @@ async fn post_heartbeat_with_retry(
 }
 
 /// Posts heartbeat and handles deployment responses.
+/// Returns HeartbeatResult::Sent on success (with optional interval override) or
+/// HeartbeatResult::Failed if all retry attempts were exhausted.
 pub async fn post_system_heartbeat_with_deployment(
     current_system: &OsStr,
     context: &str,
     agent_state: Arc<Mutex<AgentState>>,
-) -> Result<Option<u64>> {
+) -> Result<HeartbeatResult> {
     info!("Posting heartbeat ({context})");
     let log_response = match post_heartbeat_with_retry(current_system, context).await {
         Ok(resp) => resp,
         Err(e) => {
             error!("❌ Heartbeat failed after all retries: {e:#}");
-            return Ok(None);
+            return Ok(HeartbeatResult::Failed);
         }
     };
 
@@ -335,12 +356,16 @@ pub async fn post_system_heartbeat_with_deployment(
         }
     }
 
-    Ok(heartbeat_interval_secs)
+    Ok(HeartbeatResult::Sent {
+        heartbeat_interval_secs,
+    })
 }
 
 /// Handles an inotify event for `/run`. Filters to the "current-system" name only,
 /// resolves the symlink, and suppresses the heartbeat if the resolved store path
 /// has not changed since the last confirmed report (deduplication guard).
+///
+/// P1-1: Only updates the deduplication state when the server confirms receipt.
 async fn handle_current_system_event(
     name: &OsStr,
     context: &str,
@@ -364,20 +389,31 @@ async fn handle_current_system_event(
         }
     }
 
-    let interval = post_system_heartbeat_with_deployment(
+    let result = post_system_heartbeat_with_deployment(
         current_system.as_os_str(),
         context,
         agent_state.clone(),
     )
     .await?;
 
-    // Record the reported path after a successful send.
-    {
-        let mut state = agent_state.lock().await;
-        state.last_reported_store_path = Some(current_system_str);
+    // P1-1: Only update dedup state after confirmed success.
+    // If all retries failed, the next inotify event for this path will retry.
+    match result {
+        HeartbeatResult::Sent {
+            heartbeat_interval_secs,
+        } => {
+            let mut state = agent_state.lock().await;
+            state.last_reported_store_path = Some(current_system_str);
+            Ok(heartbeat_interval_secs)
+        }
+        HeartbeatResult::Failed => {
+            warn!(
+                "[{context}] Heartbeat failed after all retries; dedup state NOT updated. \
+                 Next event for this path will retry."
+            );
+            Ok(None)
+        }
     }
-
-    Ok(interval)
 }
 
 /// The periodic heartbeat loop. Sleeps for the server-provided interval (or the
@@ -408,14 +444,21 @@ async fn run_periodic_heartbeat_loop(agent_state: Arc<Mutex<AgentState>>) -> Res
         )
         .await
         {
-            Ok(Some(server_interval)) => {
+            Ok(HeartbeatResult::Sent {
+                heartbeat_interval_secs: Some(server_interval),
+            }) => {
                 if server_interval != current_interval {
                     info!("💓 Heartbeat interval updated by server: {current_interval}s → {server_interval}s");
                 }
                 current_interval = server_interval;
             }
-            Ok(None) => {
-                // Heartbeat failed (already logged); retain current interval.
+            Ok(HeartbeatResult::Sent {
+                heartbeat_interval_secs: None,
+            }) => {
+                // Server provided no override; keep current interval.
+            }
+            Ok(HeartbeatResult::Failed) => {
+                // Heartbeat failed after all retries (already logged); retain current interval.
             }
             Err(e) => {
                 error!("❌ Heartbeat loop error: {e}");
@@ -558,6 +601,47 @@ mod tests {
             !is_reboot_by_uptime(86400),
             "uptime=86400 must be classified as agent restart"
         );
+    }
+
+    #[test]
+    fn heartbeat_result_sent_carries_interval() {
+        let result = HeartbeatResult::Sent {
+            heartbeat_interval_secs: Some(120),
+        };
+        match result {
+            HeartbeatResult::Sent {
+                heartbeat_interval_secs: Some(interval),
+            } => {
+                assert_eq!(interval, 120, "interval must match");
+            }
+            _ => panic!("expected HeartbeatResult::Sent with interval"),
+        }
+    }
+
+    #[test]
+    fn heartbeat_result_sent_can_have_no_interval() {
+        let result = HeartbeatResult::Sent {
+            heartbeat_interval_secs: None,
+        };
+        match result {
+            HeartbeatResult::Sent {
+                heartbeat_interval_secs: None,
+            } => {
+                // OK
+            }
+            _ => panic!("expected HeartbeatResult::Sent with None"),
+        }
+    }
+
+    #[test]
+    fn heartbeat_result_failed_is_distinct() {
+        let result = HeartbeatResult::Failed;
+        match result {
+            HeartbeatResult::Failed => {
+                // OK
+            }
+            _ => panic!("expected HeartbeatResult::Failed"),
+        }
     }
 }
 
