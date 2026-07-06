@@ -1349,6 +1349,7 @@ fn detail_row_to_api_model(row: SystemDetailRow, server_default_interval: u64) -
         effective_heartbeat_interval_secs,
         boot_id: row.boot_id,
         restart_type: row.last_restart_type,
+        last_restart_at: row.last_restart_at,
     }
 }
 

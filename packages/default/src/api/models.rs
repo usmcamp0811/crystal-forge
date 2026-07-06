@@ -801,6 +801,7 @@ pub struct SystemSummary {
     pub heartbeat_interval_secs: Option<i32>,
     /// Effective heartbeat interval in seconds: per-system override if set,
     /// otherwise the server-config default. Always present; use this for spinners.
+    #[serde(default = "default_effective_heartbeat_interval_secs")]
     pub effective_heartbeat_interval_secs: i32,
     /// Linux kernel boot UUID from /proc/sys/kernel/random/boot_id.
     /// Used to distinguish system reboots from agent restarts.
@@ -860,6 +861,7 @@ pub struct SystemDetail {
     pub heartbeat_interval_secs: Option<i32>,
     /// Effective heartbeat interval in seconds: per-system override if set,
     /// otherwise the server-config default. Always present; use this for spinners.
+    #[serde(default = "default_effective_heartbeat_interval_secs")]
     pub effective_heartbeat_interval_secs: i32,
     /// Linux kernel boot UUID from /proc/sys/kernel/random/boot_id.
     /// Used to distinguish system reboots from agent restarts.
@@ -869,6 +871,9 @@ pub struct SystemDetail {
     /// Values: "system_reboot", "agent_restart", "unknown". None = no startup event processed yet.
     #[serde(default)]
     pub restart_type: Option<String>,
+    /// Timestamp of the heartbeat that triggered the last restart classification.
+    #[serde(default)]
+    pub last_restart_at: Option<DateTime<Utc>>,
 }
 
 /// Hardware information subset for system detail.
@@ -894,6 +899,10 @@ pub struct SystemNetworkInfo {
 
 fn default_system_reachability() -> String {
     "direct".to_string()
+}
+
+fn default_effective_heartbeat_interval_secs() -> i32 {
+    600
 }
 
 /// Security posture subset for system detail.

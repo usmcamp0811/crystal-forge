@@ -569,6 +569,7 @@ pub fn fallback_system_detail() -> SystemDetail {
         effective_heartbeat_interval_secs: 600,
         boot_id: None,
         restart_type: None,
+        last_restart_at: None,
     }
 }
 

@@ -173,36 +173,17 @@ pub async fn log(
         None // Older agent that does not send boot_id
     };
 
-    // Persist restart classification transactionally when this is a startup event.
-    //
-    // We only write on startup (`change_reason == "startup"`) so that routine
-    // periodic heartbeats do not overwrite the last classification. The column
-    // retains the most recent startup event until the next one.
-    //
-    // Classification:
-    //   boot_id Changed     → "system_reboot"   (boot_id differed from stored)
-    //   boot_id Initialized → "agent_restart"   (first heartbeat with boot_id,
-    //                                            cannot be a reboot)
-    //   boot_id Unchanged   → "agent_restart"   (same boot session, service restart)
-    //   no boot_id in payload → "unknown"       (older agent; not written here)
-    //
+    // Persist restart classification transactionally.
+    // See `classify_restart_type` for the full decision table.
     // This is best-effort: a failure is logged but does NOT abort the heartbeat.
-    if payload.change_reason == "startup" {
-        let restart_type = match boot_id_change {
-            Some(BootIdChange::Changed) => Some("system_reboot"),
-            Some(BootIdChange::Initialized) | Some(BootIdChange::Unchanged) => {
-                Some("agent_restart")
-            }
-            None => None, // older agent, no boot_id — skip
-        };
-        if let Some(rtype) = restart_type {
-            if let Err(e) = update_restart_type_tx(&mut tx, &payload.hostname, rtype).await {
-                debug!(
-                    "⚠ failed to persist restart_type for {}: {e:?}",
-                    payload.hostname
-                );
-                // Non-fatal: continue; the heartbeat/state insert is more important.
-            }
+    let restart_type = classify_restart_type(boot_id_change, &payload.change_reason);
+    if let Some(rtype) = restart_type {
+        if let Err(e) = update_restart_type_tx(&mut tx, &payload.hostname, rtype).await {
+            debug!(
+                "⚠ failed to persist restart_type for {}: {e:?}",
+                payload.hostname
+            );
+            // Non-fatal: continue; the heartbeat/state insert is more important.
         }
     }
 
@@ -298,9 +279,111 @@ pub async fn log(
     (status, axum::Json(response)).into_response()
 }
 
+/// Pure function: given the boot_id comparison result and the change_reason string,
+/// return the restart type to persist, or `None` if the classification should not be
+/// updated (i.e. a routine periodic heartbeat with an unchanged boot_id).
+///
+/// Decision table:
+///
+/// | boot_id_change      | change_reason | result          |
+/// |---------------------|---------------|-----------------|
+/// | Changed             | any           | "system_reboot" |
+/// | Unchanged           | "startup"     | "agent_restart" |
+/// | Initialized         | "startup"     | "unknown"       |
+/// | None (no boot_id)   | "startup"     | "unknown"       |
+/// | Unchanged/Init/None | other         | None            |
+///
+/// `Changed` always classifies regardless of `change_reason` so that a reboot is
+/// never lost when the startup heartbeat fails and a later periodic heartbeat is
+/// the first to reach the server with the new `boot_id`.
+fn classify_restart_type(
+    boot_id_change: Option<BootIdChange>,
+    change_reason: &str,
+) -> Option<&'static str> {
+    match boot_id_change {
+        // A changed boot_id proves a host reboot on any heartbeat type.
+        Some(BootIdChange::Changed) => Some("system_reboot"),
+        // Same boot session, agent service restarted.
+        Some(BootIdChange::Unchanged) if change_reason == "startup" => Some("agent_restart"),
+        // No prior boot_id baseline; cannot distinguish reboot from restart.
+        Some(BootIdChange::Initialized) if change_reason == "startup" => Some("unknown"),
+        // Older agent without boot_id; overwrite any stale classification.
+        None if change_reason == "startup" => Some("unknown"),
+        // Periodic heartbeat with stable boot_id — keep the last classification.
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── classify_restart_type tests ───────────────────────────────────────
+
+    #[test]
+    fn changed_boot_id_is_system_reboot_on_startup() {
+        assert_eq!(
+            classify_restart_type(Some(BootIdChange::Changed), "startup"),
+            Some("system_reboot"),
+        );
+    }
+
+    #[test]
+    fn changed_boot_id_is_system_reboot_on_periodic_heartbeat() {
+        // P1: a reboot must be captured even when the startup heartbeat failed
+        // and the first successful request is a periodic "heartbeat".
+        assert_eq!(
+            classify_restart_type(Some(BootIdChange::Changed), "heartbeat"),
+            Some("system_reboot"),
+        );
+    }
+
+    #[test]
+    fn unchanged_boot_id_on_startup_is_agent_restart() {
+        assert_eq!(
+            classify_restart_type(Some(BootIdChange::Unchanged), "startup"),
+            Some("agent_restart"),
+        );
+    }
+
+    #[test]
+    fn unchanged_boot_id_on_heartbeat_returns_none() {
+        // Periodic heartbeat must not overwrite the last startup classification.
+        assert_eq!(
+            classify_restart_type(Some(BootIdChange::Unchanged), "heartbeat"),
+            None,
+        );
+    }
+
+    #[test]
+    fn initialized_boot_id_on_startup_is_unknown() {
+        // P2: no baseline means we cannot prove it is an agent restart.
+        assert_eq!(
+            classify_restart_type(Some(BootIdChange::Initialized), "startup"),
+            Some("unknown"),
+        );
+    }
+
+    #[test]
+    fn initialized_boot_id_on_heartbeat_returns_none() {
+        assert_eq!(
+            classify_restart_type(Some(BootIdChange::Initialized), "heartbeat"),
+            None,
+        );
+    }
+
+    #[test]
+    fn no_boot_id_on_startup_is_unknown() {
+        // P2: older agent without boot_id; overwrite stale classification.
+        assert_eq!(classify_restart_type(None, "startup"), Some("unknown"));
+    }
+
+    #[test]
+    fn no_boot_id_on_heartbeat_returns_none() {
+        assert_eq!(classify_restart_type(None, "heartbeat"), None);
+    }
+
+    // ─── duplicate-cleanup tests ────────────────────────────────────────────
 
     #[tokio::test]
     async fn handle_duplicate_cleanup_returns_deactivated_hosts_on_success() {

@@ -1865,6 +1865,24 @@ fn OverviewTab(
         format!("{} critical CVEs", critical)
     };
 
+    // Restart classification display strings.
+    let restart_type_label = match system.restart_type.as_deref() {
+        Some("system_reboot") => "System reboot",
+        Some("agent_restart") => "Agent restart",
+        Some("unknown") => "Unknown",
+        _ => "",
+    };
+    let restart_at_text = system.last_restart_at.map(|dt| {
+        let d = now.signed_duration_since(dt);
+        if d.num_minutes() < 60 {
+            format!("{}m ago", d.num_minutes().max(0))
+        } else if d.num_hours() < 24 {
+            format!("{}h ago", d.num_hours())
+        } else {
+            format!("{}d ago", d.num_days())
+        }
+    });
+
     let mut recent_activity: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = vec![
         (
             "System record updated".to_string(),
@@ -1939,6 +1957,25 @@ fn OverviewTab(
                         }
                     }
                     dt { "Uptime" } dd { "{uptime}" }
+                    if !restart_type_label.is_empty() {
+                        dt { "Last restart" }
+                        dd {
+                            span {
+                                class: if system.restart_type.as_deref() == Some("system_reboot") {
+                                    "chip chip-warning"
+                                } else {
+                                    "chip chip-info"
+                                },
+                                "{restart_type_label}"
+                            }
+                            if let Some(ref at_text) = restart_at_text {
+                                span {
+                                    style: "margin-left: 6px; color: var(--cf-text-muted); font-size: 12px;",
+                                    "{at_text}"
+                                }
+                            }
+                        }
+                    }
                     dt { "CPU" } dd { "{cpu_text}" }
                     dt { "Memory" } dd { "{memory_text}" }
                     dt { "IPv4" } dd { class: "mono", "{ipv4_text}" }

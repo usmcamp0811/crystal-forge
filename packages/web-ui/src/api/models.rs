@@ -697,6 +697,9 @@ pub struct SystemDetail {
     /// Authoritative restart classification: "system_reboot", "agent_restart", "unknown", or None.
     #[serde(default)]
     pub restart_type: Option<String>,
+    /// Timestamp of the heartbeat that triggered the last restart classification.
+    #[serde(default)]
+    pub last_restart_at: Option<DateTime<Utc>>,
 }
 
 /// Hardware information subset for system detail.

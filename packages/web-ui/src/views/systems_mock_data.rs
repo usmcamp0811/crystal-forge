@@ -421,5 +421,6 @@ pub(super) fn build_system_detail(
         effective_heartbeat_interval_secs: 600,
         boot_id: None,
         restart_type: None,
+        last_restart_at: None,
     }
 }
