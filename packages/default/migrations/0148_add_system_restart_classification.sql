@@ -13,8 +13,9 @@
 --   boot_id unchanged and    → 'agent_restart'
 --     change_reason = 'startup'
 --   no boot_id in payload    → 'unknown'  (older agent; not updated)
---   boot_id Initialized      → 'agent_restart' (first upgraded heartbeat,
---                               not a reboot)
+--     and change_reason = 'startup'
+--   boot_id Initialized      → 'unknown' (first upgraded heartbeat,
+--     and change_reason = 'startup'       cannot distinguish reboot from restart)
 --
 -- NULL means no startup event has been processed yet for this system.
 

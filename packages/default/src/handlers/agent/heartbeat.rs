@@ -173,9 +173,10 @@ pub async fn log(
         None // Older agent that does not send boot_id
     };
 
-    // Persist restart classification transactionally.
-    // See `classify_restart_type` for the full decision table.
-    // This is best-effort: a failure is logged but does NOT abort the heartbeat.
+    // Persist restart classification inside the same transaction as the
+    // heartbeat/state insert. See `classify_restart_type` for the full decision table.
+    // A failure is logged and execution continues, but a SQL error here could leave
+    // the transaction unusable and cause the later insert/commit to fail.
     let restart_type = classify_restart_type(boot_id_change, &payload.change_reason);
     if let Some(rtype) = restart_type {
         if let Err(e) = update_restart_type_tx(&mut tx, &payload.hostname, rtype).await {
