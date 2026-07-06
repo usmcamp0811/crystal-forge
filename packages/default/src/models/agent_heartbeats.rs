@@ -64,9 +64,21 @@ impl AgentHeartbeat {
         }
     }
 
-    /// Check if the change reason indicates this should be a heartbeat
+    /// Check if the change reason indicates this should be a heartbeat.
+    ///
+    /// Both `"heartbeat"` (periodic loop) and `"startup"` (agent service restart)
+    /// are eligible for the lightweight heartbeat path. When the system state
+    /// hasn't changed (same store path, hardware, network, etc.), a startup POST
+    /// records a cheap `agent_heartbeats` row instead of a full `system_states`
+    /// row. Only when `states_are_equivalent` returns false does a startup advance
+    /// to `insert_system_state` — which correctly produces a history event.
+    ///
+    /// Without this, every agent service restart unconditionally called
+    /// `insert_system_state` (because `NotHeartbeatType` bypasses the equivalence
+    /// check), flooding the history timeline with "System restarted" entries even
+    /// when nothing about the system changed.
     fn is_heartbeat_change_reason(change_reason: &str) -> bool {
-        matches!(change_reason, "heartbeat")
+        matches!(change_reason, "heartbeat" | "startup")
     }
 
     /// Compare two system states to determine if they're equivalent
@@ -121,3 +133,31 @@ impl std::fmt::Display for StateChangeRequired {
 }
 
 impl std::error::Error for StateChangeRequired {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heartbeat_change_reason_accepted() {
+        assert!(AgentHeartbeat::is_heartbeat_change_reason("heartbeat"));
+    }
+
+    #[test]
+    fn startup_change_reason_accepted_for_heartbeat_path() {
+        // A startup POST where the state is identical to the previous state
+        // should land in agent_heartbeats, not system_states. Without this,
+        // every agent service restart floods the history with "System restarted".
+        assert!(AgentHeartbeat::is_heartbeat_change_reason("startup"));
+    }
+
+    #[test]
+    fn config_change_is_not_a_heartbeat_type() {
+        assert!(!AgentHeartbeat::is_heartbeat_change_reason("config_change"));
+    }
+
+    #[test]
+    fn cf_deployment_is_not_a_heartbeat_type() {
+        assert!(!AgentHeartbeat::is_heartbeat_change_reason("cf_deployment"));
+    }
+}

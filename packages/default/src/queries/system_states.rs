@@ -16,10 +16,11 @@ pub async fn insert_system_state<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
-    let change_reason = match state.change_reason.as_str() {
-        "heartbeat" => "startup",
-        other => other,
-    };
+    // Use the change_reason as-is. The "heartbeat" → "startup" rewrite that
+    // used to live here was dead code: insert_system_state is only called when
+    // from_system_state_if_heartbeat returns Err (i.e. the payload is NOT a
+    // plain heartbeat), so change_reason is never "heartbeat" at this point.
+    let change_reason = &state.change_reason;
     sqlx::query(
         r#"INSERT INTO system_states (
             hostname, 
@@ -118,10 +119,7 @@ pub async fn get_last_system_state_by_hostname(
     Ok(row)
 }
 
-pub async fn get_latest_system_state_id(
-    pool: &PgPool,
-    hostname: &str,
-) -> Result<Option<i32>> {
+pub async fn get_latest_system_state_id(pool: &PgPool, hostname: &str) -> Result<Option<i32>> {
     let row = sqlx::query_scalar::<_, i32>(
         r#"
         SELECT id
