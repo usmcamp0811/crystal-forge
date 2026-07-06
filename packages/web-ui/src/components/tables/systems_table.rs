@@ -275,7 +275,7 @@ pub fn SystemsTable(
                                             })
                                             .unwrap_or_else(|| "Never".to_string());
 
-                                        let hb_interval = system.heartbeat_interval_secs.unwrap_or(600) as i64;
+                                        let hb_interval = system.effective_heartbeat_interval_secs as i64;
                                         let next_in = system
                                             .last_seen
                                             .map(|dt| hb_interval as f64 - chrono::Utc::now().signed_duration_since(dt).num_seconds() as f64)

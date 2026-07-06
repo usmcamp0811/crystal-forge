@@ -162,7 +162,7 @@ pub fn SystemCardV2(
         })
         .unwrap_or_else(|| "Never".to_string());
 
-    let heartbeat_interval_sec = system.heartbeat_interval_secs.unwrap_or(600) as i64;
+    let heartbeat_interval_sec = system.effective_heartbeat_interval_secs as i64;
     let heartbeat_next_in_sec = system
         .last_seen
         .map(|dt| {

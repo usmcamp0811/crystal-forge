@@ -16,13 +16,13 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api::client::{
-    ApiClientError, fetch_compliance_system_evidence, fetch_cve_scan_status,
-    fetch_hardening_scan_status, fetch_system_compliance_bundles,
-    fetch_system_cve_scan_eligibility, fetch_system_cves, fetch_system_hardening,
-    fetch_system_hardening_justifications, fetch_system_hardening_scan_eligibility,
-    request_system_generation_rollback, request_system_rollback, request_system_sync,
-    save_system_hardening_justification, trigger_system_cve_scan, trigger_system_hardening_scan,
-    verify_generation_closure as verify_generation_closure_request,
+    fetch_compliance_system_evidence, fetch_cve_scan_status, fetch_hardening_scan_status,
+    fetch_system_compliance_bundles, fetch_system_cve_scan_eligibility, fetch_system_cves,
+    fetch_system_hardening, fetch_system_hardening_justifications,
+    fetch_system_hardening_scan_eligibility, request_system_generation_rollback,
+    request_system_rollback, request_system_sync, save_system_hardening_justification,
+    trigger_system_cve_scan, trigger_system_hardening_scan,
+    verify_generation_closure as verify_generation_closure_request, ApiClientError,
 };
 use crate::api::models::{
     BuildStatus, CommitInfo, ComplianceEvidenceResponse, ComplianceSystemRollup,
@@ -42,9 +42,9 @@ use crate::components::layout::Card;
 use crate::components::modals::{RollbackConfirmDialog, SyncConfirmDialog};
 use crate::components::notifications::Toast;
 use crate::components::system::{
-    AgentCard, BooleanRow, EditSystemModal, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab,
-    NetworkCard, SecurityCard, StatusBadge, SystemInfoCard, deployment_state_label,
-    environment_style, format_uptime,
+    deployment_state_label, environment_style, format_uptime, AgentCard, BooleanRow,
+    EditSystemModal, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab, NetworkCard,
+    SecurityCard, StatusBadge, SystemInfoCard,
 };
 use crate::routes::Route;
 use crate::state::{app_state::AppState, auth};
@@ -728,7 +728,7 @@ pub fn SystemDetailView(id: String) -> Element {
             }
 
             {
-                let heartbeat_interval_sec = system.heartbeat_interval_secs.unwrap_or(600) as i64;
+                let heartbeat_interval_sec = system.effective_heartbeat_interval_secs as i64;
                 let heartbeat_next_in_sec = system
                     .last_seen
                     .map(|dt| heartbeat_interval_sec as f64 - now.signed_duration_since(dt).num_seconds() as f64)
@@ -1782,10 +1782,13 @@ fn OverviewTab(
     });
     let mut tag_adding = use_signal(|| false);
     let mut tag_draft = use_signal(String::new);
-    let heartbeat_interval_overview_sec = system.heartbeat_interval_secs.unwrap_or(600) as i64;
+    let heartbeat_interval_overview_sec = system.effective_heartbeat_interval_secs as i64;
     let heartbeat_next_in_sec = system
         .last_seen
-        .map(|dt| heartbeat_interval_overview_sec as f64 - now.signed_duration_since(dt).num_seconds() as f64)
+        .map(|dt| {
+            heartbeat_interval_overview_sec as f64
+                - now.signed_duration_since(dt).num_seconds() as f64
+        })
         .unwrap_or(0.0);
     let fqdn_text = effective_fqdn(&system);
 
@@ -3171,7 +3174,10 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         })
         .collect();
 
-    let latest_line_timestamp = all_lines.iter().map(|(timestamp, _, _, _)| *timestamp).max();
+    let latest_line_timestamp = all_lines
+        .iter()
+        .map(|(timestamp, _, _, _)| *timestamp)
+        .max();
 
     // Compute day separators in the selected display timezone.
     let use_utc_value = *use_utc.read();
@@ -6860,13 +6866,11 @@ mod tests {
 
         assert_eq!(timeline.len(), 3);
         assert!(timeline[0].is_current);
-        assert!(
-            timeline[2]
-                .diff_summary
-                .as_deref()
-                .unwrap_or_default()
-                .contains("Revert detected")
-        );
+        assert!(timeline[2]
+            .diff_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Revert detected"));
     }
 
     #[test]

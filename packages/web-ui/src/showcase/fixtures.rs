@@ -322,6 +322,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             fqdn: None,
             heartbeat_interval_secs: None,
             boot_id: None,
+            effective_heartbeat_interval_secs: 600,
         },
         // Warning staging system (behind)
         SystemSummary {
@@ -346,6 +347,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             fqdn: None,
             heartbeat_interval_secs: None,
             boot_id: None,
+            effective_heartbeat_interval_secs: 600,
         },
         // Critical dev system (never deployed)
         SystemSummary {
@@ -370,6 +372,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             fqdn: None,
             heartbeat_interval_secs: None,
             boot_id: None,
+            effective_heartbeat_interval_secs: 600,
         },
         // Offline system (no environment)
         SystemSummary {
@@ -394,6 +397,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             fqdn: None,
             heartbeat_interval_secs: None,
             boot_id: None,
+            effective_heartbeat_interval_secs: 600,
         },
         // Healthy system with long hostname (overflow test)
         SystemSummary {
@@ -418,6 +422,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             fqdn: None,
             heartbeat_interval_secs: None,
             boot_id: None,
+            effective_heartbeat_interval_secs: 600,
         },
         // Building state system
         SystemSummary {
@@ -442,6 +447,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
             fqdn: None,
             heartbeat_interval_secs: None,
             boot_id: None,
+            effective_heartbeat_interval_secs: 600,
         },
     ]
 }

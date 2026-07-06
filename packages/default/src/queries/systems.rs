@@ -457,6 +457,33 @@ pub async fn update_boot_id_tx(
     })
 }
 
+/// Persist the authoritative restart classification inside an existing transaction.
+///
+/// Called from the heartbeat handler immediately after `update_boot_id_tx` so
+/// both writes commit atomically. The `restart_type` argument must be one of:
+/// `"system_reboot"`, `"agent_restart"`, or `"unknown"`.
+///
+/// Best-effort: a failure here is logged and does NOT abort the heartbeat; the
+/// boot_id update and state/heartbeat insert still commit.
+pub async fn update_restart_type_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    hostname: &str,
+    restart_type: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE systems
+         SET last_restart_type = $1,
+             last_restart_at   = NOW(),
+             updated_at        = NOW()
+         WHERE hostname = $2",
+    )
+    .bind(restart_type)
+    .bind(hostname)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 pub async fn get_desired_target_by_id(pool: &PgPool, system_id: i32) -> Result<Option<String>> {
     let result =
         sqlx::query_scalar::<_, Option<String>>("SELECT desired_target FROM systems WHERE id = $1")
@@ -801,6 +828,9 @@ pub struct SystemDetailRow {
     // Heartbeat configuration
     pub heartbeat_interval_secs: Option<i32>,
     pub boot_id: Option<String>,
+    // Restart classification (from migration 0148/0149)
+    pub last_restart_type: Option<String>,
+    pub last_restart_at: Option<DateTime<Utc>>,
 }
 
 /// Fetch system detail from view_system_detail

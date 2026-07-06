@@ -562,6 +562,7 @@ impl SystemSummaryBuilder {
             deployment_policy: self.deployment_policy.clone(),
             fqdn: None,
             heartbeat_interval_secs: None,
+            effective_heartbeat_interval_secs: 600,
             boot_id: None,
         }
     }

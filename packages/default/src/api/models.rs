@@ -799,6 +799,9 @@ pub struct SystemSummary {
     /// Per-system heartbeat interval in seconds. None means the agent uses the server default (600s).
     #[serde(default)]
     pub heartbeat_interval_secs: Option<i32>,
+    /// Effective heartbeat interval in seconds: per-system override if set,
+    /// otherwise the server-config default. Always present; use this for spinners.
+    pub effective_heartbeat_interval_secs: i32,
     /// Linux kernel boot UUID from /proc/sys/kernel/random/boot_id.
     /// Used to distinguish system reboots from agent restarts.
     #[serde(default)]
@@ -855,10 +858,17 @@ pub struct SystemDetail {
     /// Per-system heartbeat interval in seconds. None means the agent uses the server default (600s).
     #[serde(default)]
     pub heartbeat_interval_secs: Option<i32>,
+    /// Effective heartbeat interval in seconds: per-system override if set,
+    /// otherwise the server-config default. Always present; use this for spinners.
+    pub effective_heartbeat_interval_secs: i32,
     /// Linux kernel boot UUID from /proc/sys/kernel/random/boot_id.
     /// Used to distinguish system reboots from agent restarts.
     #[serde(default)]
     pub boot_id: Option<String>,
+    /// Authoritative restart classification written by the server on each startup heartbeat.
+    /// Values: "system_reboot", "agent_restart", "unknown". None = no startup event processed yet.
+    #[serde(default)]
+    pub restart_type: Option<String>,
 }
 
 /// Hardware information subset for system detail.

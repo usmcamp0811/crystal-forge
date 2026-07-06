@@ -6,7 +6,7 @@ use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::{get_caches_for_environment, get_global_caches};
 use crate::queries::systems::{
     deactivate_duplicate_active_systems_by_public_key, get_agent_desired_target_by_hostname,
-    get_system_heartbeat_interval_secs, update_boot_id_tx, BootIdChange,
+    get_system_heartbeat_interval_secs, update_boot_id_tx, update_restart_type_tx, BootIdChange,
 };
 use crate::queries::{agent_heartbeat::insert_agent_heartbeat, system_states::insert_system_state};
 use axum::response::Response;
@@ -172,6 +172,39 @@ pub async fn log(
     } else {
         None // Older agent that does not send boot_id
     };
+
+    // Persist restart classification transactionally when this is a startup event.
+    //
+    // We only write on startup (`change_reason == "startup"`) so that routine
+    // periodic heartbeats do not overwrite the last classification. The column
+    // retains the most recent startup event until the next one.
+    //
+    // Classification:
+    //   boot_id Changed     → "system_reboot"   (boot_id differed from stored)
+    //   boot_id Initialized → "agent_restart"   (first heartbeat with boot_id,
+    //                                            cannot be a reboot)
+    //   boot_id Unchanged   → "agent_restart"   (same boot session, service restart)
+    //   no boot_id in payload → "unknown"       (older agent; not written here)
+    //
+    // This is best-effort: a failure is logged but does NOT abort the heartbeat.
+    if payload.change_reason == "startup" {
+        let restart_type = match boot_id_change {
+            Some(BootIdChange::Changed) => Some("system_reboot"),
+            Some(BootIdChange::Initialized) | Some(BootIdChange::Unchanged) => {
+                Some("agent_restart")
+            }
+            None => None, // older agent, no boot_id — skip
+        };
+        if let Some(rtype) = restart_type {
+            if let Err(e) = update_restart_type_tx(&mut tx, &payload.hostname, rtype).await {
+                debug!(
+                    "⚠ failed to persist restart_type for {}: {e:?}",
+                    payload.hostname
+                );
+                // Non-fatal: continue; the heartbeat/state insert is more important.
+            }
+        }
+    }
 
     match &heartbeat_or_state {
         Ok(heartbeat) => {

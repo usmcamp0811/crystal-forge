@@ -36,6 +36,7 @@ use crate::queries::systems::{
     list_system_history_rows, touch_system_updated_at, update_public_key,
     update_system_desired_target, update_system_metadata,
 };
+use crate::handlers::agent_request::CFState;
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
 use crate::services::systems::SystemsListContext;
 
@@ -51,6 +52,7 @@ const ALLOWED_CVE_JUSTIFICATION_CATEGORIES: &[&str] = &[
 ];
 
 pub async fn list_systems(
+    State(state): State<CFState>,
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Query(params): Query<SystemsListParams>,
@@ -72,13 +74,20 @@ pub async fn list_systems(
     let ctx = SystemsListContext::new(user_id, roles, environment_memberships, &params);
 
     // Call the service layer for server-side filtering/sorting/pagination
-    match crate::services::systems::list_systems_for_user(&pool, &ctx).await {
+    match crate::services::systems::list_systems_for_user(
+        &pool,
+        &ctx,
+        state.server_config.heartbeat_interval_secs,
+    )
+    .await
+    {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(_) => internal_error("Failed to list systems"),
     }
 }
 
 pub async fn create_system(
+    State(state): State<CFState>,
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Json(payload): Json<CreateSystemRequest>,
@@ -192,7 +201,9 @@ pub async fn create_system(
 
     // Fetch the created system from view to return complete data
     let detail = match get_system_detail_by_id(&pool, system.id).await {
-        Ok(Some(row)) => detail_row_to_api_model(row),
+        Ok(Some(row)) => {
+            detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs)
+        }
         Ok(None) => return internal_error("System created but not found in view"),
         Err(_) => return internal_error("Failed to fetch created system"),
     };
@@ -201,6 +212,7 @@ pub async fn create_system(
 }
 
 pub async fn get_system(
+    State(state): State<CFState>,
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
@@ -226,7 +238,7 @@ pub async fn get_system(
     // Note: Environment-based access control would go here
     // For now, simplified - in production you'd check environment membership
 
-    let detail = detail_row_to_api_model(row);
+    let detail = detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs);
 
     (StatusCode::OK, Json(detail)).into_response()
 }
@@ -723,6 +735,7 @@ fn parse_cve_severity(value: &str) -> crate::api::models::CveSeverity {
 }
 
 pub async fn update_system_handler(
+    State(state): State<CFState>,
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
@@ -857,7 +870,9 @@ pub async fn update_system_handler(
     }
 
     let detail = match get_system_detail_by_id(&pool, system_id).await {
-        Ok(Some(row)) => detail_row_to_api_model(row),
+        Ok(Some(row)) => {
+            detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs)
+        }
         Ok(None) => return not_found(),
         Err(_) => return internal_error("Failed to load updated system"),
     };
@@ -1268,8 +1283,13 @@ fn parse_pipeline_stage(stage: &str) -> PipelineStage {
     }
 }
 
-fn detail_row_to_api_model(row: SystemDetailRow) -> SystemDetail {
+fn detail_row_to_api_model(row: SystemDetailRow, server_default_interval: u64) -> SystemDetail {
     use crate::api::models::FlakeSummary;
+
+    let effective_heartbeat_interval_secs = row
+        .heartbeat_interval_secs
+        .map(|v| v as i32)
+        .unwrap_or(server_default_interval as i32);
 
     SystemDetail {
         id: row.id,
@@ -1326,7 +1346,9 @@ fn detail_row_to_api_model(row: SystemDetailRow) -> SystemDetail {
         created_at: row.created_at,
         updated_at: row.updated_at,
         heartbeat_interval_secs: row.heartbeat_interval_secs,
+        effective_heartbeat_interval_secs,
         boot_id: row.boot_id,
+        restart_type: row.last_restart_type,
     }
 }
 
@@ -2043,13 +2065,24 @@ mod tests {
         assert!(!matches_filters(&row, &params));
     }
 
-    #[tokio::test]
-    async fn list_systems_requires_authenticated_role() {
+    fn test_cf_state() -> CFState {
+        use crate::config::ServerConfig;
+        use crate::handlers::agent_request::CFState;
+        use crate::queue::QueueNotifier;
+        use std::sync::Arc;
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
             .expect("lazy pool should construct");
+        CFState::new(pool, ServerConfig::default(), Arc::new(QueueNotifier::new()))
+    }
+
+    #[tokio::test]
+    async fn list_systems_requires_authenticated_role() {
+        let state = test_cf_state();
+        let pool = state.pool.clone();
 
         let response = list_systems(
+            State(state),
             State(pool),
             HeaderMap::new(),
             Query(SystemsListParams::default()),
@@ -2062,11 +2095,11 @@ mod tests {
 
     #[tokio::test]
     async fn get_system_requires_authenticated_role() {
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
-            .expect("lazy pool should construct");
+        let state = test_cf_state();
+        let pool = state.pool.clone();
 
         let response = get_system(
+            State(state),
             State(pool),
             HeaderMap::new(),
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),

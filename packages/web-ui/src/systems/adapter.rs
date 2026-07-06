@@ -16,10 +16,9 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::api::client::{
-    ApiClientError, create_system, deactivate_system, deploy_system, fetch_flake_timelines,
-    fetch_flakes, fetch_system, fetch_system_agent_events, fetch_system_commits,
-    fetch_system_generations, fetch_system_history, fetch_systems, update_system,
-    update_system_public_key,
+    create_system, deactivate_system, deploy_system, fetch_flake_timelines, fetch_flakes,
+    fetch_system, fetch_system_agent_events, fetch_system_commits, fetch_system_generations,
+    fetch_system_history, fetch_systems, update_system, update_system_public_key, ApiClientError,
 };
 use crate::api::models::{
     CommitInfo, CreateSystemRequest, CveSummary, DeploySystemRequest, DeploymentStatus,
@@ -260,7 +259,6 @@ pub async fn update_system_via_api(
     system_id: Uuid,
     request: UpdateSystemRequest,
 ) -> Result<SystemDetail, String> {
-
     match update_system(&system_id, &request).await {
         Ok(detail) => Ok(detail),
         Err(ApiClientError::Status {
@@ -432,6 +430,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             fqdn: None,
             heartbeat_interval_secs: None,
             boot_id: None,
+            effective_heartbeat_interval_secs: 600,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
@@ -455,6 +454,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             fqdn: None,
             heartbeat_interval_secs: None,
             boot_id: None,
+            effective_heartbeat_interval_secs: 600,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
@@ -478,6 +478,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             fqdn: None,
             heartbeat_interval_secs: None,
             boot_id: None,
+            effective_heartbeat_interval_secs: 600,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
@@ -501,6 +502,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             fqdn: None,
             heartbeat_interval_secs: None,
             boot_id: None,
+            effective_heartbeat_interval_secs: 600,
         },
     ]
 }
@@ -564,7 +566,9 @@ pub fn fallback_system_detail() -> SystemDetail {
         created_at: now,
         updated_at: now,
         heartbeat_interval_secs: None,
+        effective_heartbeat_interval_secs: 600,
         boot_id: None,
+        restart_type: None,
     }
 }
 

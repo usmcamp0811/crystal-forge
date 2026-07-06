@@ -432,7 +432,7 @@ pub fn EditSystemModal(
                                 option { value: "300", selected: *heartbeat_interval_sec.read() == 300, "5 minutes" }
                                 option { value: "600", selected: *heartbeat_interval_sec.read() == 600, "10 minutes" }
                             }
-                            p { class: "help", "Agent heartbeat cadence. \"Use server default\" clears any per-system override (server default is 600 s). Takes effect on the agent's next check-in after saving." }
+                            p { class: "help", "Agent heartbeat cadence. \"Use server default\" clears any per-system override (inherits the server-configured default). Takes effect on the agent's next check-in after saving." }
                         }
                         div {
                             class: "field",

@@ -9,15 +9,15 @@ use crate::api::models::{
 };
 use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::filters::ViewMode;
-use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
+use crate::components::forms::{validate_new_system, AddSystemForm, NewSystemDraft};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::icon::{Icon, IconName};
 use crate::components::modals::{
-    GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
+    generate_key_pair, GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::system::{
-    DeploySystemModal, EditSystemModal, SystemCardV2, deployment_state_label,
+    deployment_state_label, DeploySystemModal, EditSystemModal, SystemCardV2,
 };
 use crate::components::systems_stat_strip::SystemsStatStrip;
 use crate::components::tables::SystemsTable;
@@ -524,6 +524,8 @@ pub fn SystemsListView() -> Element {
                                         deployment_policy: detail.deployment_policy,
                                         fqdn: detail.fqdn,
                                         heartbeat_interval_secs: detail.heartbeat_interval_secs,
+                                        effective_heartbeat_interval_secs: detail
+                                            .effective_heartbeat_interval_secs,
                                         boot_id: detail.boot_id,
                                     };
 
@@ -1072,10 +1074,12 @@ fn SystemPreviewPanel(
         HealthStatus::Offline => "#6b7280",
     };
 
-    let heartbeat_interval_sec = detail.heartbeat_interval_secs.unwrap_or(600) as i64;
+    let heartbeat_interval_sec = detail.effective_heartbeat_interval_secs as i64;
     let heartbeat_next_in_sec = detail
         .last_seen
-        .map(|dt| heartbeat_interval_sec as f64 - now.signed_duration_since(dt).num_seconds() as f64)
+        .map(|dt| {
+            heartbeat_interval_sec as f64 - now.signed_duration_since(dt).num_seconds() as f64
+        })
         .unwrap_or(0.0);
     let last_heartbeat = detail
         .last_seen
