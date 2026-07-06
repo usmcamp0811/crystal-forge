@@ -187,20 +187,35 @@ pub async fn log(
         }
     }
 
-    match &heartbeat_or_state {
-        Ok(heartbeat) => {
-            // This is a heartbeat - insert to heartbeats table
-            if let Err(e) = insert_agent_heartbeat(&mut *tx, heartbeat).await {
-                debug!("❌ failed to insert heartbeat: {e:?}");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
+    // P1 (critical): System reboots MUST always insert a full system_states row,
+    // even if from_system_state_if_heartbeat classified the payload as equivalent.
+    // BootIdChange::Changed is the authoritative reboot signal; it overrides the
+    // precomputed heartbeat_or_state decision to ensure we capture post-reboot state.
+    let force_full_state_for_reboot = matches!(boot_id_change, Some(BootIdChange::Changed));
+
+    if force_full_state_for_reboot {
+        // Reboot detected: always write full system state regardless of equivalence.
+        if let Err(e) = insert_system_state(&mut *tx, &payload, version_compatible).await {
+            debug!("❌ failed to insert reboot system state: {e:?}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
-        Err(state_change_reason) => {
-            info!("🔍 Heartbeat became state change: {}", state_change_reason);
-            // State changed - insert full state record
-            if let Err(e) = insert_system_state(&mut *tx, &payload, version_compatible).await {
-                debug!("❌ failed to insert system state: {e:?}");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    } else {
+        // No reboot: use the precomputed heartbeat vs state decision.
+        match &heartbeat_or_state {
+            Ok(heartbeat) => {
+                // This is a heartbeat - insert to heartbeats table
+                if let Err(e) = insert_agent_heartbeat(&mut *tx, heartbeat).await {
+                    debug!("❌ failed to insert heartbeat: {e:?}");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            }
+            Err(state_change_reason) => {
+                info!("🔍 Heartbeat became state change: {}", state_change_reason);
+                // State changed - insert full state record
+                if let Err(e) = insert_system_state(&mut *tx, &payload, version_compatible).await {
+                    debug!("❌ failed to insert system state: {e:?}");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
             }
         }
     }
@@ -226,9 +241,15 @@ pub async fn log(
         }
         Some(BootIdChange::Unchanged) | None => {}
     }
-    match heartbeat_or_state {
-        Ok(_) => info!("💓 Heartbeat recorded for {}", payload.hostname),
-        Err(_) => info!("📊 State change recorded for {}", payload.hostname),
+    
+    // Log what was actually inserted (accounting for reboot override).
+    if force_full_state_for_reboot {
+        info!("📊 State change recorded for {} (reboot)", payload.hostname);
+    } else {
+        match heartbeat_or_state {
+            Ok(_) => info!("💓 Heartbeat recorded for {}", payload.hostname),
+            Err(_) => info!("📊 State change recorded for {}", payload.hostname),
+        }
     }
 
     // Fetch desired target for this system. Manual systems only receive fresh,
