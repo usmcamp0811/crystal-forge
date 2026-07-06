@@ -16,11 +16,13 @@ pub async fn insert_system_state<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
-    // Use the change_reason as-is. The "heartbeat" → "startup" rewrite that
-    // used to live here was dead code: insert_system_state is only called when
-    // from_system_state_if_heartbeat returns Err (i.e. the payload is NOT a
-    // plain heartbeat), so change_reason is never "heartbeat" at this point.
-    let change_reason = &state.change_reason;
+    // Map heartbeat → startup for DB constraint compliance. When the agent
+    // sends change_reason="heartbeat" but from_system_state_if_heartbeat
+    // returns Err (i.e., real state change detected), we record it as startup.
+    let change_reason = match state.change_reason.as_str() {
+        "heartbeat" => "startup",
+        other => other,
+    };
     sqlx::query(
         r#"INSERT INTO system_states (
             hostname, 
