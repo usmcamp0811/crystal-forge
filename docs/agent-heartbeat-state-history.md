@@ -266,7 +266,7 @@ When a system shows unexpected history rows:
 2. Compare repeated history rows.
    - Same generation and same store path every 10 minutes means heartbeat rows
      are being misclassified or incorrectly inserted as `system_states`.
-3. Check backend `event_kind` returned by `/api/v1/systems/<id>/history`.
+3. Check backend `event_kind` returned by `/api/v1/systems/{system_id}/history`.
    - `state_change` should not render as Local rebuild.
    - `local_rebuild` should only appear for real generation/store-path changes.
 4. Check agent version behavior.
