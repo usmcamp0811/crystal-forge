@@ -323,7 +323,10 @@ pub fn build_sarif(p: &ExportPayload<'_>) -> String {
                     let full_desc = if ctrl.framework_mapping.is_empty() {
                         format!("Verifies compliance with: {}", ctrl.policy_name)
                     } else {
-                        format!("Verifies compliance with: {} ({})", ctrl.policy_name, ctrl.framework_mapping)
+                        format!(
+                            "Verifies compliance with: {} ({})",
+                            ctrl.policy_name, ctrl.framework_mapping
+                        )
                     };
                     rules.push(json!({
                         "id": ctrl.policy_id.to_string(),
@@ -367,18 +370,15 @@ pub fn build_sarif(p: &ExportPayload<'_>) -> String {
                 //   Fail   → fail  / error    — requirement not satisfied
                 //   Waiver → fail  / warning  — failed but risk formally accepted
                 let (sarif_kind, sarif_level) = match ctrl.status {
-                    ComplianceControlStatus::Pass   => ("pass",   "none"),
-                    ComplianceControlStatus::Warn   => ("review", "warning"),
-                    ComplianceControlStatus::Fail   => ("fail",   "error"),
-                    ComplianceControlStatus::Waiver => ("fail",   "warning"),
+                    ComplianceControlStatus::Pass => ("pass", "none"),
+                    ComplianceControlStatus::Warn => ("review", "warning"),
+                    ComplianceControlStatus::Fail => ("fail", "error"),
+                    ComplianceControlStatus::Waiver => ("fail", "warning"),
                 };
 
                 // Stable fingerprint: bundle:system:policy — allows consumers
                 // to correlate the same finding across repeated exports.
-                let fingerprint = format!(
-                    "{}:{}:{}",
-                    p.bundle.id, ev.system_id, ctrl.policy_id
-                );
+                let fingerprint = format!("{}:{}:{}", p.bundle.id, ev.system_id, ctrl.policy_id);
 
                 // Host-specific result message (contrasts with rule.fullDescription
                 // which describes the policy invariant, not any specific host).

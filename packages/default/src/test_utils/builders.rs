@@ -392,6 +392,7 @@ impl SystemStateBuilder {
             nixos_version: self.nixos_version.clone(),
             agent_compatible: self.agent_compatible,
             partial_data: self.partial_data,
+            boot_id: Some(format!("test-boot-id-{}", self.hostname)),
         }
     }
 }
@@ -560,6 +561,9 @@ impl SystemSummaryBuilder {
             last_seen: self.last_seen,
             deployment_policy: self.deployment_policy.clone(),
             fqdn: None,
+            heartbeat_interval_secs: None,
+            effective_heartbeat_interval_secs: 600,
+            boot_id: None,
         }
     }
 }

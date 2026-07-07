@@ -18,7 +18,8 @@ pub fn RemoveSystemDialog(
     /// Whether the request is in progress
     is_loading: bool,
     /// Error from the latest removal attempt, shown inside the active dialog.
-    #[props(default)] error_message: Option<String>,
+    #[props(default)]
+    error_message: Option<String>,
     /// Called when the user confirms removal
     on_confirm: EventHandler<()>,
     /// Called when the user cancels

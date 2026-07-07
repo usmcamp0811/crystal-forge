@@ -1,11 +1,11 @@
 ---
 id: TASK-375.4
 title: 'Remote builders: add verified source re-evaluation strategy'
-status: Review
+status: Done
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-30 17:46'
-updated_date: '2026-07-01 20:08'
+updated_date: '2026-07-03 15:49'
 labels:
   - builder
   - remote-builds
@@ -110,6 +110,8 @@ Verification Plan:
 
 <!-- SECTION:NOTES:BEGIN -->
 User deployment showed verified source evaluation failing because the builder was evaluating `nixosConfigurations.<host>.drvPath`; root cause was manifest target normalization preserving `derivation_target = nixosConfigurations.<host>` without adding `.config.system.build.toplevel`. Pushed c3ba9e7b to MR !290 to normalize NixOS targets and clean worktrees via the bare mirror git-dir. Targeted tests and rustfmt passed.
+
+Merged into dev at 21d462bb
 <!-- SECTION:NOTES:END -->
 
 ## Comments

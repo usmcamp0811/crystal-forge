@@ -728,10 +728,10 @@ pub fn SystemDetailView(id: String) -> Element {
             }
 
             {
-                let heartbeat_interval_sec = 60_i64;
+                let heartbeat_interval_sec = system.effective_heartbeat_interval_secs as i64;
                 let heartbeat_next_in_sec = system
                     .last_seen
-                    .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
+                    .map(|dt| heartbeat_interval_sec as f64 - now.signed_duration_since(dt).num_seconds() as f64)
                     .unwrap_or(0.0);
                 let uptime_str = format_uptime(system.hardware.uptime_secs.unwrap_or(0));
                 let kernel_str = system.kernel.clone().unwrap_or_else(|| "unknown".to_string());
@@ -1017,12 +1017,7 @@ pub fn SystemDetailView(id: String) -> Element {
                     spawn(async move {
                         match update_system_via_api(
                             system_id,
-                            request.hostname,
-                            request.fqdn,
-                            request.system_configuration_name,
-                            request.environment,
-                            request.flake_name,
-                            request.deployment_policy,
+                            request,
                         )
                         .await
                         {
@@ -1787,9 +1782,13 @@ fn OverviewTab(
     });
     let mut tag_adding = use_signal(|| false);
     let mut tag_draft = use_signal(String::new);
+    let heartbeat_interval_overview_sec = system.effective_heartbeat_interval_secs as i64;
     let heartbeat_next_in_sec = system
         .last_seen
-        .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
+        .map(|dt| {
+            heartbeat_interval_overview_sec as f64
+                - now.signed_duration_since(dt).num_seconds() as f64
+        })
         .unwrap_or(0.0);
     let fqdn_text = effective_fqdn(&system);
 
@@ -1866,6 +1865,24 @@ fn OverviewTab(
         format!("{} critical CVEs", critical)
     };
 
+    // Restart classification display strings.
+    let restart_type_label = match system.restart_type.as_deref() {
+        Some("system_reboot") => "System reboot",
+        Some("agent_restart") => "Agent restart",
+        Some("unknown") => "Unknown",
+        _ => "",
+    };
+    let restart_at_text = system.last_restart_at.map(|dt| {
+        let d = now.signed_duration_since(dt);
+        if d.num_minutes() < 60 {
+            format!("{}m ago", d.num_minutes().max(0))
+        } else if d.num_hours() < 24 {
+            format!("{}h ago", d.num_hours())
+        } else {
+            format!("{}d ago", d.num_days())
+        }
+    });
+
     let mut recent_activity: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = vec![
         (
             "System record updated".to_string(),
@@ -1940,6 +1957,25 @@ fn OverviewTab(
                         }
                     }
                     dt { "Uptime" } dd { "{uptime}" }
+                    if !restart_type_label.is_empty() {
+                        dt { "Last restart" }
+                        dd {
+                            span {
+                                class: if system.restart_type.as_deref() == Some("system_reboot") {
+                                    "chip chip-warning"
+                                } else {
+                                    "chip chip-info"
+                                },
+                                "{restart_type_label}"
+                            }
+                            if let Some(ref at_text) = restart_at_text {
+                                span {
+                                    style: "margin-left: 6px; color: var(--cf-text-muted); font-size: 12px;",
+                                    "{at_text}"
+                                }
+                            }
+                        }
+                    }
                     dt { "CPU" } dd { "{cpu_text}" }
                     dt { "Memory" } dd { "{memory_text}" }
                     dt { "IPv4" } dd { class: "mono", "{ipv4_text}" }
@@ -1957,7 +1993,7 @@ fn OverviewTab(
                     class: "hb-panel",
                     style: "margin-top: 16px;",
                     crate::components::HeartbeatSpinner {
-                        interval_sec: 60,
+                        interval_sec: heartbeat_interval_overview_sec,
                         next_in_sec: heartbeat_next_in_sec,
                         size: 56,
                         show_label: true,
@@ -2991,11 +3027,18 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
             };
 
             match kind {
-                HistoryEventKind::Restart => {
+                HistoryEventKind::Restart | HistoryEventKind::AgentRestart => {
+                    let is_agent = matches!(kind, HistoryEventKind::AgentRestart);
                     push(
                         0,
                         "info",
-                        "[reconstructed timeline] systemd: reached target multi-user.target".into(),
+                        if is_agent {
+                            "[reconstructed timeline] systemd: crystal-forge-agent.service started"
+                                .into()
+                        } else {
+                            "[reconstructed timeline] systemd: reached target multi-user.target"
+                                .into()
+                        },
                         false,
                     );
                     push(
@@ -3007,7 +3050,11 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                     push(
                         4,
                         "info",
-                        "[reconstructed timeline] heartbeat observed after boot".into(),
+                        if is_agent {
+                            "[reconstructed timeline] heartbeat observed after agent start".into()
+                        } else {
+                            "[reconstructed timeline] heartbeat observed after boot".into()
+                        },
                         false,
                     );
                 }
@@ -3133,6 +3180,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                         true,
                     );
                 }
+                HistoryEventKind::StateChange => {}
             }
         }
 
@@ -3175,7 +3223,10 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         })
         .collect();
 
-    let latest_line_timestamp = all_lines.iter().map(|(timestamp, _, _, _)| *timestamp).max();
+    let latest_line_timestamp = all_lines
+        .iter()
+        .map(|(timestamp, _, _, _)| *timestamp)
+        .max();
 
     // Compute day separators in the selected display timezone.
     let use_utc_value = *use_utc.read();
@@ -3533,8 +3584,12 @@ enum HistoryEventKind {
     LocalRebuildMatched,
     /// Out-of-band `nixos-rebuild switch` on the host with no tracked flake commit.
     LocalRebuildUntracked,
-    /// System restart (reboot) at the same generation.
+    /// System reboot (boot_id changed, full OS restart).
     Restart,
+    /// Agent service restart — same boot, only the crystal-forge-agent process restarted.
+    AgentRestart,
+    /// Non-generation-changing state/metadata update. Hidden from deployment timeline.
+    StateChange,
 }
 
 /// A single unified timeline event, built from deployment history + agent events.
@@ -3590,6 +3645,8 @@ fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
             }
         }
         "restart" => HistoryEventKind::Restart,
+        "agent_restart" => HistoryEventKind::AgentRestart,
+        "state_change" => HistoryEventKind::StateChange,
         _ => classify_history_entry_legacy(entry),
     }
 }
@@ -3642,6 +3699,20 @@ fn history_event_message(entry: &SystemHistoryEntry, kind: &HistoryEventKind) ->
                 raw
             }
         }
+        HistoryEventKind::AgentRestart => {
+            if is_raw_reason {
+                "Agent restarted".to_string()
+            } else {
+                raw
+            }
+        }
+        HistoryEventKind::StateChange => {
+            if is_raw_reason {
+                "State updated".to_string()
+            } else {
+                raw
+            }
+        }
     }
 }
 
@@ -3657,8 +3728,14 @@ fn classify_history_entry_legacy(entry: &SystemHistoryEntry) -> HistoryEventKind
     if reason.contains("restart") || reason.contains("boot") || reason.contains("startup") {
         return HistoryEventKind::Restart;
     }
-    let is_local =
-        actor.contains('@') || reason.contains("nixos-rebuild") || reason.contains("local");
+    if reason.contains("state_change") || reason.contains("state_delta") {
+        return HistoryEventKind::StateChange;
+    }
+    let is_local = actor.contains('@')
+        || actor.contains("on-host")
+        || reason.contains("config_change")
+        || reason.contains("nixos-rebuild")
+        || reason.contains("local");
     if is_local {
         if entry.commit_hash.is_some() {
             HistoryEventKind::LocalRebuildMatched
@@ -3691,6 +3768,9 @@ fn build_history_events(
 
     for (idx, entry) in entries.iter().enumerate() {
         let kind = classify_history_entry(entry);
+        if matches!(kind, HistoryEventKind::StateChange) {
+            continue;
+        }
         let short_reason = history_event_message(entry, &kind);
 
         // Match a commit record (for the rollback action + rich commit link).
@@ -3701,7 +3781,9 @@ fn build_history_events(
 
         let is_gen_changing = !matches!(
             kind,
-            HistoryEventKind::Restart | HistoryEventKind::DeployFailed
+            HistoryEventKind::Restart
+                | HistoryEventKind::AgentRestart
+                | HistoryEventKind::DeployFailed
         );
         let (generation, prev_generation) = if has_authoritative_gen {
             // Authoritative: use the recorded generation and compare against the
@@ -3748,26 +3830,260 @@ fn build_history_events(
     events
 }
 
-/// Fold consecutive restart events into clusters; deploys stay standalone.
-/// Mirrors the design's item-folding pass so routine reboots don't drown out changes.
+/// Fold consecutive restart events into clusters; deploys/rebuilds stay standalone.
+///
+/// Fold consecutive **system** restart events into clusters; agent restarts and
+/// all other event kinds always render as standalone items.
+///
+/// Ordering rule: when a generation-creating event (successful deploy or local
+/// rebuild — but NOT a failed deploy) immediately follows a system-restart run in
+/// the newest-first stream, we surface the gen-creating event **above** the cluster
+/// so the causally important change is not buried under reboot noise.  The reorder
+/// is gated on both events sharing the same recorded generation to prevent false
+/// promotion when generation data is absent.
+///
+/// `AgentRestart` is intentionally excluded from clustering so a solo agent
+/// service restart is always a visible standalone line.
+/// `DeployFailed` is intentionally excluded from the gen-creating set because a
+/// failed deploy does not create a new generation.
 fn fold_restart_clusters(events: &[HistoryEvent]) -> Vec<TimelineItem> {
-    let mut items = Vec::new();
+    // Only successful deploys and local rebuilds create a new generation.
+    // DeployFailed is intentionally excluded (a failed deploy does not create a
+    // generation).  AgentRestart is intentionally excluded (never clusters).
+    let is_system_restart = |e: &HistoryEvent| matches!(e.kind, HistoryEventKind::Restart);
+
+    let is_generation_changing = |e: &HistoryEvent| {
+        matches!(
+            e.kind,
+            HistoryEventKind::Deploy
+                | HistoryEventKind::LocalRebuildMatched
+                | HistoryEventKind::LocalRebuildUntracked
+        )
+    };
+
+    let emit_run = |items: &mut Vec<TimelineItem>, run: Vec<HistoryEvent>| {
+        if run.len() == 1 {
+            items.push(TimelineItem::Event(run.into_iter().next().unwrap()));
+        } else {
+            items.push(TimelineItem::RestartCluster(run));
+        }
+    };
+
+    // Process events newest-first.
+    //
+    // `run`     — accumulates consecutive HistoryEventKind::Restart events.
+    // `pending` — AgentRestart events that arrived at the *top* of the stream
+    //             before any system-restart run began. They are held until the
+    //             run (and its possible gen-promotion) is resolved, then emitted
+    //             after. Other standalone events are never buffered.
+    //
+    // Example stream (newest-first):
+    //   AgentRestart(gen=5054)         → standalone, buffered in `pending`
+    //   Restart(gen=5054)              → pushed to `run`
+    //   Restart(gen=5054)              → pushed to `run`
+    //   LocalRebuildUntracked(gen=5054)→ closes `run`; gen matches & gen-changing
+    //                                    → emit LocalRebuild, Cluster(2),
+    //                                      then drain pending → AgentRestart
+    //
+    // Result: [LocalRebuild, Cluster(2), AgentRestart]  ✓
+
+    let mut items: Vec<TimelineItem> = Vec::new();
+    let is_agent_restart = |e: &HistoryEvent| matches!(e.kind, HistoryEventKind::AgentRestart);
+
     let mut run: Vec<HistoryEvent> = Vec::new();
+    // Agent restarts seen before the first system-restart of the current run.
+    let mut pre_run_agent_restarts: Vec<HistoryEvent> = Vec::new();
+
+    let flush_pending_agent_restarts =
+        |items: &mut Vec<TimelineItem>, pending: &mut Vec<HistoryEvent>| {
+            for event in pending.drain(..) {
+                items.push(TimelineItem::Event(event));
+            }
+        };
 
     for e in events {
-        if matches!(e.kind, HistoryEventKind::Restart) {
+        if is_system_restart(e) {
             run.push(e.clone());
-        } else {
-            if !run.is_empty() {
-                items.push(TimelineItem::RestartCluster(std::mem::take(&mut run)));
+            continue;
+        }
+
+        // Non-system-restart event — closes an open run (if any).
+        if run.is_empty() {
+            if is_agent_restart(e) {
+                // Keep agent restarts standalone, but allow them to trail a
+                // subsequent promoted system-restart cluster.
+                pre_run_agent_restarts.push(e.clone());
+            } else {
+                // Any unrelated standalone event (deploy, state change, failed
+                // deploy, etc.) must not be buried below a future restart cluster.
+                flush_pending_agent_restarts(&mut items, &mut pre_run_agent_restarts);
+                items.push(TimelineItem::Event(e.clone()));
             }
-            items.push(TimelineItem::Event(e.clone()));
+        } else {
+            // A run is open.  Close it.
+            let finished = std::mem::take(&mut run);
+
+            let cluster_gen_matches =
+                e.generation.is_some() && finished.iter().all(|r| r.generation == e.generation);
+
+            if is_generation_changing(e) && cluster_gen_matches {
+                // Gen-promotion: show gen-changing event first, then the cluster,
+                // then the standalones that were buffered above the system restarts.
+                items.push(TimelineItem::Event(e.clone()));
+                emit_run(&mut items, finished);
+                flush_pending_agent_restarts(&mut items, &mut pre_run_agent_restarts);
+            } else {
+                // No promotion: flush pending standalones, then the cluster, then
+                // this non-gen-changing event.
+                flush_pending_agent_restarts(&mut items, &mut pre_run_agent_restarts);
+                emit_run(&mut items, finished);
+                items.push(TimelineItem::Event(e.clone()));
+            }
         }
     }
+
+    // Flush any trailing system-restart run.
     if !run.is_empty() {
-        items.push(TimelineItem::RestartCluster(run));
+        let finished = std::mem::take(&mut run);
+        emit_run(&mut items, finished);
     }
+    // Flush any remaining agent restarts (stream ended before a run opened).
+    flush_pending_agent_restarts(&mut items, &mut pre_run_agent_restarts);
+
     items
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::{HistoryEvent, HistoryEventKind, TimelineItem, fold_restart_clusters};
+    use chrono::Utc;
+
+    fn ev(kind: HistoryEventKind, generation: Option<i32>) -> HistoryEvent {
+        HistoryEvent {
+            id: String::new(),
+            kind,
+            timestamp: Utc::now(),
+            generation,
+            prev_generation: None,
+            sha: None,
+            message: String::new(),
+            actor: String::new(),
+            duration: None,
+            store_path: None,
+            commit: None,
+        }
+    }
+
+    fn kinds(items: &[TimelineItem]) -> Vec<String> {
+        items
+            .iter()
+            .map(|item| match item {
+                TimelineItem::Event(e) => format!("{:?}", e.kind),
+                TimelineItem::RestartCluster(v) => {
+                    format!("Cluster({})", v.len())
+                }
+            })
+            .collect()
+    }
+
+    /// AgentRestart, Restart, Restart, LocalRebuild →
+    /// LocalRebuild, Cluster(2), AgentRestart
+    #[test]
+    fn agent_restart_then_rebuild_then_system_restarts() {
+        let events = vec![
+            ev(HistoryEventKind::AgentRestart, Some(5054)),
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::LocalRebuildUntracked, Some(5054)),
+        ];
+        let items = fold_restart_clusters(&events);
+        assert_eq!(
+            kinds(&items),
+            vec!["LocalRebuildUntracked", "Cluster(2)", "AgentRestart"],
+            "gen-changing event should be promoted above the system-restart cluster; \
+             AgentRestart stays standalone after the cluster"
+        );
+    }
+
+    /// Restart, Restart, DeployFailed →
+    /// Cluster(2), DeployFailed  (DeployFailed must NOT promote)
+    #[test]
+    fn deploy_failed_does_not_promote_over_restart_cluster() {
+        let events = vec![
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::DeployFailed, Some(5054)),
+        ];
+        let items = fold_restart_clusters(&events);
+        assert_eq!(
+            kinds(&items),
+            vec!["Cluster(2)", "DeployFailed"],
+            "DeployFailed must not be promoted above a restart cluster"
+        );
+    }
+
+    /// AgentRestart is always standalone, never clustered.
+    #[test]
+    fn agent_restart_never_clusters() {
+        let events = vec![
+            ev(HistoryEventKind::AgentRestart, Some(5054)),
+            ev(HistoryEventKind::AgentRestart, Some(5054)),
+        ];
+        let items = fold_restart_clusters(&events);
+        assert_eq!(
+            kinds(&items),
+            vec!["AgentRestart", "AgentRestart"],
+            "AgentRestart events must always be standalone"
+        );
+    }
+
+    /// System restarts with no following gen-changing event cluster normally.
+    #[test]
+    fn system_restarts_cluster_without_gen_change() {
+        let events = vec![
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::Restart, Some(5054)),
+        ];
+        let items = fold_restart_clusters(&events);
+        assert_eq!(kinds(&items), vec!["Cluster(3)"]);
+    }
+
+    /// Generation mismatch: deploy does NOT promote when generations differ.
+    #[test]
+    fn gen_mismatch_deploy_does_not_promote() {
+        let events = vec![
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::Deploy, Some(5053)), // different gen
+        ];
+        let items = fold_restart_clusters(&events);
+        assert_eq!(
+            kinds(&items),
+            vec!["Cluster(2)", "Deploy"],
+            "deploy at a different generation must not be promoted"
+        );
+    }
+
+    /// Deploy, Restart, Restart, LocalRebuild →
+    /// Deploy, LocalRebuild, Cluster(2)
+    #[test]
+    fn unrelated_newer_deploy_stays_above_older_restart_cluster() {
+        let events = vec![
+            ev(HistoryEventKind::Deploy, Some(5055)),
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::LocalRebuildUntracked, Some(5054)),
+        ];
+
+        let items = fold_restart_clusters(&events);
+
+        assert_eq!(
+            kinds(&items),
+            vec!["Deploy", "LocalRebuildUntracked", "Cluster(2)"],
+            "newer unrelated deploy must not be buffered below an older restart cluster"
+        );
+    }
 }
 
 /// Enhanced History tab — a faithful Rust recreation of the design reference.
@@ -3793,11 +4109,21 @@ fn HistoryTab(
 
     let deploy_count = events
         .iter()
-        .filter(|e| !matches!(e.kind, HistoryEventKind::Restart))
+        .filter(|e| {
+            !matches!(
+                e.kind,
+                HistoryEventKind::Restart | HistoryEventKind::AgentRestart
+            )
+        })
         .count();
     let restart_count = events
         .iter()
-        .filter(|e| matches!(e.kind, HistoryEventKind::Restart))
+        .filter(|e| {
+            matches!(
+                e.kind,
+                HistoryEventKind::Restart | HistoryEventKind::AgentRestart
+            )
+        })
         .count();
 
     // Infinite scroll pagination: reveal a page of clustered items at a time as
@@ -3862,23 +4188,51 @@ fn HistoryTab(
                 for (idx, item) in shown.iter().enumerate() {
                     {
                         match item {
-                            TimelineItem::Event(event) => rsx! {
-                                DeployRow {
-                                    key: "{event.id}",
-                                    event: event.clone(),
-                                    allow_mutations,
-                                    on_rollback: {
-                                        let commit = event.commit.clone();
-                                        move |_| {
-                                            if let Some(commit) = commit.clone() {
-                                                on_rollback.call(commit);
+                            TimelineItem::Event(event) => {
+                                let is_restart_event = matches!(
+                                    event.kind,
+                                    HistoryEventKind::Restart | HistoryEventKind::AgentRestart
+                                );
+                                if is_restart_event {
+                                    let e = event.clone();
+                                    rsx! {
+                                        div {
+                                            key: "{event.id}",
+                                            class: "tl-row",
+                                            div { class: "tl-rail",
+                                                span {
+                                                    class: "tl-node tl-node-sm",
+                                                    style: "--node: var(--cf-blue);",
+                                                    Icon { name: IconName::Power, size: 11 }
+                                                }
+                                            }
+                                            div { class: "tl-body",
+                                                div { class: "tl-restart-single",
+                                                    RestartLine { event: e }
+                                                }
                                             }
                                         }
-                                    },
-                                    on_view_logs: {
-                                        let id = event.id.clone();
-                                        move |_| on_view_logs.call(id.clone())
-                                    },
+                                    }
+                                } else {
+                                    rsx! {
+                                        DeployRow {
+                                            key: "{event.id}",
+                                            event: event.clone(),
+                                            allow_mutations,
+                                            on_rollback: {
+                                                let commit = event.commit.clone();
+                                                move |_| {
+                                                    if let Some(commit) = commit.clone() {
+                                                        on_rollback.call(commit);
+                                                    }
+                                                }
+                                            },
+                                            on_view_logs: {
+                                                let id = event.id.clone();
+                                                move |_| on_view_logs.call(id.clone())
+                                            },
+                                        }
+                                    }
                                 }
                             },
                             TimelineItem::RestartCluster(list) => {
@@ -3999,15 +4353,22 @@ fn HistoryTab(
     }
 }
 
-/// A single reboot line within a restart cluster (design `RestartLine`).
+/// A single restart line within a restart cluster (design `RestartLine`).
+/// Shows "System restarted" for OS reboots and "Agent restarted" for service restarts.
 #[component]
 fn RestartLine(event: HistoryEvent) -> Element {
     let when = relative_time(event.timestamp);
+    let is_agent_restart = matches!(event.kind, HistoryEventKind::AgentRestart);
+    let label = if is_agent_restart {
+        "Agent restarted"
+    } else {
+        "System restarted"
+    };
     rsx! {
         div { class: "tl-restart-line",
             span { class: "tl-restart-dot" }
             Icon { name: IconName::Power, size: 12 }
-            span { class: "tl-restart-label", "System restarted" }
+            span { class: "tl-restart-label", "{label}" }
             span { class: "tl-restart-sep", "·" }
             span { class: "tl-when", "{when}" }
         }
@@ -6772,6 +7133,7 @@ fn synthesize_history_entries_from_commits(
             generation: None,
             reconciled: true,
             generation_matches_current_store_path: None,
+            restart_type: None,
         })
         .collect()
 }
@@ -6805,7 +7167,10 @@ fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogE
 
 #[cfg(test)]
 mod tests {
-    use super::{map_agent_events_to_logs, map_history_entries_to_commit_history};
+    use super::{
+        HistoryEventKind, build_history_events, classify_history_entry, map_agent_events_to_logs,
+        map_history_entries_to_commit_history,
+    };
     use crate::api::models::{SystemAgentEvent, SystemHistoryEntry};
     use chrono::{Duration, Utc};
 
@@ -6827,6 +7192,7 @@ mod tests {
                 generation: Some(3),
                 reconciled: true,
                 generation_matches_current_store_path: Some(true),
+                restart_type: None,
             },
             SystemHistoryEntry {
                 timestamp: now - Duration::minutes(10),
@@ -6842,6 +7208,7 @@ mod tests {
                 generation: Some(2),
                 reconciled: true,
                 generation_matches_current_store_path: Some(false),
+                restart_type: None,
             },
             SystemHistoryEntry {
                 timestamp: now - Duration::minutes(20),
@@ -6857,6 +7224,7 @@ mod tests {
                 generation: Some(1),
                 reconciled: true,
                 generation_matches_current_store_path: Some(false),
+                restart_type: None,
             },
         ];
 
@@ -6886,5 +7254,85 @@ mod tests {
 
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].phase.as_deref(), Some("Deployment"));
+    }
+
+    fn history_entry(change_reason: &str, actor: &str, event_kind: &str) -> SystemHistoryEntry {
+        SystemHistoryEntry {
+            timestamp: Utc::now(),
+            store_path: Some("/nix/store/aaaa-system".to_string()),
+            system_configuration_name: Some("web-01".to_string()),
+            change_reason: change_reason.to_string(),
+            commit_hash: Some("aaaaaaaa".to_string()),
+            flake_name: Some("infra".to_string()),
+            flake_repo_url: Some("https://example.com/infra.git".to_string()),
+            actor: actor.to_string(),
+            outcome: "recorded".to_string(),
+            event_kind: event_kind.to_string(),
+            generation: Some(3),
+            reconciled: true,
+            generation_matches_current_store_path: Some(true),
+            restart_type: None,
+        }
+    }
+
+    #[test]
+    fn legacy_history_classifies_config_change_as_local_rebuild() {
+        let entry = history_entry("config_change", "on-host", "");
+
+        assert_eq!(
+            classify_history_entry(&entry),
+            HistoryEventKind::LocalRebuildMatched
+        );
+    }
+
+    #[test]
+    fn legacy_history_classifies_state_delta_as_state_change() {
+        let entry = history_entry("state_delta", "agent", "");
+
+        assert_eq!(
+            classify_history_entry(&entry),
+            HistoryEventKind::StateChange
+        );
+    }
+
+    #[test]
+    fn legacy_history_classifies_state_change_as_state_change() {
+        let entry = history_entry("state_change", "agent", "");
+
+        assert_eq!(
+            classify_history_entry(&entry),
+            HistoryEventKind::StateChange
+        );
+    }
+
+    #[test]
+    fn authoritative_state_change_does_not_render_in_deployment_timeline() {
+        let entry = history_entry("state_delta", "agent", "state_change");
+
+        assert_eq!(
+            classify_history_entry(&entry),
+            HistoryEventKind::StateChange
+        );
+        assert!(build_history_events(&[entry], &[], Some(3)).is_empty());
+    }
+
+    #[test]
+    fn authoritative_local_rebuild_still_renders_in_deployment_timeline() {
+        let entry = history_entry("state_delta", "on-host", "local_rebuild");
+
+        assert_eq!(
+            classify_history_entry(&entry),
+            HistoryEventKind::LocalRebuildMatched
+        );
+        let events = build_history_events(&[entry], &[], Some(3));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, HistoryEventKind::LocalRebuildMatched);
+    }
+
+    #[test]
+    fn authoritative_cf_event_kind_still_classifies_as_deploy() {
+        let entry = history_entry("cf_deployment", "crystal-forge", "cf_deployment");
+
+        assert_eq!(classify_history_entry(&entry), HistoryEventKind::Deploy);
     }
 }
