@@ -3629,6 +3629,21 @@ enum TimelineItem {
 fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
     let outcome = entry.outcome.to_lowercase();
 
+    match entry.event_type.as_str() {
+        "cf_deployment_succeeded" => return HistoryEventKind::Deploy,
+        "cf_deployment_failed" => return HistoryEventKind::DeployFailed,
+        "local_rebuild_detected" => {
+            return if entry.reconciled {
+                HistoryEventKind::LocalRebuildMatched
+            } else {
+                HistoryEventKind::LocalRebuildUntracked
+            };
+        }
+        "system_reboot" => return HistoryEventKind::Restart,
+        "agent_restart" => return HistoryEventKind::AgentRestart,
+        _ => {}
+    }
+
     match entry.event_kind.as_str() {
         "cf_deployment" => {
             if outcome.contains("fail") || outcome.contains("error") {
@@ -3657,6 +3672,10 @@ fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
 /// surface a descriptive summary per kind while still preferring any richer message
 /// text carried on the entry (e.g. a commit subject in the fallback path).
 fn history_event_message(entry: &SystemHistoryEntry, kind: &HistoryEventKind) -> String {
+    if let Some(title) = entry.title.as_ref().filter(|title| !title.trim().is_empty()) {
+        return title.clone();
+    }
+
     let raw = entry
         .change_reason
         .lines()
@@ -3667,7 +3686,17 @@ fn history_event_message(entry: &SystemHistoryEntry, kind: &HistoryEventKind) ->
 
     let is_raw_reason = matches!(
         raw.as_str(),
-        "config_change" | "cf_deployment" | "startup" | "state_delta" | "state_change" | ""
+        "config_change"
+            | "cf_deployment"
+            | "cf_deployment_succeeded"
+            | "cf_deployment_failed"
+            | "local_rebuild_detected"
+            | "system_reboot"
+            | "agent_restart"
+            | "startup"
+            | "state_delta"
+            | "state_change"
+            | ""
     );
 
     match kind {
@@ -3789,9 +3818,12 @@ fn build_history_events(
             // Authoritative: use the recorded generation and compare against the
             // next-older recorded generation to show a real transition.
             let current = entry.generation;
-            let older = entries
+            let older = entry
+                .previous_generation
+                .and_then(|value| i32::try_from(value).ok())
+                .or_else(|| entries
                 .get(idx + 1)
-                .and_then(|older_entry| older_entry.generation);
+                .and_then(|older_entry| older_entry.generation));
             let prev = match (is_gen_changing, current, older) {
                 // Only surface a transition when the generation actually changed.
                 (true, Some(cur), Some(old)) if old != cur => Some(old),
@@ -7113,11 +7145,19 @@ fn synthesize_history_entries_from_commits(
 ) -> Vec<SystemHistoryEntry> {
     commits
         .iter()
-        .map(|commit| SystemHistoryEntry {
-            timestamp: commit.deployed_at.unwrap_or(commit.committed_at),
+        .map(|commit| {
+            let timestamp = commit.deployed_at.unwrap_or(commit.committed_at);
+            SystemHistoryEntry {
+            id: None,
+            timestamp,
+            occurred_at: Some(timestamp),
+            observed_at: None,
             store_path: None,
             system_configuration_name: commit.config_identity.clone(),
             change_reason: commit.message.clone(),
+            event_type: "cf_deployment_succeeded".to_string(),
+            event_rank: Some(10),
+            title: Some("Deployed through Crystal Forge".to_string()),
             commit_hash: Some(commit.hash.clone()),
             flake_name: None,
             flake_repo_url: commit.flake_repo_url.clone(),
@@ -7131,9 +7171,21 @@ fn synthesize_history_entries_from_commits(
             // as deploys with a reconciled/tracked source.
             event_kind: "cf_deployment".to_string(),
             generation: None,
+            previous_generation: None,
+            new_generation: None,
+            previous_store_path: None,
+            new_store_path: None,
+            previous_boot_id: None,
+            new_boot_id: None,
+            deployment_id: None,
+            desired_target_id: None,
+            source: Some("commit_fallback".to_string()),
+            correlation_id: None,
+            metadata: serde_json::Value::Null,
             reconciled: true,
             generation_matches_current_store_path: None,
             restart_type: None,
+        }
         })
         .collect()
 }
@@ -7179,10 +7231,16 @@ mod tests {
         let now = Utc::now();
         let entries = vec![
             SystemHistoryEntry {
+                id: None,
                 timestamp: now,
+                occurred_at: Some(now),
+                observed_at: None,
                 store_path: Some("/nix/store/aaaa-system".to_string()),
                 system_configuration_name: Some("web-01".to_string()),
                 change_reason: "cf_deployment".to_string(),
+                event_type: "cf_deployment_succeeded".to_string(),
+                event_rank: Some(10),
+                title: Some("Deployed through Crystal Forge".to_string()),
                 commit_hash: Some("aaaaaaaa".to_string()),
                 flake_name: Some("infra".to_string()),
                 flake_repo_url: Some("https://example.com/infra.git".to_string()),
@@ -7190,15 +7248,32 @@ mod tests {
                 outcome: "recorded".to_string(),
                 event_kind: "cf_deployment".to_string(),
                 generation: Some(3),
+                previous_generation: Some(2),
+                new_generation: Some(3),
+                previous_store_path: None,
+                new_store_path: Some("/nix/store/aaaa-system".to_string()),
+                previous_boot_id: None,
+                new_boot_id: None,
+                deployment_id: None,
+                desired_target_id: None,
+                source: Some("test".to_string()),
+                correlation_id: None,
+                metadata: serde_json::Value::Null,
                 reconciled: true,
                 generation_matches_current_store_path: Some(true),
                 restart_type: None,
             },
             SystemHistoryEntry {
+                id: None,
                 timestamp: now - Duration::minutes(10),
+                occurred_at: Some(now - Duration::minutes(10)),
+                observed_at: None,
                 store_path: Some("/nix/store/bbbb-system".to_string()),
                 system_configuration_name: Some("web-01".to_string()),
                 change_reason: "cf_deployment".to_string(),
+                event_type: "cf_deployment_succeeded".to_string(),
+                event_rank: Some(10),
+                title: Some("Deployed through Crystal Forge".to_string()),
                 commit_hash: Some("bbbbbbbb".to_string()),
                 flake_name: Some("infra".to_string()),
                 flake_repo_url: Some("https://example.com/infra.git".to_string()),
@@ -7206,15 +7281,32 @@ mod tests {
                 outcome: "recorded".to_string(),
                 event_kind: "cf_deployment".to_string(),
                 generation: Some(2),
+                previous_generation: Some(1),
+                new_generation: Some(2),
+                previous_store_path: None,
+                new_store_path: Some("/nix/store/bbbb-system".to_string()),
+                previous_boot_id: None,
+                new_boot_id: None,
+                deployment_id: None,
+                desired_target_id: None,
+                source: Some("test".to_string()),
+                correlation_id: None,
+                metadata: serde_json::Value::Null,
                 reconciled: true,
                 generation_matches_current_store_path: Some(false),
                 restart_type: None,
             },
             SystemHistoryEntry {
+                id: None,
                 timestamp: now - Duration::minutes(20),
+                occurred_at: Some(now - Duration::minutes(20)),
+                observed_at: None,
                 store_path: Some("/nix/store/aaaa-system".to_string()),
                 system_configuration_name: Some("web-01".to_string()),
                 change_reason: "cf_deployment".to_string(),
+                event_type: "cf_deployment_succeeded".to_string(),
+                event_rank: Some(10),
+                title: Some("Deployed through Crystal Forge".to_string()),
                 commit_hash: Some("aaaaaaaa".to_string()),
                 flake_name: Some("infra".to_string()),
                 flake_repo_url: Some("https://example.com/infra.git".to_string()),
@@ -7222,6 +7314,17 @@ mod tests {
                 outcome: "recorded".to_string(),
                 event_kind: "cf_deployment".to_string(),
                 generation: Some(1),
+                previous_generation: None,
+                new_generation: Some(1),
+                previous_store_path: None,
+                new_store_path: Some("/nix/store/aaaa-system".to_string()),
+                previous_boot_id: None,
+                new_boot_id: None,
+                deployment_id: None,
+                desired_target_id: None,
+                source: Some("test".to_string()),
+                correlation_id: None,
+                metadata: serde_json::Value::Null,
                 reconciled: true,
                 generation_matches_current_store_path: Some(false),
                 restart_type: None,
@@ -7258,10 +7361,16 @@ mod tests {
 
     fn history_entry(change_reason: &str, actor: &str, event_kind: &str) -> SystemHistoryEntry {
         SystemHistoryEntry {
+            id: None,
             timestamp: Utc::now(),
+            occurred_at: None,
+            observed_at: None,
             store_path: Some("/nix/store/aaaa-system".to_string()),
             system_configuration_name: Some("web-01".to_string()),
             change_reason: change_reason.to_string(),
+            event_type: event_kind.to_string(),
+            event_rank: None,
+            title: None,
             commit_hash: Some("aaaaaaaa".to_string()),
             flake_name: Some("infra".to_string()),
             flake_repo_url: Some("https://example.com/infra.git".to_string()),
@@ -7269,6 +7378,17 @@ mod tests {
             outcome: "recorded".to_string(),
             event_kind: event_kind.to_string(),
             generation: Some(3),
+            previous_generation: None,
+            new_generation: Some(3),
+            previous_store_path: None,
+            new_store_path: Some("/nix/store/aaaa-system".to_string()),
+            previous_boot_id: None,
+            new_boot_id: None,
+            deployment_id: None,
+            desired_target_id: None,
+            source: Some("test".to_string()),
+            correlation_id: None,
+            metadata: serde_json::Value::Null,
             reconciled: true,
             generation_matches_current_store_path: Some(true),
             restart_type: None,
@@ -7283,6 +7403,24 @@ mod tests {
             classify_history_entry(&entry),
             HistoryEventKind::LocalRebuildMatched
         );
+    }
+
+    #[test]
+    fn event_backed_history_classifies_explicit_event_type_without_text_heuristics() {
+        let mut entry = history_entry("startup", "agent", "state_change");
+        entry.event_type = "local_rebuild_detected".to_string();
+        entry.reconciled = false;
+
+        assert_eq!(
+            classify_history_entry(&entry),
+            HistoryEventKind::LocalRebuildUntracked
+        );
+
+        entry.event_type = "system_reboot".to_string();
+        assert_eq!(classify_history_entry(&entry), HistoryEventKind::Restart);
+
+        entry.event_type = "agent_restart".to_string();
+        assert_eq!(classify_history_entry(&entry), HistoryEventKind::AgentRestart);
     }
 
     #[test]

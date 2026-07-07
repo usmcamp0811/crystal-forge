@@ -1504,10 +1504,22 @@ pub struct VerifyGenerationClosureResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemHistoryEntry {
+    #[serde(default)]
+    pub id: Option<Uuid>,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub occurred_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub observed_at: Option<DateTime<Utc>>,
     pub store_path: Option<String>,
     pub system_configuration_name: Option<String>,
     pub change_reason: String,
+    #[serde(default)]
+    pub event_type: String,
+    #[serde(default)]
+    pub event_rank: Option<i16>,
+    #[serde(default)]
+    pub title: Option<String>,
     pub commit_hash: Option<String>,
     pub flake_name: Option<String>,
     pub flake_repo_url: Option<String>,
@@ -1520,6 +1532,28 @@ pub struct SystemHistoryEntry {
     /// Recorded generation number at this transition.
     #[serde(default)]
     pub generation: Option<i32>,
+    #[serde(default)]
+    pub previous_generation: Option<i64>,
+    #[serde(default)]
+    pub new_generation: Option<i64>,
+    #[serde(default)]
+    pub previous_store_path: Option<String>,
+    #[serde(default)]
+    pub new_store_path: Option<String>,
+    #[serde(default)]
+    pub previous_boot_id: Option<String>,
+    #[serde(default)]
+    pub new_boot_id: Option<String>,
+    #[serde(default)]
+    pub deployment_id: Option<Uuid>,
+    #[serde(default)]
+    pub desired_target_id: Option<Uuid>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub correlation_id: Option<Uuid>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
     /// Whether the running store path maps to a tracked flake commit.
     #[serde(default)]
     pub reconciled: bool,
