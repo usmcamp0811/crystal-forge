@@ -1855,6 +1855,39 @@ pub async fn verify_generation_closure(
     (StatusCode::OK, Json(response)).into_response()
 }
 
+/// Classify a history row into `(event_kind, actor)`.
+///
+/// `cf_deployment` = deploy driven through Crystal Forge; `config_change` =
+/// on-host/out-of-band activation (e.g. a manual `nixos-rebuild switch`);
+/// `startup` + `system_reboot` restart_type = system reboot;
+/// `startup` + `agent_restart` restart_type = agent service restart;
+/// `startup` + other/None = generic restart (legacy, no boot_id data).
+///
+/// A `nixos-rebuild switch` stops and restarts the agent during activation,
+/// so the first heartbeat carrying the NEW generation is often a `startup`
+/// row. When such a row lands on a different generation/store path than the
+/// next-older row, the real event is the on-host rebuild — classify it as
+/// `local_rebuild` instead of hiding the switch behind "Agent restarted".
+/// A genuine reboot (`system_reboot`) still classifies as `restart`.
+fn classify_history_event(
+    change_reason: &str,
+    restart_type: Option<&str>,
+    changed_generation_or_store: bool,
+) -> (&'static str, &'static str) {
+    match change_reason {
+        "cf_deployment" => ("cf_deployment", "crystal-forge"),
+        "config_change" => ("local_rebuild", "on-host"),
+        "startup" => match restart_type {
+            Some("system_reboot") => ("restart", "agent"),
+            _ if changed_generation_or_store => ("local_rebuild", "on-host"),
+            Some("agent_restart") => ("agent_restart", "agent"),
+            _ => ("restart", "agent"),
+        },
+        "state_delta" if changed_generation_or_store => ("local_rebuild", "on-host"),
+        _ => ("state_change", "agent"),
+    }
+}
+
 pub async fn get_system_history(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -1907,40 +1940,20 @@ pub async fn get_system_history(
                 row.generation != older.generation || row.store_path != older.store_path
             });
 
-            // Authoritative classification derived from the recorded change_reason and,
-            // for startup events, the per-row restart_type written at insert time.
-            // `cf_deployment` = deploy driven through Crystal Forge; `config_change` =
-            // on-host/out-of-band activation (e.g. a manual `nixos-rebuild switch`);
-            // `startup` + `system_reboot` restart_type = system reboot;
-            // `startup` + `agent_restart` restart_type = agent service restart;
-            // `startup` + other/None = generic restart (legacy, no boot_id data).
-            let event_kind = match change_reason.as_str() {
-                "cf_deployment" => "cf_deployment",
-                "config_change" => "local_rebuild",
-                "startup" => match row.restart_type.as_deref() {
-                    Some("system_reboot") => "restart",
-                    Some("agent_restart") => "agent_restart",
-                    _ => "restart",
-                },
-                "state_delta" if changed_generation_or_store => "local_rebuild",
-                _ => "state_change",
-            }
-            .to_string();
+            // Authoritative classification derived from the recorded change_reason,
+            // the per-row restart_type written at insert time, and the actual
+            // generation/store-path transition. See classify_history_event.
+            let (event_kind, actor) = classify_history_event(
+                change_reason.as_str(),
+                row.restart_type.as_deref(),
+                changed_generation_or_store,
+            );
+            let event_kind = event_kind.to_string();
+            let actor = actor.to_string();
 
             // Reconciled/tracked when the running store path maps to a known flake
             // commit; untracked (capture-to-flake) otherwise.
             let reconciled = row.commit_hash.is_some();
-
-            // Actor attribution: CF deploys are agent-applied; on-host rebuilds are
-            // host-local. We do not currently capture the specific user, so we report
-            // the honest source rather than a fabricated value.
-            let actor = match change_reason.as_str() {
-                "cf_deployment" => "crystal-forge",
-                "config_change" => "on-host",
-                "state_delta" if changed_generation_or_store => "on-host",
-                _ => "agent",
-            }
-            .to_string();
 
             SystemHistoryEntry {
                 timestamp: row.timestamp,
@@ -2052,6 +2065,64 @@ mod tests {
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
     use sqlx::postgres::PgPoolOptions;
+
+    #[test]
+    fn startup_row_with_changed_generation_classifies_as_local_rebuild() {
+        // nixos-rebuild switch restarts the agent, so the new generation
+        // arrives on a startup heartbeat. The switch must show as a local
+        // rebuild, not be hidden behind "Agent restarted".
+        assert_eq!(
+            classify_history_event("startup", Some("agent_restart"), true),
+            ("local_rebuild", "on-host")
+        );
+        assert_eq!(
+            classify_history_event("startup", None, true),
+            ("local_rebuild", "on-host")
+        );
+    }
+
+    #[test]
+    fn startup_row_without_generation_change_keeps_restart_classification() {
+        assert_eq!(
+            classify_history_event("startup", Some("agent_restart"), false),
+            ("agent_restart", "agent")
+        );
+        assert_eq!(
+            classify_history_event("startup", None, false),
+            ("restart", "agent")
+        );
+    }
+
+    #[test]
+    fn system_reboot_stays_restart_even_when_generation_changed() {
+        // Booting into a new generation (nixos-rebuild boot + reboot) is
+        // still a reboot event; the generation transition is visible on the
+        // entry itself.
+        assert_eq!(
+            classify_history_event("startup", Some("system_reboot"), true),
+            ("restart", "agent")
+        );
+    }
+
+    #[test]
+    fn non_startup_rows_classify_by_change_reason() {
+        assert_eq!(
+            classify_history_event("cf_deployment", None, false),
+            ("cf_deployment", "crystal-forge")
+        );
+        assert_eq!(
+            classify_history_event("config_change", None, false),
+            ("local_rebuild", "on-host")
+        );
+        assert_eq!(
+            classify_history_event("state_delta", None, true),
+            ("local_rebuild", "on-host")
+        );
+        assert_eq!(
+            classify_history_event("state_delta", None, false),
+            ("state_change", "agent")
+        );
+    }
 
     #[test]
     fn highest_role_prefers_admin_then_operator_then_viewer() {
