@@ -1,6 +1,6 @@
 // Mock data for Crystal Forge Systems view (~35 systems, mid fleet)
 
-const ENVIRONMENTS = (typeof __fx === "function" && __fx("environments")) || [
+const ENVIRONMENTS = [
   { name: "production", color: "#dc2626", dot: "#ef4444" },
   { name: "staging",    color: "#d97706", dot: "#f59e0b" },
   { name: "dev",        color: "#2563eb", dot: "#3b82f6" },
@@ -176,7 +176,7 @@ function buildSystem([hostname, env, flake, health, criticalCves], idx) {
   };
 }
 
-const SYSTEMS = (typeof __fx === "function" && __fx("systems")) || HOSTS.map(buildSystem);
+const SYSTEMS = HOSTS.map(buildSystem);
 
 // All distinct tags currently in use across the fleet — for filter dropdowns + suggestions.
 function allFleetTags() {

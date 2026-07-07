@@ -290,35 +290,6 @@ function TweaksPanel({ open, onClose, theme, onTheme, density, onDensity, defaul
 
 }
 
-// Deterministic render target for automated design-parity screenshots.
-//
-// The design-parity harness (checks/web-ui/design-parity) renders this example
-// headlessly for a specific view + theme so the resulting screenshot can be
-// compared against the real Dioxus UI backed by the same shared fixture. This
-// reads `?view=&theme=` (or window.__CF_TARGET) and is fully backward
-// compatible: with no params the example behaves exactly as before.
-const CF_TARGET_VIEWS = new Set([
-  "dashboard", "systems", "builds", "evals", "flakes", "environments",
-  "caches", "builders", "policies", "compliance", "cves", "scanning",
-  "admin", "profile",
-]);
-
-function readCfTarget() {
-  const target = {};
-  try {
-    if (typeof window !== "undefined" && window.__CF_TARGET && typeof window.__CF_TARGET === "object") {
-      Object.assign(target, window.__CF_TARGET);
-    }
-    if (typeof window !== "undefined" && window.location && window.location.search) {
-      const params = new URLSearchParams(window.location.search);
-      for (const key of ["view", "theme", "density", "sidebar", "defaultView", "coach"]) {
-        if (params.has(key)) target[key] = params.get(key);
-      }
-    }
-  } catch (_) { /* fall back to defaults */ }
-  return target;
-}
-
 // App root
 function App() {
   const TWEAKS = /*EDITMODE-BEGIN*/{
@@ -328,19 +299,10 @@ function App() {
     "sidebarMode": "full"
   } /*EDITMODE-END*/;
 
-  const CF_TARGET = readCfTarget();
-  const targetView = CF_TARGET_VIEWS.has(CF_TARGET.view) ? CF_TARGET.view : null;
-  const targetTheme = CF_TARGET.theme === "light" || CF_TARGET.theme === "dark" ? CF_TARGET.theme : null;
-  const targetSidebar = CF_TARGET.sidebar === "rail" || CF_TARGET.sidebar === "full" ? CF_TARGET.sidebar : null;
-  const targetDensity = CF_TARGET.density === "compact" || CF_TARGET.density === "comfortable" ? CF_TARGET.density : null;
-  const targetDefaultView = CF_TARGET.defaultView === "cards" || CF_TARGET.defaultView === "table" ? CF_TARGET.defaultView : null;
-  // Suppress the setup coach overlay for clean parity screenshots unless asked for.
-  const suppressCoach = targetView !== null && CF_TARGET.coach !== "1";
-
-  const [theme, setTheme] = React.useState(targetTheme || TWEAKS.theme);
-  const [density, setDensity] = React.useState(targetDensity || TWEAKS.density);
-  const [defaultView, setDefaultView] = React.useState(targetDefaultView || TWEAKS.defaultView);
-  const [sidebarMode, setSidebarMode] = React.useState(targetSidebar || TWEAKS.sidebarMode);
+  const [theme, setTheme] = React.useState(TWEAKS.theme);
+  const [density, setDensity] = React.useState(TWEAKS.density);
+  const [defaultView, setDefaultView] = React.useState(TWEAKS.defaultView);
+  const [sidebarMode, setSidebarMode] = React.useState(TWEAKS.sidebarMode);
   const [tweaksOpen, setTweaksOpen] = React.useState(false);
   const [detailSystem, setDetailSystem] = React.useState(null);
   const [sysTag, setSysTag] = React.useState("all");
@@ -348,7 +310,7 @@ function App() {
   const [editTarget, setEditTarget] = React.useState(null);
   const [complianceBundleId, setComplianceBundleId] = React.useState(null);
   const [flakeFocus, setFlakeFocus] = React.useState(null);
-  const [topView, setTopView] = React.useState(targetView || "dashboard"); // dashboard | systems | builds | evals | flakes | environments | caches | cves
+  const [topView, setTopView] = React.useState("dashboard"); // dashboard | systems | builds | evals | flakes | environments | caches | cves
   const coach = useCoach();
   const [classif, setClassif] = React.useState(() => {
     try { const r = localStorage.getItem("cf.classification"); if (r) return JSON.parse(r); } catch {}
@@ -412,7 +374,7 @@ function App() {
           } />
         
         <div className="content" data-screen-label={detailSystem ? `SystemDetail-${detailSystem.hostname}` : topView}>
-          {!suppressCoach && <CoachCallout coach={coach} topView={topView} onNavigate={goTo} />}
+          <CoachCallout coach={coach} topView={topView} onNavigate={goTo} />
           {topView === "builds" && <BuildsView />}
           {topView === "evals" && <EvalsView />}
           {topView === "flakes" && <FlakesView defaultView={defaultView} focus={flakeFocus} onClearFocus={() => setFlakeFocus(null)} />}
@@ -473,8 +435,8 @@ function App() {
         onTopView={(v) => {setTopView(v);setDetailSystem(null);}}
         coach={coach} />
       
-      {!suppressCoach && <SetupCoach coach={coach} onNavigate={goTo} />}
-      {!suppressCoach && <CoachBubble coach={coach} topView={topView} />}
+      <SetupCoach coach={coach} onNavigate={goTo} />
+      <CoachBubble coach={coach} topView={topView} />
     </div>);
 
 }

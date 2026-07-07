@@ -1,6 +1,6 @@
 // Cache destinations — registry data
 
-const CACHE_DESTINATIONS = (typeof __fx === "function" && __fx("caches")) || [
+const CACHE_DESTINATIONS = [
   {
     id: "cache-prod-s3",
     name: "crystal-forge-prod-cache",

@@ -1,6 +1,6 @@
 // Server management / admin — users, roles, OIDC mappings, audit log, server info
 
-const ADMIN_USERS = (typeof __fx === "function" && __fx("admin.users")) || [
+const ADMIN_USERS = [
   { id:"u1", name:"Mira Reyes",   email:"mreyes@acme.io",     role:"admin",    source:"oidc",  groups:["cf-admins"],           envs:["all"],                       status:"active",   lastLogin:"2m ago",   mfa:true },
   { id:"u2", name:"Jordan Park",  email:"jpark@acme.io",      role:"operator", source:"oidc",  groups:["cf-operators","sre"],  envs:["production","staging"],      status:"active",   lastLogin:"1h ago",   mfa:true },
   { id:"u3", name:"Dana Chen",    email:"dchen@acme.io",      role:"operator", source:"oidc",  groups:["cf-operators"],        envs:["edge","lab"],                status:"active",   lastLogin:"3h ago",   mfa:true },
@@ -10,14 +10,14 @@ const ADMIN_USERS = (typeof __fx === "function" && __fx("admin.users")) || [
   { id:"u7", name:"audit-export", email:"audit@acme.io",      role:"viewer",   source:"local", groups:[],                      envs:["all"],                       status:"active",   lastLogin:"6h ago",   mfa:false, serviceAccount:true },
 ];
 
-const OIDC_MAPPINGS = (typeof __fx === "function" && __fx("admin.oidcMappings")) || [
+const OIDC_MAPPINGS = [
   { id:"m1", group:"cf-admins",    role:"admin",    envs:["all"],                  users:1, priority:1 },
   { id:"m2", group:"cf-operators", role:"operator", envs:["production","staging"], users:2, priority:2 },
   { id:"m3", group:"sre",          role:"operator", envs:["all"],                  users:1, priority:3 },
   { id:"m4", group:"cf-viewers",   role:"viewer",   envs:[],                       users:2, priority:4 },
 ];
 
-const ROLE_DEFS = (typeof __fx === "function" && __fx("admin.roles")) || [
+const ROLE_DEFS = [
   { role:"admin",    desc:"Full control — manage users, servers, all environments.", color:"#f87171",
     perms:["Manage users & OIDC", "Edit server config", "All operator powers", "View audit log"] },
   { role:"operator", desc:"Deploy, build, evaluate, and manage assigned environments.", color:"#60a5fa",
@@ -26,7 +26,7 @@ const ROLE_DEFS = (typeof __fx === "function" && __fx("admin.roles")) || [
     perms:["View all dashboards", "Export reports", "Read audit log (own actions)"] },
 ];
 
-const AUDIT_LOG = (typeof __fx === "function" && __fx("admin.auditLog")) || [
+const AUDIT_LOG = [
   { id:"a1",  at:"2m ago",    actor:"mreyes",   action:"cve.accept",        target:"CVE-2025-31822 (dev, lab)",          ip:"10.2.4.18",   kind:"security" },
   { id:"a2",  at:"8m ago",    actor:"jpark",    action:"system.deploy",     target:"atlas-01 → a3f8c12",                 ip:"10.2.4.31",   kind:"deploy" },
   { id:"a3",  at:"14m ago",   actor:"ops-bot",  action:"build.complete",    target:"linux-6.6.72 on hydra-01",           ip:"10.0.1.9",    kind:"build" },
@@ -44,7 +44,7 @@ const AUDIT_LOG = (typeof __fx === "function" && __fx("admin.auditLog")) || [
   { id:"a15", at:"yesterday", actor:"dchen",    action:"system.rollback",   target:"edge-fra-01 → gen #142",             ip:"10.2.4.44",   kind:"deploy" },
 ];
 
-const SERVER_INFO = (typeof __fx === "function" && __fx("admin.server")) || {
+const SERVER_INFO = {
   version: "0.8.2",
   commit: "f3a9c01",
   uptime: "18d 4h",
@@ -59,7 +59,7 @@ const SERVER_INFO = (typeof __fx === "function" && __fx("admin.server")) || {
 Object.assign(window, { ADMIN_USERS, OIDC_MAPPINGS, ROLE_DEFS, AUDIT_LOG, SERVER_INFO });
 
 // Background / scheduled jobs — admin-configurable cron-like tasks
-const BACKGROUND_JOBS = (typeof __fx === "function" && __fx("admin.backgroundJobs")) || [
+const BACKGROUND_JOBS = [
   { id:"j1", name:"Cache status poll",        desc:"Query binary caches to confirm tracked store paths still exist (detect GC eviction).", interval:"15m", enabled:true,  lastRun:"3m ago",  lastDuration:"4.2s",  nextRun:"in 12m", status:"healthy", impact:"low" },
   { id:"j2", name:"GC-eviction reconcile",    desc:"Flag configs whose derivations were garbage-collected so Scanning marks them needs-build.", interval:"1h",  enabled:true,  lastRun:"24m ago", lastDuration:"11s",   nextRun:"in 36m", status:"healthy", impact:"medium" },
   { id:"j3", name:"CVE DB refresh",           desc:"Pull latest NVD / advisory feeds into the local vulnerability database.", interval:"6h",  enabled:true,  lastRun:"1h ago",  lastDuration:"38s",   nextRun:"in 5h",  status:"healthy", impact:"low" },
@@ -75,7 +75,7 @@ const JOB_INTERVALS = ["1m","5m","15m","30m","1h","6h","12h","24h","never"];
 Object.assign(window, { BACKGROUND_JOBS, JOB_INTERVALS });
 
 // Agent heartbeat configuration — global default + per-environment overrides
-const HEARTBEAT_CONFIG = (typeof __fx === "function" && __fx("admin.heartbeat")) || {
+const HEARTBEAT_CONFIG = {
   globalIntervalSec: 60,
   staleMultiplier: 2,      // mark stale at N× interval missed
   offlineMultiplier: 5,    // mark offline at N× interval missed

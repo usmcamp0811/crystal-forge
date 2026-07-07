@@ -110,7 +110,7 @@ function buildCVEData() {
   });
 }
 
-const CVES = (typeof __fx === "function" && __fx("cves.list")) || buildCVEData();
+const CVES = buildCVEData();
 
 const CVE_STATS = {
   total:    CVES.length,

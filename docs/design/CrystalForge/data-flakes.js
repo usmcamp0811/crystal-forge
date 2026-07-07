@@ -1,6 +1,6 @@
 // Flakes mock data — registry + commits per flake + file diffs
 
-const FLAKE_REGISTRY = (typeof __fx === "function" && __fx("flakes.registry")) || [
+const FLAKE_REGISTRY = [
   {
     id: "fl-infra",
     name: "infrastructure",
@@ -96,7 +96,7 @@ const COMMIT_PIPELINE_STATUS = [
   { eval: "complete", build: "failed",         deploy: null         },
 ];
 
-const FLAKE_COMMITS = (typeof __fx === "function" && __fx("flakes.commits")) || (() => {
+const FLAKE_COMMITS = (() => {
   const base = {
   "fl-infra": [
     { sha:"a3f8c12", msg:"stig: enforce audit rules for sudo",        author:"mreyes",  at:"2h ago",  files:3, add:28, del:4  },

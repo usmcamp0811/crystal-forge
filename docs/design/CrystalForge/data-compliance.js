@@ -1,6 +1,6 @@
 // Compliance bundles — policies of policies for STIG / NIST / CMMC / custom
 
-const COMPLIANCE_BUNDLES = (typeof __fx === "function" && __fx("compliance")) || [
+const COMPLIANCE_BUNDLES = [
   {
     id: "disa-rhel9-stig",
     name: "Anduril NixOS STIG (v1r2)",

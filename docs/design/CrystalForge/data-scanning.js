@@ -26,7 +26,7 @@ const SCAN_STATUS_META = {
   unscanned: { label:"Never scanned", color:"#9ca3af", cls:"chip-unknown" },
 };
 
-const SCAN_CONFIGS = (typeof __fx === "function" && __fx("scanning.configs")) || [
+const SCAN_CONFIGS = [
   // freshness: deployed | recent | archived
   { id:"sc-1",  name:"gaia-web-01",  flake:"web-services",   commit:"c7e1902", freshness:"deployed", status:"scanning", progress:0.62, found:{crit:0,high:2,med:5}, lastScan:"scanning…", trigger:"post-build" },
   { id:"sc-2",  name:"atlas-01",     flake:"infrastructure", commit:"a3f8c12", freshness:"deployed", status:"complete", found:{crit:1,high:3,med:8}, lastScan:"4m ago", trigger:"scheduled" },
@@ -50,7 +50,7 @@ const SCAN_STATS = {
 };
 
 // Recent scan activity feed
-const SCAN_ACTIVITY = (typeof __fx === "function" && __fx("scanning.activity")) || [
+const SCAN_ACTIVITY = [
   { at:"just now", name:"gaia-web-01", event:"Scan started", detail:"post-build trigger · vulnix 1.10.1", color:"#60a5fa", icon:"shield" },
   { at:"4m ago",   name:"atlas-01",   event:"Scan complete", detail:"1 critical, 3 high, 8 medium found", color:"#34d399", icon:"check" },
   { at:"12m ago",  name:"orion-db-01",event:"Scan complete", detail:"1 high, 4 medium · clean of criticals", color:"#34d399", icon:"check" },
@@ -125,5 +125,5 @@ function buildScanHistory() {
     };
   });
 }
-const SCAN_HISTORY = (typeof __fx === "function" && __fx("scanning.history")) || buildScanHistory();
+const SCAN_HISTORY = buildScanHistory();
 Object.assign(window, { SCAN_HISTORY });

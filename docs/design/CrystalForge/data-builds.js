@@ -48,7 +48,7 @@ function sdScore(name, i) {
 const HARDENING_SERVICES = SD_SERVICES.map(sdScore);
 
 /* ─── Build workers ─── */
-const BUILD_WORKERS = (typeof __fx === "function" && __fx("builds.workers")) || [
+const BUILD_WORKERS = [
   { id:"w1", fingerprint:"SHA256:k7Hn2pQ9xR4mLwT0vBcZ8sJ1aD3eF6gY", registered:true,  name:"reckless-builder", host:"reckless-builder.lab",      arch:"x86_64-linux",   cores:16, mem:64,  slots:{used:0,total:1}, status:"running", load:0.02, lastSeen:"just now", uptimeDays:42,  completed24h:128, failed24h:1,  environments:["lab","dev"],                publicKey:"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH9rk2pQ9xR4mLwT0vBcZ8sJ1aD3eF6gY crystal-forge@reckless-builder" },
   { id:"w2", fingerprint:"SHA256:c04eD8a52f6gH7Lp1qWnM3zX9bV5tR8yK", registered:true,  name:"hydra-01",         host:"hydra-01.production",        arch:"x86_64-linux",   cores:64, mem:256, slots:{used:7,total:8}, status:"running", load:0.91, lastSeen:"2s ago",   uptimeDays:118, completed24h:842, failed24h:12, environments:["production","staging"],    publicKey:"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC04eD8a52f6gH7Lp1qWnM3zX9bV5tR8yK crystal-forge@hydra-01" },
   { id:"w3", fingerprint:"SHA256:9a2b7E60c3d1mQz4kP8xH2vN6rL0tW5yB", registered:true,  name:"hydra-02",         host:"hydra-02.production",        arch:"x86_64-linux",   cores:64, mem:256, slots:{used:5,total:8}, status:"running", load:0.62, lastSeen:"5s ago",   uptimeDays:118, completed24h:617, failed24h:8,  environments:["production"],              publicKey:"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII9a2b7E60c3d1mQz4kP8xH2vN6rL0tW5yB crystal-forge@hydra-02" },
@@ -108,8 +108,8 @@ function mkBuild(i, forceStatus) {
   };
 }
 
-const ACTIVE_BUILDS  = (typeof __fx === "function" && __fx("builds.active"))  || [0,1,2,3,4,5].map(i => mkBuild(i));
-const HISTORY_BUILDS = (typeof __fx === "function" && __fx("builds.history")) || Array.from({length:40},(_,i) => mkBuild(100+i));
+const ACTIVE_BUILDS  = [0,1,2,3,4,5].map(i => mkBuild(i));
+const HISTORY_BUILDS = Array.from({length:40},(_,i) => mkBuild(100+i));
 
 const BUILD_STATS = {
   building: ACTIVE_BUILDS.filter(b=>b.status==="building").length,
@@ -162,8 +162,8 @@ function mkEval(i, forceStatus) {
   };
 }
 
-const ACTIVE_EVALS  = (typeof __fx === "function" && __fx("evaluations.active")) || [0,1,2,3].map(i => mkEval(i));
-const HISTORY_EVALS = (typeof __fx === "function" && __fx("evaluations.history")) || Array.from({length:50},(_,i)=>mkEval(200+i,"complete").status==="cancelled"?mkEval(200+i):mkEval(200+i,["complete","complete","complete","failed","cancelled"][i%5]));
+const ACTIVE_EVALS  = [0,1,2,3].map(i => mkEval(i));
+const HISTORY_EVALS = Array.from({length:50},(_,i)=>mkEval(200+i,"complete").status==="cancelled"?mkEval(200+i):mkEval(200+i,["complete","complete","complete","failed","cancelled"][i%5]));
 
 const EVAL_STATS = {
   active:    ACTIVE_EVALS.length,
