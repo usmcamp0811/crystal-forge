@@ -66,19 +66,19 @@ impl AgentHeartbeat {
 
     /// Check if the change reason indicates this should be a heartbeat.
     ///
-    /// Both `"heartbeat"` (periodic loop) and `"startup"` (agent service restart)
-    /// are eligible for the lightweight heartbeat path. When the system state
-    /// hasn't changed (same store path, hardware, network, etc.), a startup POST
+    /// `"heartbeat"` (periodic loop), `"startup"` (agent service restart), and
+    /// `"state_delta"` (older agent binaries that don't emit `"heartbeat"`) are
+    /// all eligible for the lightweight heartbeat path. When the system state
+    /// hasn't changed (same store path, hardware, network, etc.), the POST
     /// records a cheap `agent_heartbeats` row instead of a full `system_states`
-    /// row. Only when `states_are_equivalent` returns false does a startup advance
-    /// to `insert_system_state` — which correctly produces a history event.
+    /// row. Only when `states_are_equivalent` returns false does the handler
+    /// advance to `insert_system_state` — which correctly produces a history event.
     ///
-    /// Without this, every agent service restart unconditionally called
-    /// `insert_system_state` (because `NotHeartbeatType` bypasses the equivalence
-    /// check), flooding the history timeline with "System restarted" entries even
-    /// when nothing about the system changed.
+    /// Older agents emit `"state_delta"` for every periodic heartbeat. Without
+    /// including `"state_delta"` here those agents flood history with identical
+    /// "Local rebuild" entries even though nothing about the system changed.
     fn is_heartbeat_change_reason(change_reason: &str) -> bool {
-        matches!(change_reason, "heartbeat" | "startup")
+        matches!(change_reason, "heartbeat" | "startup" | "state_delta")
     }
 
     /// Compare two system states to determine if they're equivalent
@@ -149,6 +149,15 @@ mod tests {
         // should land in agent_heartbeats, not system_states. Without this,
         // every agent service restart floods the history with "System restarted".
         assert!(AgentHeartbeat::is_heartbeat_change_reason("startup"));
+    }
+
+    #[test]
+    fn state_delta_accepted_for_heartbeat_path() {
+        // Older agent binaries emit "state_delta" for every periodic heartbeat.
+        // When the system state hasn't actually changed, these must land in
+        // agent_heartbeats rather than inserting a new system_states row, so
+        // history doesn't fill with identical "Local rebuild" entries.
+        assert!(AgentHeartbeat::is_heartbeat_change_reason("state_delta"));
     }
 
     #[test]
