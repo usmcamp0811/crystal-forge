@@ -30,6 +30,7 @@ pub struct PendingSystemDeployment {
 pub struct SystemEventHistoryRow {
     pub id: Uuid,
     pub event_type: String,
+    pub event_rank: i16,
     pub occurred_at: DateTime<Utc>,
     pub observed_at: DateTime<Utc>,
     pub correlation_id: Option<Uuid>,
@@ -66,6 +67,18 @@ struct PendingSystemEvent {
     actor: Option<&'static str>,
     metadata: serde_json::Value,
 }
+
+const MATCH_PENDING_DEPLOYMENT_SQL: &str = r#"
+        SELECT id, system_id, target_store_path, status, source, issued_at, expires_at
+        FROM pending_system_deployments
+        WHERE system_id = $1
+          AND target_store_path = $2
+          AND status = 'pending'
+          AND expires_at > NOW()
+        ORDER BY issued_at DESC
+        LIMIT 1
+        FOR UPDATE
+        "#;
 
 pub async fn lock_observed_system_state_by_hostname_tx(
     tx: &mut Transaction<'_, Postgres>,
@@ -213,19 +226,7 @@ async fn find_matching_pending_deployment_tx(
         return Ok(None);
     };
 
-    let row = sqlx::query_as::<_, PendingSystemDeployment>(
-        r#"
-        SELECT id, system_id, target_store_path, status, source, issued_at, expires_at
-        FROM pending_system_deployments
-        WHERE system_id = $1
-          AND target_store_path = $2
-          AND status IN ('pending', 'succeeded')
-          AND expires_at > NOW()
-        ORDER BY issued_at DESC
-        LIMIT 1
-        FOR UPDATE
-        "#,
-    )
+    let row = sqlx::query_as::<_, PendingSystemDeployment>(MATCH_PENDING_DEPLOYMENT_SQL)
     .bind(system_id)
     .bind(store_path)
     .fetch_optional(&mut **tx)
@@ -261,23 +262,24 @@ async fn insert_system_event_tx(
     sqlx::query(
         r#"
         INSERT INTO system_events (
-            system_id, event_type, dedupe_key, correlation_id,
+            system_id, event_type, event_rank, dedupe_key, correlation_id,
             occurred_at, previous_generation, new_generation,
             previous_store_path, new_store_path,
             previous_boot_id, new_boot_id,
             deployment_id, desired_target_id, source, actor, metadata
         ) VALUES (
-            $1, $2, $3, $4,
-            $5, $6, $7,
-            $8, $9,
-            $10, $11,
-            $12, $13, $14, $15, $16
+            $1, $2, $3, $4, $5,
+            $6, $7, $8,
+            $9, $10,
+            $11, $12,
+            $13, $14, $15, $16, $17
         )
         ON CONFLICT (system_id, event_type, dedupe_key) DO NOTHING
         "#,
     )
     .bind(system_id)
     .bind(event.event_type.as_str())
+    .bind(event.event_type.rank())
     .bind(&event.dedupe_key)
     .bind(correlation_id)
     .bind(occurred_at)
@@ -441,6 +443,7 @@ pub async fn list_system_event_history_rows(
         SELECT
             se.id,
             se.event_type,
+            se.event_rank,
             se.occurred_at,
             se.observed_at,
             se.correlation_id,
@@ -468,7 +471,7 @@ pub async fn list_system_event_history_rows(
         LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id
         WHERE se.system_id = $1
-        ORDER BY se.occurred_at DESC, se.observed_at DESC, se.id DESC
+        ORDER BY se.occurred_at DESC, se.observed_at DESC, se.correlation_id DESC, se.event_rank ASC, se.id DESC
         LIMIT $2
         "#,
     )
@@ -500,5 +503,20 @@ mod tests {
             SystemEventType::LocalRebuildDetected.as_str(),
             "local_rebuild_detected"
         );
+    }
+
+    #[test]
+    fn event_ranks_put_config_transition_before_restart_for_same_report() {
+        assert_eq!(SystemEventType::CfDeploymentSucceeded.rank(), 10);
+        assert_eq!(SystemEventType::LocalRebuildDetected.rank(), 10);
+        assert_eq!(SystemEventType::SystemReboot.rank(), 20);
+        assert_eq!(SystemEventType::AgentRestart.rank(), 30);
+    }
+
+    #[test]
+    fn matching_pending_deployment_sql_excludes_succeeded_contexts() {
+        assert!(MATCH_PENDING_DEPLOYMENT_SQL.contains("status = 'pending'"));
+        assert!(!MATCH_PENDING_DEPLOYMENT_SQL.contains("succeeded"));
+        assert!(!MATCH_PENDING_DEPLOYMENT_SQL.contains("status IN"));
     }
 }

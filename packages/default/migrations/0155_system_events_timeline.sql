@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS system_events (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     system_id uuid NOT NULL REFERENCES systems (id) ON DELETE CASCADE,
     event_type text NOT NULL,
+    event_rank smallint NOT NULL DEFAULT 100,
     dedupe_key text NOT NULL,
     correlation_id uuid,
     occurred_at timestamptz NOT NULL,
@@ -54,7 +55,7 @@ CREATE TABLE IF NOT EXISTS system_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_system_events_system_history
-    ON system_events (system_id, occurred_at DESC, observed_at DESC, id DESC);
+    ON system_events (system_id, occurred_at DESC, observed_at DESC, correlation_id DESC, event_rank ASC, id DESC);
 
 CREATE INDEX IF NOT EXISTS idx_system_events_system_type
     ON system_events (system_id, event_type, occurred_at DESC);

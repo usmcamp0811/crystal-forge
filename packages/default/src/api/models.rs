@@ -1478,6 +1478,8 @@ pub struct SystemHistoryEntry {
     #[serde(default)]
     pub event_type: String,
     #[serde(default)]
+    pub event_rank: Option<i16>,
+    #[serde(default)]
     pub title: Option<String>,
     pub commit_hash: Option<String>,
     pub flake_name: Option<String>,

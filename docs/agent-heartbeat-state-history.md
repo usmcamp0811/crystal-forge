@@ -92,12 +92,14 @@ Example dedupe keys:
 Ordering is deterministic:
 
 ```sql
-ORDER BY occurred_at DESC, observed_at DESC, id DESC
+ORDER BY occurred_at DESC, observed_at DESC, correlation_id DESC, event_rank ASC, id DESC
 ```
 
 Events emitted from the same report share a `correlation_id`, so a report that
 both changes generation and changes `boot_id` can be grouped later without relying
-only on timestamps.
+only on timestamps. `event_rank` provides a stable causal order inside one report:
+configuration/deployment transitions (rank 10) render before `system_reboot`
+(rank 20), which renders before `agent_restart` (rank 30).
 
 ### Pending deployment context
 
@@ -119,6 +121,15 @@ server emits `cf_deployment_succeeded` and marks the pending context `succeeded`
 When a newer desired target is set, older pending contexts for the same system are
 marked `superseded`. Pending contexts expire after a bounded window so stale targets
 cannot claim unrelated future host changes.
+
+Only live `pending` contexts may attribute future reports. Once a context is marked
+`succeeded`, it is no longer matchable; a later manual switch back to the same store
+path is therefore classified as `local_rebuild_detected`.
+
+Commit-based deploy requests are resolved to the matching NixOS derivation store
+path before `systems.desired_target` is set. If no store path or expected store path
+is available for that commit/configuration, the deploy request is rejected instead
+of sending an agent a commit SHA it cannot activate.
 
 `cf_deployment_failed` is part of the event contract, but the current server path
 does not always receive reliable post-detached failure data. Until that data is

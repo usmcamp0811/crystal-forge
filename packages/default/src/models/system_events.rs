@@ -7,6 +7,7 @@ pub struct SystemEvent {
     pub id: Uuid,
     pub system_id: Uuid,
     pub event_type: String,
+    pub event_rank: i16,
     pub dedupe_key: String,
     pub correlation_id: Option<Uuid>,
     pub occurred_at: DateTime<Utc>,
@@ -41,6 +42,16 @@ impl SystemEventType {
             Self::CfDeploymentSucceeded => "cf_deployment_succeeded",
             Self::CfDeploymentFailed => "cf_deployment_failed",
             Self::LocalRebuildDetected => "local_rebuild_detected",
+        }
+    }
+
+    pub fn rank(self) -> i16 {
+        match self {
+            Self::CfDeploymentSucceeded | Self::CfDeploymentFailed | Self::LocalRebuildDetected => {
+                10
+            }
+            Self::SystemReboot => 20,
+            Self::AgentRestart => 30,
         }
     }
 }
