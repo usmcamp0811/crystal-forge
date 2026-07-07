@@ -6849,6 +6849,7 @@ fn synthesize_history_entries_from_commits(
             generation: None,
             reconciled: true,
             generation_matches_current_store_path: None,
+            restart_type: None,
         })
         .collect()
 }
@@ -6904,6 +6905,7 @@ mod tests {
                 generation: Some(3),
                 reconciled: true,
                 generation_matches_current_store_path: Some(true),
+                restart_type: None,
             },
             SystemHistoryEntry {
                 timestamp: now - Duration::minutes(10),
@@ -6919,6 +6921,7 @@ mod tests {
                 generation: Some(2),
                 reconciled: true,
                 generation_matches_current_store_path: Some(false),
+                restart_type: None,
             },
             SystemHistoryEntry {
                 timestamp: now - Duration::minutes(20),
@@ -6934,6 +6937,7 @@ mod tests {
                 generation: Some(1),
                 reconciled: true,
                 generation_matches_current_store_path: Some(false),
+                restart_type: None,
             },
         ];
 
