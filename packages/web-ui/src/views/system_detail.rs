@@ -3717,8 +3717,13 @@ fn classify_history_entry_legacy(entry: &SystemHistoryEntry) -> HistoryEventKind
     if reason.contains("restart") || reason.contains("boot") || reason.contains("startup") {
         return HistoryEventKind::Restart;
     }
-    let is_local =
-        actor.contains('@') || reason.contains("nixos-rebuild") || reason.contains("local");
+    let is_local = actor.contains('@')
+        || actor.contains("on-host")
+        || reason.contains("config_change")
+        || reason.contains("state_change")
+        || reason.contains("state_delta")
+        || reason.contains("nixos-rebuild")
+        || reason.contains("local");
     if is_local {
         if entry.commit_hash.is_some() {
             HistoryEventKind::LocalRebuildMatched
@@ -7147,7 +7152,10 @@ fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogE
 
 #[cfg(test)]
 mod tests {
-    use super::{map_agent_events_to_logs, map_history_entries_to_commit_history};
+    use super::{
+        HistoryEventKind, classify_history_entry, map_agent_events_to_logs,
+        map_history_entries_to_commit_history,
+    };
     use crate::api::models::{SystemAgentEvent, SystemHistoryEntry};
     use chrono::{Duration, Utc};
 
@@ -7231,5 +7239,61 @@ mod tests {
 
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].phase.as_deref(), Some("Deployment"));
+    }
+
+    fn history_entry(change_reason: &str, actor: &str, event_kind: &str) -> SystemHistoryEntry {
+        SystemHistoryEntry {
+            timestamp: Utc::now(),
+            store_path: Some("/nix/store/aaaa-system".to_string()),
+            system_configuration_name: Some("web-01".to_string()),
+            change_reason: change_reason.to_string(),
+            commit_hash: Some("aaaaaaaa".to_string()),
+            flake_name: Some("infra".to_string()),
+            flake_repo_url: Some("https://example.com/infra.git".to_string()),
+            actor: actor.to_string(),
+            outcome: "recorded".to_string(),
+            event_kind: event_kind.to_string(),
+            generation: Some(3),
+            reconciled: true,
+            generation_matches_current_store_path: Some(true),
+            restart_type: None,
+        }
+    }
+
+    #[test]
+    fn legacy_history_classifies_config_change_as_local_rebuild() {
+        let entry = history_entry("config_change", "on-host", "");
+
+        assert_eq!(
+            classify_history_entry(&entry),
+            HistoryEventKind::LocalRebuildMatched
+        );
+    }
+
+    #[test]
+    fn legacy_history_classifies_state_delta_as_local_rebuild() {
+        let entry = history_entry("state_delta", "agent", "");
+
+        assert_eq!(
+            classify_history_entry(&entry),
+            HistoryEventKind::LocalRebuildMatched
+        );
+    }
+
+    #[test]
+    fn legacy_history_classifies_state_change_as_local_rebuild() {
+        let entry = history_entry("state_change", "agent", "");
+
+        assert_eq!(
+            classify_history_entry(&entry),
+            HistoryEventKind::LocalRebuildMatched
+        );
+    }
+
+    #[test]
+    fn authoritative_cf_event_kind_still_classifies_as_deploy() {
+        let entry = history_entry("cf_deployment", "crystal-forge", "cf_deployment");
+
+        assert_eq!(classify_history_entry(&entry), HistoryEventKind::Deploy);
     }
 }
