@@ -224,14 +224,14 @@ pub async fn log(
             }
             Err(state_change_reason) => {
                 info!("🔍 Heartbeat became state change: {}", state_change_reason);
-                let change_reason_override =
+                let (change_reason_override, event_restart_type) =
                     classify_non_reboot_state_change_reason(&pool, &payload, restart_type).await;
 
                 if let Err(e) = insert_system_state(
                     &mut *tx,
                     &payload,
                     version_compatible,
-                    restart_type,
+                    event_restart_type,
                     Some(change_reason_override),
                 )
                 .await
@@ -327,26 +327,51 @@ async fn classify_non_reboot_state_change_reason(
     pool: &PgPool,
     payload: &crate::models::system_states::SystemState,
     restart_type: Option<&str>,
-) -> &'static str {
-    // Startup with unchanged boot_id is an agent service restart unless the
-    // actual running system generation/store path changed.  Other metadata
-    // changes (agent build hash/version, network details, etc.) must not turn a
-    // service restart into a fake local rebuild.
-    if payload.change_reason == "startup" && restart_type == Some("agent_restart") {
-        match get_last_system_state_by_hostname(pool, &payload.hostname).await {
-            Ok(Some(previous))
-                if payload.generation == previous.generation
-                    && payload.store_path == previous.store_path =>
-            {
-                return "startup";
-            }
-            Ok(_) | Err(_) => {}
-        }
+) -> (&'static str, Option<&'static str>) {
+    let previous = match get_last_system_state_by_hostname(pool, &payload.hostname).await {
+        Ok(Some(previous)) => Some((previous.generation, previous.store_path)),
+        Ok(None) | Err(_) => None,
+    };
+
+    classify_non_reboot_state_change_reason_from_previous(
+        payload.change_reason.as_str(),
+        restart_type,
+        payload.generation,
+        payload.store_path.as_deref(),
+        previous
+            .as_ref()
+            .map(|(generation, store_path)| (*generation, store_path.as_deref())),
+    )
+}
+
+fn classify_non_reboot_state_change_reason_from_previous(
+    payload_change_reason: &str,
+    restart_type: Option<&str>,
+    payload_generation: Option<i32>,
+    payload_store_path: Option<&str>,
+    previous: Option<(Option<i32>, Option<&str>)>,
+) -> (&'static str, Option<&'static str>) {
+    let generation_or_store_changed = previous
+        .map(|(previous_generation, previous_store_path)| {
+            payload_generation != previous_generation || payload_store_path != previous_store_path
+        })
+        .unwrap_or(false);
+
+    if generation_or_store_changed {
+        // A changed generation/store path is the local rebuild/config delta.
+        // It is not a restart classification event.
+        return ("config_change", None);
     }
 
-    // Heartbeat/startup full-state deltas with a generation/store-path change
-    // are local rebuild/config changes, not restarts.
-    "config_change"
+    if payload_change_reason == "startup" && restart_type == Some("agent_restart") {
+        // Same generation/store path + unchanged boot_id means only the agent
+        // service restarted, even if metadata such as agent build hash changed.
+        return ("startup", Some("agent_restart"));
+    }
+
+    // Metadata-only full-state delta from heartbeat/startup. Do not invent a
+    // local rebuild and do not carry restart_type on generic state changes.
+    ("state_delta", None)
 }
 
 /// Pure function: given the boot_id comparison result and the change_reason string,
@@ -451,6 +476,64 @@ mod tests {
     #[test]
     fn no_boot_id_on_heartbeat_returns_none() {
         assert_eq!(classify_restart_type(None, "heartbeat"), None);
+    }
+
+    // ─── classify_non_reboot_state_change_reason tests ──────────────────────
+
+    #[test]
+    fn non_reboot_generation_change_is_config_change_without_restart_type() {
+        assert_eq!(
+            classify_non_reboot_state_change_reason_from_previous(
+                "startup",
+                Some("agent_restart"),
+                Some(5056),
+                Some("/nix/store/new-system"),
+                Some((Some(5055), Some("/nix/store/old-system"))),
+            ),
+            ("config_change", None),
+        );
+    }
+
+    #[test]
+    fn unchanged_startup_preserves_agent_restart_classification() {
+        assert_eq!(
+            classify_non_reboot_state_change_reason_from_previous(
+                "startup",
+                Some("agent_restart"),
+                Some(5056),
+                Some("/nix/store/current-system"),
+                Some((Some(5056), Some("/nix/store/current-system"))),
+            ),
+            ("startup", Some("agent_restart")),
+        );
+    }
+
+    #[test]
+    fn heartbeat_metadata_only_delta_is_state_delta_not_config_change() {
+        assert_eq!(
+            classify_non_reboot_state_change_reason_from_previous(
+                "heartbeat",
+                None,
+                Some(5056),
+                Some("/nix/store/current-system"),
+                Some((Some(5056), Some("/nix/store/current-system"))),
+            ),
+            ("state_delta", None),
+        );
+    }
+
+    #[test]
+    fn missing_previous_state_does_not_invent_config_change() {
+        assert_eq!(
+            classify_non_reboot_state_change_reason_from_previous(
+                "heartbeat",
+                None,
+                Some(5056),
+                Some("/nix/store/current-system"),
+                None,
+            ),
+            ("state_delta", None),
+        );
     }
 
     // ─── duplicate-cleanup tests ────────────────────────────────────────────
