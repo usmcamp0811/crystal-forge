@@ -3180,6 +3180,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                         true,
                     );
                 }
+                HistoryEventKind::StateChange => {}
             }
         }
 
@@ -3587,6 +3588,8 @@ enum HistoryEventKind {
     Restart,
     /// Agent service restart — same boot, only the crystal-forge-agent process restarted.
     AgentRestart,
+    /// Non-generation-changing state/metadata update. Hidden from deployment timeline.
+    StateChange,
 }
 
 /// A single unified timeline event, built from deployment history + agent events.
@@ -3643,6 +3646,7 @@ fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
         }
         "restart" => HistoryEventKind::Restart,
         "agent_restart" => HistoryEventKind::AgentRestart,
+        "state_change" => HistoryEventKind::StateChange,
         _ => classify_history_entry_legacy(entry),
     }
 }
@@ -3702,6 +3706,13 @@ fn history_event_message(entry: &SystemHistoryEntry, kind: &HistoryEventKind) ->
                 raw
             }
         }
+        HistoryEventKind::StateChange => {
+            if is_raw_reason {
+                "State updated".to_string()
+            } else {
+                raw
+            }
+        }
     }
 }
 
@@ -3717,11 +3728,12 @@ fn classify_history_entry_legacy(entry: &SystemHistoryEntry) -> HistoryEventKind
     if reason.contains("restart") || reason.contains("boot") || reason.contains("startup") {
         return HistoryEventKind::Restart;
     }
+    if reason.contains("state_change") || reason.contains("state_delta") {
+        return HistoryEventKind::StateChange;
+    }
     let is_local = actor.contains('@')
         || actor.contains("on-host")
         || reason.contains("config_change")
-        || reason.contains("state_change")
-        || reason.contains("state_delta")
         || reason.contains("nixos-rebuild")
         || reason.contains("local");
     if is_local {
@@ -3756,6 +3768,9 @@ fn build_history_events(
 
     for (idx, entry) in entries.iter().enumerate() {
         let kind = classify_history_entry(entry);
+        if matches!(kind, HistoryEventKind::StateChange) {
+            continue;
+        }
         let short_reason = history_event_message(entry, &kind);
 
         // Match a commit record (for the rollback action + rich commit link).
@@ -7153,7 +7168,7 @@ fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogE
 #[cfg(test)]
 mod tests {
     use super::{
-        HistoryEventKind, classify_history_entry, map_agent_events_to_logs,
+        HistoryEventKind, build_history_events, classify_history_entry, map_agent_events_to_logs,
         map_history_entries_to_commit_history,
     };
     use crate::api::models::{SystemAgentEvent, SystemHistoryEntry};
@@ -7271,23 +7286,47 @@ mod tests {
     }
 
     #[test]
-    fn legacy_history_classifies_state_delta_as_local_rebuild() {
+    fn legacy_history_classifies_state_delta_as_state_change() {
         let entry = history_entry("state_delta", "agent", "");
 
         assert_eq!(
             classify_history_entry(&entry),
-            HistoryEventKind::LocalRebuildMatched
+            HistoryEventKind::StateChange
         );
     }
 
     #[test]
-    fn legacy_history_classifies_state_change_as_local_rebuild() {
+    fn legacy_history_classifies_state_change_as_state_change() {
         let entry = history_entry("state_change", "agent", "");
+
+        assert_eq!(
+            classify_history_entry(&entry),
+            HistoryEventKind::StateChange
+        );
+    }
+
+    #[test]
+    fn authoritative_state_change_does_not_render_in_deployment_timeline() {
+        let entry = history_entry("state_delta", "agent", "state_change");
+
+        assert_eq!(
+            classify_history_entry(&entry),
+            HistoryEventKind::StateChange
+        );
+        assert!(build_history_events(&[entry], &[], Some(3)).is_empty());
+    }
+
+    #[test]
+    fn authoritative_local_rebuild_still_renders_in_deployment_timeline() {
+        let entry = history_entry("state_delta", "on-host", "local_rebuild");
 
         assert_eq!(
             classify_history_entry(&entry),
             HistoryEventKind::LocalRebuildMatched
         );
+        let events = build_history_events(&[entry], &[], Some(3));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, HistoryEventKind::LocalRebuildMatched);
     }
 
     #[test]

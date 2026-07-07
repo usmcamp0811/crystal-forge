@@ -32,7 +32,7 @@ sequenceDiagram
     participant UI as Web UI
 
     Agent->>Agent: Gather /run/current-system, generation, boot_id, metadata
-    Agent->>Server: POST /current-system (SystemState + change_reason)
+    Agent->>Server: POST /agent/heartbeat (SystemState + change_reason)
     Server->>Server: Authenticate agent request
     Server->>Server: Classify boot_id change
     Server->>Server: Decide heartbeat vs full state row
@@ -45,7 +45,7 @@ sequenceDiagram
     Server-->>Agent: LogResponse { desired_target, runtime_caches, heartbeat_interval_secs }
     alt desired_target present and differs from current system
         Agent->>Agent: Copy store path from cache and activate via systemd-run
-        Agent->>Server: POST follow-up state with cf_deployment
+        Agent->>Server: POST /agent/state with cf_deployment/config_change when reported
     else no desired target or already on target
         Agent->>Agent: No deployment needed
     end
@@ -85,7 +85,7 @@ heartbeat telemetry.
 
 ```mermaid
 flowchart TD
-    A[POST /current-system] --> B[Authenticate request]
+    A[POST /agent/heartbeat or /agent/state] --> B[Authenticate request]
     B --> C[Deserialize SystemState]
     C --> D[Update/compare boot_id]
     D --> E{boot_id changed?}
@@ -144,6 +144,27 @@ Therefore, treating old-agent `state_delta` as heartbeat-eligible is safe:
 - `desired_target` is still returned either way
 - older agents can still receive and apply deployment commands
 
+### Current limitation: detached CF deployment attribution
+
+Normal store-path deployment currently starts activation through a detached
+`systemd-run --no-block` unit and returns `DeploymentResult::Started`. That path
+logs that deployment started, but it does not itself synchronously write a
+follow-up `system_states` row with `change_reason = cf_deployment` before the
+agent process may be restarted by activation.
+
+Because of that, the next report after activation can arrive as `startup`,
+`config_change`, or `state_delta`. Unless deployment context is persisted across
+the detached activation, a successful Crystal Forge-initiated activation can be
+hard to distinguish from an on-host rebuild after the fact.
+
+Desired future behavior:
+
+1. When an agent receives a desired target and starts detached activation, persist
+   pending CF deployment context locally or server-side.
+2. When `/run/current-system` or the startup heartbeat later reports that target
+   store path, record the transition as `cf_deployment`.
+3. Clear the pending context after success, mismatch, timeout, or failure.
+
 ## Restart and activation classification
 
 The server uses `boot_id` and generation/store-path transitions to classify
@@ -159,9 +180,12 @@ flowchart TD
     E -->|no| F[event_kind state_change\nactor agent]
     B -->|startup| G{restart_type}
     G -->|system_reboot| H[event_kind restart]
-    G -->|agent_restart or unknown| I{generation/store path changed?}
+    G -->|agent_restart| I{generation/store path changed?}
+    G -->|unknown/none| K{generation/store path changed?}
     I -->|yes| D
-    I -->|no| J[event_kind agent_restart or restart]
+    I -->|no| J[event_kind agent_restart]
+    K -->|yes| D
+    K -->|no| L[event_kind restart]
 ```
 
 ### Why startup can be a local rebuild
@@ -205,6 +229,16 @@ Important UI rule:
 > `state_change` must not fall through to legacy classification. Otherwise raw
 > `state_delta` text can be misread as a local rebuild and flood Deployment
 > History with fake rebuild rows.
+
+### Current limitation: failed deployment history
+
+`DeployFailed` only appears when the history/API payload includes a failure-like
+outcome (for example a value containing `fail` or `error`). The current
+heartbeat/system-state history path emits `outcome = recorded` for normal state
+rows, and an agent-side `DeploymentResult::Failed` is not automatically converted
+into a failed deployment history row unless that failure is also persisted and
+merged into the history stream. Treat `DeployFailed` as supported by the UI model
+but dependent on a failure outcome being present in the data.
 
 ## Correct tests to keep
 
