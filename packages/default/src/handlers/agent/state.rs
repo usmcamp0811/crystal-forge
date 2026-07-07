@@ -70,7 +70,11 @@ pub async fn update(
     let pool = pool.clone();
     update_with_lookup_and_insert(headers, body, &pool, |payload, version_compatible| {
         let pool = pool.clone();
-        Box::pin(async move { insert_system_state(&pool, payload, version_compatible).await })
+        Box::pin(async move {
+            // The legacy state endpoint does not perform boot_id classification;
+            // restart_type is not known here and is left NULL.
+            insert_system_state(&pool, payload, version_compatible, None).await
+        })
     })
     .await
 }

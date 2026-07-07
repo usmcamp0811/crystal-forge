@@ -1514,7 +1514,7 @@ pub struct SystemHistoryEntry {
     pub actor: String,
     pub outcome: String,
     /// Authoritative event classification derived from `change_reason`:
-    /// `cf_deployment`, `local_rebuild`, `restart`, or `state_change`.
+    /// `cf_deployment`, `local_rebuild`, `restart`, `agent_restart`, or `state_change`.
     #[serde(default)]
     pub event_kind: String,
     /// Recorded generation number at this transition.
@@ -1526,6 +1526,9 @@ pub struct SystemHistoryEntry {
     /// Whether this recorded generation matched the current store path.
     #[serde(default)]
     pub generation_matches_current_store_path: Option<bool>,
+    /// Per-event restart classification: "system_reboot", "agent_restart", "unknown", or None.
+    #[serde(default)]
+    pub restart_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1899,14 +1899,21 @@ pub async fn get_system_history(
                 .change_reason
                 .unwrap_or_else(|| "state_delta".to_string());
 
-            // Authoritative classification derived from the recorded change_reason.
+            // Authoritative classification derived from the recorded change_reason and,
+            // for startup events, the per-row restart_type written at insert time.
             // `cf_deployment` = deploy driven through Crystal Forge; `config_change` =
             // on-host/out-of-band activation (e.g. a manual `nixos-rebuild switch`);
-            // `startup` = reboot/restart at the same generation.
+            // `startup` + `system_reboot` restart_type = system reboot;
+            // `startup` + `agent_restart` restart_type = agent service restart;
+            // `startup` + other/None = generic restart (legacy, no boot_id data).
             let event_kind = match change_reason.as_str() {
                 "cf_deployment" => "cf_deployment",
                 "config_change" => "local_rebuild",
-                "startup" => "restart",
+                "startup" => match row.restart_type.as_deref() {
+                    Some("system_reboot") => "restart",
+                    Some("agent_restart") => "agent_restart",
+                    _ => "restart",
+                },
                 _ => "state_change",
             }
             .to_string();
@@ -1940,6 +1947,7 @@ pub async fn get_system_history(
                 reconciled,
                 generation_matches_current_store_path: row
                     .generation_matches_current_store_path,
+                restart_type: row.restart_type,
             }
         })
         .collect::<Vec<_>>();

@@ -196,7 +196,9 @@ pub async fn log(
 
     if force_full_state_for_reboot {
         // Reboot detected: always write full system state regardless of equivalence.
-        if let Err(e) = insert_system_state(&mut *tx, &payload, version_compatible).await {
+        if let Err(e) =
+            insert_system_state(&mut *tx, &payload, version_compatible, restart_type).await
+        {
             debug!("❌ failed to insert reboot system state: {e:?}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
@@ -212,8 +214,12 @@ pub async fn log(
             }
             Err(state_change_reason) => {
                 info!("🔍 Heartbeat became state change: {}", state_change_reason);
-                // State changed - insert full state record
-                if let Err(e) = insert_system_state(&mut *tx, &payload, version_compatible).await {
+                // State changed - insert full state record.
+                // restart_type is set for startup transitions; None for other state changes.
+                if let Err(e) =
+                    insert_system_state(&mut *tx, &payload, version_compatible, restart_type)
+                        .await
+                {
                     debug!("❌ failed to insert system state: {e:?}");
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }

@@ -3027,11 +3027,16 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
             };
 
             match kind {
-                HistoryEventKind::Restart => {
+                HistoryEventKind::Restart | HistoryEventKind::AgentRestart => {
+                    let is_agent = matches!(kind, HistoryEventKind::AgentRestart);
                     push(
                         0,
                         "info",
-                        "[reconstructed timeline] systemd: reached target multi-user.target".into(),
+                        if is_agent {
+                            "[reconstructed timeline] systemd: crystal-forge-agent.service started".into()
+                        } else {
+                            "[reconstructed timeline] systemd: reached target multi-user.target".into()
+                        },
                         false,
                     );
                     push(
@@ -3043,7 +3048,11 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                     push(
                         4,
                         "info",
-                        "[reconstructed timeline] heartbeat observed after boot".into(),
+                        if is_agent {
+                            "[reconstructed timeline] heartbeat observed after agent start".into()
+                        } else {
+                            "[reconstructed timeline] heartbeat observed after boot".into()
+                        },
                         false,
                     );
                 }
@@ -3572,8 +3581,10 @@ enum HistoryEventKind {
     LocalRebuildMatched,
     /// Out-of-band `nixos-rebuild switch` on the host with no tracked flake commit.
     LocalRebuildUntracked,
-    /// System restart (reboot) at the same generation.
+    /// System reboot (boot_id changed, full OS restart).
     Restart,
+    /// Agent service restart — same boot, only the crystal-forge-agent process restarted.
+    AgentRestart,
 }
 
 /// A single unified timeline event, built from deployment history + agent events.
@@ -3629,6 +3640,7 @@ fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
             }
         }
         "restart" => HistoryEventKind::Restart,
+        "agent_restart" => HistoryEventKind::AgentRestart,
         _ => classify_history_entry_legacy(entry),
     }
 }
@@ -3677,6 +3689,13 @@ fn history_event_message(entry: &SystemHistoryEntry, kind: &HistoryEventKind) ->
         HistoryEventKind::Restart => {
             if is_raw_reason {
                 "System restarted".to_string()
+            } else {
+                raw
+            }
+        }
+        HistoryEventKind::AgentRestart => {
+            if is_raw_reason {
+                "Agent restarted".to_string()
             } else {
                 raw
             }
@@ -3740,7 +3759,9 @@ fn build_history_events(
 
         let is_gen_changing = !matches!(
             kind,
-            HistoryEventKind::Restart | HistoryEventKind::DeployFailed
+            HistoryEventKind::Restart
+                | HistoryEventKind::AgentRestart
+                | HistoryEventKind::DeployFailed
         );
         let (generation, prev_generation) = if has_authoritative_gen {
             // Authoritative: use the recorded generation and compare against the
@@ -3794,7 +3815,7 @@ fn fold_restart_clusters(events: &[HistoryEvent]) -> Vec<TimelineItem> {
     let mut run: Vec<HistoryEvent> = Vec::new();
 
     for e in events {
-        if matches!(e.kind, HistoryEventKind::Restart) {
+        if matches!(e.kind, HistoryEventKind::Restart | HistoryEventKind::AgentRestart) {
             run.push(e.clone());
         } else {
             if !run.is_empty() {
@@ -3832,11 +3853,21 @@ fn HistoryTab(
 
     let deploy_count = events
         .iter()
-        .filter(|e| !matches!(e.kind, HistoryEventKind::Restart))
+        .filter(|e| {
+            !matches!(
+                e.kind,
+                HistoryEventKind::Restart | HistoryEventKind::AgentRestart
+            )
+        })
         .count();
     let restart_count = events
         .iter()
-        .filter(|e| matches!(e.kind, HistoryEventKind::Restart))
+        .filter(|e| {
+            matches!(
+                e.kind,
+                HistoryEventKind::Restart | HistoryEventKind::AgentRestart
+            )
+        })
         .count();
 
     // Infinite scroll pagination: reveal a page of clustered items at a time as
@@ -4038,15 +4069,22 @@ fn HistoryTab(
     }
 }
 
-/// A single reboot line within a restart cluster (design `RestartLine`).
+/// A single restart line within a restart cluster (design `RestartLine`).
+/// Shows "System restarted" for OS reboots and "Agent restarted" for service restarts.
 #[component]
 fn RestartLine(event: HistoryEvent) -> Element {
     let when = relative_time(event.timestamp);
+    let is_agent_restart = matches!(event.kind, HistoryEventKind::AgentRestart);
+    let label = if is_agent_restart {
+        "Agent restarted"
+    } else {
+        "System restarted"
+    };
     rsx! {
         div { class: "tl-restart-line",
             span { class: "tl-restart-dot" }
             Icon { name: IconName::Power, size: 12 }
-            span { class: "tl-restart-label", "System restarted" }
+            span { class: "tl-restart-label", "{label}" }
             span { class: "tl-restart-sep", "·" }
             span { class: "tl-when", "{when}" }
         }
