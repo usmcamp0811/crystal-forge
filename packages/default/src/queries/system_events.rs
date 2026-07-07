@@ -80,6 +80,25 @@ const MATCH_PENDING_DEPLOYMENT_SQL: &str = r#"
         FOR UPDATE
         "#;
 
+fn meaningful_generation_or_store_changed(
+    previous_generation: Option<i32>,
+    current_generation: Option<i32>,
+    previous_store_path: Option<&str>,
+    current_store_path: Option<&str>,
+) -> bool {
+    let store_changed = match (previous_store_path, current_store_path) {
+        (Some(previous), Some(current)) => previous != current,
+        _ => false,
+    };
+
+    let generation_changed = match (previous_generation, current_generation) {
+        (Some(previous), Some(current)) => previous != current,
+        _ => false,
+    };
+
+    store_changed || generation_changed
+}
+
 pub async fn lock_observed_system_state_by_hostname_tx(
     tx: &mut Transaction<'_, Postgres>,
     hostname: &str,
@@ -120,6 +139,8 @@ pub async fn set_pending_deployment_target_tx(
     desired_target: Option<&str>,
     source: &str,
 ) -> Result<Option<Uuid>> {
+    expire_stale_pending_deployments_tx(tx, system_id).await?;
+
     sqlx::query(
         r#"
         UPDATE pending_system_deployments
@@ -151,6 +172,7 @@ pub async fn set_pending_deployment_target_tx(
             WHERE system_id = $1
               AND target_store_path = $2
               AND status = 'pending'
+              AND expires_at > NOW()
         )
         RETURNING id
         "#,
@@ -174,6 +196,7 @@ pub async fn set_pending_deployment_target_tx(
         WHERE system_id = $1
           AND target_store_path = $2
           AND status = 'pending'
+          AND expires_at > NOW()
         ORDER BY issued_at DESC
         LIMIT 1
         "#,
@@ -320,8 +343,12 @@ pub async fn record_report_events_tx(
     let previous_store_path = previous.store_path.clone();
     let new_store_path = payload.store_path.clone();
 
-    let generation_or_store_changed = previous.generation != payload.generation
-        || previous.store_path.as_deref() != payload.store_path.as_deref();
+    let generation_or_store_changed = meaningful_generation_or_store_changed(
+        previous.generation,
+        payload.generation,
+        previous.store_path.as_deref(),
+        payload.store_path.as_deref(),
+    );
 
     let mut events = Vec::new();
 
@@ -518,5 +545,60 @@ mod tests {
         assert!(MATCH_PENDING_DEPLOYMENT_SQL.contains("status = 'pending'"));
         assert!(!MATCH_PENDING_DEPLOYMENT_SQL.contains("succeeded"));
         assert!(!MATCH_PENDING_DEPLOYMENT_SQL.contains("status IN"));
+    }
+
+    #[test]
+    fn missing_generation_or_store_path_does_not_invent_transition() {
+        assert!(!meaningful_generation_or_store_changed(
+            Some(5058),
+            None,
+            Some("/nix/store/current-system"),
+            Some("/nix/store/current-system"),
+        ));
+        assert!(!meaningful_generation_or_store_changed(
+            Some(5058),
+            Some(5058),
+            Some("/nix/store/current-system"),
+            None,
+        ));
+        assert!(!meaningful_generation_or_store_changed(
+            Some(5058),
+            None,
+            Some("/nix/store/current-system"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn present_generation_or_store_path_change_is_transition() {
+        assert!(meaningful_generation_or_store_changed(
+            Some(5058),
+            Some(5059),
+            Some("/nix/store/current-system"),
+            Some("/nix/store/current-system"),
+        ));
+        assert!(meaningful_generation_or_store_changed(
+            Some(5058),
+            Some(5058),
+            Some("/nix/store/old-system"),
+            Some("/nix/store/new-system"),
+        ));
+    }
+
+    #[test]
+    fn setting_pending_target_expires_stale_rows_and_ignores_expired_same_target_rows() {
+        let source = include_str!("system_events.rs");
+        assert!(
+            source.contains("expire_stale_pending_deployments_tx(tx, system_id).await?"),
+            "set_pending_deployment_target_tx must expire stale pending rows before insert"
+        );
+        assert!(
+            source.contains("AND expires_at > NOW()\n        )\n        RETURNING id"),
+            "same-target insert guard must ignore expired pending rows"
+        );
+        assert!(
+            source.contains("AND expires_at > NOW()\n        ORDER BY issued_at DESC"),
+            "same-target fallback SELECT must ignore expired pending rows"
+        );
     }
 }
