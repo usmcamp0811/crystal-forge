@@ -73,7 +73,7 @@ pub async fn update(
         Box::pin(async move {
             // The legacy state endpoint does not perform boot_id classification;
             // restart_type is not known here and is left NULL.
-            insert_system_state(&pool, payload, version_compatible, None).await
+            insert_system_state(&pool, payload, version_compatible, None, None).await
         })
     })
     .await

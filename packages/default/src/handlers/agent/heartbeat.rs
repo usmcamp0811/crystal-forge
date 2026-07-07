@@ -1,12 +1,13 @@
 use crate::handlers::agent_request::{
-    authenticate_agent_request, deserialize_system_state_versioned, CFState,
+    CFState, authenticate_agent_request, deserialize_system_state_versioned,
 };
 use crate::models::agent_heartbeats::AgentHeartbeat;
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::{get_caches_for_environment, get_global_caches};
 use crate::queries::systems::{
-    deactivate_duplicate_active_systems_by_public_key, get_agent_desired_target_by_hostname,
-    get_system_heartbeat_interval_secs, update_boot_id_tx, update_restart_type_tx, BootIdChange,
+    BootIdChange, deactivate_duplicate_active_systems_by_public_key,
+    get_agent_desired_target_by_hostname, get_system_heartbeat_interval_secs, update_boot_id_tx,
+    update_restart_type_tx,
 };
 use crate::queries::{agent_heartbeat::insert_agent_heartbeat, system_states::insert_system_state};
 use axum::response::Response;
@@ -196,8 +197,14 @@ pub async fn log(
 
     if force_full_state_for_reboot {
         // Reboot detected: always write full system state regardless of equivalence.
-        if let Err(e) =
-            insert_system_state(&mut *tx, &payload, version_compatible, restart_type).await
+        if let Err(e) = insert_system_state(
+            &mut *tx,
+            &payload,
+            version_compatible,
+            restart_type,
+            Some("startup"),
+        )
+        .await
         {
             debug!("❌ failed to insert reboot system state: {e:?}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -214,11 +221,17 @@ pub async fn log(
             }
             Err(state_change_reason) => {
                 info!("🔍 Heartbeat became state change: {}", state_change_reason);
-                // State changed - insert full state record.
-                // restart_type is set for startup transitions; None for other state changes.
-                if let Err(e) =
-                    insert_system_state(&mut *tx, &payload, version_compatible, restart_type)
-                        .await
+                // State changed without a boot_id change: prefer config_change so
+                // history shows the local rebuild/config delta that changed the
+                // generation/store path, not an agent-service restart.
+                if let Err(e) = insert_system_state(
+                    &mut *tx,
+                    &payload,
+                    version_compatible,
+                    None,
+                    Some("config_change"),
+                )
+                .await
                 {
                     debug!("❌ failed to insert system state: {e:?}");
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -248,7 +261,7 @@ pub async fn log(
         }
         Some(BootIdChange::Unchanged) | None => {}
     }
-    
+
     // Log what was actually inserted (accounting for reboot override).
     if force_full_state_for_reboot {
         info!("📊 State change recorded for {} (reboot)", payload.hostname);

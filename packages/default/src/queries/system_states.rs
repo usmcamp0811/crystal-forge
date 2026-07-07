@@ -17,17 +17,23 @@ pub async fn insert_system_state<'e, E>(
     state: &SystemState,
     version_compatible: bool,
     restart_type: Option<&str>,
+    change_reason_override: Option<&str>,
 ) -> Result<()>
 where
     E: sqlx::PgExecutor<'e>,
 {
-    // Map heartbeat → startup for DB constraint compliance. When the agent
-    // sends change_reason="heartbeat" but from_system_state_if_heartbeat
-    // returns Err (i.e., real state change detected), we record it as startup.
-    let change_reason = match state.change_reason.as_str() {
-        "heartbeat" => "startup",
-        other => other,
-    };
+    // The heartbeat handler may override the recorded reason after it compares
+    // boot_id and previous state:
+    // - system reboot: record startup + restart_type=system_reboot
+    // - local state delta from heartbeat/startup with unchanged boot_id: record
+    //   config_change so history shows a local rebuild instead of agent restart
+    // Legacy callers fall back to the payload reason, with heartbeat mapped to
+    // startup for DB constraint compatibility.
+    let change_reason =
+        change_reason_override.unwrap_or_else(|| match state.change_reason.as_str() {
+            "heartbeat" => "startup",
+            other => other,
+        });
     sqlx::query(
         r#"INSERT INTO system_states (
             hostname, 
@@ -283,7 +289,7 @@ mod tests {
         state_with_commit.hostname = hostname.clone();
         state_with_commit.generation = Some(101);
         state_with_commit.store_path = Some(format!("/nix/store/{suffix}-gen101-system"));
-        insert_system_state(&pool, &state_with_commit, true, None)
+        insert_system_state(&pool, &state_with_commit, true, None, None)
             .await
             .expect("insert_system_state with store_path should succeed");
 
@@ -291,7 +297,7 @@ mod tests {
         state_without_commit.hostname = hostname.clone();
         state_without_commit.generation = Some(100);
         state_without_commit.store_path = None;
-        insert_system_state(&pool, &state_without_commit, true, None)
+        insert_system_state(&pool, &state_without_commit, true, None, None)
             .await
             .expect("insert_system_state without store_path should succeed");
 
