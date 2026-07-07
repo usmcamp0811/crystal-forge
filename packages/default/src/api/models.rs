@@ -1465,10 +1465,20 @@ pub struct VerifyGenerationClosureResponse {
 /// A single system state transition for timeline/history views.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemHistoryEntry {
+    #[serde(default)]
+    pub id: Option<uuid::Uuid>,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub occurred_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub observed_at: Option<DateTime<Utc>>,
     pub store_path: Option<String>,
     pub system_configuration_name: Option<String>,
     pub change_reason: String,
+    #[serde(default)]
+    pub event_type: String,
+    #[serde(default)]
+    pub title: Option<String>,
     pub commit_hash: Option<String>,
     pub flake_name: Option<String>,
     pub flake_repo_url: Option<String>,
@@ -1479,6 +1489,28 @@ pub struct SystemHistoryEntry {
     pub event_kind: String,
     /// Recorded generation number at this transition (from `system_states.generation`).
     pub generation: Option<i32>,
+    #[serde(default)]
+    pub previous_generation: Option<i64>,
+    #[serde(default)]
+    pub new_generation: Option<i64>,
+    #[serde(default)]
+    pub previous_store_path: Option<String>,
+    #[serde(default)]
+    pub new_store_path: Option<String>,
+    #[serde(default)]
+    pub previous_boot_id: Option<String>,
+    #[serde(default)]
+    pub new_boot_id: Option<String>,
+    #[serde(default)]
+    pub deployment_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub desired_target_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub correlation_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
     /// Whether the running store path at this transition maps to a tracked flake commit.
     /// For out-of-band local rebuilds this distinguishes "reconciled" from
     /// "untracked / capture-to-flake".

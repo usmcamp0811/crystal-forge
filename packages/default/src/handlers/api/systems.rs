@@ -29,6 +29,7 @@ use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
 use crate::queries::system_states::{
     fetch_system_generations, find_generation_store_path_last_seen,
 };
+use crate::queries::system_events::list_system_event_history_rows;
 use crate::queries::systems::{
     FqdnUpdate, HeartbeatIntervalUpdate, SystemAccessRow, SystemDetailRow, SystemListRow,
     commit_belongs_to_system_flake, deactivate_system, find_system_access_row,
@@ -1888,6 +1889,28 @@ fn classify_history_event(
     }
 }
 
+fn event_history_kind(event_type: &str) -> (&'static str, &'static str, &'static str) {
+    match event_type {
+        "cf_deployment_succeeded" => ("cf_deployment", "crystal-forge", "succeeded"),
+        "cf_deployment_failed" => ("cf_deployment", "crystal-forge", "failed"),
+        "local_rebuild_detected" => ("local_rebuild", "on-host", "recorded"),
+        "system_reboot" => ("restart", "agent", "recorded"),
+        "agent_restart" => ("agent_restart", "agent", "recorded"),
+        _ => ("state_change", "agent", "recorded"),
+    }
+}
+
+fn event_history_title(event_type: &str) -> &'static str {
+    match event_type {
+        "cf_deployment_succeeded" => "Deployed through Crystal Forge",
+        "cf_deployment_failed" => "Deploy failed to activate",
+        "local_rebuild_detected" => "nixos-rebuild switch on host",
+        "system_reboot" => "System restarted",
+        "agent_restart" => "Agent restarted",
+        _ => "State updated",
+    }
+}
+
 pub async fn get_system_history(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -1914,6 +1937,65 @@ pub async fn get_system_history(
 
     if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
         return not_found();
+    }
+
+    let event_rows = match list_system_event_history_rows(&pool, system_id, 200).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load system history"),
+    };
+
+    if !event_rows.is_empty() {
+        let entries = event_rows
+            .into_iter()
+            .map(|row| {
+                let (event_kind, default_actor, outcome) = event_history_kind(&row.event_type);
+                let title = event_history_title(&row.event_type).to_string();
+                let actor = row.actor.clone().unwrap_or_else(|| default_actor.to_string());
+                let generation = row.new_generation.and_then(|value| i32::try_from(value).ok());
+                let store_path = row.new_store_path.clone();
+                let reconciled = row.commit_hash.is_some();
+                let restart_type = match row.event_type.as_str() {
+                    "system_reboot" => Some("system_reboot".to_string()),
+                    "agent_restart" => Some("agent_restart".to_string()),
+                    _ => None,
+                };
+
+                SystemHistoryEntry {
+                    id: Some(row.id),
+                    timestamp: row.occurred_at,
+                    occurred_at: Some(row.occurred_at),
+                    observed_at: Some(row.observed_at),
+                    store_path,
+                    system_configuration_name: row.system_configuration_name,
+                    change_reason: title.clone(),
+                    event_type: row.event_type,
+                    title: Some(title),
+                    commit_hash: row.commit_hash,
+                    flake_name: row.flake_name,
+                    flake_repo_url: row.flake_repo_url,
+                    actor,
+                    outcome: outcome.to_string(),
+                    event_kind: event_kind.to_string(),
+                    generation,
+                    previous_generation: row.previous_generation,
+                    new_generation: row.new_generation,
+                    previous_store_path: row.previous_store_path,
+                    new_store_path: row.new_store_path,
+                    previous_boot_id: row.previous_boot_id,
+                    new_boot_id: row.new_boot_id,
+                    deployment_id: row.deployment_id,
+                    desired_target_id: row.desired_target_id,
+                    source: Some(row.source),
+                    correlation_id: row.correlation_id,
+                    metadata: row.metadata,
+                    reconciled,
+                    generation_matches_current_store_path: None,
+                    restart_type,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        return (StatusCode::OK, Json(entries)).into_response();
     }
 
     let rows = match list_system_history_rows(&pool, system_id, 200).await {
@@ -1956,10 +2038,15 @@ pub async fn get_system_history(
             let reconciled = row.commit_hash.is_some();
 
             SystemHistoryEntry {
+                id: None,
                 timestamp: row.timestamp,
+                occurred_at: Some(row.timestamp),
+                observed_at: None,
                 store_path: row.store_path.clone(),
                 system_configuration_name: row.system_configuration_name.clone(),
                 change_reason,
+                event_type: event_kind.clone(),
+                title: None,
                 commit_hash: row.commit_hash.clone(),
                 flake_name: row.flake_name.clone(),
                 flake_repo_url: row.flake_repo_url.clone(),
@@ -1967,6 +2054,17 @@ pub async fn get_system_history(
                 outcome: "recorded".to_string(),
                 event_kind,
                 generation: row.generation,
+                previous_generation: None,
+                new_generation: row.generation.map(i64::from),
+                previous_store_path: None,
+                new_store_path: row.store_path.clone(),
+                previous_boot_id: None,
+                new_boot_id: None,
+                deployment_id: None,
+                desired_target_id: None,
+                source: Some("legacy_system_states".to_string()),
+                correlation_id: None,
+                metadata: serde_json::json!({ "legacy_history_source": "system_states" }),
                 reconciled,
                 generation_matches_current_store_path: row.generation_matches_current_store_path,
                 restart_type: row.restart_type.clone(),
@@ -2121,6 +2219,30 @@ mod tests {
         assert_eq!(
             classify_history_event("state_delta", None, false),
             ("state_change", "agent")
+        );
+    }
+
+    #[test]
+    fn event_history_kind_maps_event_backed_contract() {
+        assert_eq!(
+            event_history_kind("cf_deployment_succeeded"),
+            ("cf_deployment", "crystal-forge", "succeeded")
+        );
+        assert_eq!(
+            event_history_kind("cf_deployment_failed"),
+            ("cf_deployment", "crystal-forge", "failed")
+        );
+        assert_eq!(
+            event_history_kind("local_rebuild_detected"),
+            ("local_rebuild", "on-host", "recorded")
+        );
+        assert_eq!(
+            event_history_kind("system_reboot"),
+            ("restart", "agent", "recorded")
+        );
+        assert_eq!(
+            event_history_kind("agent_restart"),
+            ("agent_restart", "agent", "recorded")
         );
     }
 

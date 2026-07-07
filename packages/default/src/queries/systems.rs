@@ -1,4 +1,5 @@
 use crate::models::systems::System;
+use crate::queries::system_events::set_pending_deployment_target_tx;
 use anyhow::Result;
 use chrono::Duration as ChronoDuration;
 use chrono::{DateTime, Utc};
@@ -578,6 +579,8 @@ pub async fn update_system_desired_target(
     system_id: Uuid,
     target_commit: &str,
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+
     sqlx::query(
         "UPDATE systems
          SET desired_target = $1, desired_target_set_at = NOW(), updated_at = NOW()
@@ -585,8 +588,18 @@ pub async fn update_system_desired_target(
     )
     .bind(target_commit)
     .bind(system_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    set_pending_deployment_target_tx(
+        &mut tx,
+        system_id,
+        Some(target_commit),
+        "api_desired_target",
+    )
+    .await?;
+
+    tx.commit().await?;
     Ok(())
 }
 
