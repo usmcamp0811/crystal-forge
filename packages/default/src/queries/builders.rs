@@ -1194,7 +1194,7 @@ pub async fn complete_job_atomic(
         bail!("Build job not owned by this builder");
     }
     match (job_session_id, builder_session_id) {
-        (None, None) => {}              // legacy sessionless match
+        (None, None) => {}                  // legacy sessionless match
         (Some(j), Some(b)) if j == *b => {} // exact session match
         _ => bail!("Builder session mismatch"),
     }

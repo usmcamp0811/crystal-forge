@@ -130,7 +130,7 @@ pub struct SystemState {
     // ───── Agent Compatibility ─────
     pub agent_compatible: Option<bool>,
     pub partial_data: Option<bool>,
-    
+
     // ───── Reboot Detection ─────
     /// Linux kernel boot UUID from /proc/sys/kernel/random/boot_id.
     /// Used to distinguish system reboots from agent restarts.
@@ -433,15 +433,27 @@ mod tests {
 
     #[test]
     fn parses_generation_from_profile_link_name() {
-        assert_eq!(parse_generation_from_profile_link_name("system-74-link"), Some(74));
-        assert_eq!(parse_generation_from_profile_link_name("system-1-link"), Some(1));
+        assert_eq!(
+            parse_generation_from_profile_link_name("system-74-link"),
+            Some(74)
+        );
+        assert_eq!(
+            parse_generation_from_profile_link_name("system-1-link"),
+            Some(1)
+        );
     }
 
     #[test]
     fn rejects_invalid_profile_link_name() {
         assert_eq!(parse_generation_from_profile_link_name("system-link"), None);
-        assert_eq!(parse_generation_from_profile_link_name("system-abc-link"), None);
-        assert_eq!(parse_generation_from_profile_link_name("/nix/store/foo"), None);
+        assert_eq!(
+            parse_generation_from_profile_link_name("system-abc-link"),
+            None
+        );
+        assert_eq!(
+            parse_generation_from_profile_link_name("/nix/store/foo"),
+            None
+        );
     }
 }
 

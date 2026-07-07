@@ -1,5 +1,3 @@
-
-
 //! Database queries for evaluation logs.
 
 use chrono::{DateTime, Utc};
@@ -98,10 +96,7 @@ pub async fn fetch_eval_logs_by_commit(
 }
 
 /// Delete all evaluation logs for a specific commit.
-pub async fn delete_eval_logs_by_commit(
-    pool: &PgPool,
-    commit_id: i32,
-) -> Result<u64, sqlx::Error> {
+pub async fn delete_eval_logs_by_commit(pool: &PgPool, commit_id: i32) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         r#"
         DELETE FROM eval_logs WHERE commit_id = $1
@@ -136,7 +131,7 @@ pub async fn count_eval_logs(pool: &PgPool) -> Result<i64, sqlx::Error> {
     let rec = sqlx::query(
         r#"
         SELECT COUNT(*)::bigint as count FROM eval_logs
-        "#
+        "#,
     )
     .fetch_one(pool)
     .await?;

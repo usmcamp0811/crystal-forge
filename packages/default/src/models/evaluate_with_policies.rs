@@ -135,7 +135,7 @@ async fn resolve_expected_store_path(
 }
 
 /// Helper function to broadcast eval log via WebSocket AND persist to database.
-/// 
+///
 /// This ensures logs are both:
 /// - Streamed in real-time to connected WebSocket clients
 /// - Persisted to eval_logs table for historical access
@@ -167,14 +167,9 @@ async fn broadcast_and_persist_eval_log(
         Some("info")
     };
 
-    if let Err(e) = crate::queries::eval_logs::insert_eval_log(
-        pool,
-        commit_id,
-        *sequence,
-        log_level,
-        &message,
-    )
-    .await
+    if let Err(e) =
+        crate::queries::eval_logs::insert_eval_log(pool, commit_id, *sequence, log_level, &message)
+            .await
     {
         warn!("Failed to persist eval log for commit {}: {}", commit_id, e);
     }
@@ -206,7 +201,7 @@ pub async fn evaluate_with_nix_eval_jobs(
 
     // Sequence counter for log persistence (1-indexed)
     let mut log_sequence = 1i32;
-    
+
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     let allowed_systems = load_allowed_systems(pool, flake, target_system).await?;
 
@@ -236,19 +231,33 @@ pub async fn evaluate_with_nix_eval_jobs(
             target_system,
             server_config.eval_workers
         );
-        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, start_msg).await;
+        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, start_msg)
+            .await;
 
         if !policies.is_empty() {
             let policy_msg = format!("📋 Checking {} deployment policies:", policies.len());
-            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, policy_msg).await;
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
+                policy_msg,
+            )
+            .await;
             for policy in policies {
                 let policy_detail = format!(
                     "   • {} (strict: {})",
                     policy.description(),
                     policy.is_strict()
                 );
-                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, policy_detail)
-                    .await;
+                broadcast_and_persist_eval_log(
+                    pool,
+                    Some(state),
+                    commit.id,
+                    &mut log_sequence,
+                    policy_detail,
+                )
+                .await;
             }
         }
 
@@ -321,7 +330,8 @@ pub async fn evaluate_with_nix_eval_jobs(
     // Cancellation poll interval: check the DB every 2 seconds while eval runs.
     let mut cancel_ticker = tokio::time::interval(Duration::from_secs(2));
     cancel_ticker.tick().await; // consume the immediate first tick
-    let mut progress_ticker = tokio::time::interval(Duration::from_secs(EVAL_PROGRESS_HEARTBEAT_SECS));
+    let mut progress_ticker =
+        tokio::time::interval(Duration::from_secs(EVAL_PROGRESS_HEARTBEAT_SECS));
     progress_ticker.tick().await; // consume immediate first tick
     let mut last_output_at = Instant::now();
 
@@ -816,12 +826,9 @@ pub async fn evaluate_with_nix_eval_jobs(
 
     // Flush any remaining buffered stderr logs.
     if !stderr_log_batch.is_empty() {
-        if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
-            pool,
-            commit.id,
-            &stderr_log_batch,
-        )
-        .await
+        if let Err(e) =
+            crate::queries::eval_logs::insert_eval_logs_batch(pool, commit.id, &stderr_log_batch)
+                .await
         {
             warn!(
                 "Failed to flush batched stderr logs for commit {}: {}",
@@ -969,48 +976,86 @@ pub async fn evaluate_with_nix_eval_jobs(
 
     // Broadcast comprehensive summary to WebSocket clients
     if let Some(state) = cf_state {
-        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+        broadcast_and_persist_eval_log(
+            pool,
+            Some(state),
+            commit.id,
+            &mut log_sequence,
             "".to_string(), // Blank line for readability
         )
         .await;
 
-        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+        broadcast_and_persist_eval_log(
+            pool,
+            Some(state),
+            commit.id,
+            &mut log_sequence,
             "═══════════════════════════════════════".to_string(),
         )
         .await;
 
-        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+        broadcast_and_persist_eval_log(
+            pool,
+            Some(state),
+            commit.id,
+            &mut log_sequence,
             "📊 Evaluation Summary".to_string(),
         )
         .await;
 
-        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+        broadcast_and_persist_eval_log(
+            pool,
+            Some(state),
+            commit.id,
+            &mut log_sequence,
             "═══════════════════════════════════════".to_string(),
         )
         .await;
 
-        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+        broadcast_and_persist_eval_log(
+            pool,
+            Some(state),
+            commit.id,
+            &mut log_sequence,
             format!("✅ Successful: {} systems", successful),
         )
         .await;
 
         if failed > 0 {
-            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
                 format!("❌ Failed: {} systems", failed),
             )
             .await;
         }
 
-        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+        broadcast_and_persist_eval_log(
+            pool,
+            Some(state),
+            commit.id,
+            &mut log_sequence,
             format!("📦 Total: {} nixosConfigurations", total_systems),
         )
         .await;
 
         if !policy_checks.is_empty() {
-            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, "".to_string())
-                .await;
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
+                "".to_string(),
+            )
+            .await;
 
-            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
                 format!(
                     "🔐 Policy Compliance: {:.1}% ({}/{})",
                     coverage,
@@ -1022,10 +1067,20 @@ pub async fn evaluate_with_nix_eval_jobs(
         }
 
         if evaluated_derivations.len() > 0 {
-            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, "".to_string())
-                .await;
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
+                "".to_string(),
+            )
+            .await;
 
-            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
                 format!(
                     "🚀 {} derivations ready for build queue",
                     evaluated_derivations.len()
@@ -1034,7 +1089,11 @@ pub async fn evaluate_with_nix_eval_jobs(
             .await;
         }
 
-        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+        broadcast_and_persist_eval_log(
+            pool,
+            Some(state),
+            commit.id,
+            &mut log_sequence,
             "═══════════════════════════════════════".to_string(),
         )
         .await;
@@ -1076,7 +1135,11 @@ pub async fn evaluate_with_mock_eval_jobs(
         .await?;
 
     if let Some(state) = cf_state {
-        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+        broadcast_and_persist_eval_log(
+            pool,
+            Some(state),
+            commit.id,
+            &mut log_sequence,
             format!(
                 "🧪 MOCK MODE: evaluating {} system(s) for {}@{}",
                 systems.len(),
@@ -1100,7 +1163,11 @@ pub async fn evaluate_with_mock_eval_jobs(
                 None,
             )
             .await;
-            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
                 format!(
                     "⏳ {}: queued in mock pipeline (system {}/{})",
                     system_name,
@@ -1119,7 +1186,11 @@ pub async fn evaluate_with_mock_eval_jobs(
             (95, "finalizing derivation metadata"),
         ] {
             if let Some(state) = cf_state {
-                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+                broadcast_and_persist_eval_log(
+                    pool,
+                    Some(state),
+                    commit.id,
+                    &mut log_sequence,
                     format!("⏳ {} [{}%]: {}", system_name, progress, stage),
                 )
                 .await;
@@ -1165,7 +1236,11 @@ pub async fn evaluate_with_mock_eval_jobs(
                         system_name, derivation.id
                     );
                     if let Some(state) = cf_state {
-                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+                        broadcast_and_persist_eval_log(
+                            pool,
+                            Some(state),
+                            commit.id,
+                            &mut log_sequence,
                             format!("🚀 {}: build job queued incrementally (mock)", system_name),
                         )
                         .await;
@@ -1230,7 +1305,11 @@ pub async fn evaluate_with_mock_eval_jobs(
                     Some("Mock policy failure".to_string()),
                 )
                 .await;
-                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+                broadcast_and_persist_eval_log(
+                    pool,
+                    Some(state),
+                    commit.id,
+                    &mut log_sequence,
                     format!(
                         "⚠️ {}: policy check failed (mock), build skipped",
                         system_name
@@ -1246,7 +1325,11 @@ pub async fn evaluate_with_mock_eval_jobs(
                     None,
                 )
                 .await;
-                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+                broadcast_and_persist_eval_log(
+                    pool,
+                    Some(state),
+                    commit.id,
+                    &mut log_sequence,
                     format!(
                         "✅ {}: policy passed (CF enabled), queued for build",
                         system_name

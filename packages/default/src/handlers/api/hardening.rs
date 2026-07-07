@@ -19,8 +19,7 @@ use crate::models::auth_identity::AuthRole;
 use crate::queries::hardening_scans::{
     get_fleet_summary, get_justifications_for_system, get_scan_by_id, get_service_results,
     get_system_posture, get_top_vulnerable_services, list_scan_environment_ids,
-    list_system_postures,
-    resolve_system_hardening_scan_target, upsert_justification,
+    list_system_postures, resolve_system_hardening_scan_target, upsert_justification,
 };
 use crate::queries::systems::{find_system_access_row, get_user_environment_membership_ids};
 use crate::services::hardening_scans::{HardeningScanError, trigger_system_hardening_scan};
@@ -324,7 +323,11 @@ pub async fn get_system_hardening_scan_eligibility(
     let environment_memberships = match get_user_environment_membership_ids(&pool, user_id).await {
         Ok(value) => value,
         Err(e) => {
-            tracing::error!("Hardening scan eligibility: Failed to load environment memberships for user {}: {:?}", user_id, e);
+            tracing::error!(
+                "Hardening scan eligibility: Failed to load environment memberships for user {}: {:?}",
+                user_id,
+                e
+            );
             return internal_error("Failed to load environment memberships");
         }
     };
@@ -333,7 +336,11 @@ pub async fn get_system_hardening_scan_eligibility(
         Ok(Some(value)) => value,
         Ok(None) => return not_found(),
         Err(e) => {
-            tracing::error!("Hardening scan eligibility: Failed to load system {}: {:?}", system_id, e);
+            tracing::error!(
+                "Hardening scan eligibility: Failed to load system {}: {:?}",
+                system_id,
+                e
+            );
             return internal_error("Failed to load system");
         }
     };
@@ -360,7 +367,11 @@ pub async fn get_system_hardening_scan_eligibility(
             hostname: None,
         },
         Err(e) => {
-            tracing::error!("Hardening scan eligibility: Failed to resolve scan target for system {}: {:?}", system_id, e);
+            tracing::error!(
+                "Hardening scan eligibility: Failed to resolve scan target for system {}: {:?}",
+                system_id,
+                e
+            );
             return internal_error("Failed to evaluate hardening scan eligibility");
         }
     };
@@ -463,21 +474,20 @@ pub async fn get_hardening_scan_status(
     };
 
     if !matches!(caller_role, Role::Admin) {
-        let environment_memberships = match get_user_environment_membership_ids(&pool, user_id).await {
-            Ok(value) => value,
-            Err(_) => return internal_error("Failed to load environment memberships"),
-        };
+        let environment_memberships =
+            match get_user_environment_membership_ids(&pool, user_id).await {
+                Ok(value) => value,
+                Err(_) => return internal_error("Failed to load environment memberships"),
+            };
 
         let environment_ids = match list_scan_environment_ids(&pool, scan_id).await {
             Ok(value) => value,
             Err(_) => return internal_error("Failed to evaluate scan access"),
         };
 
-        let can_access = environment_ids
-            .into_iter()
-            .any(|environment_id| {
-                caller_role.can_access_system_environment(environment_id, &environment_memberships)
-            });
+        let can_access = environment_ids.into_iter().any(|environment_id| {
+            caller_role.can_access_system_environment(environment_id, &environment_memberships)
+        });
 
         if !can_access {
             return (

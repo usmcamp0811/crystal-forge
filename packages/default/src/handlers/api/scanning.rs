@@ -12,8 +12,8 @@ use crate::api::models::{
 };
 use crate::handlers::api::rbac::require_admin;
 use crate::queries::scanning::{
-    ScanSchedulePolicyRow, get_scan_activity, get_scan_queue, get_scan_schedule_policy,
-    get_scan_queue_for_system, get_scan_stats, get_scan_systems, update_scan_schedule_policy,
+    ScanSchedulePolicyRow, get_scan_activity, get_scan_queue, get_scan_queue_for_system,
+    get_scan_schedule_policy, get_scan_stats, get_scan_systems, update_scan_schedule_policy,
 };
 
 #[derive(Debug, Deserialize)]

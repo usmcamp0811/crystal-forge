@@ -1,8 +1,8 @@
-use anyhow::{bail, Context, Result};
-use base64::engine::general_purpose::STANDARD;
+use anyhow::{Context, Result, bail};
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use crystal_forge::config::CrystalForgeConfig;
-use crystal_forge::deployment::agent::{readlink_path, AgentDeploymentManager, DeploymentResult};
+use crystal_forge::deployment::agent::{AgentDeploymentManager, DeploymentResult, readlink_path};
 use crystal_forge::handlers::agent::heartbeat::LogResponse;
 use crystal_forge::models::system_states::SystemState;
 use ed25519_dalek::{Signer, SigningKey};
@@ -10,8 +10,8 @@ use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use reqwest::blocking::Client;
 use serde_json::Value;
 use std::{ffi::OsStr, fs, path::PathBuf, process::Command, sync::Arc};
-use tokio::sync::{watch, Mutex};
-use tokio::time::{sleep, Duration};
+use tokio::sync::{Mutex, watch};
+use tokio::time::{Duration, sleep};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -386,7 +386,9 @@ async fn handle_current_system_event(
     {
         let state = agent_state.lock().await;
         if state.last_reported_store_path.as_deref() == Some(&current_system_str) {
-            info!("[{context}] Store path unchanged ({current_system_str}), suppressing duplicate heartbeat");
+            info!(
+                "[{context}] Store path unchanged ({current_system_str}), suppressing duplicate heartbeat"
+            );
             return Ok(None);
         }
     }

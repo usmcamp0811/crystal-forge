@@ -9,15 +9,15 @@ use crate::api::models::{
 };
 use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::filters::ViewMode;
-use crate::components::forms::{validate_new_system, AddSystemForm, NewSystemDraft};
+use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::icon::{Icon, IconName};
 use crate::components::modals::{
-    generate_key_pair, GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal,
+    GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::system::{
-    deployment_state_label, DeploySystemModal, EditSystemModal, SystemCardV2,
+    DeploySystemModal, EditSystemModal, SystemCardV2, deployment_state_label,
 };
 use crate::components::systems_stat_strip::SystemsStatStrip;
 use crate::components::tables::SystemsTable;

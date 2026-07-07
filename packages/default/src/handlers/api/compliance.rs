@@ -18,9 +18,9 @@ use crate::api::models::{
 };
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
-    BundleValidationError, create_bundle as create_bundle_row,
-    delete_bundle as delete_bundle_row, get_system_evidence, list_bundle_systems, list_bundles,
-    list_system_bundles, update_bundle as update_bundle_row,
+    BundleValidationError, create_bundle as create_bundle_row, delete_bundle as delete_bundle_row,
+    get_system_evidence, list_bundle_systems, list_bundles, list_system_bundles,
+    update_bundle as update_bundle_row,
 };
 
 /// `GET /api/v1/compliance/bundles`
@@ -80,10 +80,7 @@ pub async fn get_system_compliance_bundles(
 
             (
                 StatusCode::OK,
-                Json(SystemComplianceBundlesResponse {
-                    system_id,
-                    bundles,
-                }),
+                Json(SystemComplianceBundlesResponse { system_id, bundles }),
             )
                 .into_response()
         }

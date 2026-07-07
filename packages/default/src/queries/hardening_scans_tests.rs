@@ -37,15 +37,9 @@ async fn fleet_summary_uses_latest_completed_scan_per_active_system_only() {
     let active_hash = format!("task276fleetactive{suffix}");
     let inactive_hash = format!("task276fleetinactive{suffix}");
 
-    let flake = insert_flake(
-        &pool,
-        &flake_name,
-        &flake_url,
-        "main",
-        "cf_systems_only",
-    )
-    .await
-    .expect("insert_flake should succeed");
+    let flake = insert_flake(&pool, &flake_name, &flake_url, "main", "cf_systems_only")
+        .await
+        .expect("insert_flake should succeed");
 
     sqlx::query(
         r#"
@@ -120,20 +114,18 @@ async fn fleet_summary_uses_latest_completed_scan_per_active_system_only() {
         .await
         .expect("load inactive commit should succeed");
 
-    let old_active_derivation = insert_derivation_for_commit(&pool, &old_commit, &active_config, "nixos")
-        .await
-        .expect("insert old active derivation should succeed");
-    let active_derivation = insert_derivation_for_commit(&pool, &active_commit, &active_config, "nixos")
-        .await
-        .expect("insert active derivation should succeed");
-    let inactive_derivation = insert_derivation_for_commit(
-        &pool,
-        &inactive_commit,
-        &inactive_config,
-        "nixos",
-    )
-    .await
-    .expect("insert inactive derivation should succeed");
+    let old_active_derivation =
+        insert_derivation_for_commit(&pool, &old_commit, &active_config, "nixos")
+            .await
+            .expect("insert old active derivation should succeed");
+    let active_derivation =
+        insert_derivation_for_commit(&pool, &active_commit, &active_config, "nixos")
+            .await
+            .expect("insert active derivation should succeed");
+    let inactive_derivation =
+        insert_derivation_for_commit(&pool, &inactive_commit, &inactive_config, "nixos")
+            .await
+            .expect("insert inactive derivation should succeed");
 
     sqlx::query(
         r#"
@@ -167,7 +159,10 @@ async fn fleet_summary_uses_latest_completed_scan_per_active_system_only() {
         .await
         .expect("get_fleet_summary should succeed");
 
-    assert_eq!(summary.total_systems_scanned - before.total_systems_scanned, 1);
+    assert_eq!(
+        summary.total_systems_scanned - before.total_systems_scanned,
+        1
+    );
     assert_eq!(
         summary.total_well_hardened_services - before.total_well_hardened_services,
         2
@@ -184,7 +179,10 @@ async fn fleet_summary_uses_latest_completed_scan_per_active_system_only() {
         summary.total_vulnerable_services - before.total_vulnerable_services,
         0
     );
-    assert_eq!(summary.total_services_scanned - before.total_services_scanned, 4);
+    assert_eq!(
+        summary.total_services_scanned - before.total_services_scanned,
+        4
+    );
 
     let n_before = before.total_systems_scanned as f64;
     let avg_before = before.avg_fleet_score.unwrap_or(0.0);
@@ -193,7 +191,9 @@ async fn fleet_summary_uses_latest_completed_scan_per_active_system_only() {
     } else {
         (avg_before * n_before + 80.0) / (n_before + 1.0)
     };
-    let observed_after = summary.avg_fleet_score.expect("avg_fleet_score should be present");
+    let observed_after = summary
+        .avg_fleet_score
+        .expect("avg_fleet_score should be present");
     assert!(
         (observed_after - expected_after).abs() < 1e-6,
         "expected avg_fleet_score {expected_after}, got {observed_after}"

@@ -109,8 +109,7 @@ pub(super) async fn build_worker(
                     tokio::time::timeout(build_timeout, run_mock_legacy_build(&derivation)).await
                 } else {
                     // Legacy worker path: no job_id available, cancel detection not supported here.
-                    let reporter =
-                        crate::derivations::reporter::PgPoolReporter::new(pool.clone());
+                    let reporter = crate::derivations::reporter::PgPoolReporter::new(pool.clone());
                     tokio::time::timeout(
                         build_timeout,
                         derivation.build(&reporter, &build_config, None),
@@ -417,7 +416,10 @@ pub async fn create_drv_gc_root(drv_path: &str, derivation_id: i32) -> Result<bo
     }
 
     tokio::fs::symlink(drv_path, &gc_root_path).await?;
-    debug!("Created derivation GC root: {} -> {}", gc_root_path, drv_path);
+    debug!(
+        "Created derivation GC root: {} -> {}",
+        gc_root_path, drv_path
+    );
     Ok(true)
 }
 

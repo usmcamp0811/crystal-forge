@@ -263,7 +263,9 @@ impl ServerConfig {
         {
             return Err(format!(
                 "heartbeat_interval_secs ({}) must be between {} and {} seconds",
-                self.heartbeat_interval_secs, MIN_HEARTBEAT_INTERVAL_SECS, MAX_HEARTBEAT_INTERVAL_SECS
+                self.heartbeat_interval_secs,
+                MIN_HEARTBEAT_INTERVAL_SECS,
+                MAX_HEARTBEAT_INTERVAL_SECS
             ));
         }
 

@@ -284,7 +284,7 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
 }
 
 /// Fetch historical evaluation logs from database for a specific commit.
-/// 
+///
 /// This endpoint retrieves persisted logs for completed/failed/cancelled evaluations.
 /// For in-progress evaluations, clients should use the WebSocket stream instead.
 pub async fn get_eval_logs_history(
@@ -299,15 +299,14 @@ pub async fn get_eval_logs_history(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let logs = match crate::queries::eval_logs::fetch_eval_logs_by_commit(&state.pool, commit_id)
-        .await
-    {
-        Ok(logs) => logs,
-        Err(e) => {
-            tracing::error!("Failed to fetch eval logs for commit {}: {}", commit_id, e);
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+    let logs =
+        match crate::queries::eval_logs::fetch_eval_logs_by_commit(&state.pool, commit_id).await {
+            Ok(logs) => logs,
+            Err(e) => {
+                tracing::error!("Failed to fetch eval logs for commit {}: {}", commit_id, e);
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
 
     let entries: Vec<EvalLogEntry> = logs
         .into_iter()
@@ -336,10 +335,15 @@ pub async fn get_eval_policy_matrix(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let rows = match crate::queries::commits::fetch_eval_policy_matrix(&state.pool, commit_id).await {
+    let rows = match crate::queries::commits::fetch_eval_policy_matrix(&state.pool, commit_id).await
+    {
         Ok(rows) => rows,
         Err(e) => {
-            tracing::error!("Failed to fetch eval policy matrix for commit {}: {}", commit_id, e);
+            tracing::error!(
+                "Failed to fetch eval policy matrix for commit {}: {}",
+                commit_id,
+                e
+            );
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
@@ -373,10 +377,19 @@ pub async fn get_eval_dependency_graph(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let rows = match crate::queries::commits::fetch_eval_dependency_breakdown(&state.pool, commit_id).await {
+    let rows = match crate::queries::commits::fetch_eval_dependency_breakdown(
+        &state.pool,
+        commit_id,
+    )
+    .await
+    {
         Ok(rows) => rows,
         Err(e) => {
-            tracing::error!("Failed to fetch eval dependency graph for commit {}: {}", commit_id, e);
+            tracing::error!(
+                "Failed to fetch eval dependency graph for commit {}: {}",
+                commit_id,
+                e
+            );
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };

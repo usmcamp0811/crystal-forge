@@ -146,7 +146,10 @@ impl AgentDeploymentManager {
 
         let Some(desired_target) = response.desired_target else {
             debug!("No desired target in heartbeat response");
-            return Ok((DeploymentResult::NoDeploymentNeeded, heartbeat_interval_secs));
+            return Ok((
+                DeploymentResult::NoDeploymentNeeded,
+                heartbeat_interval_secs,
+            ));
         };
 
         info!("Received desired target: {}", desired_target);
@@ -158,7 +161,10 @@ impl AgentDeploymentManager {
                 desired_target,
                 self.config.post_agent_start_deployment_delay - uptime
             );
-            return Ok((DeploymentResult::NoDeploymentNeeded, heartbeat_interval_secs));
+            return Ok((
+                DeploymentResult::NoDeploymentNeeded,
+                heartbeat_interval_secs,
+            ));
         }
 
         // Always check the actual running system, not just cached state
