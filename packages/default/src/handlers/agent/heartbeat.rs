@@ -9,7 +9,10 @@ use crate::queries::systems::{
     get_agent_desired_target_by_hostname, get_system_heartbeat_interval_secs, update_boot_id_tx,
     update_restart_type_tx,
 };
-use crate::queries::{agent_heartbeat::insert_agent_heartbeat, system_states::insert_system_state};
+use crate::queries::{
+    agent_heartbeat::insert_agent_heartbeat,
+    system_states::{get_last_system_state_by_hostname, insert_system_state},
+};
 use axum::response::Response;
 use axum::{
     body::Bytes,
@@ -221,15 +224,15 @@ pub async fn log(
             }
             Err(state_change_reason) => {
                 info!("🔍 Heartbeat became state change: {}", state_change_reason);
-                // State changed without a boot_id change: prefer config_change so
-                // history shows the local rebuild/config delta that changed the
-                // generation/store path, not an agent-service restart.
+                let change_reason_override =
+                    classify_non_reboot_state_change_reason(&pool, &payload, restart_type).await;
+
                 if let Err(e) = insert_system_state(
                     &mut *tx,
                     &payload,
                     version_compatible,
-                    None,
-                    Some("config_change"),
+                    restart_type,
+                    Some(change_reason_override),
                 )
                 .await
                 {
@@ -318,6 +321,32 @@ pub async fn log(
     };
 
     (status, axum::Json(response)).into_response()
+}
+
+async fn classify_non_reboot_state_change_reason(
+    pool: &PgPool,
+    payload: &crate::models::system_states::SystemState,
+    restart_type: Option<&str>,
+) -> &'static str {
+    // Startup with unchanged boot_id is an agent service restart unless the
+    // actual running system generation/store path changed.  Other metadata
+    // changes (agent build hash/version, network details, etc.) must not turn a
+    // service restart into a fake local rebuild.
+    if payload.change_reason == "startup" && restart_type == Some("agent_restart") {
+        match get_last_system_state_by_hostname(pool, &payload.hostname).await {
+            Ok(Some(previous))
+                if payload.generation == previous.generation
+                    && payload.store_path == previous.store_path =>
+            {
+                return "startup";
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+
+    // Heartbeat/startup full-state deltas with a generation/store-path change
+    // are local rebuild/config changes, not restarts.
+    "config_change"
 }
 
 /// Pure function: given the boot_id comparison result and the change_reason string,
