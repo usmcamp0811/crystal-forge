@@ -1,10 +1,10 @@
 //! API handlers for the advanced CVE dashboard.
 
 use axum::{
-    extract::{Path, Query, State},
-    http::{header, StatusCode},
-    response::{IntoResponse, Response},
     Json,
+    extract::{Path, Query, State},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 
@@ -78,14 +78,12 @@ pub async fn list_package_names(
     State(state): State<CFState>,
     _user: RequireAuth,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
-    let packages = cves::fetch_package_names(&state.pool)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to fetch package names: {}", e),
-            )
-        })?;
+    let packages = cves::fetch_package_names(&state.pool).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to fetch package names: {}", e),
+        )
+    })?;
 
     Ok(Json(packages))
 }
@@ -137,11 +135,19 @@ pub async fn save_justification(
     Json(payload): Json<CveJustificationRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Validate category
-    let valid_categories = ["mitigated", "false_positive", "accepted_risk", "patch_scheduled"];
+    let valid_categories = [
+        "mitigated",
+        "false_positive",
+        "accepted_risk",
+        "patch_scheduled",
+    ];
     if !valid_categories.contains(&payload.category.as_str()) {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!("Invalid category. Must be one of: {}", valid_categories.join(", ")),
+            format!(
+                "Invalid category. Must be one of: {}",
+                valid_categories.join(", ")
+            ),
         ));
     }
 
@@ -277,10 +283,7 @@ pub async fn export_cves(
     csv_output.push_str("CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,Affected Systems,Environments,Fix Status,Triage Status,Age (days),First Seen,Last Seen\n");
 
     for cve in cves {
-        let environments = cve
-            .affected_environments
-            .unwrap_or_default()
-            .join(";");
+        let environments = cve.affected_environments.unwrap_or_default().join(";");
         let first_seen = cve
             .first_seen
             .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
@@ -345,7 +348,12 @@ mod tests {
 
     #[test]
     fn justification_category_allowlist_accepts_valid_values() {
-        let valid = ["mitigated", "false_positive", "accepted_risk", "patch_scheduled"];
+        let valid = [
+            "mitigated",
+            "false_positive",
+            "accepted_risk",
+            "patch_scheduled",
+        ];
         assert!(valid.contains(&"accepted_risk"));
         assert!(valid.contains(&"patch_scheduled"));
         assert!(valid.contains(&"mitigated"));
@@ -354,7 +362,12 @@ mod tests {
 
     #[test]
     fn justification_category_allowlist_rejects_invalid_values() {
-        let valid = ["mitigated", "false_positive", "accepted_risk", "patch_scheduled"];
+        let valid = [
+            "mitigated",
+            "false_positive",
+            "accepted_risk",
+            "patch_scheduled",
+        ];
         assert!(!valid.contains(&"wontfix"));
         assert!(!valid.contains(&"ignored"));
         assert!(!valid.contains(&""));
@@ -414,7 +427,12 @@ mod tests {
     fn revoke_category_not_in_save_allowlist() {
         // Ensure "outstanding" is rejected by save_justification so revoke
         // must go through the DELETE endpoint, not POST.
-        let valid = ["mitigated", "false_positive", "accepted_risk", "patch_scheduled"];
+        let valid = [
+            "mitigated",
+            "false_positive",
+            "accepted_risk",
+            "patch_scheduled",
+        ];
         assert!(
             !valid.contains(&"outstanding"),
             "outstanding must not be in save allowlist — use DELETE /justification to revoke"

@@ -29,15 +29,9 @@ async fn re_evaluation_replaces_persisted_logs_for_same_commit() {
     let flake_url = format!("https://example.com/{flake_name}.git");
     let commit_hash = format!("task289reval{suffix}");
 
-    let flake = insert_flake(
-        &pool,
-        &flake_name,
-        &flake_url,
-        "main",
-        "cf_systems_only",
-    )
-    .await
-    .expect("insert_flake should succeed");
+    let flake = insert_flake(&pool, &flake_name, &flake_url, "main", "cf_systems_only")
+        .await
+        .expect("insert_flake should succeed");
 
     insert_commit_with_metadata(
         &pool,

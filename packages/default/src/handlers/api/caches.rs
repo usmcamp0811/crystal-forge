@@ -19,7 +19,11 @@ use crate::models::cache_destination::{
 };
 use crate::queries::{cache_destinations, cache_push};
 
-fn normalize_test_url(cache_type: &str, push_to: Option<&str>, s3_endpoint_url: Option<&str>) -> Option<String> {
+fn normalize_test_url(
+    cache_type: &str,
+    push_to: Option<&str>,
+    s3_endpoint_url: Option<&str>,
+) -> Option<String> {
     let cache_type = cache_type.to_lowercase();
 
     match cache_type.as_str() {
@@ -147,7 +151,11 @@ fn reject_non_public_ip(ip: IpAddr) -> Result<(), String> {
             }
         }
         IpAddr::V6(v6) => {
-            if v6.is_loopback() || v6.is_unspecified() || v6.is_unique_local() || v6.is_unicast_link_local() {
+            if v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+            {
                 return Err("Refusing to test private, loopback, or non-routable IP".to_string());
             }
         }
@@ -168,7 +176,10 @@ async fn run_cache_destination_test(
     allow_private_targets: bool,
 ) -> Result<CacheCredentialTestResult, String> {
     let cache_type = create.cache_type.trim();
-    if !matches!(cache_type, "S3" | "Attic" | "Http" | "Nix" | "s3" | "attic" | "http" | "nix") {
+    if !matches!(
+        cache_type,
+        "S3" | "Attic" | "Http" | "Nix" | "s3" | "attic" | "http" | "nix"
+    ) {
         return Err(format!(
             "Validation failed: Invalid cache_type: {cache_type}. Must be one of: S3, Attic, Http, Nix"
         ));
@@ -420,7 +431,8 @@ pub async fn test_cache_destination_credentials(
             .into_response();
     }
 
-    match run_cache_destination_test(&create, server_config.allow_private_cache_test_targets).await {
+    match run_cache_destination_test(&create, server_config.allow_private_cache_test_targets).await
+    {
         Ok(result) => (StatusCode::OK, Json(result)).into_response(),
         Err(message) => (
             StatusCode::BAD_REQUEST,
@@ -504,17 +516,21 @@ mod tests {
     #[tokio::test]
     async fn validate_cache_test_url_dns_rejects_localhost_resolution() {
         let url = Url::parse("https://localhost").unwrap();
-        assert!(validate_cache_test_url_resolves_publicly(&url, false)
-            .await
-            .is_err());
+        assert!(
+            validate_cache_test_url_resolves_publicly(&url, false)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn validate_cache_test_url_dns_allows_localhost_when_enabled() {
         let url = Url::parse("https://localhost").unwrap();
-        assert!(validate_cache_test_url_resolves_publicly(&url, true)
-            .await
-            .is_ok());
+        assert!(
+            validate_cache_test_url_resolves_publicly(&url, true)
+                .await
+                .is_ok()
+        );
     }
 
     #[test]

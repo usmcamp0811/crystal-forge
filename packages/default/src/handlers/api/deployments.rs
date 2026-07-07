@@ -2,15 +2,17 @@
 // Handles approval submission and canary rollout status queries
 
 use axum::{
+    Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::handlers::agent_request::CFState;
-use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role, has_operator_or_admin_role};
+use crate::handlers::api::rbac::{
+    authenticated_user_roles, has_admin_role, has_operator_or_admin_role,
+};
 use crate::services::{
     approval_policy::{self, DeploymentContext},
     canary_rollout::{self, RolloutContext},
@@ -70,18 +72,21 @@ pub async fn submit_commit_approval(
     let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
         return Err((StatusCode::UNAUTHORIZED, "Unauthorized".to_string()));
     };
-    
+
     // Get policy config to validate role requirement
-    let policy = crate::queries::deployment_policies::get_deployment_policy_by_id(&state.pool, &request.policy_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to fetch policy: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to fetch policy".to_string(),
-            )
-        })?
-        .ok_or((StatusCode::NOT_FOUND, "Policy not found".to_string()))?;
+    let policy = crate::queries::deployment_policies::get_deployment_policy_by_id(
+        &state.pool,
+        &request.policy_id,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to fetch policy: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to fetch policy".to_string(),
+        )
+    })?
+    .ok_or((StatusCode::NOT_FOUND, "Policy not found".to_string()))?;
 
     if policy.policy_type != "require_approvals" {
         return Err((
@@ -92,7 +97,7 @@ pub async fn submit_commit_approval(
 
     // Parse approval config to check required role
     let config = serde_json::from_value::<crate::models::deployment_policies::ApprovalConfig>(
-        policy.config.clone()
+        policy.config.clone(),
     )
     .map_err(|e| {
         tracing::error!("Failed to parse approval config: {}", e);
@@ -108,7 +113,10 @@ pub async fn submit_commit_approval(
         "operator" => has_operator_or_admin_role(&roles),
         "viewer" => true, // viewer or above is authenticated
         _ => {
-            tracing::warn!("Unknown role requirement in approval policy: {}", config.role);
+            tracing::warn!(
+                "Unknown role requirement in approval policy: {}",
+                config.role
+            );
             false
         }
     };
@@ -154,20 +162,24 @@ pub async fn get_commit_approval_status(
     Path((commit_id, policy_id)): Path<(String, Uuid)>,
 ) -> Result<Json<ApprovalStatusResponse>, (StatusCode, String)> {
     // Require authentication for status reads
-    if authenticated_user_roles(&state.pool, &headers).await.is_none() {
+    if authenticated_user_roles(&state.pool, &headers)
+        .await
+        .is_none()
+    {
         return Err((StatusCode::UNAUTHORIZED, "Unauthorized".to_string()));
     }
     // Get policy config
-    let policy = crate::queries::deployment_policies::get_deployment_policy_by_id(&state.pool, &policy_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to fetch policy: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to fetch policy".to_string(),
-            )
-        })?
-        .ok_or((StatusCode::NOT_FOUND, "Policy not found".to_string()))?;
+    let policy =
+        crate::queries::deployment_policies::get_deployment_policy_by_id(&state.pool, &policy_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to fetch policy: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to fetch policy".to_string(),
+                )
+            })?
+            .ok_or((StatusCode::NOT_FOUND, "Policy not found".to_string()))?;
 
     if policy.policy_type != "require_approvals" {
         return Err((
@@ -226,7 +238,10 @@ pub async fn get_commit_rollout_status(
     Path((commit_id, policy_id)): Path<(String, Uuid)>,
 ) -> Result<Json<RolloutStatusResponse>, (StatusCode, String)> {
     // Require authentication for status reads
-    if authenticated_user_roles(&state.pool, &headers).await.is_none() {
+    if authenticated_user_roles(&state.pool, &headers)
+        .await
+        .is_none()
+    {
         return Err((StatusCode::UNAUTHORIZED, "Unauthorized".to_string()));
     }
     let rollout_state = canary_rollout::get_rollout_state(
@@ -264,9 +279,7 @@ pub async fn get_commit_rollout_status(
             systems_in_current_phase: state.systems_in_current_phase,
             systems_completed: state.systems_completed,
             systems_failed: state.systems_failed,
-            phase_observation_end: state
-                .phase_observation_end
-                .map(|dt| dt.to_rfc3339()),
+            phase_observation_end: state.phase_observation_end.map(|dt| dt.to_rfc3339()),
             halted_reason: state.halted_reason,
         })),
     }

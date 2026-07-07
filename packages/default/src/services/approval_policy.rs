@@ -53,19 +53,19 @@ pub async fn check_approvals(
 ) -> Result<ApprovalResult, sqlx::Error> {
     // Get non-expired approvals for this deployment
     let mut approvals = get_approvals(pool, context, context_id, policy_id).await?;
-    
+
     // Filter out expired approvals
     if let Some(expires_hours) = config.expires_after_hours {
         let cutoff = Utc::now() - Duration::hours(expires_hours as i64);
         approvals.retain(|approval| approval.approved_at > cutoff);
     }
-    
+
     let approval_count = approvals.len();
     let required_count = config.count as usize;
-    
+
     // Check if distinct approvers requirement is met
     if config.distinct {
-        let unique_approvers: std::collections::HashSet<_> = 
+        let unique_approvers: std::collections::HashSet<_> =
             approvals.iter().map(|a| a.approved_by).collect();
         if unique_approvers.len() < approval_count {
             return Ok(ApprovalResult {
@@ -76,10 +76,10 @@ pub async fn check_approvals(
             });
         }
     }
-    
+
     // TODO: Verify approvers have required role (requires user role lookup)
     // For now, we trust that the approval was created by someone with the right role
-    
+
     if approval_count >= required_count {
         Ok(ApprovalResult {
             deployment_allowed: true,
@@ -110,10 +110,8 @@ pub async fn submit_approval(
     comment: Option<String>,
     expires_after_hours: Option<u32>,
 ) -> Result<Uuid, sqlx::Error> {
-    let expires_at = expires_after_hours.map(|hours| {
-        Utc::now() + Duration::hours(hours as i64)
-    });
-    
+    let expires_at = expires_after_hours.map(|hours| Utc::now() + Duration::hours(hours as i64));
+
     let id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO deployment_approvals (
@@ -141,7 +139,7 @@ pub async fn submit_approval(
     .bind(expires_at)
     .fetch_one(pool)
     .await?;
-    
+
     Ok(id)
 }
 
@@ -181,6 +179,6 @@ async fn get_approvals(
         approved_at,
     })
     .collect();
-    
+
     Ok(approvals)
 }

@@ -42,7 +42,10 @@ pub fn build_update_request(
     }
 }
 
-pub fn public_key_update_for_save(current_public_key: &str, edited_public_key: &str) -> Option<String> {
+pub fn public_key_update_for_save(
+    current_public_key: &str,
+    edited_public_key: &str,
+) -> Option<String> {
     let next_public_key = edited_public_key.trim();
     if next_public_key.is_empty() || next_public_key == current_public_key {
         None

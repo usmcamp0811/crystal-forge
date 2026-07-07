@@ -152,45 +152,45 @@ pub async fn check_rollout(
     match existing_state {
         None => {
             // No rollout exists - initialize new one
-            let state = init_rollout(pool, context, context_id, policy_id, config, all_systems).await?;
+            let state =
+                init_rollout(pool, context, context_id, policy_id, config, all_systems).await?;
             Ok(CanaryResult {
                 deployment_allowed: true,
                 systems_to_deploy: state.systems_in_current_phase.clone(),
-                reason: Some(format!("Starting canary rollout phase 1/{}", state.total_phases)),
+                reason: Some(format!(
+                    "Starting canary rollout phase 1/{}",
+                    state.total_phases
+                )),
                 rollout_state: Some(state),
             })
         }
         Some(state) => {
             match state.status {
-                RolloutStatus::Completed => {
-                    Ok(CanaryResult {
-                        deployment_allowed: true,
-                        systems_to_deploy: all_systems.to_vec(),
-                        reason: Some("Canary rollout completed".to_string()),
-                        rollout_state: Some(state),
-                    })
-                }
-                RolloutStatus::Halted | RolloutStatus::Failed => {
-                    Ok(CanaryResult {
-                        deployment_allowed: false,
-                        systems_to_deploy: vec![],
-                        reason: state.halted_reason.clone(),
-                        rollout_state: Some(state),
-                    })
-                }
+                RolloutStatus::Completed => Ok(CanaryResult {
+                    deployment_allowed: true,
+                    systems_to_deploy: all_systems.to_vec(),
+                    reason: Some("Canary rollout completed".to_string()),
+                    rollout_state: Some(state),
+                }),
+                RolloutStatus::Halted | RolloutStatus::Failed => Ok(CanaryResult {
+                    deployment_allowed: false,
+                    systems_to_deploy: vec![],
+                    reason: state.halted_reason.clone(),
+                    rollout_state: Some(state),
+                }),
                 RolloutStatus::Observing => {
                     // Check if observation period has ended
                     if let Some(end_time) = state.phase_observation_end {
                         if Utc::now() >= end_time {
                             // Observation period complete - advance to next phase
-                            let next_state = advance_to_next_phase(pool, state.id, all_systems, config).await?;
+                            let next_state =
+                                advance_to_next_phase(pool, state.id, all_systems, config).await?;
                             Ok(CanaryResult {
                                 deployment_allowed: true,
                                 systems_to_deploy: next_state.systems_in_current_phase.clone(),
                                 reason: Some(format!(
                                     "Observation complete, advanced to phase {}/{}",
-                                    next_state.current_phase,
-                                    next_state.total_phases
+                                    next_state.current_phase, next_state.total_phases
                                 )),
                                 rollout_state: Some(next_state),
                             })
@@ -211,7 +211,9 @@ pub async fn check_rollout(
                         Ok(CanaryResult {
                             deployment_allowed: true,
                             systems_to_deploy: state.systems_in_current_phase.clone(),
-                            reason: Some("Observation period misconfigured, allowing deployment".to_string()),
+                            reason: Some(
+                                "Observation period misconfigured, allowing deployment".to_string(),
+                            ),
                             rollout_state: Some(state),
                         })
                     }
@@ -297,7 +299,8 @@ pub async fn advance_to_next_phase(
     all_systems: &[Uuid],
     config: &CanaryConfig,
 ) -> Result<RolloutState, sqlx::Error> {
-    let state = get_rollout_state_by_id(pool, rollout_id).await?
+    let state = get_rollout_state_by_id(pool, rollout_id)
+        .await?
         .ok_or_else(|| sqlx::Error::RowNotFound)?;
 
     if state.current_phase >= state.total_phases {
@@ -366,18 +369,21 @@ pub async fn get_rollout_state(
     context_id: &str,
     policy_id: Uuid,
 ) -> Result<Option<RolloutState>, sqlx::Error> {
-    let result = sqlx::query_as::<_, (
-        Uuid,
-        i32,
-        i32,
-        String,
-        DateTime<Utc>,
-        Option<DateTime<Utc>>,
-        Vec<Uuid>,
-        Vec<Uuid>,
-        Vec<Uuid>,
-        Option<String>,
-    )>(
+    let result = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            i32,
+            i32,
+            String,
+            DateTime<Utc>,
+            Option<DateTime<Utc>>,
+            Vec<Uuid>,
+            Vec<Uuid>,
+            Vec<Uuid>,
+            Option<String>,
+        ),
+    >(
         r#"
         SELECT id, current_phase, total_phases, status, phase_started_at,
                phase_observation_end, systems_in_current_phase, systems_completed,
@@ -415,18 +421,21 @@ async fn get_rollout_state_by_id(
     pool: &PgPool,
     rollout_id: Uuid,
 ) -> Result<Option<RolloutState>, sqlx::Error> {
-    let result = sqlx::query_as::<_, (
-        Uuid,
-        i32,
-        i32,
-        String,
-        DateTime<Utc>,
-        Option<DateTime<Utc>>,
-        Vec<Uuid>,
-        Vec<Uuid>,
-        Vec<Uuid>,
-        Option<String>,
-    )>(
+    let result = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            i32,
+            i32,
+            String,
+            DateTime<Utc>,
+            Option<DateTime<Utc>>,
+            Vec<Uuid>,
+            Vec<Uuid>,
+            Vec<Uuid>,
+            Option<String>,
+        ),
+    >(
         r#"
         SELECT id, current_phase, total_phases, status, phase_started_at,
                phase_observation_end, systems_in_current_phase, systems_completed,
@@ -472,7 +481,7 @@ fn select_systems_for_phase(
 ) -> Vec<Uuid> {
     let completed_set: HashSet<_> = completed.iter().collect();
     let failed_set: HashSet<_> = failed.iter().collect();
-    
+
     let remaining: Vec<Uuid> = all_systems
         .iter()
         .filter(|s| !completed_set.contains(s) && !failed_set.contains(s))
@@ -504,7 +513,11 @@ fn select_systems_for_phase(
                 })
                 .collect();
             indexed.sort_by_key(|(hash, _)| *hash);
-            indexed.into_iter().take(phase_size).map(|(_, uuid)| uuid).collect()
+            indexed
+                .into_iter()
+                .take(phase_size)
+                .map(|(_, uuid)| uuid)
+                .collect()
         }
         _ => {
             // Default: simple sequential selection

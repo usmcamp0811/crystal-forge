@@ -27,9 +27,9 @@ pub fn ComplianceView() -> Element {
     // Read-only compliance browsing is available to all authenticated users.
     // Bundle management (create / edit / delete) and Import STIG are restricted
     // to admins, matching the backend RBAC on POST/PUT/DELETE endpoints.
-    let app_state   = use_context::<Signal<AppState>>();
+    let app_state = use_context::<Signal<AppState>>();
     let auth_context = app_state.read().auth.clone();
-    let is_admin    = auth::is_admin(&auth_context);
+    let is_admin = auth::is_admin(&auth_context);
 
     // `fetch_started` prevents the effect from re-firing; `loaded` becomes true
     // only after the bundle fetch completes so we never show the empty state
@@ -440,49 +440,161 @@ fn EmptyComplianceState(props: EmptyComplianceStateProps) -> Element {
 
 #[derive(Clone, PartialEq)]
 struct StigRule {
-    rule_id:  String,
-    stig_id:  String,
+    rule_id: String,
+    stig_id: String,
     severity: String, // "high" | "medium" | "low"
-    title:    String,
-    fixtext:  String,
-    check:    String,
-    srg:      String,
+    title: String,
+    fixtext: String,
+    check: String,
+    srg: String,
     selected: bool,
 }
 
 fn sample_stig_rules() -> Vec<StigRule> {
     vec![
-        StigRule { rule_id: "RHEL-09-255040".into(), stig_id: "RHEL-09-255040".into(), severity: "high".into(),   title: "RHEL 9 must disable SSH root login.".into(),                        fixtext: "Set PermitRootLogin no in /etc/ssh/sshd_config.d/.".into(),                 check: "Verify sshd -T | grep permitrootlogin returns no.".into(),     srg: "SRG-OS-000109".into(), selected: true },
-        StigRule { rule_id: "RHEL-09-255095".into(), stig_id: "RHEL-09-255095".into(), severity: "medium".into(), title: "RHEL 9 SSH must use FIPS-validated MACs.".into(),                    fixtext: "Configure approved MACs (hmac-sha2-512, hmac-sha2-256).".into(),             check: "Verify MACs in sshd config.".into(),                           srg: "SRG-OS-000250".into(), selected: true },
-        StigRule { rule_id: "RHEL-09-211010".into(), stig_id: "RHEL-09-211010".into(), severity: "high".into(),   title: "RHEL 9 must enable FIPS mode.".into(),                              fixtext: "Boot kernel with fips=1 and install dracut-fips.".into(),                  check: "cat /proc/sys/crypto/fips_enabled returns 1.".into(),          srg: "SRG-OS-000478".into(), selected: true },
-        StigRule { rule_id: "RHEL-09-654010".into(), stig_id: "RHEL-09-654010".into(), severity: "medium".into(), title: "RHEL 9 must enable auditd.".into(),                                 fixtext: "systemctl enable --now auditd.".into(),                                    check: "systemctl is-active auditd returns active.".into(),            srg: "SRG-OS-000062".into(), selected: true },
-        StigRule { rule_id: "RHEL-09-654155".into(), stig_id: "RHEL-09-654155".into(), severity: "medium".into(), title: "RHEL 9 must audit execution of privileged functions.".into(),       fixtext: "Add execve audit rules for b32/b64.".into(),                               check: "auditctl -l shows execve rules.".into(),                        srg: "SRG-OS-000326".into(), selected: true },
-        StigRule { rule_id: "RHEL-09-271010".into(), stig_id: "RHEL-09-271010".into(), severity: "medium".into(), title: "RHEL 9 must display the Standard Mandatory DoD banner.".into(),     fixtext: "Set /etc/issue to the DoD consent banner.".into(),                         check: "Verify /etc/issue contents.".into(),                           srg: "SRG-OS-000023".into(), selected: true },
-        StigRule { rule_id: "RHEL-09-251010".into(), stig_id: "RHEL-09-251010".into(), severity: "high".into(),   title: "RHEL 9 must enable the firewalld default-deny policy.".into(),      fixtext: "Set firewalld default zone to drop.".into(),                               check: "firewall-cmd --get-default-zone returns drop.".into(),         srg: "SRG-OS-000480".into(), selected: true },
-        StigRule { rule_id: "RHEL-09-411015".into(), stig_id: "RHEL-09-411015".into(), severity: "medium".into(), title: "RHEL 9 must lock accounts after 3 failed logon attempts.".into(),  fixtext: "Configure pam_faillock deny=3.".into(),                                    check: "Verify faillock config.".into(),                               srg: "SRG-OS-000021".into(), selected: true },
-        StigRule { rule_id: "RHEL-09-412035".into(), stig_id: "RHEL-09-412035".into(), severity: "low".into(),    title: "RHEL 9 must set an idle session timeout.".into(),                   fixtext: "Set TMOUT=600 in /etc/profile.d/.".into(),                                 check: "Verify TMOUT export.".into(),                                  srg: "SRG-OS-000163".into(), selected: true },
-        StigRule { rule_id: "RHEL-09-672010".into(), stig_id: "RHEL-09-672010".into(), severity: "low".into(),    title: "RHEL 9 must synchronize time with an authoritative source.".into(),  fixtext: "Configure chrony with authorized servers.".into(),                         check: "chronyc sources shows server.".into(),                         srg: "SRG-OS-000355".into(), selected: true },
-        StigRule { rule_id: "RHEL-09-231010".into(), stig_id: "RHEL-09-231010".into(), severity: "medium".into(), title: "RHEL 9 must encrypt all non-boot partitions (LUKS).".into(),        fixtext: "Provision LUKS on data partitions.".into(),                                check: "lsblk shows crypt devices.".into(),                            srg: "SRG-OS-000405".into(), selected: true },
-        StigRule { rule_id: "RHEL-09-215015".into(), stig_id: "RHEL-09-215015".into(), severity: "low".into(),    title: "RHEL 9 must remove unauthorized package repositories.".into(),      fixtext: "Remove unapproved .repo files.".into(),                                    check: "dnf repolist matches baseline.".into(),                        srg: "SRG-OS-000366".into(), selected: true },
+        StigRule {
+            rule_id: "RHEL-09-255040".into(),
+            stig_id: "RHEL-09-255040".into(),
+            severity: "high".into(),
+            title: "RHEL 9 must disable SSH root login.".into(),
+            fixtext: "Set PermitRootLogin no in /etc/ssh/sshd_config.d/.".into(),
+            check: "Verify sshd -T | grep permitrootlogin returns no.".into(),
+            srg: "SRG-OS-000109".into(),
+            selected: true,
+        },
+        StigRule {
+            rule_id: "RHEL-09-255095".into(),
+            stig_id: "RHEL-09-255095".into(),
+            severity: "medium".into(),
+            title: "RHEL 9 SSH must use FIPS-validated MACs.".into(),
+            fixtext: "Configure approved MACs (hmac-sha2-512, hmac-sha2-256).".into(),
+            check: "Verify MACs in sshd config.".into(),
+            srg: "SRG-OS-000250".into(),
+            selected: true,
+        },
+        StigRule {
+            rule_id: "RHEL-09-211010".into(),
+            stig_id: "RHEL-09-211010".into(),
+            severity: "high".into(),
+            title: "RHEL 9 must enable FIPS mode.".into(),
+            fixtext: "Boot kernel with fips=1 and install dracut-fips.".into(),
+            check: "cat /proc/sys/crypto/fips_enabled returns 1.".into(),
+            srg: "SRG-OS-000478".into(),
+            selected: true,
+        },
+        StigRule {
+            rule_id: "RHEL-09-654010".into(),
+            stig_id: "RHEL-09-654010".into(),
+            severity: "medium".into(),
+            title: "RHEL 9 must enable auditd.".into(),
+            fixtext: "systemctl enable --now auditd.".into(),
+            check: "systemctl is-active auditd returns active.".into(),
+            srg: "SRG-OS-000062".into(),
+            selected: true,
+        },
+        StigRule {
+            rule_id: "RHEL-09-654155".into(),
+            stig_id: "RHEL-09-654155".into(),
+            severity: "medium".into(),
+            title: "RHEL 9 must audit execution of privileged functions.".into(),
+            fixtext: "Add execve audit rules for b32/b64.".into(),
+            check: "auditctl -l shows execve rules.".into(),
+            srg: "SRG-OS-000326".into(),
+            selected: true,
+        },
+        StigRule {
+            rule_id: "RHEL-09-271010".into(),
+            stig_id: "RHEL-09-271010".into(),
+            severity: "medium".into(),
+            title: "RHEL 9 must display the Standard Mandatory DoD banner.".into(),
+            fixtext: "Set /etc/issue to the DoD consent banner.".into(),
+            check: "Verify /etc/issue contents.".into(),
+            srg: "SRG-OS-000023".into(),
+            selected: true,
+        },
+        StigRule {
+            rule_id: "RHEL-09-251010".into(),
+            stig_id: "RHEL-09-251010".into(),
+            severity: "high".into(),
+            title: "RHEL 9 must enable the firewalld default-deny policy.".into(),
+            fixtext: "Set firewalld default zone to drop.".into(),
+            check: "firewall-cmd --get-default-zone returns drop.".into(),
+            srg: "SRG-OS-000480".into(),
+            selected: true,
+        },
+        StigRule {
+            rule_id: "RHEL-09-411015".into(),
+            stig_id: "RHEL-09-411015".into(),
+            severity: "medium".into(),
+            title: "RHEL 9 must lock accounts after 3 failed logon attempts.".into(),
+            fixtext: "Configure pam_faillock deny=3.".into(),
+            check: "Verify faillock config.".into(),
+            srg: "SRG-OS-000021".into(),
+            selected: true,
+        },
+        StigRule {
+            rule_id: "RHEL-09-412035".into(),
+            stig_id: "RHEL-09-412035".into(),
+            severity: "low".into(),
+            title: "RHEL 9 must set an idle session timeout.".into(),
+            fixtext: "Set TMOUT=600 in /etc/profile.d/.".into(),
+            check: "Verify TMOUT export.".into(),
+            srg: "SRG-OS-000163".into(),
+            selected: true,
+        },
+        StigRule {
+            rule_id: "RHEL-09-672010".into(),
+            stig_id: "RHEL-09-672010".into(),
+            severity: "low".into(),
+            title: "RHEL 9 must synchronize time with an authoritative source.".into(),
+            fixtext: "Configure chrony with authorized servers.".into(),
+            check: "chronyc sources shows server.".into(),
+            srg: "SRG-OS-000355".into(),
+            selected: true,
+        },
+        StigRule {
+            rule_id: "RHEL-09-231010".into(),
+            stig_id: "RHEL-09-231010".into(),
+            severity: "medium".into(),
+            title: "RHEL 9 must encrypt all non-boot partitions (LUKS).".into(),
+            fixtext: "Provision LUKS on data partitions.".into(),
+            check: "lsblk shows crypt devices.".into(),
+            srg: "SRG-OS-000405".into(),
+            selected: true,
+        },
+        StigRule {
+            rule_id: "RHEL-09-215015".into(),
+            stig_id: "RHEL-09-215015".into(),
+            severity: "low".into(),
+            title: "RHEL 9 must remove unauthorized package repositories.".into(),
+            fixtext: "Remove unapproved .repo files.".into(),
+            check: "dnf repolist matches baseline.".into(),
+            srg: "SRG-OS-000366".into(),
+            selected: true,
+        },
     ]
 }
 
 fn sev_color(sev: &str) -> &'static str {
     match sev {
-        "high"   => "#f87171",
+        "high" => "#f87171",
         "medium" => "#fbbf24",
-        _        => "#60a5fa",
+        _ => "#60a5fa",
     }
 }
 fn sev_cat(sev: &str) -> &'static str {
     match sev {
-        "high"   => "CAT I",
+        "high" => "CAT I",
         "medium" => "CAT II",
-        _        => "CAT III",
+        _ => "CAT III",
     }
 }
 fn sev_label(sev: &str) -> &'static str {
-    match sev { "high" => "High", "medium" => "Medium", _ => "Low" }
+    match sev {
+        "high" => "High",
+        "medium" => "Medium",
+        _ => "Low",
+    }
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -494,17 +606,17 @@ struct ImportStigModalProps {
 #[component]
 fn ImportStigModal(props: ImportStigModalProps) -> Element {
     // step: "upload" | "review" | "refine" | "done"
-    let mut step         = use_signal(|| "upload".to_string());
-    let mut rules        = use_signal(|| Vec::<StigRule>::new());
-    let mut bundle_name  = use_signal(String::new);
-    let mut file_name    = use_signal(String::new);
-    let mut bench_title  = use_signal(String::new);
-    let mut bench_ver    = use_signal(String::new);
-    let mut selected_envs= use_signal(|| Vec::<String>::new());
-    let mut cursor       = use_signal(|| 0usize);
-    let mut parse_error  = use_signal(|| Option::<String>::None);
+    let mut step = use_signal(|| "upload".to_string());
+    let mut rules = use_signal(|| Vec::<StigRule>::new());
+    let mut bundle_name = use_signal(String::new);
+    let mut file_name = use_signal(String::new);
+    let mut bench_title = use_signal(String::new);
+    let mut bench_ver = use_signal(String::new);
+    let mut selected_envs = use_signal(|| Vec::<String>::new());
+    let mut cursor = use_signal(|| 0usize);
+    let mut parse_error = use_signal(|| Option::<String>::None);
     // done-step summary
-    let mut done_total   = use_signal(|| 0usize);
+    let mut done_total = use_signal(|| 0usize);
 
     let all_env_names: Vec<String> = props.environments.iter().map(|e| e.name.clone()).collect();
 
@@ -512,8 +624,8 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
         let all_env_names = all_env_names.clone();
         move |_| {
             let sample = sample_stig_rules();
-            let title  = "Red Hat Enterprise Linux 9 STIG".to_string();
-            let ver    = "V1R5".to_string();
+            let title = "Red Hat Enterprise Linux 9 STIG".to_string();
+            let ver = "V1R5".to_string();
             bundle_name.set(title.clone());
             bench_title.set(title);
             bench_ver.set(ver);
@@ -528,15 +640,27 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
     };
 
     // Derived counts
-    let selected_rules: Vec<StigRule> = rules.read().iter().filter(|r| r.selected).cloned().collect();
-    let sel_count  = selected_rules.len();
+    let selected_rules: Vec<StigRule> = rules
+        .read()
+        .iter()
+        .filter(|r| r.selected)
+        .cloned()
+        .collect();
+    let sel_count = selected_rules.len();
     let total_count = rules.read().len();
 
-    let counts: Vec<(&'static str, usize, usize)> = ["high", "medium", "low"].iter().map(|&s| {
-        let n   = rules.read().iter().filter(|r| r.severity == s).count();
-        let sel = rules.read().iter().filter(|r| r.severity == s && r.selected).count();
-        (s, n, sel)
-    }).collect();
+    let counts: Vec<(&'static str, usize, usize)> = ["high", "medium", "low"]
+        .iter()
+        .map(|&s| {
+            let n = rules.read().iter().filter(|r| r.severity == s).count();
+            let sel = rules
+                .read()
+                .iter()
+                .filter(|r| r.severity == s && r.selected)
+                .count();
+            (s, n, sel)
+        })
+        .collect();
 
     // can_advance: need at least one rule selected and a bundle name.
     // Env selection is only required when environments actually exist — if the
@@ -1228,11 +1352,36 @@ fn ExportModal(props: ExportModalProps) -> Element {
     let fail_count: i64 = env_filtered_systems.iter().filter(|s| s.fail > 0).count() as i64;
 
     let formats: &[(&str, &str, &str, &str)] = &[
-        ("oscal", "OSCAL 1.1.2 JSON", "oscal.json", "NIST OSCAL System Security Plan + Assessment Results for ATO packages."),
-        ("json",  "Crystal Forge JSON", "cf-evidence.json", "Native CF schema — best for re-ingest or custom dashboards."),
-        ("csv",   "CSV summary",        "summary.csv", "Flat per-(host, control) table. Spreadsheet-friendly."),
-        ("pdf",   "Print report (HTML)", "html",       "Styled HTML report — open in browser and Ctrl-P to save as PDF."),
-        ("sarif", "SARIF 2.1.0",        "sarif",      "Static analysis exchange format — works with most SAST/posture tools."),
+        (
+            "oscal",
+            "OSCAL 1.1.2 JSON",
+            "oscal.json",
+            "NIST OSCAL System Security Plan + Assessment Results for ATO packages.",
+        ),
+        (
+            "json",
+            "Crystal Forge JSON",
+            "cf-evidence.json",
+            "Native CF schema — best for re-ingest or custom dashboards.",
+        ),
+        (
+            "csv",
+            "CSV summary",
+            "summary.csv",
+            "Flat per-(host, control) table. Spreadsheet-friendly.",
+        ),
+        (
+            "pdf",
+            "Print report (HTML)",
+            "html",
+            "Styled HTML report — open in browser and Ctrl-P to save as PDF.",
+        ),
+        (
+            "sarif",
+            "SARIF 2.1.0",
+            "sarif",
+            "Static analysis exchange format — works with most SAST/posture tools.",
+        ),
     ];
 
     let fmt_name = formats

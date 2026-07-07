@@ -626,7 +626,8 @@ pub async fn get_recent_branch_commit_hashes_with_creds(
     limit: usize,
     creds: Option<&FlakeCredentialEnv>,
 ) -> Result<Vec<String>> {
-    let commits = get_commits_with_full_metadata(repo_url, branch, Some(limit), None, creds).await?;
+    let commits =
+        get_commits_with_full_metadata(repo_url, branch, Some(limit), None, creds).await?;
     Ok(commits.into_iter().map(|c| c.hash).collect())
 }
 

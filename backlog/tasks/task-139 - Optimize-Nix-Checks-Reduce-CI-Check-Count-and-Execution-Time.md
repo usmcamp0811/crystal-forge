@@ -1,9 +1,10 @@
 ---
 id: TASK-139
 title: Optimize Nix Checks - Reduce CI Check Count and Execution Time
-status: Backlog
+status: Review
 assignee: []
 created_date: '2026-02-28 02:51'
+updated_date: '2026-07-04 16:54'
 labels:
   - performance
   - ci
@@ -325,6 +326,20 @@ checks = {
 - [ ] #9 Documentation updated with new check structure and debugging guide
 - [ ] #10 Developer feedback collected and positive
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/292
+
+This commit replaces the FixtureDb middleware approach with DB-backed seeding:
+- dfcc37fe feat: replace middleware fixture layer with DB-backed fixture seeding
+
+Discrepancy tasks created for unseeded backend features:
+- TASK-380: Seed build_jobs + derivations
+- TASK-381: Seed hardening data
+- TASK-382: Seed compliance, caches, scanning, admin audit
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

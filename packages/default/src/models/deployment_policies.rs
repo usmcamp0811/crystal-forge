@@ -258,22 +258,22 @@ pub enum DeploymentPolicy {
     /// CVE-count gate evaluated against the database after build-complete.
     /// This policy type is NOT Nix-evaluated; it runs in the deployment manager.
     RequireCveCheck { config: CveCheckConfig },
-    
+
     /// Time-windowed deployment restriction.
     /// Deployment only allowed during specified time windows.
     /// NOT Nix-evaluated; checked at deployment time.
     TimeWindow { config: TimeWindowConfig },
-    
+
     /// Multi-operator approval requirement.
     /// Requires N approvals from operators with specific roles.
     /// NOT Nix-evaluated; checked at deployment time.
     RequireApprovals { config: ApprovalConfig },
-    
+
     /// Canary/phased rollout orchestration.
     /// Deploys to subsets of fleet with observation periods.
     /// NOT Nix-evaluated; controls deployment orchestration.
     CanaryRollout { config: CanaryConfig },
-    
+
     /// Enhanced CVE threshold policy with per-severity actions.
     /// More flexible than RequireCveCheck.
     /// NOT Nix-evaluated; checked at deployment time.

@@ -313,25 +313,28 @@ pub async fn fetch_cve_packages_grouped(
     let mut nested_by_package: HashMap<String, Vec<CveListItem>> = HashMap::new();
     for row in nested_rows {
         let pkg_key = row.package_name.clone().unwrap_or_default();
-        nested_by_package.entry(pkg_key).or_default().push(CveListItem {
-            cve_id: row.cve_id,
-            cvss_v3_score: row.cvss_v3_score,
-            severity: row.severity,
-            title: row.title,
-            cvss_vector: row.cvss_vector,
-            published_date: row.published_date,
-            exploited: row.exploited,
-            package_name: row.package_name,
-            installed_version: row.installed_version,
-            fixed_version: row.fixed_version,
-            fix_status: row.fix_status,
-            affected_count: row.affected_count,
-            affected_environments: row.affected_environments,
-            first_seen: row.first_seen,
-            last_seen: row.last_seen,
-            age_days: row.age_days,
-            triage_status: row.triage_status,
-        });
+        nested_by_package
+            .entry(pkg_key)
+            .or_default()
+            .push(CveListItem {
+                cve_id: row.cve_id,
+                cvss_v3_score: row.cvss_v3_score,
+                severity: row.severity,
+                title: row.title,
+                cvss_vector: row.cvss_vector,
+                published_date: row.published_date,
+                exploited: row.exploited,
+                package_name: row.package_name,
+                installed_version: row.installed_version,
+                fixed_version: row.fixed_version,
+                fix_status: row.fix_status,
+                affected_count: row.affected_count,
+                affected_environments: row.affected_environments,
+                first_seen: row.first_seen,
+                last_seen: row.last_seen,
+                age_days: row.age_days,
+                triage_status: row.triage_status,
+            });
     }
 
     let mut result = Vec::new();
@@ -507,10 +510,7 @@ pub async fn fetch_cve_justifications(
 ///
 /// Per-system rows (system_id IS NOT NULL) continue to use the composite
 /// primary key (system_id, cve_id) as the conflict target.
-pub async fn insert_cve_justification(
-    pool: &PgPool,
-    input: &CveJustificationInput,
-) -> Result<()> {
+pub async fn insert_cve_justification(pool: &PgPool, input: &CveJustificationInput) -> Result<()> {
     if input.system_id.is_none() {
         // Fleet-wide: conflict on the partial unique index WHERE system_id IS NULL
         sqlx::query(
@@ -637,9 +637,7 @@ mod tests {
     // ── Query builder unit tests (pure logic, no DB connection needed) ──
 
     fn build_list_query(filters: &CveFilters) -> String {
-        let mut query = String::from(
-            "SELECT * FROM view_cve_list_with_metadata WHERE 1=1\n",
-        );
+        let mut query = String::from("SELECT * FROM view_cve_list_with_metadata WHERE 1=1\n");
         let mut conditions = Vec::new();
 
         if let Some(ref severity) = filters.severity {

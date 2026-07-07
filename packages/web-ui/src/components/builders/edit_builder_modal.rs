@@ -123,7 +123,8 @@ pub fn EditBuilderModal(
             max_concurrent_jobs().as_str(),
         );
 
-        let public_key_update = public_key_update_for_save(&current_public_key(), &rotated_public_key());
+        let public_key_update =
+            public_key_update_for_save(&current_public_key(), &rotated_public_key());
 
         match submit_builder_update(&builder_id, &update_request, selected_environments()).await {
             Ok(_) => {

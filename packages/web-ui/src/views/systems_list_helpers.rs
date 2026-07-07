@@ -165,6 +165,9 @@ mod tests {
             last_seen: Some(Utc::now()),
             deployment_policy: "manual".to_string(),
             fqdn: None,
+            heartbeat_interval_secs: None,
+            effective_heartbeat_interval_secs: 600,
+            boot_id: None,
         }
     }
 
