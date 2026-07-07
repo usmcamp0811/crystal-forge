@@ -2,8 +2,12 @@
 
 This document describes how Crystal Forge agents report state, how the server
 decides whether to persist a lightweight heartbeat or a full system-state row,
-how deployment commands are returned, and how history entries should be
+how deployment commands are returned, and how event-backed history entries are
 classified for the UI.
+
+`system_events` is the authoritative source for user-facing Deployment History.
+`system_states` remains available as raw observation/audit/debug data and as a
+legacy fallback for systems that do not yet have event rows.
 
 It is intentionally focused on the bugs seen during TASK-378:
 
@@ -34,7 +38,8 @@ sequenceDiagram
     Agent->>Agent: Gather /run/current-system, generation, boot_id, metadata
     Agent->>Server: POST /agent/heartbeat (SystemState + change_reason)
     Server->>Server: Authenticate agent request
-    Server->>Server: Classify boot_id change
+    Server->>Server: Lock previous observed state and classify boot_id change
+    Server->>DB: INSERT idempotent system_events for real transitions only
     Server->>Server: Decide heartbeat vs full state row
     alt unchanged heartbeat-equivalent state
         Server->>DB: INSERT agent_heartbeats
@@ -50,10 +55,86 @@ sequenceDiagram
         Agent->>Agent: No deployment needed
     end
     UI->>Server: GET system history
-    Server->>DB: Read system_states history
-    Server-->>UI: SystemHistoryEntry[] with event_kind
-    UI->>UI: Render deployment timeline from authoritative event_kind
+    Server->>DB: Read system_events history, fallback to system_states if empty
+    Server-->>UI: SystemHistoryEntry[] with explicit event_type/event_kind
+    UI->>UI: Render deployment timeline from explicit event_type
 ```
+
+## Authoritative `system_events` timeline
+
+The server appends user-facing timeline events to `system_events` only when an
+incoming report proves a real transition. Raw state reports and heartbeat-equivalent
+metadata updates must not become Deployment History entries.
+
+Supported event types:
+
+| `event_type` | Meaning | UI classification |
+| --- | --- | --- |
+| `cf_deployment_succeeded` | Reported store path matched a pending Crystal Forge desired target | Crystal Forge deployment |
+| `cf_deployment_failed` | Reserved for reliable server-side failure attribution | Failed deployment |
+| `local_rebuild_detected` | Generation/store path changed without matching pending CF context | Local rebuild |
+| `system_reboot` | `boot_id` changed | System restart |
+| `agent_restart` | startup report on same boot without generation/store-path change | Agent restart |
+
+Events are idempotent through a durable unique key:
+
+```sql
+UNIQUE (system_id, event_type, dedupe_key)
+```
+
+Example dedupe keys:
+
+- `system_reboot:<new_boot_id>`
+- `agent_restart:<boot_id>:<store_path>`
+- `local_rebuild:<old_generation>:<old_store_path>-><new_generation>:<new_store_path>`
+- `cf_deployment_succeeded:<pending_deployment_id>`
+
+Ordering is deterministic:
+
+```sql
+ORDER BY occurred_at DESC, observed_at DESC, correlation_id DESC, event_rank ASC, id DESC
+```
+
+Events emitted from the same report share a `correlation_id`, so a report that
+both changes generation and changes `boot_id` can be grouped later without relying
+only on timestamps. `event_rank` provides a stable causal order inside one report:
+configuration/deployment transitions (rank 10) render before `system_reboot`
+(rank 20), which renders before `agent_restart` (rank 30).
+
+### Pending deployment context
+
+Detached activation via `systemd-run --no-block` can restart the agent before the
+agent posts a `cf_deployment` state row. To preserve attribution, the server stores
+pending Crystal Forge deployment context when a desired store-path target is set.
+
+`pending_system_deployments` records:
+
+- `system_id`
+- `target_store_path`
+- `status` (`pending`, `succeeded`, `failed`, `superseded`, `expired`)
+- `issued_at` / `expires_at` / `completed_at`
+- `source`
+- metadata
+
+When a later heartbeat/state report observes `store_path == target_store_path`, the
+server emits `cf_deployment_succeeded` and marks the pending context `succeeded`.
+When a newer desired target is set, older pending contexts for the same system are
+marked `superseded`. Pending contexts expire after a bounded window so stale targets
+cannot claim unrelated future host changes.
+
+Only live `pending` contexts may attribute future reports. Once a context is marked
+`succeeded`, it is no longer matchable; a later manual switch back to the same store
+path is therefore classified as `local_rebuild_detected`.
+
+Commit-based deploy requests are resolved to the matching NixOS derivation store
+path before `systems.desired_target` is set. If no store path or expected store path
+is available for that commit/configuration, the deploy request is rejected instead
+of sending an agent a commit SHA it cannot activate.
+
+`cf_deployment_failed` is part of the event contract, but the current server path
+does not always receive reliable post-detached failure data. Until that data is
+persisted reliably, failed detached activations may remain absent from
+`system_events` instead of being guessed from raw reports.
 
 ## Agent POST types
 
@@ -157,13 +238,14 @@ Because of that, the next report after activation can arrive as `startup`,
 the detached activation, a successful Crystal Forge-initiated activation can be
 hard to distinguish from an on-host rebuild after the fact.
 
-Desired future behavior:
+Event-backed behavior:
 
-1. When an agent receives a desired target and starts detached activation, persist
-   pending CF deployment context locally or server-side.
+1. When the server sets a desired store-path target, persist pending CF deployment
+   context server-side.
 2. When `/run/current-system` or the startup heartbeat later reports that target
-   store path, record the transition as `cf_deployment`.
-3. Clear the pending context after success, mismatch, timeout, or failure.
+   store path, record the transition as `cf_deployment_succeeded`.
+3. Close the pending context after success, supersession, timeout, or reliable
+   failure.
 
 ## Restart and activation classification
 
@@ -211,8 +293,8 @@ it as an `agent_heartbeats` row in the first place.
 
 ## Web UI history rendering rules
 
-The UI should prefer authoritative backend `event_kind` over legacy text
-heuristics.
+The UI should prefer authoritative backend `event_type`/`event_kind` over legacy
+text heuristics.
 
 Expected mappings:
 
@@ -223,6 +305,17 @@ Expected mappings:
 | `restart` | `Restart` | visible, clusterable |
 | `agent_restart` | `AgentRestart` | visible, not clustered |
 | `state_change` | `StateChange` | hidden from Deployment History |
+
+New event-backed rows also carry `event_type`, generation/store-path deltas,
+actor/source, deployment identifiers, timestamps, `correlation_id`, and metadata.
+New fields are optional/defaulted on the wire so older clients and older history
+rows remain compatible.
+
+Backwards compatibility rule:
+
+> If a system has no `system_events` rows yet, the history API may fall back to
+> legacy `system_states` reconstruction. Once event rows exist for a system, the
+> Deployment History timeline uses `system_events` as the authoritative source.
 
 Important UI rule:
 

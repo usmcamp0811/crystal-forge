@@ -1,10 +1,26 @@
 use crate::models::systems::System;
+use crate::queries::system_events::set_pending_deployment_target_tx;
 use anyhow::Result;
 use chrono::Duration as ChronoDuration;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use std::collections::BTreeSet;
 use uuid::Uuid;
+
+const RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL: &str = r#"
+SELECT COALESCE(d.store_path, d.expected_store_path) AS store_path
+FROM systems s
+JOIN commits c ON c.flake_id = s.flake_id
+JOIN derivations d ON d.commit_id = c.id
+WHERE s.id = $1
+  AND LOWER(c.git_commit_hash) = LOWER($2)
+  AND d.derivation_type = 'nixos'
+  AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
+  AND COALESCE(d.store_path, d.expected_store_path) IS NOT NULL
+  AND BTRIM(COALESCE(d.store_path, d.expected_store_path)) <> ''
+ORDER BY d.id DESC
+LIMIT 1
+"#;
 
 const DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL: &str = "UPDATE systems
      SET is_active = FALSE,
@@ -576,17 +592,37 @@ pub async fn touch_system_updated_at(pool: &PgPool, system_id: Uuid) -> Result<(
 pub async fn update_system_desired_target(
     pool: &PgPool,
     system_id: Uuid,
-    target_commit: &str,
+    target: &str,
 ) -> Result<()> {
+    let desired_target = resolve_system_deployment_target(pool, system_id, target)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No NixOS store path is available for deployment target {target} on system {system_id}"
+            )
+        })?;
+
+    let mut tx = pool.begin().await?;
+
     sqlx::query(
         "UPDATE systems
          SET desired_target = $1, desired_target_set_at = NOW(), updated_at = NOW()
          WHERE id = $2",
     )
-    .bind(target_commit)
+    .bind(&desired_target)
     .bind(system_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    set_pending_deployment_target_tx(
+        &mut tx,
+        system_id,
+        Some(desired_target.as_str()),
+        "api_desired_target",
+    )
+    .await?;
+
+    tx.commit().await?;
     Ok(())
 }
 
@@ -760,6 +796,24 @@ pub async fn commit_belongs_to_system_flake(
     .await?;
 
     Ok(exists)
+}
+
+pub async fn resolve_system_deployment_target(
+    pool: &PgPool,
+    system_id: Uuid,
+    target: &str,
+) -> Result<Option<String>> {
+    if target.starts_with("/nix/store/") {
+        return Ok(Some(target.to_string()));
+    }
+
+    let store_path = sqlx::query_scalar::<_, String>(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL)
+        .bind(system_id)
+        .bind(target)
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(store_path)
 }
 
 pub async fn get_user_environment_membership_ids(
@@ -1822,6 +1876,14 @@ mod tests {
             migration.contains("ADD COLUMN IF NOT EXISTS generation integer"),
             "migration must add nullable generation integer column"
         );
+    }
+
+    #[test]
+    fn deployment_target_resolution_uses_nixos_store_path_for_commit() {
+        assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("COALESCE(d.store_path, d.expected_store_path)"));
+        assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("d.derivation_type = 'nixos'"));
+        assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)"));
+        assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("LOWER(c.git_commit_hash) = LOWER($2)"));
     }
 
     #[test]

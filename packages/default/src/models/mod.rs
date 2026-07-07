@@ -16,5 +16,6 @@ pub mod package_vulnerabilities;
 pub mod public_key;
 pub mod scan_packages;
 pub mod system_states;
+pub mod system_events;
 pub mod systems;
 pub mod users;

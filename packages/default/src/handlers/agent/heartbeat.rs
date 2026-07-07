@@ -11,7 +11,8 @@ use crate::queries::systems::{
 };
 use crate::queries::{
     agent_heartbeat::insert_agent_heartbeat,
-    system_states::{get_last_system_state_by_hostname, insert_system_state},
+    system_events::{lock_observed_system_state_by_hostname_tx, record_report_events_tx},
+    system_states::insert_system_state,
 };
 use axum::response::Response;
 use axum::{
@@ -162,6 +163,17 @@ pub async fn log(
         }
     };
 
+    let previous_observed = match lock_observed_system_state_by_hostname_tx(&mut tx, &payload.hostname).await {
+        Ok(value) => value,
+        Err(e) => {
+            debug!(
+                "❌ failed to lock observed state for {}: {e:?}",
+                payload.hostname
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
     let boot_id_change = if let Some(ref new_boot_id) = payload.boot_id {
         match update_boot_id_tx(&mut tx, &payload.hostname, new_boot_id).await {
             Ok(change) => Some(change),
@@ -190,6 +202,22 @@ pub async fn log(
             );
             // Non-fatal: continue; the heartbeat/state insert is more important.
         }
+    }
+
+    if let Err(e) = record_report_events_tx(
+        &mut tx,
+        previous_observed.as_ref(),
+        &payload,
+        boot_id_change,
+        restart_type,
+    )
+    .await
+    {
+        debug!(
+            "❌ failed to record system events for {}: {e:?}",
+            payload.hostname
+        );
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
     // P1 (critical): System reboots MUST always insert a full system_states row,
@@ -225,7 +253,7 @@ pub async fn log(
             Err(state_change_reason) => {
                 info!("🔍 Heartbeat became state change: {}", state_change_reason);
                 let (change_reason_override, event_restart_type) =
-                    classify_non_reboot_state_change_reason(&pool, &payload, restart_type).await;
+                    classify_non_reboot_state_change_reason(&payload, restart_type, previous_observed.as_ref());
 
                 if let Err(e) = insert_system_state(
                     &mut *tx,
@@ -323,24 +351,17 @@ pub async fn log(
     (status, axum::Json(response)).into_response()
 }
 
-async fn classify_non_reboot_state_change_reason(
-    pool: &PgPool,
+fn classify_non_reboot_state_change_reason(
     payload: &crate::models::system_states::SystemState,
     restart_type: Option<&str>,
+    previous: Option<&crate::queries::system_events::ObservedSystemState>,
 ) -> (&'static str, Option<&'static str>) {
-    let previous = match get_last_system_state_by_hostname(pool, &payload.hostname).await {
-        Ok(Some(previous)) => Some((previous.generation, previous.store_path)),
-        Ok(None) | Err(_) => None,
-    };
-
     classify_non_reboot_state_change_reason_from_previous(
         payload.change_reason.as_str(),
         restart_type,
         payload.generation,
         payload.store_path.as_deref(),
-        previous
-            .as_ref()
-            .map(|(generation, store_path)| (*generation, store_path.as_deref())),
+        previous.map(|previous| (previous.generation, previous.store_path.as_deref())),
     )
 }
 
