@@ -22,7 +22,7 @@ pub struct SystemCommitRow {
     pub timestamp: DateTime<Utc>,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SystemHistoryRow {
     pub timestamp: DateTime<Utc>,
     pub store_path: Option<String>,
@@ -1964,10 +1964,14 @@ mod tests {
 
     #[test]
     fn stale_manual_target_clear_is_guarded_against_concurrent_replacement() {
-        assert!(CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL
-            .contains("desired_target IS NOT DISTINCT FROM $2"));
-        assert!(CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL
-            .contains("desired_target_set_at IS NOT DISTINCT FROM $3"));
+        assert!(
+            CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL
+                .contains("desired_target IS NOT DISTINCT FROM $2")
+        );
+        assert!(
+            CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL
+                .contains("desired_target_set_at IS NOT DISTINCT FROM $3")
+        );
     }
 
     #[test]
@@ -1976,8 +1980,10 @@ mod tests {
             "WHEN systems.desired_target IS DISTINCT FROM EXCLUDED.desired_target THEN NOW()"
         ));
         assert!(INSERT_SYSTEM_SQL.contains("WHEN EXCLUDED.deployment_policy = 'manual'"));
-        assert!(INSERT_SYSTEM_SQL
-            .contains("AND systems.deployment_policy IS DISTINCT FROM 'manual' THEN NULL"));
+        assert!(
+            INSERT_SYSTEM_SQL
+                .contains("AND systems.deployment_policy IS DISTINCT FROM 'manual' THEN NULL")
+        );
     }
 
     #[tokio::test]

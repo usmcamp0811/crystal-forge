@@ -10,9 +10,9 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse, FieldUpdate,
+    ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse,
     CveScanStatusResponse, CveScanTriggerResponse, CveSummary, DeploySystemRequest,
-    DeploymentStatus, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
+    DeploymentStatus, FieldUpdate, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
     SystemAgentEvent, SystemCommitsResponse, SystemDetail, SystemGeneration,
     SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
     SystemNetworkInfo, SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
@@ -20,6 +20,7 @@ use crate::api::models::{
     UpdateSystemRequest, VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
 };
 use crate::auth::models::Role;
+use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{
     authenticated_user_roles, extract_request_origin, require_viewer_or_above,
 };
@@ -31,12 +32,11 @@ use crate::queries::system_states::{
 use crate::queries::systems::{
     FqdnUpdate, HeartbeatIntervalUpdate, SystemAccessRow, SystemDetailRow, SystemListRow,
     commit_belongs_to_system_flake, deactivate_system, find_system_access_row,
-    get_system_detail_by_id, get_user_environment_membership_ids,
-    list_recent_commits_for_system, list_system_access_rows, list_system_agent_event_rows,
-    list_system_history_rows, touch_system_updated_at, update_public_key,
-    update_system_desired_target, update_system_metadata,
+    get_system_detail_by_id, get_user_environment_membership_ids, list_recent_commits_for_system,
+    list_system_access_rows, list_system_agent_event_rows, list_system_history_rows,
+    touch_system_updated_at, update_public_key, update_system_desired_target,
+    update_system_metadata,
 };
-use crate::handlers::agent_request::CFState;
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
 use crate::services::systems::SystemsListContext;
 
@@ -201,9 +201,7 @@ pub async fn create_system(
 
     // Fetch the created system from view to return complete data
     let detail = match get_system_detail_by_id(&pool, system.id).await {
-        Ok(Some(row)) => {
-            detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs)
-        }
+        Ok(Some(row)) => detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs),
         Ok(None) => return internal_error("System created but not found in view"),
         Err(_) => return internal_error("Failed to fetch created system"),
     };
@@ -772,13 +770,13 @@ pub async fn update_system_handler(
             }
         }
     };
-    
+
     // PATCH semantics for heartbeat_interval_secs: omitted key preserves value,
     // null clears it (falls back to server default 600s), value sets it.
     // Valid range: 15-900 seconds.
     const MIN_HEARTBEAT_INTERVAL_SECS: i32 = 15;
     const MAX_HEARTBEAT_INTERVAL_SECS: i32 = 900;
-    
+
     let heartbeat_interval = match &payload.heartbeat_interval_secs {
         FieldUpdate::Unset => HeartbeatIntervalUpdate::Keep,
         FieldUpdate::Clear => HeartbeatIntervalUpdate::Clear,
@@ -792,7 +790,7 @@ pub async fn update_system_handler(
             HeartbeatIntervalUpdate::Set(*value)
         }
     };
-    
+
     if !matches!(
         payload.deployment_policy.as_str(),
         "manual" | "auto_latest" | "pinned"
@@ -870,9 +868,7 @@ pub async fn update_system_handler(
     }
 
     let detail = match get_system_detail_by_id(&pool, system_id).await {
-        Ok(Some(row)) => {
-            detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs)
-        }
+        Ok(Some(row)) => detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs),
         Ok(None) => return not_found(),
         Err(_) => return internal_error("Failed to load updated system"),
     };
@@ -1893,11 +1889,23 @@ pub async fn get_system_history(
     };
 
     let entries = rows
-        .into_iter()
-        .map(|row| {
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| {
             let change_reason = row
                 .change_reason
+                .clone()
                 .unwrap_or_else(|| "state_delta".to_string());
+
+            // Rows are sorted newest → oldest.  If this row's generation/store
+            // path differs from the next-older row, it is a real local system
+            // activation even when the stored change_reason is the generic
+            // state_delta.  Prefer the actual generation/store transition over
+            // the textual reason so a nixos-rebuild switch does not disappear
+            // from history as a generic state change.
+            let changed_generation_or_store = rows.get(idx + 1).is_some_and(|older| {
+                row.generation != older.generation || row.store_path != older.store_path
+            });
 
             // Authoritative classification derived from the recorded change_reason and,
             // for startup events, the per-row restart_type written at insert time.
@@ -1914,6 +1922,7 @@ pub async fn get_system_history(
                     Some("agent_restart") => "agent_restart",
                     _ => "restart",
                 },
+                "state_delta" if changed_generation_or_store => "local_rebuild",
                 _ => "state_change",
             }
             .to_string();
@@ -1928,26 +1937,26 @@ pub async fn get_system_history(
             let actor = match change_reason.as_str() {
                 "cf_deployment" => "crystal-forge",
                 "config_change" => "on-host",
+                "state_delta" if changed_generation_or_store => "on-host",
                 _ => "agent",
             }
             .to_string();
 
             SystemHistoryEntry {
                 timestamp: row.timestamp,
-                store_path: row.store_path,
-                system_configuration_name: row.system_configuration_name,
+                store_path: row.store_path.clone(),
+                system_configuration_name: row.system_configuration_name.clone(),
                 change_reason,
-                commit_hash: row.commit_hash,
-                flake_name: row.flake_name,
-                flake_repo_url: row.flake_repo_url,
+                commit_hash: row.commit_hash.clone(),
+                flake_name: row.flake_name.clone(),
+                flake_repo_url: row.flake_repo_url.clone(),
                 actor,
                 outcome: "recorded".to_string(),
                 event_kind,
                 generation: row.generation,
                 reconciled,
-                generation_matches_current_store_path: row
-                    .generation_matches_current_store_path,
-                restart_type: row.restart_type,
+                generation_matches_current_store_path: row.generation_matches_current_store_path,
+                restart_type: row.restart_type.clone(),
             }
         })
         .collect::<Vec<_>>();
@@ -2082,7 +2091,11 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
             .expect("lazy pool should construct");
-        CFState::new(pool, ServerConfig::default(), Arc::new(QueueNotifier::new()))
+        CFState::new(
+            pool,
+            ServerConfig::default(),
+            Arc::new(QueueNotifier::new()),
+        )
     }
 
     #[tokio::test]
