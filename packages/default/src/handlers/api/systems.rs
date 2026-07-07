@@ -10,9 +10,9 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse, FieldUpdate,
+    ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse,
     CveScanStatusResponse, CveScanTriggerResponse, CveSummary, DeploySystemRequest,
-    DeploymentStatus, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
+    DeploymentStatus, FieldUpdate, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
     SystemAgentEvent, SystemCommitsResponse, SystemDetail, SystemGeneration,
     SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
     SystemNetworkInfo, SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
@@ -1890,8 +1890,7 @@ pub async fn get_system_history(
                 event_kind,
                 generation: row.generation,
                 reconciled,
-                generation_matches_current_store_path: row
-                    .generation_matches_current_store_path,
+                generation_matches_current_store_path: row.generation_matches_current_store_path,
             }
         })
         .collect::<Vec<_>>();

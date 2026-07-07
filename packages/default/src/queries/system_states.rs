@@ -111,10 +111,7 @@ pub async fn get_last_system_state_by_hostname(
     Ok(row)
 }
 
-pub async fn get_latest_system_state_id(
-    pool: &PgPool,
-    hostname: &str,
-) -> Result<Option<i32>> {
+pub async fn get_latest_system_state_id(pool: &PgPool, hostname: &str) -> Result<Option<i32>> {
     let row = sqlx::query_scalar::<_, i32>(
         r#"
         SELECT id

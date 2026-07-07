@@ -12,10 +12,10 @@
 //! - `GET /api/v1/environments/:id` — returns a single `EnvironmentSummary`
 
 use axum::{
+    Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    Json,
 };
 use sqlx::Error as SqlxError;
 use sqlx::PgPool;

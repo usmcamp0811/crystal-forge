@@ -2246,12 +2246,12 @@ mod tests {
 
     use super::BuildStreamMessage;
     use super::builder_id_for_resolved_builder;
+    use super::canonical_signature_payload;
     use super::chunk_derivation_archive_paths;
     use super::fallback_job_status_request_for_invalid_details;
     use super::map_create_builder_error;
     use super::parse_derivation_requisites;
     use super::parse_job_status_request;
-    use super::canonical_signature_payload;
     use super::verify_builder_resolve_request;
     use crate::builder::api_client::BuilderApiClient;
     use crate::models::builders::{Builder, BuilderStatus, ResolveBuilderIdRequest};

@@ -477,7 +477,12 @@ pub async fn update_user(
         }
     }
 
-    if let Some(password) = payload.password.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+    if let Some(password) = payload
+        .password
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
         let password_hash = match hash_password(password) {
             Ok(value) => value,
             Err(_) => return internal_error("Failed to hash password"),
@@ -1518,7 +1523,13 @@ mod classification_tests {
 
     #[test]
     fn valid_classification_level_accepts_known_values() {
-        for lvl in &["UNCLASSIFIED", "CUI", "CONFIDENTIAL", "SECRET", "TOP SECRET"] {
+        for lvl in &[
+            "UNCLASSIFIED",
+            "CUI",
+            "CONFIDENTIAL",
+            "SECRET",
+            "TOP SECRET",
+        ] {
             assert!(valid_classification_level(lvl), "should accept {lvl}");
         }
     }
@@ -1535,12 +1546,9 @@ mod classification_tests {
         // GET is unauthenticated (public read), so it should attempt the DB
         // query and return either 200 (connected DB) or 500 (no DB in test),
         // but specifically not 403 FORBIDDEN.
-        let response = get_classification_config(
-            State(lazy_pool()),
-            HeaderMap::new(),
-        )
-        .await
-        .into_response();
+        let response = get_classification_config(State(lazy_pool()), HeaderMap::new())
+            .await
+            .into_response();
 
         assert_ne!(
             response.status(),

@@ -4,10 +4,8 @@ use crate::models::deployment_policies::{
 };
 use crate::models::systems::DeploymentPolicy;
 use crate::queries::deployment::{get_systems_with_auto_latest_policy, update_desired_target};
-use crate::queries::derivations::{
-    get_latest_deployable_targets_for_flake_hosts,
-};
 use crate::queries::deployment_policies::get_deployment_policy_by_id;
+use crate::queries::derivations::get_latest_deployable_targets_for_flake_hosts;
 use crate::queries::environments::get_system_effective_policy_ids;
 use crate::server::load_cve_policies;
 use crate::services::approval_policy::{self, DeploymentContext};
@@ -89,7 +87,9 @@ fn map_canary_decision_for_system(
     }
 }
 
-fn map_cve_threshold_decision(result: cve_threshold_policy::CveThresholdResult) -> AdvancedGateDecision {
+fn map_cve_threshold_decision(
+    result: cve_threshold_policy::CveThresholdResult,
+) -> AdvancedGateDecision {
     if !result.deployment_allowed {
         let reason = if result.warnings.is_empty() {
             "CVE threshold policy blocked deployment".to_string()
@@ -342,7 +342,13 @@ impl DeploymentPolicyManager {
             // Preserve legacy CVE gate behavior for require_cve_check policies.
             let cve_policies = load_cve_policies(&self.pool).await;
             if !cve_policies.is_empty() {
-                match check_cve_policies(&self.pool, latest_target_for_host.derivation_id, &cve_policies).await {
+                match check_cve_policies(
+                    &self.pool,
+                    latest_target_for_host.derivation_id,
+                    &cve_policies,
+                )
+                .await
+                {
                     Ok(gate) if !gate.deployment_allowed => {
                         warn!(
                             "🛑 Legacy CVE gate blocked deployment for {} -> {}: {}",
@@ -356,16 +362,15 @@ impl DeploymentPolicyManager {
                     Err(err) => {
                         warn!(
                             "Legacy CVE gate evaluation failed for {} -> {}: {:#}; skipping deployment update",
-                            system.hostname,
-                            store_path,
-                            err
+                            system.hostname, store_path, err
                         );
                         continue;
                     }
                 }
             }
 
-            if let Err(e) = update_desired_target(&self.pool, &system.hostname, Some(store_path)).await
+            if let Err(e) =
+                update_desired_target(&self.pool, &system.hostname, Some(store_path)).await
             {
                 error!(
                     "Failed to set desired_target for {} -> {}: {:#}",
@@ -407,7 +412,10 @@ impl DeploymentPolicyManager {
             }
 
             let Some(policy) = policies_by_id.get(policy_id) else {
-                return AdvancedGateDecision::Block(format!("Deployment policy {} was not found", policy_id));
+                return AdvancedGateDecision::Block(format!(
+                    "Deployment policy {} was not found",
+                    policy_id
+                ));
             };
 
             if !policy.enabled {
@@ -416,30 +424,33 @@ impl DeploymentPolicyManager {
 
             match policy.policy_type.as_str() {
                 "time_window" => {
-                    let config = match serde_json::from_value::<TimeWindowConfig>(policy.config.clone()) {
-                        Ok(config) => config,
-                        Err(err) => {
-                            return AdvancedGateDecision::Block(format!(
-                                "Invalid time_window policy config for policy {}: {}",
-                                policy.id, err
-                            ));
-                        }
-                    };
-                    let decision = map_time_window_decision(time_window_policy::check_time_window(&config));
+                    let config =
+                        match serde_json::from_value::<TimeWindowConfig>(policy.config.clone()) {
+                            Ok(config) => config,
+                            Err(err) => {
+                                return AdvancedGateDecision::Block(format!(
+                                    "Invalid time_window policy config for policy {}: {}",
+                                    policy.id, err
+                                ));
+                            }
+                        };
+                    let decision =
+                        map_time_window_decision(time_window_policy::check_time_window(&config));
                     if !matches!(decision, AdvancedGateDecision::Allow) {
                         return decision;
                     }
                 }
                 "require_approvals" => {
-                    let config = match serde_json::from_value::<ApprovalConfig>(policy.config.clone()) {
-                        Ok(config) => config,
-                        Err(err) => {
-                            return AdvancedGateDecision::Block(format!(
-                                "Invalid require_approvals policy config for policy {}: {}",
-                                policy.id, err
-                            ));
-                        }
-                    };
+                    let config =
+                        match serde_json::from_value::<ApprovalConfig>(policy.config.clone()) {
+                            Ok(config) => config,
+                            Err(err) => {
+                                return AdvancedGateDecision::Block(format!(
+                                    "Invalid require_approvals policy config for policy {}: {}",
+                                    policy.id, err
+                                ));
+                            }
+                        };
                     match approval_policy::check_approvals(
                         &self.pool,
                         DeploymentContext::Commit,
@@ -464,7 +475,8 @@ impl DeploymentPolicyManager {
                     }
                 }
                 "canary_rollout" => {
-                    let config = match serde_json::from_value::<CanaryConfig>(policy.config.clone()) {
+                    let config = match serde_json::from_value::<CanaryConfig>(policy.config.clone())
+                    {
                         Ok(config) => config,
                         Err(err) => {
                             return AdvancedGateDecision::Block(format!(
@@ -514,15 +526,16 @@ impl DeploymentPolicyManager {
                     }
                 }
                 "cve_threshold" => {
-                    let config = match serde_json::from_value::<CveThresholdConfig>(policy.config.clone()) {
-                        Ok(config) => config,
-                        Err(err) => {
-                            return AdvancedGateDecision::Block(format!(
-                                "Invalid cve_threshold policy config for policy {}: {}",
-                                policy.id, err
-                            ));
-                        }
-                    };
+                    let config =
+                        match serde_json::from_value::<CveThresholdConfig>(policy.config.clone()) {
+                            Ok(config) => config,
+                            Err(err) => {
+                                return AdvancedGateDecision::Block(format!(
+                                    "Invalid cve_threshold policy config for policy {}: {}",
+                                    policy.id, err
+                                ));
+                            }
+                        };
                     match cve_threshold_policy::check_cve_thresholds(
                         &self.pool,
                         target.derivation_id,

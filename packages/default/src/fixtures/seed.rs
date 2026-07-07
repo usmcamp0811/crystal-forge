@@ -368,23 +368,11 @@ pub async fn seed_from_fixture(pool: &PgPool, path: &Path) -> Result<()> {
     seed_commits(pool, &fixture.flakes.registry, &flake_ids).await?;
     let policy_ids = seed_deployment_policies(pool, &fixture.policies).await?;
     let _user_ids = seed_users(pool, &fixture.admin).await?;
-    let system_ids = seed_systems(
-        pool,
-        &fixture.systems,
-        &flake_ids,
-        &policy_ids,
-    )
-    .await?;
+    let system_ids = seed_systems(pool, &fixture.systems, &flake_ids, &policy_ids).await?;
     seed_system_states(pool, &fixture.systems, &system_ids).await?;
     seed_cves(pool, &fixture.cves, &fixture.systems, &system_ids).await?;
     // Builders and build jobs are seeded after systems
-    seed_builders_and_jobs(
-        pool,
-        &fixture.builds,
-        &fixture.systems,
-        &system_ids,
-    )
-    .await?;
+    seed_builders_and_jobs(pool, &fixture.builds, &fixture.systems, &system_ids).await?;
     seed_hardening(pool, &fixture.hardening, &fixture.systems, &system_ids).await?;
 
     // Dismiss the onboarding coach for every user. The coach panel uses
@@ -437,12 +425,10 @@ struct EnvIdMap {
 impl EnvIdMap {
     /// Lookup by fixture JSON's environment name string.
     async fn from_db(pool: &PgPool) -> Result<Self> {
-        let rows: Vec<(Uuid, String)> = sqlx::query_as(
-            "SELECT id, name FROM environments"
-        )
-        .fetch_all(pool)
-        .await
-        .context("Failed to load environment IDs")?;
+        let rows: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, name FROM environments")
+            .fetch_all(pool)
+            .await
+            .context("Failed to load environment IDs")?;
 
         let mut map = std::collections::HashMap::new();
         for (id, name) in rows {
@@ -450,15 +436,25 @@ impl EnvIdMap {
         }
 
         Ok(Self {
-            production: map.get("production").copied()
+            production: map
+                .get("production")
+                .copied()
                 .unwrap_or_else(|| map.values().next().copied().unwrap_or(Uuid::nil())),
-            staging: map.get("staging").copied()
+            staging: map
+                .get("staging")
+                .copied()
                 .unwrap_or_else(|| map.get("production").copied().unwrap_or(Uuid::nil())),
-            lab: map.get("lab").copied()
+            lab: map
+                .get("lab")
+                .copied()
                 .unwrap_or_else(|| map.get("staging").copied().unwrap_or(Uuid::nil())),
-            dev: map.get("dev").copied()
+            dev: map
+                .get("dev")
+                .copied()
                 .unwrap_or_else(|| map.get("lab").copied().unwrap_or(Uuid::nil())),
-            test: map.get("test").copied()
+            test: map
+                .get("test")
+                .copied()
                 .unwrap_or_else(|| map.get("dev").copied().unwrap_or(Uuid::nil())),
             other: map.values().next().copied().unwrap_or(Uuid::nil()),
         })
@@ -542,7 +538,9 @@ async fn seed_flakes(pool: &PgPool, registry: &[FixtureFlakeRegistry]) -> Result
     let mut map = FlakeIdMap::default();
 
     for flake in registry {
-        let repo_url = flake.url.trim_start_matches("git+ssh://")
+        let repo_url = flake
+            .url
+            .trim_start_matches("git+ssh://")
             .trim_start_matches("https://")
             .to_string();
         let branch = flake.branch.as_deref().unwrap_or("main");
@@ -591,7 +589,7 @@ async fn seed_commits(
             let message = flake.latest_message.as_deref().unwrap_or("Fixture commit");
             let author = flake.latest_author.as_deref().unwrap_or("fixture");
             let commit_timestamp = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
-                "SELECT NOW() - INTERVAL '1 hour'"
+                "SELECT NOW() - INTERVAL '1 hour'",
             )
             .fetch_one(pool)
             .await?;
@@ -619,7 +617,7 @@ async fn seed_commits(
             for commit in commits {
                 let hash = commit.hash.as_deref().unwrap_or("0000000");
                 let ts = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
-                    "SELECT NOW() - (random() * INTERVAL '30 days')"
+                    "SELECT NOW() - (random() * INTERVAL '30 days')",
                 )
                 .fetch_one(pool)
                 .await?;
@@ -702,17 +700,20 @@ async fn seed_users(pool: &PgPool, admin: &FixtureAdmin) -> Result<Vec<(String, 
     let mut user_ids = Vec::new();
 
     for user in &admin.users {
-        let name_parts: Vec<&str> = user.name.as_deref().unwrap_or("Fixture User").splitn(2, ' ').collect();
+        let name_parts: Vec<&str> = user
+            .name
+            .as_deref()
+            .unwrap_or("Fixture User")
+            .splitn(2, ' ')
+            .collect();
         let first_name = name_parts.first().copied().unwrap_or("Fixture");
         let last_name = name_parts.get(1).copied().unwrap_or("User");
 
         // Check if user already exists by email
-        let existing: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM users WHERE email = $1"
-        )
-        .bind(&user.email)
-        .fetch_optional(pool)
-        .await?;
+        let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
+            .bind(&user.email)
+            .fetch_optional(pool)
+            .await?;
 
         let user_id = if let Some(id) = existing {
             // Ensure the onboarding coach stays dismissed for a clean UI.
@@ -810,8 +811,13 @@ async fn seed_systems(
         };
 
         // Systems table requires `public_key` and `derivation` (both NOT NULL)
-        let public_key = format!("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFIXTURE-{}", sys.hostname);
-        let derivation = sys.store_path.as_deref()
+        let public_key = format!(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFIXTURE-{}",
+            sys.hostname
+        );
+        let derivation = sys
+            .store_path
+            .as_deref()
             .unwrap_or("/nix/store/00000000000000000000000000000000-nixos-system-fixture");
 
         let system_uuid: Uuid = sqlx::query_scalar(
@@ -858,7 +864,9 @@ async fn seed_system_states(
     let mut hb_count = 0usize;
 
     for sys in systems {
-        let store_path = sys.store_path.as_deref()
+        let store_path = sys
+            .store_path
+            .as_deref()
             .unwrap_or("/nix/store/00000000000000000000000000000000-nixos-system-fixture");
         let kernel = sys.kernel.as_deref().unwrap_or("linux-6.1.115");
         let nixos_version = sys.nixos_version.as_deref().unwrap_or("24.05");
@@ -913,7 +921,11 @@ async fn seed_system_states(
         hb_count += 1;
     }
 
-    tracing::info!("Seeded {} system_states and {} heartbeats", systems.len(), hb_count);
+    tracing::info!(
+        "Seeded {} system_states and {} heartbeats",
+        systems.len(),
+        hb_count
+    );
     Ok(())
 }
 
@@ -979,11 +991,14 @@ async fn seed_builders_and_jobs(
         builds.active.len() + builds.history.len()
     );
 
-    let mut builder_id_map: std::collections::HashMap<String, Uuid> = std::collections::HashMap::new();
+    let mut builder_id_map: std::collections::HashMap<String, Uuid> =
+        std::collections::HashMap::new();
 
     // Seed builders
     for worker in &builds.workers {
-        let public_key = worker.public_key.as_deref()
+        let public_key = worker
+            .public_key
+            .as_deref()
             .unwrap_or("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFIXTURE-BUILDER");
         let arch = worker.arch.as_deref().unwrap_or("x86_64-linux");
         let status = worker.status.as_deref().unwrap_or("active");
@@ -1083,7 +1098,11 @@ fn parse_uptime(s: &str) -> Option<i64> {
         }
     }
 
-    if total_secs == 0 { None } else { Some(total_secs) }
+    if total_secs == 0 {
+        None
+    } else {
+        Some(total_secs)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,30 +1163,44 @@ mod tests {
             }
         }
 
-        let content = content.expect(
-            "Fixture file not found. Try running from packages/default/ or the repo root."
-        );
+        let content = content
+            .expect("Fixture file not found. Try running from packages/default/ or the repo root.");
 
         let fixture: FixtureRoot = serde_json::from_str(&content)
             .expect("Fixture JSON should deserialize into FixtureRoot");
 
         assert!(!fixture.environments.is_empty(), "Should have environments");
         assert!(!fixture.systems.is_empty(), "Should have systems");
-        assert!(!fixture.builds.workers.is_empty(), "Should have build workers");
+        assert!(
+            !fixture.builds.workers.is_empty(),
+            "Should have build workers"
+        );
         assert!(!fixture.policies.is_empty(), "Should have policies");
         assert!(!fixture.cves.list.is_empty(), "Should have CVEs");
         assert!(!fixture.admin.users.is_empty(), "Should have admin users");
 
         // Verify specific fields
         let first_system = &fixture.systems[0];
-        assert!(!first_system.hostname.is_empty(), "System should have hostname");
-        assert!(!first_system.environment.is_empty(), "System should have environment");
-        assert!(first_system.mem_gb.unwrap_or(0.0) > 0.0, "System should have mem_gb");
+        assert!(
+            !first_system.hostname.is_empty(),
+            "System should have hostname"
+        );
+        assert!(
+            !first_system.environment.is_empty(),
+            "System should have environment"
+        );
+        assert!(
+            first_system.mem_gb.unwrap_or(0.0) > 0.0,
+            "System should have mem_gb"
+        );
     }
 
     #[test]
     fn test_parse_uptime() {
-        assert_eq!(parse_uptime("32d 22h"), Some((32 * 86400 + 22 * 3600) as i64));
+        assert_eq!(
+            parse_uptime("32d 22h"),
+            Some((32 * 86400 + 22 * 3600) as i64)
+        );
         assert_eq!(parse_uptime("0s"), None);
         assert_eq!(parse_uptime(""), None);
         assert_eq!(parse_uptime("141s"), Some(141));

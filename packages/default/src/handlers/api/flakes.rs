@@ -22,8 +22,8 @@ use crate::flake::commits::sync_commits_for_flake;
 use crate::flake::commits::{
     GitCommitMetadata, branch_exists, branch_exists_with_creds, get_commit_changed_files,
     get_commit_diff_with_creds, get_commit_metadata, get_commit_nixos_configurations,
-    get_recent_branch_commit_hashes_with_creds, infer_default_branch, infer_default_branch_with_creds,
-    is_history_rewrite_error,
+    get_recent_branch_commit_hashes_with_creds, infer_default_branch,
+    infer_default_branch_with_creds, is_history_rewrite_error,
 };
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::handlers::agent_request::CFState;
@@ -202,9 +202,7 @@ pub async fn get_flake_timelines(
                     Err(err) => {
                         warn!(
                             "Failed to fetch remote commit order for flake {} ({} @ {}): {err:#}",
-                            flake.id,
-                            flake.repo_url,
-                            flake.branch
+                            flake.id, flake.repo_url, flake.branch
                         );
                         // Keep DB-backed timeline when remote ordering is unavailable.
                         // This preserves cached visibility while avoiding destructive empty states.
@@ -709,18 +707,16 @@ pub async fn get_commit_diff_handler(
             let initial_error_text = initial_error.to_string();
 
             if is_commit_unresolvable_error(&initial_error_text) {
-                if let Err(refresh_error) =
-                    crate::flake::eval::refresh_flake_cache_with_creds(
-                        &flake.repo_url,
-                        &flake.branch,
-                        creds.as_ref(),
-                    )
-                    .await
+                if let Err(refresh_error) = crate::flake::eval::refresh_flake_cache_with_creds(
+                    &flake.repo_url,
+                    &flake.branch,
+                    creds.as_ref(),
+                )
+                .await
                 {
                     warn!(
                         "Failed to refresh flake cache before diff retry for {} (flake_id={}): {refresh_error:#}",
-                        commit_hash,
-                        flake_id
+                        commit_hash, flake_id
                     );
                 }
 
@@ -747,8 +743,7 @@ pub async fn get_commit_diff_handler(
                         if is_commit_unresolvable_error(&retry_error_text) {
                             warn!(
                                 "Commit diff unavailable after refresh/retry for {} (flake_id={}): {retry_error:#}",
-                                commit_hash,
-                                flake_id
+                                commit_hash, flake_id
                             );
                             return (
                                 StatusCode::NOT_FOUND,
@@ -781,7 +776,10 @@ pub async fn get_commit_diff_handler(
                 }
             }
 
-            error!("Failed to fetch commit diff for {}: {initial_error:#}", commit_hash);
+            error!(
+                "Failed to fetch commit diff for {}: {initial_error:#}",
+                commit_hash
+            );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
@@ -1234,7 +1232,9 @@ pub async fn test_flake_credentials(
 
     let mut secret = payload.secret.clone();
     if payload.use_stored_secret_if_empty
-        && secret.as_deref().is_none_or(|value| value.trim().is_empty())
+        && secret
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
     {
         if let Ok(Some(existing)) = get_flake_credential(&pool, flake_id).await {
             secret = existing.secret_encrypted;
@@ -1754,10 +1754,7 @@ pub async fn accept_flake_history_rewrite(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ApiError {
                         error: "history_resync_failed".to_string(),
-                        message: format!(
-                            "History reset completed but re-sync failed: {}",
-                            e
-                        ),
+                        message: format!("History reset completed but re-sync failed: {}", e),
                         details: Some(serde_json::json!({
                             "error": e.to_string(),
                             "deleted_commits": deleted_commits
@@ -3191,7 +3188,7 @@ mod task_221_integration_tests {
     async fn test_update_system_metadata_persists_config_name() {
         let pool = get_test_pool().await;
         use crate::queries::systems::{
-            get_system_detail_by_id, update_system_metadata, FqdnUpdate,
+            FqdnUpdate, get_system_detail_by_id, update_system_metadata,
         };
         let flake = make_flake(&pool, "test-sysmeta", "cf_systems_only").await;
         let system = make_system(&pool, "host-meta", Some(flake.id), None).await;
@@ -3229,7 +3226,7 @@ mod task_221_integration_tests {
         // the DB). The 400 validation for "unknown flake name" happens in update_system_handler
         // before metadata is written. This test verifies the query layer correctly persists a
         // known flake_id and that passing an invalid FK gets a DB error (not a silent NULL).
-        use crate::queries::systems::{update_system_metadata, FqdnUpdate};
+        use crate::queries::systems::{FqdnUpdate, update_system_metadata};
         let flake = make_flake(&pool, "test-sysmeta-fk", "cf_systems_only").await;
         let system = make_system(&pool, "host-fk", Some(flake.id), None).await;
 

@@ -387,7 +387,8 @@ fn validate_policy_config(
                 if nsb != "block" && nsb != "skip" && nsb != "warn" {
                     return Err((
                         StatusCode::BAD_REQUEST,
-                        "config.no_scan_behavior must be \"block\", \"skip\", or \"warn\"".to_string(),
+                        "config.no_scan_behavior must be \"block\", \"skip\", or \"warn\""
+                            .to_string(),
                     ));
                 }
             }

@@ -3175,7 +3175,10 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         })
         .collect();
 
-    let latest_line_timestamp = all_lines.iter().map(|(timestamp, _, _, _)| *timestamp).max();
+    let latest_line_timestamp = all_lines
+        .iter()
+        .map(|(timestamp, _, _, _)| *timestamp)
+        .max();
 
     // Compute day separators in the selected display timezone.
     let use_utc_value = *use_utc.read();
