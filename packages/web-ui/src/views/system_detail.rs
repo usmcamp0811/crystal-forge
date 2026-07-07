@@ -3808,24 +3808,67 @@ fn build_history_events(
     events
 }
 
-/// Fold consecutive restart events into clusters; deploys stay standalone.
-/// Mirrors the design's item-folding pass so routine reboots don't drown out changes.
+/// Fold consecutive restart events into clusters; deploys/rebuilds stay standalone.
+///
+/// Ordering rule: when a generation-changing event (deploy, local rebuild) immediately
+/// follows a restart cluster in the newest-first stream, it means those restarts happened
+/// *after* the deploy/rebuild. We surface the deploy/rebuild **above** the restart cluster
+/// so the causally important event is not buried under noise. Single restarts are never
+/// clustered — they render as standalone lines so they are immediately visible.
 fn fold_restart_clusters(events: &[HistoryEvent]) -> Vec<TimelineItem> {
-    let mut items = Vec::new();
+    let mut items: Vec<TimelineItem> = Vec::new();
     let mut run: Vec<HistoryEvent> = Vec::new();
 
+    let is_restart = |e: &HistoryEvent| {
+        matches!(e.kind, HistoryEventKind::Restart | HistoryEventKind::AgentRestart)
+    };
+    let is_gen_changing = |e: &HistoryEvent| {
+        matches!(
+            e.kind,
+            HistoryEventKind::Deploy
+                | HistoryEventKind::DeployFailed
+                | HistoryEventKind::LocalRebuildMatched
+                | HistoryEventKind::LocalRebuildUntracked
+        )
+    };
+
     for e in events {
-        if matches!(e.kind, HistoryEventKind::Restart | HistoryEventKind::AgentRestart) {
+        if is_restart(e) {
             run.push(e.clone());
         } else {
             if !run.is_empty() {
-                items.push(TimelineItem::RestartCluster(std::mem::take(&mut run)));
+                let finished = std::mem::take(&mut run);
+                if is_gen_changing(e) {
+                    // The generation-changing event caused the generation that these
+                    // restarts ran on. Show it first (above the cluster) so it is not
+                    // buried under restart noise — even though the restarts are newer.
+                    items.push(TimelineItem::Event(e.clone()));
+                    if finished.len() == 1 {
+                        items.push(TimelineItem::Event(finished.into_iter().next().unwrap()));
+                    } else {
+                        items.push(TimelineItem::RestartCluster(finished));
+                    }
+                } else {
+                    // Non-gen-changing break (e.g. state_change): keep restarts above.
+                    if finished.len() == 1 {
+                        items.push(TimelineItem::Event(finished.into_iter().next().unwrap()));
+                    } else {
+                        items.push(TimelineItem::RestartCluster(finished));
+                    }
+                    items.push(TimelineItem::Event(e.clone()));
+                }
+            } else {
+                items.push(TimelineItem::Event(e.clone()));
             }
-            items.push(TimelineItem::Event(e.clone()));
         }
     }
+    // Flush any trailing run of restarts.
     if !run.is_empty() {
-        items.push(TimelineItem::RestartCluster(run));
+        if run.len() == 1 {
+            items.push(TimelineItem::Event(run.into_iter().next().unwrap()));
+        } else {
+            items.push(TimelineItem::RestartCluster(run));
+        }
     }
     items
 }
@@ -3932,23 +3975,51 @@ fn HistoryTab(
                 for (idx, item) in shown.iter().enumerate() {
                     {
                         match item {
-                            TimelineItem::Event(event) => rsx! {
-                                DeployRow {
-                                    key: "{event.id}",
-                                    event: event.clone(),
-                                    allow_mutations,
-                                    on_rollback: {
-                                        let commit = event.commit.clone();
-                                        move |_| {
-                                            if let Some(commit) = commit.clone() {
-                                                on_rollback.call(commit);
+                            TimelineItem::Event(event) => {
+                                let is_restart_event = matches!(
+                                    event.kind,
+                                    HistoryEventKind::Restart | HistoryEventKind::AgentRestart
+                                );
+                                if is_restart_event {
+                                    let e = event.clone();
+                                    rsx! {
+                                        div {
+                                            key: "{event.id}",
+                                            class: "tl-row",
+                                            div { class: "tl-rail",
+                                                span {
+                                                    class: "tl-node tl-node-sm",
+                                                    style: "--node: var(--cf-blue);",
+                                                    Icon { name: IconName::Power, size: 11 }
+                                                }
+                                            }
+                                            div { class: "tl-body",
+                                                div { class: "tl-restart-single",
+                                                    RestartLine { event: e }
+                                                }
                                             }
                                         }
-                                    },
-                                    on_view_logs: {
-                                        let id = event.id.clone();
-                                        move |_| on_view_logs.call(id.clone())
-                                    },
+                                    }
+                                } else {
+                                    rsx! {
+                                        DeployRow {
+                                            key: "{event.id}",
+                                            event: event.clone(),
+                                            allow_mutations,
+                                            on_rollback: {
+                                                let commit = event.commit.clone();
+                                                move |_| {
+                                                    if let Some(commit) = commit.clone() {
+                                                        on_rollback.call(commit);
+                                                    }
+                                                }
+                                            },
+                                            on_view_logs: {
+                                                let id = event.id.clone();
+                                                move |_| on_view_logs.call(id.clone())
+                                            },
+                                        }
+                                    }
                                 }
                             },
                             TimelineItem::RestartCluster(list) => {
