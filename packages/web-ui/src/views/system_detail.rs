@@ -3810,67 +3810,229 @@ fn build_history_events(
 
 /// Fold consecutive restart events into clusters; deploys/rebuilds stay standalone.
 ///
-/// Ordering rule: when a generation-changing event (deploy, local rebuild) immediately
-/// follows a restart cluster in the newest-first stream, it means those restarts happened
-/// *after* the deploy/rebuild. We surface the deploy/rebuild **above** the restart cluster
-/// so the causally important event is not buried under noise. Single restarts are never
-/// clustered — they render as standalone lines so they are immediately visible.
+/// Fold consecutive **system** restart events into clusters; agent restarts and
+/// all other event kinds always render as standalone items.
+///
+/// Ordering rule: when a generation-creating event (successful deploy or local
+/// rebuild — but NOT a failed deploy) immediately follows a system-restart run in
+/// the newest-first stream, we surface the gen-creating event **above** the cluster
+/// so the causally important change is not buried under reboot noise.  The reorder
+/// is gated on both events sharing the same recorded generation to prevent false
+/// promotion when generation data is absent.
+///
+/// `AgentRestart` is intentionally excluded from clustering so a solo agent
+/// service restart is always a visible standalone line.
+/// `DeployFailed` is intentionally excluded from the gen-creating set because a
+/// failed deploy does not create a new generation.
 fn fold_restart_clusters(events: &[HistoryEvent]) -> Vec<TimelineItem> {
-    let mut items: Vec<TimelineItem> = Vec::new();
-    let mut run: Vec<HistoryEvent> = Vec::new();
+    // Only successful deploys and local rebuilds create a new generation.
+    // DeployFailed is intentionally excluded (a failed deploy does not create a
+    // generation).  AgentRestart is intentionally excluded (never clusters).
+    let is_system_restart = |e: &HistoryEvent| matches!(e.kind, HistoryEventKind::Restart);
 
-    let is_restart = |e: &HistoryEvent| {
-        matches!(e.kind, HistoryEventKind::Restart | HistoryEventKind::AgentRestart)
-    };
-    let is_gen_changing = |e: &HistoryEvent| {
+    let is_generation_changing = |e: &HistoryEvent| {
         matches!(
             e.kind,
             HistoryEventKind::Deploy
-                | HistoryEventKind::DeployFailed
                 | HistoryEventKind::LocalRebuildMatched
                 | HistoryEventKind::LocalRebuildUntracked
         )
     };
 
-    for e in events {
-        if is_restart(e) {
-            run.push(e.clone());
-        } else {
-            if !run.is_empty() {
-                let finished = std::mem::take(&mut run);
-                if is_gen_changing(e) {
-                    // The generation-changing event caused the generation that these
-                    // restarts ran on. Show it first (above the cluster) so it is not
-                    // buried under restart noise — even though the restarts are newer.
-                    items.push(TimelineItem::Event(e.clone()));
-                    if finished.len() == 1 {
-                        items.push(TimelineItem::Event(finished.into_iter().next().unwrap()));
-                    } else {
-                        items.push(TimelineItem::RestartCluster(finished));
-                    }
-                } else {
-                    // Non-gen-changing break (e.g. state_change): keep restarts above.
-                    if finished.len() == 1 {
-                        items.push(TimelineItem::Event(finished.into_iter().next().unwrap()));
-                    } else {
-                        items.push(TimelineItem::RestartCluster(finished));
-                    }
-                    items.push(TimelineItem::Event(e.clone()));
-                }
-            } else {
-                items.push(TimelineItem::Event(e.clone()));
-            }
-        }
-    }
-    // Flush any trailing run of restarts.
-    if !run.is_empty() {
+    let emit_run = |items: &mut Vec<TimelineItem>, run: Vec<HistoryEvent>| {
         if run.len() == 1 {
             items.push(TimelineItem::Event(run.into_iter().next().unwrap()));
         } else {
             items.push(TimelineItem::RestartCluster(run));
         }
+    };
+
+    // Process events newest-first.
+    //
+    // `run`     — accumulates consecutive HistoryEventKind::Restart events.
+    // `pending` — standalone (non-system-restart) events that arrived at the
+    //             *top* of the stream before any system-restart run began.
+    //             They are held until the run (and its possible gen-promotion)
+    //             are resolved, then emitted after.
+    //
+    // Example stream (newest-first):
+    //   AgentRestart(gen=5054)         → standalone, buffered in `pending`
+    //   Restart(gen=5054)              → pushed to `run`
+    //   Restart(gen=5054)              → pushed to `run`
+    //   LocalRebuildUntracked(gen=5054)→ closes `run`; gen matches & gen-changing
+    //                                    → emit LocalRebuild, Cluster(2),
+    //                                      then drain pending → AgentRestart
+    //
+    // Result: [LocalRebuild, Cluster(2), AgentRestart]  ✓
+
+    let mut items: Vec<TimelineItem> = Vec::new();
+    let mut run: Vec<HistoryEvent> = Vec::new();
+    // Standalone events seen before the first system-restart of the current run.
+    let mut pre_run_pending: Vec<HistoryEvent> = Vec::new();
+
+    for e in events {
+        if is_system_restart(e) {
+            run.push(e.clone());
+            continue;
+        }
+
+        // Non-system-restart event — closes an open run (if any).
+        if run.is_empty() {
+            // No open run yet.  Buffer this standalone event; it will be placed
+            // after the cluster (and its promoted gen-change) if a run follows.
+            // If no run ever starts before the next gen-change, we flush below.
+            pre_run_pending.push(e.clone());
+        } else {
+            // A run is open.  Close it.
+            let finished = std::mem::take(&mut run);
+
+            let cluster_gen_matches = e.generation.is_some()
+                && finished.iter().all(|r| r.generation == e.generation);
+
+            if is_generation_changing(e) && cluster_gen_matches {
+                // Gen-promotion: show gen-changing event first, then the cluster,
+                // then the standalones that were buffered above the system restarts.
+                items.push(TimelineItem::Event(e.clone()));
+                emit_run(&mut items, finished);
+                for p in pre_run_pending.drain(..) {
+                    items.push(TimelineItem::Event(p));
+                }
+            } else {
+                // No promotion: flush pending standalones, then the cluster, then
+                // this non-gen-changing event.
+                for p in pre_run_pending.drain(..) {
+                    items.push(TimelineItem::Event(p));
+                }
+                emit_run(&mut items, finished);
+                items.push(TimelineItem::Event(e.clone()));
+            }
+        }
     }
+
+    // Flush any trailing system-restart run.
+    if !run.is_empty() {
+        let finished = std::mem::take(&mut run);
+        emit_run(&mut items, finished);
+    }
+    // Flush any remaining pre-run standalones (stream ended before a run opened).
+    for p in pre_run_pending.drain(..) {
+        items.push(TimelineItem::Event(p));
+    }
+
     items
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::{HistoryEvent, HistoryEventKind, TimelineItem, fold_restart_clusters};
+    use chrono::Utc;
+
+    fn ev(kind: HistoryEventKind, generation: Option<i32>) -> HistoryEvent {
+        HistoryEvent {
+            id: String::new(),
+            kind,
+            timestamp: Utc::now(),
+            generation,
+            prev_generation: None,
+            sha: None,
+            message: String::new(),
+            actor: String::new(),
+            duration: None,
+            store_path: None,
+            commit: None,
+        }
+    }
+
+    fn kinds(items: &[TimelineItem]) -> Vec<String> {
+        items
+            .iter()
+            .map(|item| match item {
+                TimelineItem::Event(e) => format!("{:?}", e.kind),
+                TimelineItem::RestartCluster(v) => {
+                    format!("Cluster({})", v.len())
+                }
+            })
+            .collect()
+    }
+
+    /// AgentRestart, Restart, Restart, LocalRebuild →
+    /// LocalRebuild, Cluster(2), AgentRestart
+    #[test]
+    fn agent_restart_then_rebuild_then_system_restarts() {
+        let events = vec![
+            ev(HistoryEventKind::AgentRestart, Some(5054)),
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::LocalRebuildUntracked, Some(5054)),
+        ];
+        let items = fold_restart_clusters(&events);
+        assert_eq!(
+            kinds(&items),
+            vec!["LocalRebuildUntracked", "Cluster(2)", "AgentRestart"],
+            "gen-changing event should be promoted above the system-restart cluster; \
+             AgentRestart stays standalone after the cluster"
+        );
+    }
+
+    /// Restart, Restart, DeployFailed →
+    /// Cluster(2), DeployFailed  (DeployFailed must NOT promote)
+    #[test]
+    fn deploy_failed_does_not_promote_over_restart_cluster() {
+        let events = vec![
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::DeployFailed, Some(5054)),
+        ];
+        let items = fold_restart_clusters(&events);
+        assert_eq!(
+            kinds(&items),
+            vec!["Cluster(2)", "DeployFailed"],
+            "DeployFailed must not be promoted above a restart cluster"
+        );
+    }
+
+    /// AgentRestart is always standalone, never clustered.
+    #[test]
+    fn agent_restart_never_clusters() {
+        let events = vec![
+            ev(HistoryEventKind::AgentRestart, Some(5054)),
+            ev(HistoryEventKind::AgentRestart, Some(5054)),
+        ];
+        let items = fold_restart_clusters(&events);
+        assert_eq!(
+            kinds(&items),
+            vec!["AgentRestart", "AgentRestart"],
+            "AgentRestart events must always be standalone"
+        );
+    }
+
+    /// System restarts with no following gen-changing event cluster normally.
+    #[test]
+    fn system_restarts_cluster_without_gen_change() {
+        let events = vec![
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::Restart, Some(5054)),
+        ];
+        let items = fold_restart_clusters(&events);
+        assert_eq!(kinds(&items), vec!["Cluster(3)"]);
+    }
+
+    /// Generation mismatch: deploy does NOT promote when generations differ.
+    #[test]
+    fn gen_mismatch_deploy_does_not_promote() {
+        let events = vec![
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::Restart, Some(5054)),
+            ev(HistoryEventKind::Deploy, Some(5053)), // different gen
+        ];
+        let items = fold_restart_clusters(&events);
+        assert_eq!(
+            kinds(&items),
+            vec!["Cluster(2)", "Deploy"],
+            "deploy at a different generation must not be promoted"
+        );
+    }
 }
 
 /// Enhanced History tab — a faithful Rust recreation of the design reference.
