@@ -1,10 +1,10 @@
 ---
 id: TASK-353
 title: Close full Systems surface parity gaps against CrystalForgelatest
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-06-13 14:53'
-updated_date: '2026-06-14 18:25'
+updated_date: '2026-07-08 07:21'
 labels:
   - design-parity
   - systems
@@ -107,10 +107,10 @@ This task covers the **full Systems surface**:
 - [ ] #9 A human reviewer can compare the implemented Systems surface against the CrystalForgelatest reference and find no remaining material parity gaps
 <!-- AC:END -->
 
-
-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 Resuming implementation from Review to add real backend support for editable system FQDN from the Edit System modal. This must use a NEW migration file only because the dev server has prior migrations applied. LOCK: opencode-agent on this host in ~/code/crystal-forge/TASK-353-full-systems-surface-parity
+
+Closed during 2026-07-08 backlog grooming: branch merged into dev (a6ac05cd). Remaining drift vs the updated design example is superseded by the new visual-drift audit task. Concrete follow-ups TASK-353.1/353.2 remain open.
 <!-- SECTION:NOTES:END -->
