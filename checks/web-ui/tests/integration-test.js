@@ -3249,6 +3249,11 @@ const steps = [
     action: async (page) => {
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2200);
+      await page
+        .getByPlaceholder("Filter by hostname, commit, or flake…")
+        .first()
+        .fill("atlas-03");
+      await page.waitForTimeout(600);
       await page.getByRole("button", { name: "Cards" }).first().click();
       await page.waitForTimeout(600);
       const systemCard = page.locator(".sys-card").filter({ hasText: "atlas-03" }).first();
