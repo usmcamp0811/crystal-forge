@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-07-08 02:49'
-updated_date: '2026-07-08 03:10'
+updated_date: '2026-07-08 03:13'
 labels:
   - design-parity
   - systems
@@ -119,8 +119,61 @@ Per doc-17 §8: fmt + clippy `-D warnings` + tests in both crates; `db-only up` 
 - [ ] #13 All verification passes: fmt + clippy -D warnings + cargo test in packages/default and packages/web-ui; nix build of server, web-ui package, and checks web-ui; nix flake check --keep-going; MR attaches the web-ui check screenshots via GitLab uploads (not committed)
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Backend schema + queries
+   - Add migration `packages/default/migrations/0156_deployment_progress_tracking.sql`.
+   - Extend `PendingSystemDeployment` and related queries in `packages/default/src/queries/system_events.rs`.
+   - Add `mark_pending_deployment_delivered`, `mark_pending_deployment_applying`, `get_system_deployment_progress`, and pure stage/kind derivation helpers with unit tests.
+
+2. Backend API + routes
+   - Add `SystemDeploymentProgress` to `packages/default/src/api/models.rs`.
+   - Add `GET /api/v1/systems/:id/deployment-status`.
+   - Add `POST /agent/deployment-started`.
+   - Update route table in `packages/default/src/bin/server.rs`.
+   - Update `event_history_kind` / `event_history_title` for `cf_deployment_started`.
+   - Thread source labels: `manual_deploy`, `manual_rollback_commit`, `manual_rollback_generation`; keep `auto_desired_target` for scheduler.
+
+3. Agent reporting
+   - Add a fire-and-forget deployment-started report before `switch-to-configuration`.
+   - Reuse existing signed agent request patterns.
+   - Timeout at 5 seconds; log and continue on any failure.
+
+4. Web API + reusable UI
+   - Mirror DTO in `packages/web-ui/src/api/models.rs`.
+   - Add `get_system_deployment_progress` in `packages/web-ui/src/api/client.rs`.
+   - Add reusable `PendingDeployBanner` component under `packages/web-ui/src/components/system/`.
+   - Port missing `.deploy-pending*`, `.deploy-step*`, `hb-waiting`, and timeline pulse CSS from design if needed.
+
+5. System Detail integration
+   - Poll deployment-status while active.
+   - Render banner between metric strip and tabs.
+   - Override heartbeat metric while pending/applying/activated.
+   - Refetch immediately after successful deploy/rollback.
+   - Replace synthetic Recent activity with real `/history` events only.
+   - Add View all → History tab behavior.
+   - Add rollback warning + production type-to-confirm.
+
+6. Systems list panel integration
+   - Fetch/poll deployment status while panel is open.
+   - Render banner as first panel section.
+   - Replace synthetic panel Recent activity with newest real history events.
+
+7. Fixtures and web-ui checks
+   - Extend fixture JSON + seeding for one in-flight applying deployment and event rows.
+   - Extend `checks/web-ui/coverage-manifest.json` assertions/screenshots for detail banner applying, real activity feed, rollback guard, and panel banner.
+
+8. Verification + MR
+   - Run required fmt/clippy/tests/builds/sqlx/Nix checks.
+   - Capture/upload screenshots to MR.
+   - Move task to Review only after MR is opened.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-384-systems-deployment-progress
+
+Approved implementation plan recorded. Starting code work in /home/mcamp/code/crystal-forge/TASK-384-systems-deployment-progress.
 <!-- SECTION:NOTES:END -->
