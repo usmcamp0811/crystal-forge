@@ -3,10 +3,11 @@ id: TASK-384
 title: >-
   Systems view: fully functional deployment/rollback progress, real Recent
   activity, design-parity rollback
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@gpt-5.5'
 created_date: '2026-07-08 02:49'
-updated_date: '2026-07-08 03:09'
+updated_date: '2026-07-08 03:10'
 labels:
   - design-parity
   - systems
@@ -117,3 +118,9 @@ Per doc-17 §8: fmt + clippy `-D warnings` + tests in both crates; `db-only up` 
 - [ ] #12 Fixtures seed one system with an in-flight pending deployment (applying stage, relative-to-now timestamps) plus at least 5 system_events spanning succeeded/started/failed/reboot/local_rebuild; checks/web-ui coverage-manifest asserts and screenshots the banner (text Deployment in progress + stage Applying), the real activity feed (3+ event rows), the rollback modal guard behavior, and the list-panel banner
 - [ ] #13 All verification passes: fmt + clippy -D warnings + cargo test in packages/default and packages/web-ui; nix build of server, web-ui package, and checks web-ui; nix flake check --keep-going; MR attaches the web-ui check screenshots via GitLab uploads (not committed)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-384-systems-deployment-progress
+<!-- SECTION:NOTES:END -->
