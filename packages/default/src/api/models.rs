@@ -796,6 +796,17 @@ pub struct SystemSummary {
     pub deployment_policy: String,
     #[serde(default)]
     pub fqdn: Option<String>,
+    /// Per-system heartbeat interval in seconds. None means the agent uses the server default (600s).
+    #[serde(default)]
+    pub heartbeat_interval_secs: Option<i32>,
+    /// Effective heartbeat interval in seconds: per-system override if set,
+    /// otherwise the server-config default. Always present; use this for spinners.
+    #[serde(default = "default_effective_heartbeat_interval_secs")]
+    pub effective_heartbeat_interval_secs: i32,
+    /// Linux kernel boot UUID from /proc/sys/kernel/random/boot_id.
+    /// Used to distinguish system reboots from agent restarts.
+    #[serde(default)]
+    pub boot_id: Option<String>,
 }
 
 /// Full system representation for the detail view.
@@ -845,6 +856,24 @@ pub struct SystemDetail {
     pub last_seen: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Per-system heartbeat interval in seconds. None means the agent uses the server default (600s).
+    #[serde(default)]
+    pub heartbeat_interval_secs: Option<i32>,
+    /// Effective heartbeat interval in seconds: per-system override if set,
+    /// otherwise the server-config default. Always present; use this for spinners.
+    #[serde(default = "default_effective_heartbeat_interval_secs")]
+    pub effective_heartbeat_interval_secs: i32,
+    /// Linux kernel boot UUID from /proc/sys/kernel/random/boot_id.
+    /// Used to distinguish system reboots from agent restarts.
+    #[serde(default)]
+    pub boot_id: Option<String>,
+    /// Authoritative restart classification written by the server on each startup heartbeat.
+    /// Values: "system_reboot", "agent_restart", "unknown". None = no startup event processed yet.
+    #[serde(default)]
+    pub restart_type: Option<String>,
+    /// Timestamp of the heartbeat that triggered the last restart classification.
+    #[serde(default)]
+    pub last_restart_at: Option<DateTime<Utc>>,
 }
 
 /// Hardware information subset for system detail.
@@ -870,6 +899,10 @@ pub struct SystemNetworkInfo {
 
 fn default_system_reachability() -> String {
     "direct".to_string()
+}
+
+fn default_effective_heartbeat_interval_secs() -> i32 {
+    600
 }
 
 /// Security posture subset for system detail.
@@ -1313,6 +1346,14 @@ pub struct UpdateSystemRequest {
     pub environment: Option<String>,
     pub flake_name: Option<String>,
     pub deployment_policy: String,
+    /// Tri-state heartbeat interval in seconds. Omitting the key preserves the persisted value;
+    /// sending `null` clears it (falls back to server default of 600s); sending a value sets it.
+    /// Valid range: 15-900 seconds.
+    ///
+    /// `skip_serializing_if` is required: without it, `Unset` serializes as `null`,
+    /// which a receiving server interprets as `Clear` and wipes the stored override.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub heartbeat_interval_secs: FieldUpdate<i32>,
 }
 
 /// Request payload for updating a system's public key.
@@ -1424,26 +1465,64 @@ pub struct VerifyGenerationClosureResponse {
 /// A single system state transition for timeline/history views.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemHistoryEntry {
+    #[serde(default)]
+    pub id: Option<uuid::Uuid>,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub occurred_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub observed_at: Option<DateTime<Utc>>,
     pub store_path: Option<String>,
     pub system_configuration_name: Option<String>,
     pub change_reason: String,
+    #[serde(default)]
+    pub event_type: String,
+    #[serde(default)]
+    pub event_rank: Option<i16>,
+    #[serde(default)]
+    pub title: Option<String>,
     pub commit_hash: Option<String>,
     pub flake_name: Option<String>,
     pub flake_repo_url: Option<String>,
     pub actor: String,
     pub outcome: String,
     /// Authoritative event classification derived from `change_reason`:
-    /// `cf_deployment`, `local_rebuild`, `restart`, or `state_change`.
+    /// `cf_deployment`, `local_rebuild`, `restart`, `agent_restart`, or `state_change`.
     pub event_kind: String,
     /// Recorded generation number at this transition (from `system_states.generation`).
     pub generation: Option<i32>,
+    #[serde(default)]
+    pub previous_generation: Option<i64>,
+    #[serde(default)]
+    pub new_generation: Option<i64>,
+    #[serde(default)]
+    pub previous_store_path: Option<String>,
+    #[serde(default)]
+    pub new_store_path: Option<String>,
+    #[serde(default)]
+    pub previous_boot_id: Option<String>,
+    #[serde(default)]
+    pub new_boot_id: Option<String>,
+    #[serde(default)]
+    pub deployment_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub desired_target_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub correlation_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
     /// Whether the running store path at this transition maps to a tracked flake commit.
     /// For out-of-band local rebuilds this distinguishes "reconciled" from
     /// "untracked / capture-to-flake".
     pub reconciled: bool,
     /// Whether this recorded generation's store path matched the current store path.
     pub generation_matches_current_store_path: Option<bool>,
+    /// Per-event restart classification: "system_reboot", "agent_restart", "unknown", or None.
+    /// Populated for startup transitions only; None for other event kinds.
+    #[serde(default)]
+    pub restart_type: Option<String>,
 }
 
 /// Agent-originated event shown on system details logs tab.
@@ -1813,6 +1892,97 @@ mod tests {
     fn field_update_default_is_unset() {
         let value: FieldUpdate<String> = FieldUpdate::default();
         assert_eq!(value, FieldUpdate::Unset);
+    }
+
+    #[test]
+    fn update_system_request_omitted_heartbeat_interval_is_unset() {
+        // Older/partial clients that don't send `heartbeat_interval_secs` must not clear it.
+        let json = r#"{"hostname":"web01","deployment_policy":"manual"}"#;
+        let req: UpdateSystemRequest = serde_json::from_str(json)
+            .expect("payload without heartbeat_interval_secs should deserialize");
+        assert_eq!(req.heartbeat_interval_secs, FieldUpdate::Unset);
+    }
+
+    #[test]
+    fn update_system_request_null_heartbeat_interval_is_clear() {
+        let json =
+            r#"{"hostname":"web01","heartbeat_interval_secs":null,"deployment_policy":"manual"}"#;
+        let req: UpdateSystemRequest = serde_json::from_str(json)
+            .expect("payload with null heartbeat_interval_secs should deserialize");
+        assert_eq!(req.heartbeat_interval_secs, FieldUpdate::Clear);
+    }
+
+    #[test]
+    fn update_system_request_value_heartbeat_interval_is_set() {
+        let json =
+            r#"{"hostname":"web01","heartbeat_interval_secs":120,"deployment_policy":"manual"}"#;
+        let req: UpdateSystemRequest = serde_json::from_str(json)
+            .expect("payload with heartbeat_interval_secs value should deserialize");
+        assert_eq!(req.heartbeat_interval_secs, FieldUpdate::Set(120));
+    }
+
+    #[test]
+    fn update_system_request_omits_unset_heartbeat_interval() {
+        // Unset must be omitted entirely: serializing as `null` would be
+        // interpreted as Clear by the receiving server (the original P1-3 bug).
+        let request = UpdateSystemRequest {
+            hostname: "web01".into(),
+            fqdn: FieldUpdate::Unset,
+            system_configuration_name: None,
+            environment: None,
+            flake_name: None,
+            deployment_policy: "manual".into(),
+            heartbeat_interval_secs: FieldUpdate::Unset,
+        };
+
+        let value = serde_json::to_value(request).expect("request should serialize");
+        assert!(
+            !value
+                .as_object()
+                .expect("request serializes as object")
+                .contains_key("heartbeat_interval_secs"),
+            "Unset heartbeat_interval_secs must be omitted from the payload"
+        );
+    }
+
+    #[test]
+    fn update_system_request_serializes_clear_heartbeat_interval_as_null() {
+        let request = UpdateSystemRequest {
+            hostname: "web01".into(),
+            fqdn: FieldUpdate::Unset,
+            system_configuration_name: None,
+            environment: None,
+            flake_name: None,
+            deployment_policy: "manual".into(),
+            heartbeat_interval_secs: FieldUpdate::Clear,
+        };
+
+        let value = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(
+            value.get("heartbeat_interval_secs"),
+            Some(&serde_json::Value::Null),
+            "Clear must serialize as explicit null"
+        );
+    }
+
+    #[test]
+    fn update_system_request_serializes_set_heartbeat_interval_as_value() {
+        let request = UpdateSystemRequest {
+            hostname: "web01".into(),
+            fqdn: FieldUpdate::Unset,
+            system_configuration_name: None,
+            environment: None,
+            flake_name: None,
+            deployment_policy: "manual".into(),
+            heartbeat_interval_secs: FieldUpdate::Set(120),
+        };
+
+        let value = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(
+            value.get("heartbeat_interval_secs"),
+            Some(&serde_json::json!(120)),
+            "Set(120) must serialize as 120"
+        );
     }
 
     #[test]

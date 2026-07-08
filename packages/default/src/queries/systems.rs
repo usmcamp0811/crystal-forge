@@ -1,10 +1,26 @@
 use crate::models::systems::System;
+use crate::queries::system_events::set_pending_deployment_target_tx;
 use anyhow::Result;
 use chrono::Duration as ChronoDuration;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use std::collections::BTreeSet;
 use uuid::Uuid;
+
+const RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL: &str = r#"
+SELECT COALESCE(d.store_path, d.expected_store_path) AS store_path
+FROM systems s
+JOIN commits c ON c.flake_id = s.flake_id
+JOIN derivations d ON d.commit_id = c.id
+WHERE s.id = $1
+  AND LOWER(c.git_commit_hash) = LOWER($2)
+  AND d.derivation_type = 'nixos'
+  AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
+  AND COALESCE(d.store_path, d.expected_store_path) IS NOT NULL
+  AND BTRIM(COALESCE(d.store_path, d.expected_store_path)) <> ''
+ORDER BY d.id DESC
+LIMIT 1
+"#;
 
 const DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL: &str = "UPDATE systems
      SET is_active = FALSE,
@@ -22,7 +38,7 @@ pub struct SystemCommitRow {
     pub timestamp: DateTime<Utc>,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SystemHistoryRow {
     pub timestamp: DateTime<Utc>,
     pub store_path: Option<String>,
@@ -35,6 +51,8 @@ pub struct SystemHistoryRow {
     pub generation: Option<i32>,
     /// Whether the recorded generation's store path matched the current store path.
     pub generation_matches_current_store_path: Option<bool>,
+    /// Per-event restart classification: "system_reboot", "agent_restart", "unknown", or None.
+    pub restart_type: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -78,6 +96,20 @@ pub enum FqdnUpdate<'a> {
     Set(&'a str),
 }
 
+/// How an update should treat the `heartbeat_interval_secs` column.
+///
+/// This preserves PATCH semantics: when the client omits `heartbeat_interval_secs` the stored
+/// value must be left untouched, which a plain `Option<i32>` cannot express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeartbeatIntervalUpdate {
+    /// Leave the existing `heartbeat_interval_secs` value unchanged.
+    Keep,
+    /// Set `heartbeat_interval_secs` to NULL (use server default).
+    Clear,
+    /// Set `heartbeat_interval_secs` to the provided value (must be 15-900).
+    Set(i32),
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn update_system_metadata(
     pool: &PgPool,
@@ -88,12 +120,14 @@ pub async fn update_system_metadata(
     flake_id: Option<i32>,
     system_configuration_name: Option<&str>,
     deployment_policy: &str,
+    heartbeat_interval_secs: HeartbeatIntervalUpdate,
 ) -> Result<()> {
-    // `fqdn` is updated only when the caller explicitly sets or clears it.
-    // `COALESCE($2, systems.fqdn)` would be wrong for the Clear case, so we
-    // branch the SQL on whether the column should be touched at all.
-    match fqdn {
-        FqdnUpdate::Keep => {
+    // Both `fqdn` and `heartbeat_interval_secs` use tri-state update semantics.
+    // We must branch the SQL to avoid touching columns when the caller wants
+    // to preserve their current values (Keep).
+    match (fqdn, heartbeat_interval_secs) {
+        (FqdnUpdate::Keep, HeartbeatIntervalUpdate::Keep) => {
+            // Neither column is touched
             sqlx::query(
                 "UPDATE systems
                  SET hostname = $1,
@@ -113,7 +147,35 @@ pub async fn update_system_metadata(
             .execute(pool)
             .await?;
         }
-        FqdnUpdate::Clear | FqdnUpdate::Set(_) => {
+        (FqdnUpdate::Keep, _) => {
+            // Only heartbeat_interval_secs is updated
+            let hb_value = match heartbeat_interval_secs {
+                HeartbeatIntervalUpdate::Set(v) => Some(v),
+                _ => None,
+            };
+            sqlx::query(
+                "UPDATE systems
+                 SET hostname = $1,
+                     environment_id = $2,
+                     flake_id = $3,
+                     system_configuration_name = $4,
+                     deployment_policy = $5,
+                     heartbeat_interval_secs = $6,
+                     updated_at = NOW()
+                  WHERE id = $7",
+            )
+            .bind(hostname)
+            .bind(environment_id)
+            .bind(flake_id)
+            .bind(system_configuration_name)
+            .bind(deployment_policy)
+            .bind(hb_value)
+            .bind(system_id)
+            .execute(pool)
+            .await?;
+        }
+        (_, HeartbeatIntervalUpdate::Keep) => {
+            // Only fqdn is updated
             let fqdn_value = match fqdn {
                 FqdnUpdate::Set(value) => Some(value),
                 _ => None,
@@ -135,6 +197,39 @@ pub async fn update_system_metadata(
             .bind(flake_id)
             .bind(system_configuration_name)
             .bind(deployment_policy)
+            .bind(system_id)
+            .execute(pool)
+            .await?;
+        }
+        (_, _) => {
+            // Both columns are updated
+            let fqdn_value = match fqdn {
+                FqdnUpdate::Set(value) => Some(value),
+                _ => None,
+            };
+            let hb_value = match heartbeat_interval_secs {
+                HeartbeatIntervalUpdate::Set(v) => Some(v),
+                _ => None,
+            };
+            sqlx::query(
+                "UPDATE systems
+                 SET hostname = $1,
+                     fqdn = $2,
+                     environment_id = $3,
+                     flake_id = $4,
+                     system_configuration_name = $5,
+                     deployment_policy = $6,
+                     heartbeat_interval_secs = $7,
+                     updated_at = NOW()
+                  WHERE id = $8",
+            )
+            .bind(hostname)
+            .bind(fqdn_value)
+            .bind(environment_id)
+            .bind(flake_id)
+            .bind(system_configuration_name)
+            .bind(deployment_policy)
+            .bind(hb_value)
             .bind(system_id)
             .execute(pool)
             .await?;
@@ -302,6 +397,111 @@ pub async fn get_agent_desired_target_by_hostname(
     Ok(None)
 }
 
+/// Fetch the per-system heartbeat interval from the systems table.
+/// Returns `None` when the system is not found or the column is NULL,
+/// indicating the caller should use the server-config default.
+pub async fn get_system_heartbeat_interval_secs(
+    pool: &PgPool,
+    hostname: &str,
+) -> Result<Option<i32>> {
+    let result = sqlx::query_scalar::<_, Option<i32>>(
+        "SELECT heartbeat_interval_secs FROM systems WHERE hostname = $1",
+    )
+    .bind(hostname)
+    .fetch_optional(pool)
+    .await?;
+    Ok(result.flatten())
+}
+
+/// Outcome of comparing an incoming boot_id against the persisted value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootIdChange {
+    /// No boot_id was stored yet (first heartbeat from an upgraded agent, or
+    /// the system row did not exist). NOT a reboot.
+    Initialized,
+    /// The stored boot_id matches the incoming one: agent restart/reconnect.
+    Unchanged,
+    /// The stored boot_id differs from the incoming one: host reboot.
+    Changed,
+}
+
+/// Classify a boot_id transition. Pure function so the initialization-vs-reboot
+/// distinction is unit-testable without a database.
+pub fn classify_boot_id_change(old_boot_id: Option<&str>, new_boot_id: &str) -> BootIdChange {
+    match old_boot_id {
+        None => BootIdChange::Initialized,
+        Some(old) if old == new_boot_id => BootIdChange::Unchanged,
+        Some(_) => BootIdChange::Changed,
+    }
+}
+
+/// Update the boot_id for a system inside an existing transaction, used for
+/// reboot detection.
+///
+/// Runs on `&mut Transaction` so the boot_id write commits atomically with the
+/// heartbeat/state insert: if the later insert fails and the transaction rolls
+/// back, the boot_id is untouched and the agent's retry still detects the reboot.
+///
+/// Returns [`BootIdChange::Initialized`] when no previous boot_id was stored —
+/// the first heartbeat from an upgraded agent must NOT be reported as a reboot.
+pub async fn update_boot_id_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    hostname: &str,
+    new_boot_id: &str,
+) -> Result<BootIdChange> {
+    #[derive(sqlx::FromRow)]
+    struct BootIdUpdate {
+        old_boot_id: Option<String>,
+    }
+
+    let result = sqlx::query_as::<_, BootIdUpdate>(
+        "WITH old_value AS (
+             SELECT boot_id FROM systems WHERE hostname = $2
+         )
+         UPDATE systems
+         SET boot_id = $1, updated_at = NOW()
+         WHERE hostname = $2
+         RETURNING (SELECT boot_id FROM old_value) as old_boot_id",
+    )
+    .bind(new_boot_id)
+    .bind(hostname)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(match result {
+        Some(update) => classify_boot_id_change(update.old_boot_id.as_deref(), new_boot_id),
+        // No system row matched; nothing was stored.
+        None => BootIdChange::Initialized,
+    })
+}
+
+/// Persist the authoritative restart classification inside an existing transaction.
+///
+/// Called from the heartbeat handler immediately after `update_boot_id_tx` so
+/// both writes commit atomically. The `restart_type` argument must be one of:
+/// `"system_reboot"`, `"agent_restart"`, or `"unknown"`.
+///
+/// Best-effort: a failure here is logged and does NOT abort the heartbeat; the
+/// boot_id update and state/heartbeat insert still commit.
+pub async fn update_restart_type_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    hostname: &str,
+    restart_type: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE systems
+         SET last_restart_type = $1,
+             last_restart_at   = NOW(),
+             updated_at        = NOW()
+         WHERE hostname = $2",
+    )
+    .bind(restart_type)
+    .bind(hostname)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 pub async fn get_desired_target_by_id(pool: &PgPool, system_id: i32) -> Result<Option<String>> {
     let result =
         sqlx::query_scalar::<_, Option<String>>("SELECT desired_target FROM systems WHERE id = $1")
@@ -392,17 +592,37 @@ pub async fn touch_system_updated_at(pool: &PgPool, system_id: Uuid) -> Result<(
 pub async fn update_system_desired_target(
     pool: &PgPool,
     system_id: Uuid,
-    target_commit: &str,
+    target: &str,
 ) -> Result<()> {
+    let desired_target = resolve_system_deployment_target(pool, system_id, target)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No NixOS store path is available for deployment target {target} on system {system_id}"
+            )
+        })?;
+
+    let mut tx = pool.begin().await?;
+
     sqlx::query(
         "UPDATE systems
          SET desired_target = $1, desired_target_set_at = NOW(), updated_at = NOW()
          WHERE id = $2",
     )
-    .bind(target_commit)
+    .bind(&desired_target)
     .bind(system_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    set_pending_deployment_target_tx(
+        &mut tx,
+        system_id,
+        Some(desired_target.as_str()),
+        "api_desired_target",
+    )
+    .await?;
+
+    tx.commit().await?;
     Ok(())
 }
 
@@ -475,7 +695,8 @@ pub async fn list_system_history_rows(
             f.name AS flake_name,
             f.repo_url AS flake_repo_url,
             ss.generation,
-            ss.generation_matches_current_store_path
+            ss.generation_matches_current_store_path,
+            ss.restart_type
         FROM systems s
         JOIN system_states ss ON ss.hostname = s.hostname
         LEFT JOIN derivations d
@@ -577,6 +798,24 @@ pub async fn commit_belongs_to_system_flake(
     Ok(exists)
 }
 
+pub async fn resolve_system_deployment_target(
+    pool: &PgPool,
+    system_id: Uuid,
+    target: &str,
+) -> Result<Option<String>> {
+    if target.starts_with("/nix/store/") {
+        return Ok(Some(target.to_string()));
+    }
+
+    let store_path = sqlx::query_scalar::<_, String>(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL)
+        .bind(system_id)
+        .bind(target)
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(store_path)
+}
+
 pub async fn get_user_environment_membership_ids(
     pool: &PgPool,
     user_id: Uuid,
@@ -643,6 +882,12 @@ pub struct SystemDetailRow {
     pub last_seen: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    // Heartbeat configuration
+    pub heartbeat_interval_secs: Option<i32>,
+    pub boot_id: Option<String>,
+    // Restart classification (from migration 0148/0149)
+    pub last_restart_type: Option<String>,
+    pub last_restart_at: Option<DateTime<Utc>>,
 }
 
 /// Fetch system detail from view_system_detail
@@ -681,6 +926,8 @@ pub struct SystemListRow {
     pub last_seen: Option<DateTime<Utc>>,
     pub deployment_policy: String,
     pub fqdn: Option<String>,
+    pub heartbeat_interval_secs: Option<i32>,
+    pub boot_id: Option<String>,
 }
 
 /// Fetch all active systems from view_system_list
@@ -1632,6 +1879,21 @@ mod tests {
     }
 
     #[test]
+    fn deployment_target_resolution_uses_nixos_store_path_for_commit() {
+        assert!(
+            RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL
+                .contains("COALESCE(d.store_path, d.expected_store_path)")
+        );
+        assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("d.derivation_type = 'nixos'"));
+        assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains(
+            "d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)"
+        ));
+        assert!(
+            RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("LOWER(c.git_commit_hash) = LOWER($2)")
+        );
+    }
+
+    #[test]
     fn system_detail_query_does_not_derive_generation_from_store_path_regex() {
         let source = include_str!("systems.rs");
         let legacy_regex_expr = [
@@ -1868,6 +2130,7 @@ mod tests {
             None,
             None,
             "manual",
+            HeartbeatIntervalUpdate::Keep,
         )
         .await
         .expect("seed fqdn should succeed");
@@ -1882,6 +2145,7 @@ mod tests {
             None,
             None,
             "auto_latest",
+            HeartbeatIntervalUpdate::Keep,
         )
         .await
         .expect("keep update should succeed");
@@ -1924,6 +2188,7 @@ mod tests {
             None,
             None,
             "manual",
+            HeartbeatIntervalUpdate::Keep,
         )
         .await
         .expect("seed fqdn should succeed");
@@ -1937,6 +2202,7 @@ mod tests {
             None,
             None,
             "manual",
+            HeartbeatIntervalUpdate::Keep,
         )
         .await
         .expect("clear update should succeed");
@@ -1996,6 +2262,155 @@ mod tests {
             detail.generation,
             Some(74),
             "detail query should expose latest persisted generation"
+        );
+
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Boot ID classification (P2-6)
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn boot_id_first_observation_is_initialized_not_changed() {
+        // The first heartbeat from an upgraded agent must NOT count as a reboot.
+        assert_eq!(
+            classify_boot_id_change(None, "boot-aaa"),
+            BootIdChange::Initialized
+        );
+    }
+
+    #[test]
+    fn boot_id_same_value_is_unchanged() {
+        assert_eq!(
+            classify_boot_id_change(Some("boot-aaa"), "boot-aaa"),
+            BootIdChange::Unchanged
+        );
+    }
+
+    #[test]
+    fn boot_id_different_value_is_changed() {
+        assert_eq!(
+            classify_boot_id_change(Some("boot-aaa"), "boot-bbb"),
+            BootIdChange::Changed
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn update_boot_id_tx_first_write_is_initialized() {
+        let pool = test_pool_from_env().await;
+        let hostname = format!("task378-bootid-init-{}", Uuid::new_v4());
+        let system = make_test_system(&pool, &hostname).await;
+
+        let mut tx = pool.begin().await.expect("begin tx");
+        let change = update_boot_id_tx(&mut tx, &hostname, "boot-1")
+            .await
+            .expect("update_boot_id_tx should succeed");
+        tx.commit().await.expect("commit tx");
+
+        assert_eq!(
+            change,
+            BootIdChange::Initialized,
+            "first stored boot_id must be Initialized, not Changed"
+        );
+
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn update_boot_id_tx_detects_unchanged_and_changed() {
+        let pool = test_pool_from_env().await;
+        let hostname = format!("task378-bootid-change-{}", Uuid::new_v4());
+        let system = make_test_system(&pool, &hostname).await;
+
+        // Seed initial boot_id.
+        let mut tx = pool.begin().await.expect("begin tx");
+        update_boot_id_tx(&mut tx, &hostname, "boot-1")
+            .await
+            .expect("seed boot_id");
+        tx.commit().await.expect("commit tx");
+
+        // Same boot_id → Unchanged.
+        let mut tx = pool.begin().await.expect("begin tx");
+        let unchanged = update_boot_id_tx(&mut tx, &hostname, "boot-1")
+            .await
+            .expect("update with same boot_id");
+        tx.commit().await.expect("commit tx");
+        assert_eq!(unchanged, BootIdChange::Unchanged);
+
+        // Different boot_id → Changed.
+        let mut tx = pool.begin().await.expect("begin tx");
+        let changed = update_boot_id_tx(&mut tx, &hostname, "boot-2")
+            .await
+            .expect("update with new boot_id");
+        tx.commit().await.expect("commit tx");
+        assert_eq!(changed, BootIdChange::Changed);
+
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn update_boot_id_tx_rolls_back_with_failed_insert() {
+        // P2-6 atomicity: if the heartbeat/state insert fails after the boot_id
+        // update, rolling back the transaction must leave the stored boot_id
+        // untouched so the agent's retry still detects the reboot.
+        let pool = test_pool_from_env().await;
+        let hostname = format!("task378-bootid-rollback-{}", Uuid::new_v4());
+        let system = make_test_system(&pool, &hostname).await;
+
+        // Seed boot-1 (committed).
+        let mut tx = pool.begin().await.expect("begin tx");
+        update_boot_id_tx(&mut tx, &hostname, "boot-1")
+            .await
+            .expect("seed boot_id");
+        tx.commit().await.expect("commit tx");
+
+        // Update to boot-2 but roll back (simulating a failed heartbeat insert).
+        let mut tx = pool.begin().await.expect("begin tx");
+        let change = update_boot_id_tx(&mut tx, &hostname, "boot-2")
+            .await
+            .expect("update inside doomed tx");
+        assert_eq!(change, BootIdChange::Changed);
+        tx.rollback().await.expect("rollback tx");
+
+        // Stored boot_id must still be boot-1.
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT boot_id FROM systems WHERE hostname = $1")
+                .bind(&hostname)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch stored boot_id");
+        assert_eq!(
+            stored.as_deref(),
+            Some("boot-1"),
+            "rolled-back boot_id update must not persist"
+        );
+
+        // The retry must therefore still classify boot-2 as Changed.
+        let mut tx = pool.begin().await.expect("begin tx");
+        let retry = update_boot_id_tx(&mut tx, &hostname, "boot-2")
+            .await
+            .expect("retry update");
+        tx.commit().await.expect("commit tx");
+        assert_eq!(
+            retry,
+            BootIdChange::Changed,
+            "retry after rollback must still detect the reboot"
         );
 
         sqlx::query("DELETE FROM systems WHERE id = $1")

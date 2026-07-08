@@ -1,4 +1,5 @@
 use crate::models::systems::System;
+use crate::queries::system_events::set_pending_deployment_target_tx;
 use anyhow::Result;
 use sqlx::PgPool;
 
@@ -37,20 +38,29 @@ pub async fn update_desired_target(
     hostname: &str,
     desired_target: Option<&str>,
 ) -> Result<()> {
-    // TODO: Update systems table to have desired store path instead of desired target or have both
-    sqlx::query(
+    let mut tx = pool.begin().await?;
+
+    let system_id = sqlx::query_scalar::<_, uuid::Uuid>(
         r#"
-        UPDATE systems 
+        UPDATE systems
         SET desired_target = $1,
             desired_target_set_at = CASE WHEN $1::text IS NULL THEN NULL ELSE NOW() END,
             updated_at = NOW()
         WHERE hostname = $2
+        RETURNING id
         "#,
     )
     .bind(desired_target)
     .bind(hostname)
-    .execute(pool)
+    .fetch_optional(&mut *tx)
     .await?;
+
+    if let Some(system_id) = system_id {
+        set_pending_deployment_target_tx(&mut tx, system_id, desired_target, "auto_desired_target")
+            .await?;
+    }
+
+    tx.commit().await?;
 
     Ok(())
 }

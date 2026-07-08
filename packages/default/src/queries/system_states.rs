@@ -4,15 +4,36 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-pub async fn insert_system_state(
-    pool: &PgPool,
+/// Insert a full system state row.
+///
+/// Accepts any Postgres executor so callers can run it against a pool or
+/// inside a transaction (e.g. atomically with the boot_id update).
+///
+/// `restart_type` is the per-event authoritative classification:
+/// `"system_reboot"`, `"agent_restart"`, `"unknown"`, or `None` for non-startup
+/// transitions (heartbeats, config changes, deploys).
+pub async fn insert_system_state<'e, E>(
+    executor: E,
     state: &SystemState,
     version_compatible: bool,
-) -> Result<()> {
-    let change_reason = match state.change_reason.as_str() {
-        "heartbeat" => "startup",
-        other => other,
-    };
+    restart_type: Option<&str>,
+    change_reason_override: Option<&str>,
+) -> Result<()>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    // The heartbeat handler may override the recorded reason after it compares
+    // boot_id and previous state:
+    // - system reboot: record startup + restart_type=system_reboot
+    // - local state delta from heartbeat/startup with unchanged boot_id: record
+    //   config_change so history shows a local rebuild instead of agent restart
+    // Legacy callers fall back to the payload reason, with heartbeat mapped to
+    // startup for DB constraint compatibility.
+    let change_reason =
+        change_reason_override.unwrap_or_else(|| match state.change_reason.as_str() {
+            "heartbeat" => "startup",
+            other => other,
+        });
     sqlx::query(
         r#"INSERT INTO system_states (
             hostname, 
@@ -44,8 +65,9 @@ pub async fn insert_system_state(
             agent_build_hash,
             nixos_version,
             agent_compatible,
-            partial_data
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)"#,
+            partial_data,
+            restart_type
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)"#,
     )
     .bind(&state.hostname)
     .bind(change_reason)
@@ -77,7 +99,8 @@ pub async fn insert_system_state(
     .bind(&state.nixos_version)
     .bind(version_compatible)  // $29
     .bind(!version_compatible) // $30 - partial_data flag
-    .execute(pool)
+    .bind(restart_type)        // $31
+    .execute(executor)
     .await
     .map_err(|e| anyhow::anyhow!("SQL error: {e:?}"))?;
 
@@ -266,7 +289,7 @@ mod tests {
         state_with_commit.hostname = hostname.clone();
         state_with_commit.generation = Some(101);
         state_with_commit.store_path = Some(format!("/nix/store/{suffix}-gen101-system"));
-        insert_system_state(&pool, &state_with_commit, true)
+        insert_system_state(&pool, &state_with_commit, true, None, None)
             .await
             .expect("insert_system_state with store_path should succeed");
 
@@ -274,7 +297,7 @@ mod tests {
         state_without_commit.hostname = hostname.clone();
         state_without_commit.generation = Some(100);
         state_without_commit.store_path = None;
-        insert_system_state(&pool, &state_without_commit, true)
+        insert_system_state(&pool, &state_without_commit, true, None, None)
             .await
             .expect("insert_system_state without store_path should succeed");
 
@@ -359,6 +382,7 @@ mod tests {
             nixos_version: Some("23.05".to_string()),
             agent_compatible: Some(true),
             partial_data: Some(false),
+            boot_id: Some("test-boot-id".to_string()),
         };
 
         let json = serde_json::to_vec(&current_state).unwrap();

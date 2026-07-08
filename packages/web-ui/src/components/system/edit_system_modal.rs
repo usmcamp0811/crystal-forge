@@ -3,7 +3,7 @@
 //! Matches the design EditSystemModal layout: two-column hostname+environment,
 //! flake assignment section, segmented deployment mode, pinned commit picker.
 
-use crate::api::models::{CommitInfo, SystemDetail, UpdateSystemRequest};
+use crate::api::models::{CommitInfo, FieldUpdate, SystemDetail, UpdateSystemRequest};
 use crate::components::modals::RemoveSystemDialog;
 use dioxus::prelude::*;
 
@@ -81,11 +81,11 @@ pub fn EditSystemModal(
             .unwrap_or_default()
     });
 
-    // Heartbeat interval and tags are NOT yet persisted server-side (no systems.tags or
-    // systems.heartbeat_interval column exists — see TASK-353.1 and TASK-279 follow-ups). These
-    // signals provide design-parity local editing only; the help text marks them as not
-    // saved so operators are not misled. Wire to real persistence once the backend lands.
-    let mut heartbeat_interval_sec = use_signal(|| 60_i32);
+    // Seed heartbeat interval from the persisted system value.
+    // 0 is a sentinel meaning "use server default" (NULL in the database).
+    // When the system has no per-system override (heartbeat_interval_secs is None),
+    // we show "Use server default" (0) so the user can see the current state.
+    let mut heartbeat_interval_sec = use_signal(|| system.heartbeat_interval_secs.unwrap_or(0));
     let mut tags_draft = use_signal(String::new);
 
     // Sync FQDN when hostname or environment changes
@@ -115,6 +115,22 @@ pub fn EditSystemModal(
     let handle_save = move |_| {
         is_saving.set(true);
 
+        // FieldUpdate semantics for heartbeat_interval_secs:
+        // - Sentinel 0 → Clear (set DB column to NULL → agent uses server default)
+        // - Any other value that differs from original → Set(value)
+        // - Unchanged → Unset (omit the field; server preserves stored value)
+        let current_heartbeat_interval = *heartbeat_interval_sec.read();
+        let original_heartbeat_interval = system.heartbeat_interval_secs.unwrap_or(0);
+
+        let heartbeat_interval = if current_heartbeat_interval == original_heartbeat_interval {
+            FieldUpdate::Unset
+        } else if current_heartbeat_interval == 0 {
+            // User selected "Use server default" → clear the per-system override.
+            FieldUpdate::Clear
+        } else {
+            FieldUpdate::Set(current_heartbeat_interval)
+        };
+
         let request = UpdateSystemRequest {
             hostname: hostname.read().clone(),
             fqdn: if fqdn.read().trim().is_empty() {
@@ -138,6 +154,7 @@ pub fn EditSystemModal(
                 Some(flake_name.read().clone())
             },
             deployment_policy: deployment_policy.read().clone(),
+            heartbeat_interval_secs: heartbeat_interval,
         };
 
         on_save.call(request);
@@ -390,10 +407,8 @@ pub fn EditSystemModal(
                     }
 
                     // Two-column: Heartbeat interval + Tags.
-                    // NOTE: These are editable for design parity but are NOT yet persisted —
-                    // there is no systems.heartbeat_interval or systems.tags column. The help
-                    // text marks them as not-saved so operators are not misled. Follow-ups
-                    // TASK-353.1 (tags) and TASK-279 (heartbeat interval) wire real persistence.
+                    // Heartbeat interval is persisted and returned to the agent via LogResponse.
+                    // Tags are still local-only (no systems.tags column yet — TASK-353.1).
                     div {
                         style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 8px;",
                         "data-testid": "heartbeat-tags-fields",
@@ -408,13 +423,16 @@ pub fn EditSystemModal(
                                         heartbeat_interval_sec.set(value);
                                     }
                                 },
-                                option { value: "30", selected: *heartbeat_interval_sec.read() == 30, "30 seconds" }
-                                option { value: "60", selected: *heartbeat_interval_sec.read() == 60, "1 minute" }
-                                option { value: "90", selected: *heartbeat_interval_sec.read() == 90, "90 seconds" }
+                                // Sentinel 0 = "use server default" (clears the per-system DB override).
+                                option { value: "0",   selected: *heartbeat_interval_sec.read() == 0,   "Use server default" }
+                                option { value: "30",  selected: *heartbeat_interval_sec.read() == 30,  "30 seconds" }
+                                option { value: "60",  selected: *heartbeat_interval_sec.read() == 60,  "1 minute" }
+                                option { value: "90",  selected: *heartbeat_interval_sec.read() == 90,  "90 seconds" }
                                 option { value: "120", selected: *heartbeat_interval_sec.read() == 120, "2 minutes" }
                                 option { value: "300", selected: *heartbeat_interval_sec.read() == 300, "5 minutes" }
+                                option { value: "600", selected: *heartbeat_interval_sec.read() == 600, "10 minutes" }
                             }
-                            p { class: "help", "Agent heartbeat cadence. Not saved yet — backend field coming soon." }
+                            p { class: "help", "Agent heartbeat cadence. \"Use server default\" clears any per-system override (inherits the server-configured default). Takes effect on the agent's next check-in after saving." }
                         }
                         div {
                             class: "field",

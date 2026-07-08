@@ -3,6 +3,9 @@ use crate::handlers::agent_request::{
     CFState, SystemLookup, authenticate_agent_request_with_lookup,
 };
 use crate::models::system_states::SystemState;
+use crate::queries::system_events::{
+    lock_observed_system_state_by_hostname_tx, record_report_events_tx,
+};
 use crate::queries::system_states::insert_system_state;
 use anyhow::Result;
 use axum::{
@@ -70,7 +73,21 @@ pub async fn update(
     let pool = pool.clone();
     update_with_lookup_and_insert(headers, body, &pool, |payload, version_compatible| {
         let pool = pool.clone();
-        Box::pin(async move { insert_system_state(&pool, payload, version_compatible).await })
+        Box::pin(async move {
+            let mut tx = pool.begin().await?;
+            let previous_observed =
+                lock_observed_system_state_by_hostname_tx(&mut tx, &payload.hostname).await?;
+
+            // The legacy state endpoint does not perform boot_id classification;
+            // restart_type is not known here and is left NULL. Generation/store-path
+            // transitions can still emit event-backed history transactionally.
+            record_report_events_tx(&mut tx, previous_observed.as_ref(), payload, None, None)
+                .await?;
+            insert_system_state(&mut *tx, payload, version_compatible, None, None).await?;
+
+            tx.commit().await?;
+            Ok(())
+        })
     })
     .await
 }

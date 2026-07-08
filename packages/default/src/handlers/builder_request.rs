@@ -23,6 +23,7 @@ use crate::queries::builders::get_builder_by_id;
 #[derive(Debug)]
 pub struct VerifiedBuilderRequest {
     pub builder_id: Uuid,
+    pub builder_session_id: Option<Uuid>,
     pub signature: Signature,
     pub builder: Builder,
     pub body: Bytes,
@@ -130,6 +131,13 @@ async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
 
     let builder_id = Uuid::parse_str(builder_id_str).map_err(|_| StatusCode::UNAUTHORIZED)?;
 
+    let builder_session_id = headers
+        .get("X-Builder-Session-ID")
+        .and_then(|v| v.to_str().ok())
+        .map(Uuid::parse_str)
+        .transpose()
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+
     // Extract timestamp from header (required for replay resistance)
     let timestamp_str = headers
         .get("X-Timestamp")
@@ -220,6 +228,7 @@ async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
 
     Ok(VerifiedBuilderRequest {
         builder_id,
+        builder_session_id,
         signature,
         builder,
         body,
@@ -554,6 +563,8 @@ mod tests {
             max_memory_mb: None,
             max_concurrent_jobs: 1,
             enabled: true,
+            current_session_id: None,
+            current_session_started_at: None,
             last_heartbeat_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -610,6 +621,8 @@ mod tests {
             max_memory_mb: None,
             max_concurrent_jobs: 1,
             enabled: false,
+            current_session_id: None,
+            current_session_started_at: None,
             last_heartbeat_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -666,6 +679,8 @@ mod tests {
             max_memory_mb: None,
             max_concurrent_jobs: 1,
             enabled: false,
+            current_session_id: None,
+            current_session_started_at: None,
             last_heartbeat_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),

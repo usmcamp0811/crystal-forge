@@ -64,9 +64,21 @@ impl AgentHeartbeat {
         }
     }
 
-    /// Check if the change reason indicates this should be a heartbeat
+    /// Check if the change reason indicates this should be a heartbeat.
+    ///
+    /// `"heartbeat"` (periodic loop), `"startup"` (agent service restart), and
+    /// `"state_delta"` (older agent binaries that don't emit `"heartbeat"`) are
+    /// all eligible for the lightweight heartbeat path. When the system state
+    /// hasn't changed (same store path, hardware, network, etc.), the POST
+    /// records a cheap `agent_heartbeats` row instead of a full `system_states`
+    /// row. Only when `states_are_equivalent` returns false does the handler
+    /// advance to `insert_system_state` — which correctly produces a history event.
+    ///
+    /// Older agents emit `"state_delta"` for every periodic heartbeat. Without
+    /// including `"state_delta"` here those agents flood history with identical
+    /// "Local rebuild" entries even though nothing about the system changed.
     fn is_heartbeat_change_reason(change_reason: &str) -> bool {
-        matches!(change_reason, "heartbeat")
+        matches!(change_reason, "heartbeat" | "startup" | "state_delta")
     }
 
     /// Compare two system states to determine if they're equivalent
@@ -121,3 +133,40 @@ impl std::fmt::Display for StateChangeRequired {
 }
 
 impl std::error::Error for StateChangeRequired {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heartbeat_change_reason_accepted() {
+        assert!(AgentHeartbeat::is_heartbeat_change_reason("heartbeat"));
+    }
+
+    #[test]
+    fn startup_change_reason_accepted_for_heartbeat_path() {
+        // A startup POST where the state is identical to the previous state
+        // should land in agent_heartbeats, not system_states. Without this,
+        // every agent service restart floods the history with "System restarted".
+        assert!(AgentHeartbeat::is_heartbeat_change_reason("startup"));
+    }
+
+    #[test]
+    fn state_delta_accepted_for_heartbeat_path() {
+        // Older agent binaries emit "state_delta" for every periodic heartbeat.
+        // When the system state hasn't actually changed, these must land in
+        // agent_heartbeats rather than inserting a new system_states row, so
+        // history doesn't fill with identical "Local rebuild" entries.
+        assert!(AgentHeartbeat::is_heartbeat_change_reason("state_delta"));
+    }
+
+    #[test]
+    fn config_change_is_not_a_heartbeat_type() {
+        assert!(!AgentHeartbeat::is_heartbeat_change_reason("config_change"));
+    }
+
+    #[test]
+    fn cf_deployment_is_not_a_heartbeat_type() {
+        assert!(!AgentHeartbeat::is_heartbeat_change_reason("cf_deployment"));
+    }
+}

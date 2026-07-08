@@ -523,6 +523,10 @@ pub fn SystemsListView() -> Element {
                                         last_seen: detail.last_seen,
                                         deployment_policy: detail.deployment_policy,
                                         fqdn: detail.fqdn,
+                                        heartbeat_interval_secs: detail.heartbeat_interval_secs,
+                                        effective_heartbeat_interval_secs: detail
+                                            .effective_heartbeat_interval_secs,
+                                        boot_id: detail.boot_id,
                                     };
 
                                     let mut values = local_systems.read().clone();
@@ -958,12 +962,7 @@ pub fn SystemsListView() -> Element {
                         spawn(async move {
                             match update_system_via_api(
                                 system_id,
-                                request.hostname,
-                                request.fqdn,
-                                request.system_configuration_name,
-                                request.environment,
-                                request.flake_name,
-                                request.deployment_policy,
+                                request,
                             ).await {
                                 Ok(updated_detail) => {
                                     // Update local systems list
@@ -1075,10 +1074,12 @@ fn SystemPreviewPanel(
         HealthStatus::Offline => "#6b7280",
     };
 
-    let heartbeat_interval_sec = 60_i64;
+    let heartbeat_interval_sec = detail.effective_heartbeat_interval_secs as i64;
     let heartbeat_next_in_sec = detail
         .last_seen
-        .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
+        .map(|dt| {
+            heartbeat_interval_sec as f64 - now.signed_duration_since(dt).num_seconds() as f64
+        })
         .unwrap_or(0.0);
     let last_heartbeat = detail
         .last_seen

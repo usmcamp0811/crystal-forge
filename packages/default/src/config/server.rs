@@ -1,3 +1,4 @@
+use crate::models::builders::RemoteBuildExecutionStrategy;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +101,30 @@ pub struct ServerConfig {
     /// Default: false (secure-by-default SSRF posture).
     #[serde(default)]
     pub allow_private_cache_test_targets: bool,
+
+    /// Default remote build execution strategy for API builders.
+    /// Defaults to `server_derivation`; set to `source_re_evaluate_verified`
+    /// only for builders explicitly configured with source access/capability.
+    /// Builders must advertise support for whichever strategy is selected.
+    #[serde(default = "default_remote_build_execution_strategy")]
+    pub remote_build_execution_strategy: RemoteBuildExecutionStrategy,
+
+    /// Default agent heartbeat interval in seconds returned via LogResponse when a system
+    /// has no per-system heartbeat_interval_secs configured (systems.heartbeat_interval_secs IS NULL).
+    /// Agents fall back to their compiled-in 600s default when this field is absent from the
+    /// server response, so changing this only affects agents that have checked in after the
+    /// server was updated.
+    /// Default: 600 (10 minutes).
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
+}
+
+fn default_remote_build_execution_strategy() -> RemoteBuildExecutionStrategy {
+    RemoteBuildExecutionStrategy::ServerDerivation
+}
+
+fn default_heartbeat_interval_secs() -> u64 {
+    600 // 10 minutes — matches the agent's compiled-in fallback
 }
 
 // Default value functions for serde
@@ -156,6 +181,8 @@ impl Default for ServerConfig {
             failed_build_log_retention_days: default_failed_build_log_retention_days(),
             commit_cache_retention_days: default_commit_cache_retention_days(),
             allow_private_cache_test_targets: false,
+            remote_build_execution_strategy: default_remote_build_execution_strategy(),
+            heartbeat_interval_secs: default_heartbeat_interval_secs(),
         }
     }
 }
@@ -228,6 +255,20 @@ impl ServerConfig {
             );
         }
 
+        // P2-5: Validate heartbeat interval is within acceptable range
+        const MIN_HEARTBEAT_INTERVAL_SECS: u64 = 15;
+        const MAX_HEARTBEAT_INTERVAL_SECS: u64 = 900;
+        if self.heartbeat_interval_secs < MIN_HEARTBEAT_INTERVAL_SECS
+            || self.heartbeat_interval_secs > MAX_HEARTBEAT_INTERVAL_SECS
+        {
+            return Err(format!(
+                "heartbeat_interval_secs ({}) must be between {} and {} seconds",
+                self.heartbeat_interval_secs,
+                MIN_HEARTBEAT_INTERVAL_SECS,
+                MAX_HEARTBEAT_INTERVAL_SECS
+            ));
+        }
+
         Ok(())
     }
 }
@@ -240,6 +281,15 @@ mod tests {
     fn execution_mode_defaults_to_real() {
         let cfg = ServerConfig::default();
         assert_eq!(cfg.execution_mode, ExecutionMode::Real);
+    }
+
+    #[test]
+    fn remote_build_strategy_defaults_to_server_derivation() {
+        let cfg = ServerConfig::default();
+        assert_eq!(
+            cfg.remote_build_execution_strategy,
+            RemoteBuildExecutionStrategy::ServerDerivation
+        );
     }
 
     #[test]

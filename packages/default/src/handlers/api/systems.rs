@@ -20,20 +20,23 @@ use crate::api::models::{
     UpdateSystemRequest, VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
 };
 use crate::auth::models::Role;
+use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{
     authenticated_user_roles, extract_request_origin, require_viewer_or_above,
 };
 use crate::models::auth_identity::AuthRole;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
+use crate::queries::system_events::list_system_event_history_rows;
 use crate::queries::system_states::{
     fetch_system_generations, find_generation_store_path_last_seen,
 };
 use crate::queries::systems::{
-    FqdnUpdate, SystemAccessRow, SystemDetailRow, SystemListRow, commit_belongs_to_system_flake,
-    deactivate_system, find_system_access_row, get_system_detail_by_id,
-    get_user_environment_membership_ids, list_recent_commits_for_system, list_system_access_rows,
-    list_system_agent_event_rows, list_system_history_rows, touch_system_updated_at,
-    update_public_key, update_system_desired_target, update_system_metadata,
+    FqdnUpdate, HeartbeatIntervalUpdate, SystemAccessRow, SystemDetailRow, SystemListRow,
+    commit_belongs_to_system_flake, deactivate_system, find_system_access_row,
+    get_system_detail_by_id, get_user_environment_membership_ids, list_recent_commits_for_system,
+    list_system_access_rows, list_system_agent_event_rows, list_system_history_rows,
+    touch_system_updated_at, update_public_key, update_system_desired_target,
+    update_system_metadata,
 };
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
 use crate::services::systems::SystemsListContext;
@@ -50,6 +53,7 @@ const ALLOWED_CVE_JUSTIFICATION_CATEGORIES: &[&str] = &[
 ];
 
 pub async fn list_systems(
+    State(state): State<CFState>,
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Query(params): Query<SystemsListParams>,
@@ -71,13 +75,20 @@ pub async fn list_systems(
     let ctx = SystemsListContext::new(user_id, roles, environment_memberships, &params);
 
     // Call the service layer for server-side filtering/sorting/pagination
-    match crate::services::systems::list_systems_for_user(&pool, &ctx).await {
+    match crate::services::systems::list_systems_for_user(
+        &pool,
+        &ctx,
+        state.server_config.heartbeat_interval_secs,
+    )
+    .await
+    {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(_) => internal_error("Failed to list systems"),
     }
 }
 
 pub async fn create_system(
+    State(state): State<CFState>,
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Json(payload): Json<CreateSystemRequest>,
@@ -191,7 +202,7 @@ pub async fn create_system(
 
     // Fetch the created system from view to return complete data
     let detail = match get_system_detail_by_id(&pool, system.id).await {
-        Ok(Some(row)) => detail_row_to_api_model(row),
+        Ok(Some(row)) => detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs),
         Ok(None) => return internal_error("System created but not found in view"),
         Err(_) => return internal_error("Failed to fetch created system"),
     };
@@ -200,6 +211,7 @@ pub async fn create_system(
 }
 
 pub async fn get_system(
+    State(state): State<CFState>,
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
@@ -225,7 +237,7 @@ pub async fn get_system(
     // Note: Environment-based access control would go here
     // For now, simplified - in production you'd check environment membership
 
-    let detail = detail_row_to_api_model(row);
+    let detail = detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs);
 
     (StatusCode::OK, Json(detail)).into_response()
 }
@@ -722,6 +734,7 @@ fn parse_cve_severity(value: &str) -> crate::api::models::CveSeverity {
 }
 
 pub async fn update_system_handler(
+    State(state): State<CFState>,
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
@@ -758,6 +771,27 @@ pub async fn update_system_handler(
             }
         }
     };
+
+    // PATCH semantics for heartbeat_interval_secs: omitted key preserves value,
+    // null clears it (falls back to server default 600s), value sets it.
+    // Valid range: 15-900 seconds.
+    const MIN_HEARTBEAT_INTERVAL_SECS: i32 = 15;
+    const MAX_HEARTBEAT_INTERVAL_SECS: i32 = 900;
+
+    let heartbeat_interval = match &payload.heartbeat_interval_secs {
+        FieldUpdate::Unset => HeartbeatIntervalUpdate::Keep,
+        FieldUpdate::Clear => HeartbeatIntervalUpdate::Clear,
+        FieldUpdate::Set(value) => {
+            if *value < MIN_HEARTBEAT_INTERVAL_SECS || *value > MAX_HEARTBEAT_INTERVAL_SECS {
+                return bad_request(&format!(
+                    "heartbeat_interval_secs must be between {} and {} seconds",
+                    MIN_HEARTBEAT_INTERVAL_SECS, MAX_HEARTBEAT_INTERVAL_SECS
+                ));
+            }
+            HeartbeatIntervalUpdate::Set(*value)
+        }
+    };
+
     if !matches!(
         payload.deployment_policy.as_str(),
         "manual" | "auto_latest" | "pinned"
@@ -826,6 +860,7 @@ pub async fn update_system_handler(
             .map(str::trim)
             .filter(|value| !value.is_empty()),
         &payload.deployment_policy,
+        heartbeat_interval,
     )
     .await
     .is_err()
@@ -834,7 +869,7 @@ pub async fn update_system_handler(
     }
 
     let detail = match get_system_detail_by_id(&pool, system_id).await {
-        Ok(Some(row)) => detail_row_to_api_model(row),
+        Ok(Some(row)) => detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs),
         Ok(None) => return not_found(),
         Err(_) => return internal_error("Failed to load updated system"),
     };
@@ -1245,8 +1280,13 @@ fn parse_pipeline_stage(stage: &str) -> PipelineStage {
     }
 }
 
-fn detail_row_to_api_model(row: SystemDetailRow) -> SystemDetail {
+fn detail_row_to_api_model(row: SystemDetailRow, server_default_interval: u64) -> SystemDetail {
     use crate::api::models::FlakeSummary;
+
+    let effective_heartbeat_interval_secs = row
+        .heartbeat_interval_secs
+        .map(|v| v as i32)
+        .unwrap_or(server_default_interval as i32);
 
     SystemDetail {
         id: row.id,
@@ -1302,6 +1342,11 @@ fn detail_row_to_api_model(row: SystemDetailRow) -> SystemDetail {
         last_seen: row.last_seen,
         created_at: row.created_at,
         updated_at: row.updated_at,
+        heartbeat_interval_secs: row.heartbeat_interval_secs,
+        effective_heartbeat_interval_secs,
+        boot_id: row.boot_id,
+        restart_type: row.last_restart_type,
+        last_restart_at: row.last_restart_at,
     }
 }
 
@@ -1811,6 +1856,61 @@ pub async fn verify_generation_closure(
     (StatusCode::OK, Json(response)).into_response()
 }
 
+/// Classify a history row into `(event_kind, actor)`.
+///
+/// `cf_deployment` = deploy driven through Crystal Forge; `config_change` =
+/// on-host/out-of-band activation (e.g. a manual `nixos-rebuild switch`);
+/// `startup` + `system_reboot` restart_type = system reboot;
+/// `startup` + `agent_restart` restart_type = agent service restart;
+/// `startup` + other/None = generic restart (legacy, no boot_id data).
+///
+/// A `nixos-rebuild switch` stops and restarts the agent during activation,
+/// so the first heartbeat carrying the NEW generation is often a `startup`
+/// row. When such a row lands on a different generation/store path than the
+/// next-older row, the real event is the on-host rebuild — classify it as
+/// `local_rebuild` instead of hiding the switch behind "Agent restarted".
+/// A genuine reboot (`system_reboot`) still classifies as `restart`.
+fn classify_history_event(
+    change_reason: &str,
+    restart_type: Option<&str>,
+    changed_generation_or_store: bool,
+) -> (&'static str, &'static str) {
+    match change_reason {
+        "cf_deployment" => ("cf_deployment", "crystal-forge"),
+        "config_change" => ("local_rebuild", "on-host"),
+        "startup" => match restart_type {
+            Some("system_reboot") => ("restart", "agent"),
+            _ if changed_generation_or_store => ("local_rebuild", "on-host"),
+            Some("agent_restart") => ("agent_restart", "agent"),
+            _ => ("restart", "agent"),
+        },
+        "state_delta" if changed_generation_or_store => ("local_rebuild", "on-host"),
+        _ => ("state_change", "agent"),
+    }
+}
+
+fn event_history_kind(event_type: &str) -> (&'static str, &'static str, &'static str) {
+    match event_type {
+        "cf_deployment_succeeded" => ("cf_deployment", "crystal-forge", "succeeded"),
+        "cf_deployment_failed" => ("cf_deployment", "crystal-forge", "failed"),
+        "local_rebuild_detected" => ("local_rebuild", "on-host", "recorded"),
+        "system_reboot" => ("restart", "agent", "recorded"),
+        "agent_restart" => ("agent_restart", "agent", "recorded"),
+        _ => ("state_change", "agent", "recorded"),
+    }
+}
+
+fn event_history_title(event_type: &str) -> &'static str {
+    match event_type {
+        "cf_deployment_succeeded" => "Deployed through Crystal Forge",
+        "cf_deployment_failed" => "Deploy failed to activate",
+        "local_rebuild_detected" => "nixos-rebuild switch on host",
+        "system_reboot" => "System restarted",
+        "agent_restart" => "Agent restarted",
+        _ => "State updated",
+    }
+}
+
 pub async fn get_system_history(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -1839,58 +1939,142 @@ pub async fn get_system_history(
         return not_found();
     }
 
+    let event_rows = match list_system_event_history_rows(&pool, system_id, 200).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load system history"),
+    };
+
+    if !event_rows.is_empty() {
+        let entries = event_rows
+            .into_iter()
+            .map(|row| {
+                let (event_kind, default_actor, outcome) = event_history_kind(&row.event_type);
+                let title = event_history_title(&row.event_type).to_string();
+                let actor = row
+                    .actor
+                    .clone()
+                    .unwrap_or_else(|| default_actor.to_string());
+                let generation = row
+                    .new_generation
+                    .and_then(|value| i32::try_from(value).ok());
+                let store_path = row.new_store_path.clone();
+                let reconciled = row.commit_hash.is_some();
+                let restart_type = match row.event_type.as_str() {
+                    "system_reboot" => Some("system_reboot".to_string()),
+                    "agent_restart" => Some("agent_restart".to_string()),
+                    _ => None,
+                };
+
+                SystemHistoryEntry {
+                    id: Some(row.id),
+                    timestamp: row.occurred_at,
+                    occurred_at: Some(row.occurred_at),
+                    observed_at: Some(row.observed_at),
+                    store_path,
+                    system_configuration_name: row.system_configuration_name,
+                    change_reason: title.clone(),
+                    event_type: row.event_type,
+                    event_rank: Some(row.event_rank),
+                    title: Some(title),
+                    commit_hash: row.commit_hash,
+                    flake_name: row.flake_name,
+                    flake_repo_url: row.flake_repo_url,
+                    actor,
+                    outcome: outcome.to_string(),
+                    event_kind: event_kind.to_string(),
+                    generation,
+                    previous_generation: row.previous_generation,
+                    new_generation: row.new_generation,
+                    previous_store_path: row.previous_store_path,
+                    new_store_path: row.new_store_path,
+                    previous_boot_id: row.previous_boot_id,
+                    new_boot_id: row.new_boot_id,
+                    deployment_id: row.deployment_id,
+                    desired_target_id: row.desired_target_id,
+                    source: Some(row.source),
+                    correlation_id: row.correlation_id,
+                    metadata: row.metadata,
+                    reconciled,
+                    generation_matches_current_store_path: None,
+                    restart_type,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        return (StatusCode::OK, Json(entries)).into_response();
+    }
+
     let rows = match list_system_history_rows(&pool, system_id, 200).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load system history"),
     };
 
     let entries = rows
-        .into_iter()
-        .map(|row| {
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| {
             let change_reason = row
                 .change_reason
+                .clone()
                 .unwrap_or_else(|| "state_delta".to_string());
 
-            // Authoritative classification derived from the recorded change_reason.
-            // `cf_deployment` = deploy driven through Crystal Forge; `config_change` =
-            // on-host/out-of-band activation (e.g. a manual `nixos-rebuild switch`);
-            // `startup` = reboot/restart at the same generation.
-            let event_kind = match change_reason.as_str() {
-                "cf_deployment" => "cf_deployment",
-                "config_change" => "local_rebuild",
-                "startup" => "restart",
-                _ => "state_change",
-            }
-            .to_string();
+            // Rows are sorted newest → oldest.  If this row's generation/store
+            // path differs from the next-older row, it is a real local system
+            // activation even when the stored change_reason is the generic
+            // state_delta.  Prefer the actual generation/store transition over
+            // the textual reason so a nixos-rebuild switch does not disappear
+            // from history as a generic state change.
+            let changed_generation_or_store = rows.get(idx + 1).is_some_and(|older| {
+                row.generation != older.generation || row.store_path != older.store_path
+            });
+
+            // Authoritative classification derived from the recorded change_reason,
+            // the per-row restart_type written at insert time, and the actual
+            // generation/store-path transition. See classify_history_event.
+            let (event_kind, actor) = classify_history_event(
+                change_reason.as_str(),
+                row.restart_type.as_deref(),
+                changed_generation_or_store,
+            );
+            let event_kind = event_kind.to_string();
+            let actor = actor.to_string();
 
             // Reconciled/tracked when the running store path maps to a known flake
             // commit; untracked (capture-to-flake) otherwise.
             let reconciled = row.commit_hash.is_some();
 
-            // Actor attribution: CF deploys are agent-applied; on-host rebuilds are
-            // host-local. We do not currently capture the specific user, so we report
-            // the honest source rather than a fabricated value.
-            let actor = match change_reason.as_str() {
-                "cf_deployment" => "crystal-forge",
-                "config_change" => "on-host",
-                _ => "agent",
-            }
-            .to_string();
-
             SystemHistoryEntry {
+                id: None,
                 timestamp: row.timestamp,
-                store_path: row.store_path,
-                system_configuration_name: row.system_configuration_name,
+                occurred_at: Some(row.timestamp),
+                observed_at: None,
+                store_path: row.store_path.clone(),
+                system_configuration_name: row.system_configuration_name.clone(),
                 change_reason,
-                commit_hash: row.commit_hash,
-                flake_name: row.flake_name,
-                flake_repo_url: row.flake_repo_url,
+                event_type: event_kind.clone(),
+                event_rank: None,
+                title: None,
+                commit_hash: row.commit_hash.clone(),
+                flake_name: row.flake_name.clone(),
+                flake_repo_url: row.flake_repo_url.clone(),
                 actor,
                 outcome: "recorded".to_string(),
                 event_kind,
                 generation: row.generation,
+                previous_generation: None,
+                new_generation: row.generation.map(i64::from),
+                previous_store_path: None,
+                new_store_path: row.store_path.clone(),
+                previous_boot_id: None,
+                new_boot_id: None,
+                deployment_id: None,
+                desired_target_id: None,
+                source: Some("legacy_system_states".to_string()),
+                correlation_id: None,
+                metadata: serde_json::json!({ "legacy_history_source": "system_states" }),
                 reconciled,
                 generation_matches_current_store_path: row.generation_matches_current_store_path,
+                restart_type: row.restart_type.clone(),
             }
         })
         .collect::<Vec<_>>();
@@ -1988,6 +2172,88 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     #[test]
+    fn startup_row_with_changed_generation_classifies_as_local_rebuild() {
+        // nixos-rebuild switch restarts the agent, so the new generation
+        // arrives on a startup heartbeat. The switch must show as a local
+        // rebuild, not be hidden behind "Agent restarted".
+        assert_eq!(
+            classify_history_event("startup", Some("agent_restart"), true),
+            ("local_rebuild", "on-host")
+        );
+        assert_eq!(
+            classify_history_event("startup", None, true),
+            ("local_rebuild", "on-host")
+        );
+    }
+
+    #[test]
+    fn startup_row_without_generation_change_keeps_restart_classification() {
+        assert_eq!(
+            classify_history_event("startup", Some("agent_restart"), false),
+            ("agent_restart", "agent")
+        );
+        assert_eq!(
+            classify_history_event("startup", None, false),
+            ("restart", "agent")
+        );
+    }
+
+    #[test]
+    fn system_reboot_stays_restart_even_when_generation_changed() {
+        // Booting into a new generation (nixos-rebuild boot + reboot) is
+        // still a reboot event; the generation transition is visible on the
+        // entry itself.
+        assert_eq!(
+            classify_history_event("startup", Some("system_reboot"), true),
+            ("restart", "agent")
+        );
+    }
+
+    #[test]
+    fn non_startup_rows_classify_by_change_reason() {
+        assert_eq!(
+            classify_history_event("cf_deployment", None, false),
+            ("cf_deployment", "crystal-forge")
+        );
+        assert_eq!(
+            classify_history_event("config_change", None, false),
+            ("local_rebuild", "on-host")
+        );
+        assert_eq!(
+            classify_history_event("state_delta", None, true),
+            ("local_rebuild", "on-host")
+        );
+        assert_eq!(
+            classify_history_event("state_delta", None, false),
+            ("state_change", "agent")
+        );
+    }
+
+    #[test]
+    fn event_history_kind_maps_event_backed_contract() {
+        assert_eq!(
+            event_history_kind("cf_deployment_succeeded"),
+            ("cf_deployment", "crystal-forge", "succeeded")
+        );
+        assert_eq!(
+            event_history_kind("cf_deployment_failed"),
+            ("cf_deployment", "crystal-forge", "failed")
+        );
+        assert_eq!(
+            event_history_kind("local_rebuild_detected"),
+            ("local_rebuild", "on-host", "recorded")
+        );
+        assert_eq!(
+            event_history_kind("system_reboot"),
+            ("restart", "agent", "recorded")
+        );
+        assert_eq!(
+            event_history_kind("agent_restart"),
+            ("agent_restart", "agent", "recorded")
+        );
+    }
+
+    #[test]
     fn highest_role_prefers_admin_then_operator_then_viewer() {
         assert_eq!(highest_role(&[AuthRole::Admin]), Some(Role::Admin));
         assert_eq!(highest_role(&[AuthRole::Operator]), Some(Role::Operator));
@@ -2017,13 +2283,28 @@ mod tests {
         assert!(!matches_filters(&row, &params));
     }
 
-    #[tokio::test]
-    async fn list_systems_requires_authenticated_role() {
+    fn test_cf_state() -> CFState {
+        use crate::config::ServerConfig;
+        use crate::handlers::agent_request::CFState;
+        use crate::queue::QueueNotifier;
+        use std::sync::Arc;
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
             .expect("lazy pool should construct");
+        CFState::new(
+            pool,
+            ServerConfig::default(),
+            Arc::new(QueueNotifier::new()),
+        )
+    }
+
+    #[tokio::test]
+    async fn list_systems_requires_authenticated_role() {
+        let state = test_cf_state();
+        let pool = state.pool.clone();
 
         let response = list_systems(
+            State(state),
             State(pool),
             HeaderMap::new(),
             Query(SystemsListParams::default()),
@@ -2036,11 +2317,11 @@ mod tests {
 
     #[tokio::test]
     async fn get_system_requires_authenticated_role() {
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
-            .expect("lazy pool should construct");
+        let state = test_cf_state();
+        let pool = state.pool.clone();
 
         let response = get_system(
+            State(state),
             State(pool),
             HeaderMap::new(),
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),

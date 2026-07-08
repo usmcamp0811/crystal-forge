@@ -127,6 +127,7 @@ impl SystemsListContext {
 pub async fn list_systems_for_user(
     pool: &PgPool,
     ctx: &SystemsListContext,
+    server_default_interval: u64,
 ) -> Result<PaginatedResponse<SystemSummary>> {
     // Use the query layer for server-side filtering/sorting/pagination
     let is_admin = ctx.is_admin();
@@ -165,7 +166,10 @@ pub async fn list_systems_for_user(
     )
     .await?;
 
-    let items = items.into_iter().map(list_row_to_summary).collect();
+    let items = items
+        .into_iter()
+        .map(|row| list_row_to_summary(row, server_default_interval))
+        .collect();
 
     Ok(PaginatedResponse {
         items,
@@ -180,6 +184,7 @@ pub async fn get_system_detail(
     pool: &PgPool,
     system_id: Uuid,
     ctx: &SystemsListContext,
+    server_default_interval: u64,
 ) -> Result<Option<SystemDetail>> {
     // Get system detail from query layer
     let row = match queries::get_system_detail_by_id(pool, system_id).await? {
@@ -198,7 +203,7 @@ pub async fn get_system_detail(
         }
     }
 
-    Ok(Some(detail_row_to_api_model(row)))
+    Ok(Some(detail_row_to_api_model(row, server_default_interval)))
 }
 
 /// Create a new system.
@@ -206,6 +211,7 @@ pub async fn create_system(
     pool: &PgPool,
     _user_id: Uuid,
     payload: CreateSystemRequest,
+    server_default_interval: u64,
 ) -> Result<SystemDetail> {
     // Look up environment ID from name
     let environment_id = if let Some(env_name) = payload.environment.as_ref() {
@@ -272,7 +278,7 @@ pub async fn create_system(
     // Fetch the created system from view to return complete data
     let detail = queries::get_system_detail_by_id(pool, system.id)
         .await?
-        .map(detail_row_to_api_model)
+        .map(|row| detail_row_to_api_model(row, server_default_interval))
         .ok_or_else(|| anyhow::anyhow!("System created but not found in view"))?;
 
     Ok(detail)
@@ -280,8 +286,13 @@ pub async fn create_system(
 
 // === Helper functions ===
 
-fn list_row_to_summary(row: queries::SystemListRow) -> SystemSummary {
+fn list_row_to_summary(row: queries::SystemListRow, server_default_interval: u64) -> SystemSummary {
     use crate::api::models::{CveSummary, DeploymentStatus, HealthStatus, PipelineStage};
+
+    let effective_heartbeat_interval_secs = row
+        .heartbeat_interval_secs
+        .map(|v| v as i32)
+        .unwrap_or(server_default_interval as i32);
 
     SystemSummary {
         id: row.id,
@@ -302,13 +313,24 @@ fn list_row_to_summary(row: queries::SystemListRow) -> SystemSummary {
         last_seen: row.last_seen,
         deployment_policy: row.deployment_policy,
         fqdn: row.fqdn,
+        heartbeat_interval_secs: row.heartbeat_interval_secs,
+        effective_heartbeat_interval_secs,
+        boot_id: row.boot_id,
     }
 }
 
-fn detail_row_to_api_model(row: queries::SystemDetailRow) -> SystemDetail {
+fn detail_row_to_api_model(
+    row: queries::SystemDetailRow,
+    server_default_interval: u64,
+) -> SystemDetail {
     use crate::api::models::{
         CveSummary, FlakeSummary, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo,
     };
+
+    let effective_heartbeat_interval_secs = row
+        .heartbeat_interval_secs
+        .map(|v| v as i32)
+        .unwrap_or(server_default_interval as i32);
 
     SystemDetail {
         id: row.id,
@@ -364,6 +386,11 @@ fn detail_row_to_api_model(row: queries::SystemDetailRow) -> SystemDetail {
         last_seen: row.last_seen,
         created_at: row.created_at,
         updated_at: row.updated_at,
+        heartbeat_interval_secs: row.heartbeat_interval_secs,
+        effective_heartbeat_interval_secs,
+        boot_id: row.boot_id,
+        restart_type: row.last_restart_type,
+        last_restart_at: row.last_restart_at,
     }
 }
 
