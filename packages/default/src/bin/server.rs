@@ -14,6 +14,7 @@ use crystal_forge::{
         ensure_bootstrap_oidc_admin_mapping, ensure_dev_users, ensure_local_bootstrap_admin,
     },
     config::CrystalForgeConfig,
+    fixtures::seed_from_fixture,
     flake::commits::initialize_flake_commits,
     handlers::{
         agent::{heartbeat, state},
@@ -146,6 +147,18 @@ async fn main() -> anyhow::Result<()> {
     // Create event-driven queue notifier
     let queue_notifier = Arc::new(QueueNotifier::new());
     info!("🔔 Initialized event-driven queue notification system");
+
+    // Seed database from fixture JSON if FIXTURE_JSON_PATH is set.
+    if let Ok(path) = std::env::var("FIXTURE_JSON_PATH") {
+        if !path.is_empty() {
+            info!("📦 Fixture seeding enabled — loading from {}", path);
+            if let Err(e) = seed_from_fixture(&pool, std::path::Path::new(&path)).await {
+                warn!("📦 Fixture seeding failed (continuing): {}", e);
+            } else {
+                info!("📦 Fixture seeding complete");
+            }
+        }
+    }
 
     let state = CFState::new(pool, server_cfg.clone(), queue_notifier.clone());
     let state_arc = Arc::new(state.clone());

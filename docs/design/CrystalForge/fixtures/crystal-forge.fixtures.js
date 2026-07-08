@@ -1,0 +1,17875 @@
+// AUTO-GENERATED from crystal-forge.fixtures.json — do not edit by hand.
+// Loaded before data-*.js so every registry reads the golden fixture.
+window.__CF_FIXTURES = {
+  "_meta": {
+    "generated": "2026-07-03T13:47:33.997Z",
+    "source": "Crystal Forge design example (data-*.js)",
+    "rngSeed": 1337,
+    "note": "Canonical golden dataset — deterministic snapshot of the mock's data registries. Load into the Dioxus app and/or the design example and assert equality."
+  },
+  "environments": [
+    {
+      "name": "production",
+      "color": "#dc2626",
+      "dot": "#ef4444"
+    },
+    {
+      "name": "staging",
+      "color": "#d97706",
+      "dot": "#f59e0b"
+    },
+    {
+      "name": "dev",
+      "color": "#2563eb",
+      "dot": "#3b82f6"
+    },
+    {
+      "name": "edge",
+      "color": "#0f766e",
+      "dot": "#14b8a6"
+    },
+    {
+      "name": "lab",
+      "color": "#7c3aed",
+      "dot": "#8b5cf6"
+    }
+  ],
+  "flakes": {
+    "registry": [
+      {
+        "id": "fl-infra",
+        "name": "infrastructure",
+        "url": "git+ssh://git@gitlab.cf.internal/ops/nixos-infra",
+        "branch": "main",
+        "description": "Production & staging NixOS host configurations",
+        "environment": "production",
+        "systemCount": 12,
+        "lastSyncAt": "4m ago",
+        "status": "synced",
+        "latestCommit": "a3f8c12",
+        "latestMessage": "stig: enforce audit rules for sudo",
+        "latestAuthor": "mreyes",
+        "latestAt": "2h ago",
+        "totalCommits": 847
+      },
+      {
+        "id": "fl-web",
+        "name": "web-services",
+        "url": "git+ssh://git@gitlab.cf.internal/ops/nixos-web",
+        "branch": "main",
+        "description": "Web-tier and API service configurations",
+        "environment": "production",
+        "systemCount": 8,
+        "lastSyncAt": "6m ago",
+        "status": "synced",
+        "latestCommit": "c7e1902",
+        "latestMessage": "nginx: bump to 1.27.4, add HSTS headers",
+        "latestAuthor": "jpark",
+        "latestAt": "5h ago",
+        "totalCommits": 312
+      },
+      {
+        "id": "fl-edge",
+        "name": "edge-gateway",
+        "url": "git+ssh://git@gitlab.cf.internal/ops/nixos-edge",
+        "branch": "main",
+        "description": "Edge node and WireGuard gateway configurations",
+        "environment": "edge",
+        "systemCount": 7,
+        "lastSyncAt": "1m ago",
+        "status": "synced",
+        "latestCommit": "4d2a801",
+        "latestMessage": "wireguard: add peer for sgp-01",
+        "latestAuthor": "dchen",
+        "latestAt": "1d ago",
+        "totalCommits": 204
+      },
+      {
+        "id": "fl-build",
+        "name": "build-farm",
+        "url": "git+ssh://git@gitlab.cf.internal/ops/nixos-build",
+        "branch": "main",
+        "description": "Nix builder and Hydra worker configurations",
+        "environment": "production",
+        "systemCount": 5,
+        "lastSyncAt": "22m ago",
+        "status": "syncing",
+        "latestCommit": "9f0c344",
+        "latestMessage": "hydra: increase max-jobs to 64",
+        "latestAuthor": "ops-bot",
+        "latestAt": "8h ago",
+        "totalCommits": 119
+      },
+      {
+        "id": "fl-lab",
+        "name": "lab-nodes",
+        "url": "git+ssh://git@gitlab.cf.internal/ops/nixos-lab",
+        "branch": "dev",
+        "description": "Lab and development host configurations",
+        "environment": "lab",
+        "systemCount": 5,
+        "lastSyncAt": "3h ago",
+        "status": "error",
+        "latestCommit": "1b7e5f0",
+        "latestMessage": "fix: reset lab-rig-01 after wipe",
+        "latestAuthor": "mreyes",
+        "latestAt": "3d ago",
+        "totalCommits": 88,
+        "errorMsg": "SSH key rejected by remote: Permission denied (publickey)"
+      }
+    ],
+    "commits": {
+      "fl-infra": [
+        {
+          "sha": "a3f8c12",
+          "msg": "stig: enforce audit rules for sudo",
+          "author": "mreyes",
+          "at": "2h ago",
+          "files": 3,
+          "add": 28,
+          "del": 4
+        },
+        {
+          "sha": "f1d9022",
+          "msg": "cve: patch openssl to 3.3.2",
+          "author": "ops-bot",
+          "at": "1d ago",
+          "files": 2,
+          "add": 12,
+          "del": 8
+        },
+        {
+          "sha": "8c4b311",
+          "msg": "atlas-02: add prometheus node exporter",
+          "author": "dchen",
+          "at": "2d ago",
+          "files": 1,
+          "add": 14,
+          "del": 0
+        },
+        {
+          "sha": "77aef00",
+          "msg": "bump nixpkgs to 24.11.20260401",
+          "author": "ops-bot",
+          "at": "3d ago",
+          "files": 1,
+          "add": 2,
+          "del": 2
+        },
+        {
+          "sha": "3c12889",
+          "msg": "orion-db: add pgbackup systemd timer",
+          "author": "jpark",
+          "at": "5d ago",
+          "files": 2,
+          "add": 31,
+          "del": 0
+        },
+        {
+          "sha": "a22fc08",
+          "msg": "harden sshd: disable password auth",
+          "author": "mreyes",
+          "at": "1w ago",
+          "files": 1,
+          "add": 6,
+          "del": 3
+        },
+        {
+          "sha": "bc10201",
+          "msg": "feat: enable sops-nix for secrets",
+          "author": "dchen",
+          "at": "1w ago",
+          "files": 4,
+          "add": 44,
+          "del": 12
+        },
+        {
+          "sha": "0e9f177",
+          "msg": "wireguard: rotate preshared keys",
+          "author": "ops-bot",
+          "at": "2w ago",
+          "files": 2,
+          "add": 8,
+          "del": 8
+        },
+        {
+          "sha": "17d39f5",
+          "msg": "grafana: pin to 11.6.2",
+          "author": "jpark",
+          "at": "8d ago",
+          "files": 1,
+          "add": 30,
+          "del": 8
+        },
+        {
+          "sha": "83e94fa",
+          "msg": "hosts: rename phoenix → phoenix-01",
+          "author": "dchen",
+          "at": "9d ago",
+          "files": 2,
+          "add": 7,
+          "del": 0
+        },
+        {
+          "sha": "fffffff",
+          "msg": "ssh: add ed25519 host key",
+          "author": "ops-bot",
+          "at": "10d ago",
+          "files": 3,
+          "add": 14,
+          "del": 1
+        },
+        {
+          "sha": "6b05af4",
+          "msg": "iptables: drop ICMP redirects",
+          "author": "kthomas",
+          "at": "11d ago",
+          "files": 4,
+          "add": 21,
+          "del": 2
+        },
+        {
+          "sha": "d71b5f9",
+          "msg": "kernel: enable BPF LSM",
+          "author": "arao",
+          "at": "12d ago",
+          "files": 1,
+          "add": 28,
+          "del": 3
+        },
+        {
+          "sha": "43210fe",
+          "msg": "audit: add execve rule",
+          "author": "linus.h",
+          "at": "13d ago",
+          "files": 2,
+          "add": 5,
+          "del": 4
+        },
+        {
+          "sha": "bf37bf3",
+          "msg": "wireguard: rotate keys",
+          "author": "mreyes",
+          "at": "2w ago",
+          "files": 3,
+          "add": 12,
+          "del": 5
+        },
+        {
+          "sha": "2b4d6f8",
+          "msg": "users: add ops-bot ssh key",
+          "author": "jpark",
+          "at": "2w ago",
+          "files": 4,
+          "add": 19,
+          "del": 6
+        },
+        {
+          "sha": "97531fd",
+          "msg": "remove unused debug module",
+          "author": "dchen",
+          "at": "2w ago",
+          "files": 1,
+          "add": 26,
+          "del": 7
+        },
+        {
+          "sha": "0369cf2",
+          "msg": "kernel: bump LTS to 6.6.62",
+          "author": "ops-bot",
+          "at": "2w ago",
+          "files": 2,
+          "add": 33,
+          "del": 8
+        },
+        {
+          "sha": "7f7f7f7",
+          "msg": "fix: race in services.acme",
+          "author": "kthomas",
+          "at": "2w ago",
+          "files": 3,
+          "add": 10,
+          "del": 0
+        },
+        {
+          "sha": "eb852fc",
+          "msg": "metrics: ship to prometheus",
+          "author": "arao",
+          "at": "2w ago",
+          "files": 4,
+          "add": 17,
+          "del": 1
+        },
+        {
+          "sha": "579bdf1",
+          "msg": "stig: V-230309 — disable IPv6 redirect",
+          "author": "linus.h",
+          "at": "2w ago",
+          "files": 1,
+          "add": 24,
+          "del": 2
+        },
+        {
+          "sha": "c3a18f6",
+          "msg": "vault: add audit log to /var/log",
+          "author": "mreyes",
+          "at": "3w ago",
+          "files": 2,
+          "add": 31,
+          "del": 3
+        },
+        {
+          "sha": "3fb73fb",
+          "msg": "fix: gnome-keyring on headless",
+          "author": "jpark",
+          "at": "3w ago",
+          "files": 3,
+          "add": 8,
+          "del": 4
+        },
+        {
+          "sha": "abcdef0",
+          "msg": "k3s: bump to v1.31.4+k3s1",
+          "author": "dchen",
+          "at": "3w ago",
+          "files": 4,
+          "add": 15,
+          "del": 5
+        },
+        {
+          "sha": "17d39f5",
+          "msg": "ci: cache nix store across jobs",
+          "author": "ops-bot",
+          "at": "3w ago",
+          "files": 1,
+          "add": 22,
+          "del": 6
+        },
+        {
+          "sha": "83e94fa",
+          "msg": "deps: bump nixpkgs",
+          "author": "kthomas",
+          "at": "3w ago",
+          "files": 2,
+          "add": 29,
+          "del": 7
+        },
+        {
+          "sha": "fffffff",
+          "msg": "fix: cgroups v2 quirk",
+          "author": "arao",
+          "at": "3w ago",
+          "files": 3,
+          "add": 6,
+          "del": 8
+        },
+        {
+          "sha": "6b05af4",
+          "msg": "feat: add tailscale module",
+          "author": "linus.h",
+          "at": "3w ago",
+          "files": 4,
+          "add": 13,
+          "del": 0
+        },
+        {
+          "sha": "d71b5f9",
+          "msg": "stig: tighten kernel hardening",
+          "author": "mreyes",
+          "at": "4w ago",
+          "files": 1,
+          "add": 20,
+          "del": 1
+        },
+        {
+          "sha": "43210fe",
+          "msg": "ci: add sops-nix gating",
+          "author": "jpark",
+          "at": "4w ago",
+          "files": 2,
+          "add": 27,
+          "del": 2
+        },
+        {
+          "sha": "bf37bf3",
+          "msg": "atlas-03: bump RAM to 64GB",
+          "author": "dchen",
+          "at": "4w ago",
+          "files": 3,
+          "add": 4,
+          "del": 3
+        },
+        {
+          "sha": "2b4d6f8",
+          "msg": "orion-cache: add zstd level=19",
+          "author": "ops-bot",
+          "at": "4w ago",
+          "files": 4,
+          "add": 11,
+          "del": 4
+        },
+        {
+          "sha": "97531fd",
+          "msg": "loki: increase chunk size",
+          "author": "kthomas",
+          "at": "4w ago",
+          "files": 1,
+          "add": 18,
+          "del": 5
+        },
+        {
+          "sha": "0369cf2",
+          "msg": "grafana: pin to 11.6.2",
+          "author": "arao",
+          "at": "4w ago",
+          "files": 2,
+          "add": 25,
+          "del": 6
+        },
+        {
+          "sha": "7f7f7f7",
+          "msg": "hosts: rename phoenix → phoenix-01",
+          "author": "linus.h",
+          "at": "4w ago",
+          "files": 3,
+          "add": 32,
+          "del": 7
+        },
+        {
+          "sha": "eb852fc",
+          "msg": "ssh: add ed25519 host key",
+          "author": "mreyes",
+          "at": "1mo ago",
+          "files": 4,
+          "add": 9,
+          "del": 8
+        },
+        {
+          "sha": "579bdf1",
+          "msg": "iptables: drop ICMP redirects",
+          "author": "jpark",
+          "at": "1mo ago",
+          "files": 1,
+          "add": 16,
+          "del": 0
+        },
+        {
+          "sha": "c3a18f6",
+          "msg": "kernel: enable BPF LSM",
+          "author": "dchen",
+          "at": "1mo ago",
+          "files": 2,
+          "add": 23,
+          "del": 1
+        },
+        {
+          "sha": "3fb73fb",
+          "msg": "audit: add execve rule",
+          "author": "ops-bot",
+          "at": "1mo ago",
+          "files": 3,
+          "add": 30,
+          "del": 2
+        },
+        {
+          "sha": "abcdef0",
+          "msg": "wireguard: rotate keys",
+          "author": "kthomas",
+          "at": "1mo ago",
+          "files": 4,
+          "add": 7,
+          "del": 3
+        },
+        {
+          "sha": "17d39f5",
+          "msg": "users: add ops-bot ssh key",
+          "author": "arao",
+          "at": "1mo ago",
+          "files": 1,
+          "add": 14,
+          "del": 4
+        },
+        {
+          "sha": "83e94fa",
+          "msg": "remove unused debug module",
+          "author": "linus.h",
+          "at": "1mo ago",
+          "files": 2,
+          "add": 21,
+          "del": 5
+        },
+        {
+          "sha": "fffffff",
+          "msg": "kernel: bump LTS to 6.6.62",
+          "author": "mreyes",
+          "at": "1mo ago",
+          "files": 3,
+          "add": 28,
+          "del": 6
+        },
+        {
+          "sha": "6b05af4",
+          "msg": "fix: race in services.acme",
+          "author": "jpark",
+          "at": "1mo ago",
+          "files": 4,
+          "add": 5,
+          "del": 7
+        },
+        {
+          "sha": "d71b5f9",
+          "msg": "metrics: ship to prometheus",
+          "author": "dchen",
+          "at": "1mo ago",
+          "files": 1,
+          "add": 12,
+          "del": 8
+        },
+        {
+          "sha": "43210fe",
+          "msg": "stig: V-230309 — disable IPv6 redirect",
+          "author": "ops-bot",
+          "at": "1mo ago",
+          "files": 2,
+          "add": 19,
+          "del": 0
+        },
+        {
+          "sha": "bf37bf3",
+          "msg": "vault: add audit log to /var/log",
+          "author": "kthomas",
+          "at": "1mo ago",
+          "files": 3,
+          "add": 26,
+          "del": 1
+        },
+        {
+          "sha": "2b4d6f8",
+          "msg": "fix: gnome-keyring on headless",
+          "author": "arao",
+          "at": "1mo ago",
+          "files": 4,
+          "add": 33,
+          "del": 2
+        },
+        {
+          "sha": "97531fd",
+          "msg": "k3s: bump to v1.31.4+k3s1",
+          "author": "linus.h",
+          "at": "1mo ago",
+          "files": 1,
+          "add": 10,
+          "del": 3
+        },
+        {
+          "sha": "0369cf2",
+          "msg": "ci: cache nix store across jobs",
+          "author": "mreyes",
+          "at": "1mo ago",
+          "files": 2,
+          "add": 17,
+          "del": 4
+        },
+        {
+          "sha": "7f7f7f7",
+          "msg": "deps: bump nixpkgs",
+          "author": "jpark",
+          "at": "1mo ago",
+          "files": 3,
+          "add": 24,
+          "del": 5
+        },
+        {
+          "sha": "eb852fc",
+          "msg": "fix: cgroups v2 quirk",
+          "author": "dchen",
+          "at": "1mo ago",
+          "files": 4,
+          "add": 31,
+          "del": 6
+        },
+        {
+          "sha": "579bdf1",
+          "msg": "feat: add tailscale module",
+          "author": "ops-bot",
+          "at": "1mo ago",
+          "files": 1,
+          "add": 8,
+          "del": 7
+        },
+        {
+          "sha": "c3a18f6",
+          "msg": "stig: tighten kernel hardening",
+          "author": "kthomas",
+          "at": "1mo ago",
+          "files": 2,
+          "add": 15,
+          "del": 8
+        },
+        {
+          "sha": "3fb73fb",
+          "msg": "ci: add sops-nix gating",
+          "author": "arao",
+          "at": "1mo ago",
+          "files": 3,
+          "add": 22,
+          "del": 0
+        },
+        {
+          "sha": "abcdef0",
+          "msg": "atlas-03: bump RAM to 64GB",
+          "author": "linus.h",
+          "at": "1mo ago",
+          "files": 4,
+          "add": 29,
+          "del": 1
+        },
+        {
+          "sha": "17d39f5",
+          "msg": "orion-cache: add zstd level=19",
+          "author": "mreyes",
+          "at": "1mo ago",
+          "files": 1,
+          "add": 6,
+          "del": 2
+        },
+        {
+          "sha": "83e94fa",
+          "msg": "loki: increase chunk size",
+          "author": "jpark",
+          "at": "1mo ago",
+          "files": 2,
+          "add": 13,
+          "del": 3
+        },
+        {
+          "sha": "fffffff",
+          "msg": "grafana: pin to 11.6.2",
+          "author": "dchen",
+          "at": "1mo ago",
+          "files": 3,
+          "add": 20,
+          "del": 4
+        },
+        {
+          "sha": "6b05af4",
+          "msg": "hosts: rename phoenix → phoenix-01",
+          "author": "ops-bot",
+          "at": "1mo ago",
+          "files": 4,
+          "add": 27,
+          "del": 5
+        },
+        {
+          "sha": "d71b5f9",
+          "msg": "ssh: add ed25519 host key",
+          "author": "kthomas",
+          "at": "2mo ago",
+          "files": 1,
+          "add": 4,
+          "del": 6
+        },
+        {
+          "sha": "43210fe",
+          "msg": "iptables: drop ICMP redirects",
+          "author": "arao",
+          "at": "2mo ago",
+          "files": 2,
+          "add": 11,
+          "del": 7
+        },
+        {
+          "sha": "bf37bf3",
+          "msg": "kernel: enable BPF LSM",
+          "author": "linus.h",
+          "at": "2mo ago",
+          "files": 3,
+          "add": 18,
+          "del": 8
+        },
+        {
+          "sha": "2b4d6f8",
+          "msg": "audit: add execve rule",
+          "author": "mreyes",
+          "at": "2mo ago",
+          "files": 4,
+          "add": 25,
+          "del": 0
+        },
+        {
+          "sha": "97531fd",
+          "msg": "wireguard: rotate keys",
+          "author": "jpark",
+          "at": "2mo ago",
+          "files": 1,
+          "add": 32,
+          "del": 1
+        },
+        {
+          "sha": "0369cf2",
+          "msg": "users: add ops-bot ssh key",
+          "author": "dchen",
+          "at": "2mo ago",
+          "files": 2,
+          "add": 9,
+          "del": 2
+        },
+        {
+          "sha": "7f7f7f7",
+          "msg": "remove unused debug module",
+          "author": "ops-bot",
+          "at": "2mo ago",
+          "files": 3,
+          "add": 16,
+          "del": 3
+        },
+        {
+          "sha": "eb852fc",
+          "msg": "kernel: bump LTS to 6.6.62",
+          "author": "kthomas",
+          "at": "2mo ago",
+          "files": 4,
+          "add": 23,
+          "del": 4
+        },
+        {
+          "sha": "579bdf1",
+          "msg": "fix: race in services.acme",
+          "author": "arao",
+          "at": "2mo ago",
+          "files": 1,
+          "add": 30,
+          "del": 5
+        },
+        {
+          "sha": "c3a18f6",
+          "msg": "metrics: ship to prometheus",
+          "author": "linus.h",
+          "at": "2mo ago",
+          "files": 2,
+          "add": 7,
+          "del": 6
+        },
+        {
+          "sha": "3fb73fb",
+          "msg": "stig: V-230309 — disable IPv6 redirect",
+          "author": "mreyes",
+          "at": "2mo ago",
+          "files": 3,
+          "add": 14,
+          "del": 7
+        },
+        {
+          "sha": "abcdef0",
+          "msg": "vault: add audit log to /var/log",
+          "author": "jpark",
+          "at": "2mo ago",
+          "files": 4,
+          "add": 21,
+          "del": 8
+        },
+        {
+          "sha": "17d39f5",
+          "msg": "fix: gnome-keyring on headless",
+          "author": "dchen",
+          "at": "2mo ago",
+          "files": 1,
+          "add": 28,
+          "del": 0
+        },
+        {
+          "sha": "83e94fa",
+          "msg": "k3s: bump to v1.31.4+k3s1",
+          "author": "ops-bot",
+          "at": "2mo ago",
+          "files": 2,
+          "add": 5,
+          "del": 1
+        },
+        {
+          "sha": "fffffff",
+          "msg": "ci: cache nix store across jobs",
+          "author": "kthomas",
+          "at": "2mo ago",
+          "files": 3,
+          "add": 12,
+          "del": 2
+        },
+        {
+          "sha": "6b05af4",
+          "msg": "deps: bump nixpkgs",
+          "author": "arao",
+          "at": "2mo ago",
+          "files": 4,
+          "add": 19,
+          "del": 3
+        },
+        {
+          "sha": "d71b5f9",
+          "msg": "fix: cgroups v2 quirk",
+          "author": "linus.h",
+          "at": "2mo ago",
+          "files": 1,
+          "add": 26,
+          "del": 4
+        },
+        {
+          "sha": "43210fe",
+          "msg": "feat: add tailscale module",
+          "author": "mreyes",
+          "at": "2mo ago",
+          "files": 2,
+          "add": 33,
+          "del": 5
+        }
+      ],
+      "fl-web": [
+        {
+          "sha": "c7e1902",
+          "msg": "nginx: bump to 1.27.4, add HSTS headers",
+          "author": "jpark",
+          "at": "5h ago",
+          "files": 2,
+          "add": 18,
+          "del": 6
+        },
+        {
+          "sha": "2fa8031",
+          "msg": "gaia-web: scale up worker pool to 8",
+          "author": "mreyes",
+          "at": "1d ago",
+          "files": 1,
+          "add": 3,
+          "del": 1
+        },
+        {
+          "sha": "d90c411",
+          "msg": "fix: restart nginx on cert renewal",
+          "author": "ops-bot",
+          "at": "2d ago",
+          "files": 1,
+          "add": 8,
+          "del": 2
+        },
+        {
+          "sha": "5e3b200",
+          "msg": "tls: enforce TLS 1.3, drop 1.0/1.1",
+          "author": "jpark",
+          "at": "4d ago",
+          "files": 1,
+          "add": 4,
+          "del": 4
+        },
+        {
+          "sha": "1a7c900",
+          "msg": "add gzip compression module",
+          "author": "dchen",
+          "at": "1w ago",
+          "files": 1,
+          "add": 12,
+          "del": 0
+        }
+      ],
+      "fl-edge": [
+        {
+          "sha": "4d2a801",
+          "msg": "wireguard: add peer for sgp-01",
+          "author": "dchen",
+          "at": "1d ago",
+          "files": 2,
+          "add": 14,
+          "del": 0
+        },
+        {
+          "sha": "9a01fc2",
+          "msg": "edge-nyc: fix MTU mismatch",
+          "author": "mreyes",
+          "at": "3d ago",
+          "files": 1,
+          "add": 3,
+          "del": 3
+        },
+        {
+          "sha": "7c88ef1",
+          "msg": "refactor: split per-region config",
+          "author": "jpark",
+          "at": "1w ago",
+          "files": 5,
+          "add": 82,
+          "del": 40
+        },
+        {
+          "sha": "221b300",
+          "msg": "initial edge fleet setup",
+          "author": "mreyes",
+          "at": "2w ago",
+          "files": 8,
+          "add": 210,
+          "del": 0
+        }
+      ],
+      "fl-build": [
+        {
+          "sha": "9f0c344",
+          "msg": "hydra: increase max-jobs to 64",
+          "author": "ops-bot",
+          "at": "8h ago",
+          "files": 1,
+          "add": 2,
+          "del": 2
+        },
+        {
+          "sha": "c3a1702",
+          "msg": "builder: add graviton arm64 node",
+          "author": "dchen",
+          "at": "2d ago",
+          "files": 2,
+          "add": 22,
+          "del": 4
+        },
+        {
+          "sha": "551b0a1",
+          "msg": "hydra-03: bump to 32 cores",
+          "author": "mreyes",
+          "at": "5d ago",
+          "files": 1,
+          "add": 1,
+          "del": 1
+        }
+      ],
+      "fl-lab": [
+        {
+          "sha": "1b7e5f0",
+          "msg": "fix: reset lab-rig-01 after wipe",
+          "author": "mreyes",
+          "at": "3d ago",
+          "files": 2,
+          "add": 18,
+          "del": 12
+        },
+        {
+          "sha": "0a2cf11",
+          "msg": "lab: add dev-node-04 config",
+          "author": "dchen",
+          "at": "1w ago",
+          "files": 2,
+          "add": 28,
+          "del": 0
+        }
+      ]
+    }
+  },
+  "systems": [
+    {
+      "id": "sys-0",
+      "hostname": "atlas-01",
+      "fqdn": "atlas-01.production.cf.internal",
+      "environment": "production",
+      "flake": "infrastructure",
+      "branch": "main",
+      "commit": "84274a8a",
+      "commitMessage": "bump nixpkgs to 24.11",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "4m ago",
+      "heartbeatAge": 4,
+      "heartbeatIntervalSec": 120,
+      "heartbeatNextInSec": -210,
+      "generation": 160,
+      "nixosVersion": "24.05.20260218",
+      "kernel": "linux-6.1.115",
+      "storePath": "/nix/store/665a74a7a948081f-nixos-system-atlas-01-24.11.20254091",
+      "targetStorePath": null,
+      "uptime": "32d 22h",
+      "cpu": "Graviton3",
+      "memGb": 256,
+      "ipv4": "10.0.34.165",
+      "ipv6": "fd42:d4:f433::17",
+      "reachability": "direct",
+      "cves": {
+        "critical": 0,
+        "high": 2,
+        "medium": 13,
+        "low": 18,
+        "total": 33
+      },
+      "tags": [
+        "stig-enforced"
+      ],
+      "stig": 28,
+      "events": [
+        {
+          "at": "6m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "9h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "21h ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "4d ago",
+          "title": "Generation 164 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-1",
+      "hostname": "atlas-02",
+      "fqdn": "atlas-02.production.cf.internal",
+      "environment": "production",
+      "flake": "infrastructure",
+      "branch": "main",
+      "commit": "45d33798",
+      "commitMessage": "harden sshd: disable password auth",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "auto_latest",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "4m ago",
+      "heartbeatAge": 4,
+      "heartbeatIntervalSec": 60,
+      "heartbeatNextInSec": -187,
+      "generation": 90,
+      "nixosVersion": "24.05.20260218",
+      "kernel": "linux-6.6.72",
+      "storePath": "/nix/store/cf8fd68e4b57e5d4-nixos-system-atlas-02-24.11.20251381",
+      "targetStorePath": null,
+      "uptime": "42d 4h",
+      "cpu": "Ryzen 9 5950X",
+      "memGb": 256,
+      "ipv4": "10.1.166.20",
+      "ipv6": "fd42:a1:803d::42",
+      "reachability": "pull",
+      "cves": {
+        "critical": 0,
+        "high": 2,
+        "medium": 3,
+        "low": 27,
+        "total": 32
+      },
+      "tags": [
+        "stig-enforced"
+      ],
+      "stig": 30,
+      "events": [
+        {
+          "at": "6m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "8h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "6d ago",
+          "title": "Generation 136 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-2",
+      "hostname": "atlas-03",
+      "fqdn": "atlas-03.production.cf.internal",
+      "environment": "production",
+      "flake": "infrastructure",
+      "branch": "main",
+      "commit": "65fd86df",
+      "commitMessage": "stig: enforce audit rules for sudo",
+      "health": "warning",
+      "status": "Warning",
+      "statusColor": "#fbbf24",
+      "statusChip": "chip-warning",
+      "deploymentPolicy": "manual",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "3m ago",
+      "heartbeatAge": 3,
+      "heartbeatIntervalSec": 90,
+      "heartbeatNextInSec": -169,
+      "generation": 145,
+      "nixosVersion": "24.11.20260401",
+      "kernel": "linux-6.6.70",
+      "storePath": "/nix/store/cfb7ec19520f8552-nixos-system-atlas-03-24.11.20256441",
+      "targetStorePath": "/nix/store/c22d7e70305bfa69-nixos-system-atlas-03-24.11.20252862",
+      "uptime": "21d 0h",
+      "cpu": "Xeon E-2336",
+      "memGb": 64,
+      "ipv4": "10.1.70.240",
+      "ipv6": "fd42:a1:aba2::32",
+      "reachability": "direct",
+      "cves": {
+        "critical": 2,
+        "high": 5,
+        "medium": 14,
+        "low": 30,
+        "total": 51
+      },
+      "tags": [
+        "stig-enforced"
+      ],
+      "stig": 29,
+      "events": [
+        {
+          "at": "5m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "6h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "22h ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "4d ago",
+          "title": "Generation 165 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-3",
+      "hostname": "hydra-01",
+      "fqdn": "hydra-01.production.cf.internal",
+      "environment": "production",
+      "flake": "build-farm",
+      "branch": "main",
+      "commit": "e11273e8",
+      "commitMessage": "harden sshd: disable password auth",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "manual",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "2m ago",
+      "heartbeatAge": 2,
+      "heartbeatIntervalSec": 90,
+      "heartbeatNextInSec": -119,
+      "generation": 81,
+      "nixosVersion": "24.11.20260320",
+      "kernel": "linux-6.1.115",
+      "storePath": "/nix/store/d9726ae5414d7ae9-nixos-system-hydra-01-24.11.20252362",
+      "targetStorePath": null,
+      "uptime": "7d 2h",
+      "cpu": "Graviton3",
+      "memGb": 64,
+      "ipv4": "10.2.207.228",
+      "ipv6": "fd42:c3:39cb::48",
+      "reachability": "pull",
+      "cves": {
+        "critical": 0,
+        "high": 4,
+        "medium": 17,
+        "low": 1,
+        "total": 22
+      },
+      "tags": [
+        "builder",
+        "stig-enforced"
+      ],
+      "stig": 29,
+      "events": [
+        {
+          "at": "4m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "52m ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "9h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "4d ago",
+          "title": "Generation 175 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-4",
+      "hostname": "hydra-02",
+      "fqdn": "hydra-02.production.cf.internal",
+      "environment": "production",
+      "flake": "build-farm",
+      "branch": "main",
+      "commit": "858f62a1",
+      "commitMessage": "cve: patch openssl to 3.3.2",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "manual",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "4m ago",
+      "heartbeatAge": 4,
+      "heartbeatIntervalSec": 120,
+      "heartbeatNextInSec": -223,
+      "generation": 111,
+      "nixosVersion": "24.11.20260320",
+      "kernel": "linux-6.6.70",
+      "storePath": "/nix/store/113e2cdb5638debe-nixos-system-hydra-02-24.11.20252054",
+      "targetStorePath": null,
+      "uptime": "9d 12h",
+      "cpu": "Xeon E-2336",
+      "memGb": 128,
+      "ipv4": "10.3.16.98",
+      "ipv6": "fd42:b2:f3bf::21",
+      "reachability": "pull",
+      "cves": {
+        "critical": 0,
+        "high": 1,
+        "medium": 15,
+        "low": 16,
+        "total": 32
+      },
+      "tags": [
+        "builder",
+        "stig-enforced"
+      ],
+      "stig": 30,
+      "events": [
+        {
+          "at": "6m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "31m ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "8h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "5d ago",
+          "title": "Generation 137 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-5",
+      "hostname": "hydra-03",
+      "fqdn": "hydra-03.production.cf.internal",
+      "environment": "production",
+      "flake": "build-farm",
+      "branch": "main",
+      "commit": "2d01e953",
+      "commitMessage": "harden sshd: disable password auth",
+      "health": "drifted",
+      "status": "Drifted",
+      "statusColor": "#fbbf24",
+      "statusChip": "chip-warning",
+      "deploymentPolicy": "manual",
+      "deploymentState": "drift",
+      "lastHeartbeat": "1m ago",
+      "heartbeatAge": 1,
+      "heartbeatIntervalSec": 120,
+      "heartbeatNextInSec": 29,
+      "generation": 135,
+      "nixosVersion": "24.05.20260218",
+      "kernel": "linux-6.6.70",
+      "storePath": "/nix/store/72455989bf1544e1-nixos-system-hydra-03-24.11.20252168",
+      "targetStorePath": "/nix/store/6db5e55a637b0df5-nixos-system-hydra-03-24.11.20253580",
+      "uptime": "7d 6h",
+      "cpu": "EPYC 7443P",
+      "memGb": 32,
+      "ipv4": "10.2.210.103",
+      "ipv6": "fd42:a1:0d85::80",
+      "reachability": "pull",
+      "cves": {
+        "critical": 1,
+        "high": 3,
+        "medium": 4,
+        "low": 25,
+        "total": 33
+      },
+      "tags": [
+        "builder",
+        "stig-enforced"
+      ],
+      "stig": 30,
+      "events": [
+        {
+          "at": "3m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy completed",
+          "color": "#34d399"
+        },
+        {
+          "at": "7h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "3d ago",
+          "title": "Generation 198 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-6",
+      "hostname": "gaia-web-01",
+      "fqdn": "gaia-web-01.production.cf.internal",
+      "environment": "production",
+      "flake": "web-services",
+      "branch": "main",
+      "commit": "d165b301",
+      "commitMessage": "stig: enforce audit rules for sudo",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "manual",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "3m ago",
+      "heartbeatAge": 3,
+      "heartbeatIntervalSec": 60,
+      "heartbeatNextInSec": -173,
+      "generation": 108,
+      "nixosVersion": "24.11.20260320",
+      "kernel": "linux-6.1.115",
+      "storePath": "/nix/store/e7dd80278b8f31c5-nixos-system-gaia-web-01-24.11.20253072",
+      "targetStorePath": null,
+      "uptime": "11d 17h",
+      "cpu": "EPYC 7443P",
+      "memGb": 128,
+      "ipv4": "10.2.43.97",
+      "ipv6": "fd42:d4:9e8b::19",
+      "reachability": "direct",
+      "cves": {
+        "critical": 0,
+        "high": 0,
+        "medium": 10,
+        "low": 10,
+        "total": 20
+      },
+      "tags": [
+        "stig-enforced"
+      ],
+      "stig": 30,
+      "events": [
+        {
+          "at": "5m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "5h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "3d ago",
+          "title": "Generation 191 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-7",
+      "hostname": "gaia-web-02",
+      "fqdn": "gaia-web-02.production.cf.internal",
+      "environment": "production",
+      "flake": "web-services",
+      "branch": "main",
+      "commit": "f848c902",
+      "commitMessage": "add grafana exporter to host",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "2m ago",
+      "heartbeatAge": 2,
+      "heartbeatIntervalSec": 90,
+      "heartbeatNextInSec": -81,
+      "generation": 100,
+      "nixosVersion": "24.05.20260218",
+      "kernel": "linux-6.6.72",
+      "storePath": "/nix/store/84407b2bb0eac5e0-nixos-system-gaia-web-02-24.11.20253673",
+      "targetStorePath": null,
+      "uptime": "15d 21h",
+      "cpu": "Ryzen 9 5950X",
+      "memGb": 64,
+      "ipv4": "10.1.30.155",
+      "ipv6": "fd42:b2:629b::91",
+      "reachability": "direct",
+      "cves": {
+        "critical": 0,
+        "high": 1,
+        "medium": 12,
+        "low": 25,
+        "total": 38
+      },
+      "tags": [
+        "stig-enforced"
+      ],
+      "stig": 28,
+      "events": [
+        {
+          "at": "4m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "11h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "3d ago",
+          "title": "Generation 21 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-8",
+      "hostname": "gaia-web-03",
+      "fqdn": "gaia-web-03.production.cf.internal",
+      "environment": "production",
+      "flake": "web-services",
+      "branch": "main",
+      "commit": "ed626e37",
+      "commitMessage": "add grafana exporter to host",
+      "health": "critical",
+      "status": "Critical",
+      "statusColor": "#f87171",
+      "statusChip": "chip-critical",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "failed",
+      "lastHeartbeat": "4m ago",
+      "heartbeatAge": 4,
+      "heartbeatIntervalSec": 120,
+      "heartbeatNextInSec": -196,
+      "generation": 98,
+      "nixosVersion": "24.11.20260320",
+      "kernel": "linux-6.6.72",
+      "storePath": "/nix/store/b5c74b815cfcd127-nixos-system-gaia-web-03-24.11.20251135",
+      "targetStorePath": null,
+      "uptime": "35d 6h",
+      "cpu": "Xeon E-2336",
+      "memGb": 32,
+      "ipv4": "10.0.252.152",
+      "ipv6": "fd42:a1:a72a::19",
+      "reachability": "pull",
+      "cves": {
+        "critical": 9,
+        "high": 14,
+        "medium": 14,
+        "low": 0,
+        "total": 37
+      },
+      "tags": [
+        "stig-enforced"
+      ],
+      "stig": 30,
+      "events": [
+        {
+          "at": "6m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "36m ago",
+          "title": "Deploy failed",
+          "color": "#f87171"
+        },
+        {
+          "at": "10h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "2d ago",
+          "title": "Generation 103 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-9",
+      "hostname": "gaia-web-04",
+      "fqdn": "gaia-web-04.production.cf.internal",
+      "environment": "production",
+      "flake": "web-services",
+      "branch": "main",
+      "commit": "74db60b3",
+      "commitMessage": "feat: enable sops-nix for secrets",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "manual",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "3m ago",
+      "heartbeatAge": 3,
+      "heartbeatIntervalSec": 90,
+      "heartbeatNextInSec": -99,
+      "generation": 71,
+      "nixosVersion": "24.11.20260320",
+      "kernel": "linux-6.6.70",
+      "storePath": "/nix/store/3164cae318db5643-nixos-system-gaia-web-04-24.11.20258434",
+      "targetStorePath": null,
+      "uptime": "7d 6h",
+      "cpu": "EPYC 7443P",
+      "memGb": 32,
+      "ipv4": "10.3.72.69",
+      "ipv6": "fd42:a1:c6ea::7",
+      "reachability": "direct",
+      "cves": {
+        "critical": 0,
+        "high": 0,
+        "medium": 5,
+        "low": 28,
+        "total": 33
+      },
+      "tags": [
+        "stig-enforced"
+      ],
+      "stig": 30,
+      "events": [
+        {
+          "at": "5m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "39m ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "9h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "5d ago",
+          "title": "Generation 165 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-10",
+      "hostname": "orion-db-01",
+      "fqdn": "orion-db-01.production.cf.internal",
+      "environment": "production",
+      "flake": "infrastructure",
+      "branch": "main",
+      "commit": "f3a1f0e5",
+      "commitMessage": "bump nixpkgs to 24.11",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "3m ago",
+      "heartbeatAge": 3,
+      "heartbeatIntervalSec": 90,
+      "heartbeatNextInSec": -127,
+      "generation": 68,
+      "nixosVersion": "24.11.20260320",
+      "kernel": "linux-6.6.70",
+      "storePath": "/nix/store/1c599db37630b547-nixos-system-orion-db-01-24.11.20252031",
+      "targetStorePath": null,
+      "uptime": "34d 20h",
+      "cpu": "Xeon E-2336",
+      "memGb": 64,
+      "ipv4": "10.1.236.207",
+      "ipv6": "fd42:b2:18e5::70",
+      "reachability": "direct",
+      "cves": {
+        "critical": 1,
+        "high": 5,
+        "medium": 2,
+        "low": 5,
+        "total": 13
+      },
+      "tags": [
+        "stig-enforced",
+        "persistent-data"
+      ],
+      "stig": 28,
+      "events": [
+        {
+          "at": "5m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "9h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "2d ago",
+          "title": "Generation 183 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-11",
+      "hostname": "orion-db-02",
+      "fqdn": "orion-db-02.production.cf.internal",
+      "environment": "production",
+      "flake": "infrastructure",
+      "branch": "main",
+      "commit": "529d1e57",
+      "commitMessage": "bump nixpkgs to 24.11",
+      "health": "warning",
+      "status": "Warning",
+      "statusColor": "#fbbf24",
+      "statusChip": "chip-warning",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "behind",
+      "lastHeartbeat": "3m ago",
+      "heartbeatAge": 3,
+      "heartbeatIntervalSec": 90,
+      "heartbeatNextInSec": -156,
+      "generation": 192,
+      "nixosVersion": "24.05.20260218",
+      "kernel": "linux-6.1.115",
+      "storePath": "/nix/store/94cb4924c5521367-nixos-system-orion-db-02-24.11.20254546",
+      "targetStorePath": "/nix/store/d5e5618c5c6c9519-nixos-system-orion-db-02-24.11.20257277",
+      "uptime": "29d 23h",
+      "cpu": "EPYC 7443P",
+      "memGb": 256,
+      "ipv4": "10.0.82.225",
+      "ipv6": "fd42:a1:f557::7",
+      "reachability": "direct",
+      "cves": {
+        "critical": 3,
+        "high": 9,
+        "medium": 1,
+        "low": 20,
+        "total": 33
+      },
+      "tags": [
+        "stig-enforced",
+        "persistent-data"
+      ],
+      "stig": 29,
+      "events": [
+        {
+          "at": "5m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy completed",
+          "color": "#34d399"
+        },
+        {
+          "at": "12h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "3d ago",
+          "title": "Generation 195 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-12",
+      "hostname": "stg-atlas-01",
+      "fqdn": "stg-atlas-01.staging.cf.internal",
+      "environment": "staging",
+      "flake": "infrastructure",
+      "branch": "staging",
+      "commit": "d9636c89",
+      "commitMessage": "wireguard: add peer for edge-sgp-01",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "manual",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "5m ago",
+      "heartbeatAge": 5,
+      "heartbeatIntervalSec": 60,
+      "heartbeatNextInSec": -245,
+      "generation": 57,
+      "nixosVersion": "24.05.20260218",
+      "kernel": "linux-6.6.70",
+      "storePath": "/nix/store/730c796d0057597a-nixos-system-stg-atlas-01-24.11.20255495",
+      "targetStorePath": null,
+      "uptime": "5d 4h",
+      "cpu": "Graviton3",
+      "memGb": 128,
+      "ipv4": "10.4.230.6",
+      "ipv6": "fd42:a1:cef7::86",
+      "reachability": "direct",
+      "cves": {
+        "critical": 0,
+        "high": 4,
+        "medium": 11,
+        "low": 8,
+        "total": 23
+      },
+      "tags": [],
+      "stig": 23,
+      "events": [
+        {
+          "at": "7m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "49m ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "7h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "3d ago",
+          "title": "Generation 68 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-13",
+      "hostname": "stg-atlas-02",
+      "fqdn": "stg-atlas-02.staging.cf.internal",
+      "environment": "staging",
+      "flake": "infrastructure",
+      "branch": "staging",
+      "commit": "f7331db2",
+      "commitMessage": "cve: patch openssl to 3.3.2",
+      "health": "offline",
+      "status": "Offline",
+      "statusColor": "#f87171",
+      "statusChip": "chip-critical",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "unknown",
+      "lastHeartbeat": "2d ago",
+      "heartbeatAge": 3260,
+      "heartbeatIntervalSec": 90,
+      "heartbeatNextInSec": -195536,
+      "generation": 163,
+      "nixosVersion": "24.11.20260401",
+      "kernel": "linux-6.6.72",
+      "storePath": "/nix/store/c23ab490d7a12b66-nixos-system-stg-atlas-02-24.11.20256087",
+      "targetStorePath": null,
+      "uptime": "27d 17h",
+      "cpu": "EPYC 7443P",
+      "memGb": 256,
+      "ipv4": "10.2.169.70",
+      "ipv6": "fd42:d4:46cb::80",
+      "reachability": "direct",
+      "cves": {
+        "critical": 0,
+        "high": 3,
+        "medium": 9,
+        "low": 9,
+        "total": 21
+      },
+      "tags": [],
+      "stig": 25,
+      "events": [
+        {
+          "at": "2d ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "50m ago",
+          "title": "Deploy completed",
+          "color": "#34d399"
+        },
+        {
+          "at": "9h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "3d ago",
+          "title": "Generation 72 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-14",
+      "hostname": "stg-web-01",
+      "fqdn": "stg-web-01.staging.cf.internal",
+      "environment": "staging",
+      "flake": "web-services",
+      "branch": "staging",
+      "commit": "ce1d8868",
+      "commitMessage": "feat: enable sops-nix for secrets",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "3m ago",
+      "heartbeatAge": 3,
+      "heartbeatIntervalSec": 120,
+      "heartbeatNextInSec": -136,
+      "generation": 122,
+      "nixosVersion": "24.11.20260401",
+      "kernel": "linux-6.6.72",
+      "storePath": "/nix/store/8d5bf0a272b39711-nixos-system-stg-web-01-24.11.20254458",
+      "targetStorePath": null,
+      "uptime": "7d 20h",
+      "cpu": "Graviton3",
+      "memGb": 32,
+      "ipv4": "10.4.56.6",
+      "ipv6": "fd42:b2:a614::7",
+      "reachability": "direct",
+      "cves": {
+        "critical": 2,
+        "high": 4,
+        "medium": 15,
+        "low": 15,
+        "total": 36
+      },
+      "tags": [],
+      "stig": 22,
+      "events": [
+        {
+          "at": "5m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "8h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "4d ago",
+          "title": "Generation 22 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-15",
+      "hostname": "stg-web-02",
+      "fqdn": "stg-web-02.staging.cf.internal",
+      "environment": "staging",
+      "flake": "web-services",
+      "branch": "staging",
+      "commit": "17e7a9dd",
+      "commitMessage": "bump nixpkgs to 24.11",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "manual",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "1m ago",
+      "heartbeatAge": 1,
+      "heartbeatIntervalSec": 120,
+      "heartbeatNextInSec": -56,
+      "generation": 69,
+      "nixosVersion": "24.11.20260320",
+      "kernel": "linux-6.6.72",
+      "storePath": "/nix/store/3df67b72165f810b-nixos-system-stg-web-02-24.11.20259107",
+      "targetStorePath": null,
+      "uptime": "38d 13h",
+      "cpu": "EPYC 7443P",
+      "memGb": 32,
+      "ipv4": "10.3.240.61",
+      "ipv6": "fd42:a1:adb6::23",
+      "reachability": "pull",
+      "cves": {
+        "critical": 0,
+        "high": 4,
+        "medium": 18,
+        "low": 9,
+        "total": 31
+      },
+      "tags": [],
+      "stig": 28,
+      "events": [
+        {
+          "at": "3m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "9h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "3d ago",
+          "title": "Generation 41 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-16",
+      "hostname": "stg-build-01",
+      "fqdn": "stg-build-01.staging.cf.internal",
+      "environment": "staging",
+      "flake": "build-farm",
+      "branch": "staging",
+      "commit": "c3313ab9",
+      "commitMessage": "cve: patch openssl to 3.3.2",
+      "health": "building",
+      "status": "Deploying",
+      "statusColor": "#60a5fa",
+      "statusChip": "chip-info",
+      "deploymentPolicy": "manual",
+      "deploymentState": "deploying",
+      "lastHeartbeat": "just now",
+      "heartbeatAge": 0,
+      "heartbeatIntervalSec": 90,
+      "heartbeatNextInSec": 31,
+      "generation": 65,
+      "nixosVersion": "24.05.20260218",
+      "kernel": "linux-6.6.70",
+      "storePath": "/nix/store/d86f9e996775d943-nixos-system-stg-build-01-24.11.20253383",
+      "targetStorePath": null,
+      "uptime": "39d 1h",
+      "cpu": "Graviton3",
+      "memGb": 64,
+      "ipv4": "10.2.204.29",
+      "ipv6": "fd42:a1:db6f::16",
+      "reachability": "pull",
+      "cves": {
+        "critical": 0,
+        "high": 0,
+        "medium": 8,
+        "low": 22,
+        "total": 30
+      },
+      "tags": [
+        "builder"
+      ],
+      "stig": 27,
+      "events": [
+        {
+          "at": "2m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy completed",
+          "color": "#34d399"
+        },
+        {
+          "at": "9h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "2d ago",
+          "title": "Generation 99 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-17",
+      "hostname": "dev-node-01",
+      "fqdn": "dev-node-01.dev.cf.internal",
+      "environment": "dev",
+      "flake": "infrastructure",
+      "branch": "dev",
+      "commit": "fc243aba",
+      "commitMessage": "stig: enforce audit rules for sudo",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "3m ago",
+      "heartbeatAge": 3,
+      "heartbeatIntervalSec": 120,
+      "heartbeatNextInSec": -120,
+      "generation": 209,
+      "nixosVersion": "24.11.20260401",
+      "kernel": "linux-6.6.70",
+      "storePath": "/nix/store/4389c3fe94226066-nixos-system-dev-node-01-24.11.20256463",
+      "targetStorePath": null,
+      "uptime": "16d 8h",
+      "cpu": "EPYC 7443P",
+      "memGb": 32,
+      "ipv4": "10.4.249.54",
+      "ipv6": "fd42:d4:3361::59",
+      "reachability": "pull",
+      "cves": {
+        "critical": 0,
+        "high": 0,
+        "medium": 3,
+        "low": 12,
+        "total": 15
+      },
+      "tags": [],
+      "stig": 16,
+      "events": [
+        {
+          "at": "5m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "6h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "5d ago",
+          "title": "Generation 53 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-18",
+      "hostname": "dev-node-02",
+      "fqdn": "dev-node-02.dev.cf.internal",
+      "environment": "dev",
+      "flake": "infrastructure",
+      "branch": "dev",
+      "commit": "f7b4e01b",
+      "commitMessage": "stig: enforce audit rules for sudo",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "manual",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "just now",
+      "heartbeatAge": 0,
+      "heartbeatIntervalSec": 120,
+      "heartbeatNextInSec": 40,
+      "generation": 96,
+      "nixosVersion": "24.05.20260218",
+      "kernel": "linux-6.6.72",
+      "storePath": "/nix/store/fda4082038ed824c-nixos-system-dev-node-02-24.11.20260308",
+      "targetStorePath": null,
+      "uptime": "14d 3h",
+      "cpu": "Xeon E-2336",
+      "memGb": 32,
+      "ipv4": "10.2.12.106",
+      "ipv6": "fd42:b2:7e5d::33",
+      "reachability": "pull",
+      "cves": {
+        "critical": 1,
+        "high": 1,
+        "medium": 15,
+        "low": 20,
+        "total": 37
+      },
+      "tags": [],
+      "stig": 21,
+      "events": [
+        {
+          "at": "2m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "59m ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "7h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "3d ago",
+          "title": "Generation 198 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-19",
+      "hostname": "dev-node-03",
+      "fqdn": "dev-node-03.dev.cf.internal",
+      "environment": "dev",
+      "flake": "web-services",
+      "branch": "dev",
+      "commit": "f11b7710",
+      "commitMessage": "cve: patch openssl to 3.3.2",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "just now",
+      "heartbeatAge": 0,
+      "heartbeatIntervalSec": 60,
+      "heartbeatNextInSec": 46,
+      "generation": 154,
+      "nixosVersion": "24.05.20260218",
+      "kernel": "linux-6.1.115",
+      "storePath": "/nix/store/9993a74c5694fdcc-nixos-system-dev-node-03-24.11.20256536",
+      "targetStorePath": null,
+      "uptime": "17d 17h",
+      "cpu": "Graviton3",
+      "memGb": 16,
+      "ipv4": "10.2.229.117",
+      "ipv6": "fd42:a1:5ca2::14",
+      "reachability": "pull",
+      "cves": {
+        "critical": 0,
+        "high": 3,
+        "medium": 13,
+        "low": 0,
+        "total": 16
+      },
+      "tags": [],
+      "stig": 17,
+      "events": [
+        {
+          "at": "2m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "8h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "5d ago",
+          "title": "Generation 35 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-20",
+      "hostname": "dev-node-04",
+      "fqdn": "dev-node-04.dev.cf.internal",
+      "environment": "dev",
+      "flake": "web-services",
+      "branch": "dev",
+      "commit": "e5689503",
+      "commitMessage": "cve: patch openssl to 3.3.2",
+      "health": "warning",
+      "status": "Warning",
+      "statusColor": "#fbbf24",
+      "statusChip": "chip-warning",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "behind",
+      "lastHeartbeat": "just now",
+      "heartbeatAge": 0,
+      "heartbeatIntervalSec": 120,
+      "heartbeatNextInSec": 1,
+      "generation": 203,
+      "nixosVersion": "24.11.20260401",
+      "kernel": "linux-6.1.115",
+      "storePath": "/nix/store/ea9dfe0c4b8ed304-nixos-system-dev-node-04-24.11.20260189",
+      "targetStorePath": "/nix/store/066623a131c5c08e-nixos-system-dev-node-04-24.11.20260219",
+      "uptime": "7d 22h",
+      "cpu": "Xeon E-2336",
+      "memGb": 256,
+      "ipv4": "10.1.37.163",
+      "ipv6": "fd42:b2:ea1a::35",
+      "reachability": "direct",
+      "cves": {
+        "critical": 1,
+        "high": 2,
+        "medium": 6,
+        "low": 11,
+        "total": 20
+      },
+      "tags": [],
+      "stig": 18,
+      "events": [
+        {
+          "at": "2m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "47m ago",
+          "title": "Deploy completed",
+          "color": "#34d399"
+        },
+        {
+          "at": "9h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "2d ago",
+          "title": "Generation 137 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-21",
+      "hostname": "dev-lab-01",
+      "fqdn": "dev-lab-01.dev.cf.internal",
+      "environment": "dev",
+      "flake": "lab-nodes",
+      "branch": "dev",
+      "commit": "d8aae228",
+      "commitMessage": "add grafana exporter to host",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "manual",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "2m ago",
+      "heartbeatAge": 2,
+      "heartbeatIntervalSec": 60,
+      "heartbeatNextInSec": -74,
+      "generation": 35,
+      "nixosVersion": "24.11.20260320",
+      "kernel": "linux-6.6.70",
+      "storePath": "/nix/store/00269e31fe9e85d9-nixos-system-dev-lab-01-24.11.20251424",
+      "targetStorePath": null,
+      "uptime": "24d 22h",
+      "cpu": "EPYC 7443P",
+      "memGb": 64,
+      "ipv4": "10.4.59.31",
+      "ipv6": "fd42:d4:93b0::29",
+      "reachability": "direct",
+      "cves": {
+        "critical": 0,
+        "high": 3,
+        "medium": 17,
+        "low": 10,
+        "total": 30
+      },
+      "tags": [],
+      "stig": 15,
+      "events": [
+        {
+          "at": "4m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "7h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "3d ago",
+          "title": "Generation 182 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-22",
+      "hostname": "dev-lab-02",
+      "fqdn": "dev-lab-02.dev.cf.internal",
+      "environment": "dev",
+      "flake": "lab-nodes",
+      "branch": "dev",
+      "commit": "75225271",
+      "commitMessage": "cve: patch openssl to 3.3.2",
+      "health": "unknown",
+      "status": "Unknown",
+      "statusColor": "#6b7280",
+      "statusChip": "chip-unknown",
+      "deploymentPolicy": "auto_latest",
+      "deploymentState": "unknown",
+      "lastHeartbeat": "23m ago",
+      "heartbeatAge": 23,
+      "heartbeatIntervalSec": 90,
+      "heartbeatNextInSec": -1292,
+      "generation": 36,
+      "nixosVersion": "24.11.20260401",
+      "kernel": "linux-6.6.72",
+      "storePath": "/nix/store/da1f2a0f996e6de5-nixos-system-dev-lab-02-24.11.20257977",
+      "targetStorePath": null,
+      "uptime": "23d 16h",
+      "cpu": "Xeon E-2336",
+      "memGb": 32,
+      "ipv4": "10.3.0.158",
+      "ipv6": "fd42:b2:dd21::42",
+      "reachability": "direct",
+      "cves": {
+        "critical": 0,
+        "high": 4,
+        "medium": 15,
+        "low": 19,
+        "total": 38
+      },
+      "tags": [],
+      "stig": 18,
+      "events": [
+        {
+          "at": "25m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy completed",
+          "color": "#34d399"
+        },
+        {
+          "at": "6h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "5d ago",
+          "title": "Generation 87 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-23",
+      "hostname": "edge-pdx-01",
+      "fqdn": "edge-pdx-01.edge.cf.internal",
+      "environment": "edge",
+      "flake": "edge-gateway",
+      "branch": "dev",
+      "commit": "ec2d6c54",
+      "commitMessage": "bump nixpkgs to 24.11",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "manual",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "5m ago",
+      "heartbeatAge": 5,
+      "heartbeatIntervalSec": 120,
+      "heartbeatNextInSec": -211,
+      "generation": 131,
+      "nixosVersion": "24.11.20260320",
+      "kernel": "linux-6.6.72",
+      "storePath": "/nix/store/6ef10b9711eda6e2-nixos-system-edge-pdx-01-24.11.20257372",
+      "targetStorePath": null,
+      "uptime": "39d 23h",
+      "cpu": "Graviton3",
+      "memGb": 64,
+      "ipv4": "10.3.124.211",
+      "ipv6": "fd42:d4:cb31::2",
+      "reachability": "pull",
+      "cves": {
+        "critical": 0,
+        "high": 0,
+        "medium": 1,
+        "low": 24,
+        "total": 25
+      },
+      "tags": [],
+      "stig": 15,
+      "events": [
+        {
+          "at": "7m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "10h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "2d ago",
+          "title": "Generation 96 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-24",
+      "hostname": "edge-pdx-02",
+      "fqdn": "edge-pdx-02.edge.cf.internal",
+      "environment": "edge",
+      "flake": "edge-gateway",
+      "branch": "dev",
+      "commit": "5d0d37e0",
+      "commitMessage": "stig: enforce audit rules for sudo",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "auto_latest",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "5m ago",
+      "heartbeatAge": 5,
+      "heartbeatIntervalSec": 60,
+      "heartbeatNextInSec": -275,
+      "generation": 128,
+      "nixosVersion": "24.11.20260320",
+      "kernel": "linux-6.1.115",
+      "storePath": "/nix/store/66f33c395fde60d5-nixos-system-edge-pdx-02-24.11.20252374",
+      "targetStorePath": null,
+      "uptime": "31d 11h",
+      "cpu": "Ryzen 9 5950X",
+      "memGb": 256,
+      "ipv4": "10.4.40.86",
+      "ipv6": "fd42:c3:3124::42",
+      "reachability": "pull",
+      "cves": {
+        "critical": 2,
+        "high": 8,
+        "medium": 6,
+        "low": 26,
+        "total": 42
+      },
+      "tags": [],
+      "stig": 19,
+      "events": [
+        {
+          "at": "7m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "10h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "21h ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "2d ago",
+          "title": "Generation 116 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-25",
+      "hostname": "edge-nyc-01",
+      "fqdn": "edge-nyc-01.edge.cf.internal",
+      "environment": "edge",
+      "flake": "edge-gateway",
+      "branch": "dev",
+      "commit": "9624fd22",
+      "commitMessage": "cve: patch openssl to 3.3.2",
+      "health": "warning",
+      "status": "Warning",
+      "statusColor": "#fbbf24",
+      "statusChip": "chip-warning",
+      "deploymentPolicy": "manual",
+      "deploymentState": "behind",
+      "lastHeartbeat": "3m ago",
+      "heartbeatAge": 3,
+      "heartbeatIntervalSec": 60,
+      "heartbeatNextInSec": -139,
+      "generation": 186,
+      "nixosVersion": "24.11.20260401",
+      "kernel": "linux-6.6.72",
+      "storePath": "/nix/store/5a8be3032c01ae8d-nixos-system-edge-nyc-01-24.11.20257258",
+      "targetStorePath": "/nix/store/b00567f9dbe3798c-nixos-system-edge-nyc-01-24.11.20258707",
+      "uptime": "25d 1h",
+      "cpu": "Xeon E-2336",
+      "memGb": 64,
+      "ipv4": "10.1.165.100",
+      "ipv6": "fd42:a1:0b7b::64",
+      "reachability": "pull",
+      "cves": {
+        "critical": 4,
+        "high": 4,
+        "medium": 2,
+        "low": 23,
+        "total": 33
+      },
+      "tags": [],
+      "stig": 19,
+      "events": [
+        {
+          "at": "5m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy completed",
+          "color": "#34d399"
+        },
+        {
+          "at": "9h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "3d ago",
+          "title": "Generation 187 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-26",
+      "hostname": "edge-nyc-02",
+      "fqdn": "edge-nyc-02.edge.cf.internal",
+      "environment": "edge",
+      "flake": "edge-gateway",
+      "branch": "dev",
+      "commit": "2147b611",
+      "commitMessage": "harden sshd: disable password auth",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "auto_latest",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "4m ago",
+      "heartbeatAge": 4,
+      "heartbeatIntervalSec": 120,
+      "heartbeatNextInSec": -173,
+      "generation": 40,
+      "nixosVersion": "24.11.20260401",
+      "kernel": "linux-6.1.115",
+      "storePath": "/nix/store/70a9c4a6c715e0ec-nixos-system-edge-nyc-02-24.11.20260232",
+      "targetStorePath": null,
+      "uptime": "1d 2h",
+      "cpu": "EPYC 7443P",
+      "memGb": 16,
+      "ipv4": "10.4.133.4",
+      "ipv6": "fd42:d4:30fc::99",
+      "reachability": "pull",
+      "cves": {
+        "critical": 0,
+        "high": 1,
+        "medium": 4,
+        "low": 30,
+        "total": 35
+      },
+      "tags": [],
+      "stig": 22,
+      "events": [
+        {
+          "at": "6m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "6h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "5d ago",
+          "title": "Generation 103 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-27",
+      "hostname": "edge-fra-01",
+      "fqdn": "edge-fra-01.edge.cf.internal",
+      "environment": "edge",
+      "flake": "edge-gateway",
+      "branch": "dev",
+      "commit": "5b221499",
+      "commitMessage": "add grafana exporter to host",
+      "health": "offline",
+      "status": "Offline",
+      "statusColor": "#f87171",
+      "statusChip": "chip-critical",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "unknown",
+      "lastHeartbeat": "2d ago",
+      "heartbeatAge": 3478,
+      "heartbeatIntervalSec": 60,
+      "heartbeatNextInSec": -208658,
+      "generation": 39,
+      "nixosVersion": "24.11.20260401",
+      "kernel": "linux-6.1.115",
+      "storePath": "/nix/store/02a516f91a227461-nixos-system-edge-fra-01-24.11.20260014",
+      "targetStorePath": null,
+      "uptime": "20d 11h",
+      "cpu": "Xeon E-2336",
+      "memGb": 128,
+      "ipv4": "10.2.180.48",
+      "ipv6": "fd42:b2:6996::41",
+      "reachability": "pull",
+      "cves": {
+        "critical": 0,
+        "high": 2,
+        "medium": 18,
+        "low": 23,
+        "total": 43
+      },
+      "tags": [],
+      "stig": 19,
+      "events": [
+        {
+          "at": "2d ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy completed",
+          "color": "#34d399"
+        },
+        {
+          "at": "8h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "5d ago",
+          "title": "Generation 126 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-28",
+      "hostname": "edge-fra-02",
+      "fqdn": "edge-fra-02.edge.cf.internal",
+      "environment": "edge",
+      "flake": "edge-gateway",
+      "branch": "dev",
+      "commit": "b85bea44",
+      "commitMessage": "bump nixpkgs to 24.11",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "auto_latest",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "4m ago",
+      "heartbeatAge": 4,
+      "heartbeatIntervalSec": 120,
+      "heartbeatNextInSec": -183,
+      "generation": 196,
+      "nixosVersion": "24.11.20260320",
+      "kernel": "linux-6.6.72",
+      "storePath": "/nix/store/bd9a5e2e64ee6ac2-nixos-system-edge-fra-02-24.11.20255726",
+      "targetStorePath": null,
+      "uptime": "32d 22h",
+      "cpu": "Xeon E-2336",
+      "memGb": 128,
+      "ipv4": "10.4.243.170",
+      "ipv6": "fd42:c3:e65a::63",
+      "reachability": "pull",
+      "cves": {
+        "critical": 1,
+        "high": 3,
+        "medium": 15,
+        "low": 25,
+        "total": 44
+      },
+      "tags": [],
+      "stig": 16,
+      "events": [
+        {
+          "at": "6m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "8h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "4d ago",
+          "title": "Generation 209 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-29",
+      "hostname": "edge-sgp-01",
+      "fqdn": "edge-sgp-01.edge.cf.internal",
+      "environment": "edge",
+      "flake": "edge-gateway",
+      "branch": "dev",
+      "commit": "1e84f129",
+      "commitMessage": "harden sshd: disable password auth",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "3m ago",
+      "heartbeatAge": 3,
+      "heartbeatIntervalSec": 90,
+      "heartbeatNextInSec": -142,
+      "generation": 75,
+      "nixosVersion": "24.05.20260218",
+      "kernel": "linux-6.6.70",
+      "storePath": "/nix/store/dbd75c9c0362a435-nixos-system-edge-sgp-01-24.11.20254345",
+      "targetStorePath": null,
+      "uptime": "26d 4h",
+      "cpu": "Xeon E-2336",
+      "memGb": 256,
+      "ipv4": "10.4.3.59",
+      "ipv6": "fd42:a1:f61a::43",
+      "reachability": "pull",
+      "cves": {
+        "critical": 0,
+        "high": 0,
+        "medium": 8,
+        "low": 29,
+        "total": 37
+      },
+      "tags": [],
+      "stig": 21,
+      "events": [
+        {
+          "at": "5m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "35m ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "10h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "3d ago",
+          "title": "Generation 113 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-30",
+      "hostname": "lab-vm-01",
+      "fqdn": "lab-vm-01.lab.cf.internal",
+      "environment": "lab",
+      "flake": "lab-nodes",
+      "branch": "dev",
+      "commit": "cfe7372c",
+      "commitMessage": "add grafana exporter to host",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "just now",
+      "heartbeatAge": 0,
+      "heartbeatIntervalSec": 120,
+      "heartbeatNextInSec": 69,
+      "generation": 207,
+      "nixosVersion": "24.11.20260320",
+      "kernel": "linux-6.6.70",
+      "storePath": "/nix/store/d13ed0cb70096be4-nixos-system-lab-vm-01-24.11.20253545",
+      "targetStorePath": null,
+      "uptime": "32d 0h",
+      "cpu": "Xeon E-2336",
+      "memGb": 32,
+      "ipv4": "10.1.162.150",
+      "ipv6": "fd42:c3:6ae7::53",
+      "reachability": "pull",
+      "cves": {
+        "critical": 0,
+        "high": 4,
+        "medium": 12,
+        "low": 27,
+        "total": 43
+      },
+      "tags": [],
+      "stig": 19,
+      "events": [
+        {
+          "at": "2m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "39m ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "10h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "5d ago",
+          "title": "Generation 117 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-31",
+      "hostname": "lab-vm-02",
+      "fqdn": "lab-vm-02.lab.cf.internal",
+      "environment": "lab",
+      "flake": "lab-nodes",
+      "branch": "dev",
+      "commit": "74477230",
+      "commitMessage": "fix: postgres role permissions migration",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "just now",
+      "heartbeatAge": 0,
+      "heartbeatIntervalSec": 90,
+      "heartbeatNextInSec": 60,
+      "generation": 102,
+      "nixosVersion": "24.11.20260401",
+      "kernel": "linux-6.1.115",
+      "storePath": "/nix/store/5c2eb4a8fee859e0-nixos-system-lab-vm-02-24.11.20260155",
+      "targetStorePath": null,
+      "uptime": "6d 11h",
+      "cpu": "Ryzen 9 5950X",
+      "memGb": 128,
+      "ipv4": "10.2.134.242",
+      "ipv6": "fd42:c3:6848::34",
+      "reachability": "direct",
+      "cves": {
+        "critical": 0,
+        "high": 0,
+        "medium": 7,
+        "low": 5,
+        "total": 12
+      },
+      "tags": [],
+      "stig": 16,
+      "events": [
+        {
+          "at": "2m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "5h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "2d ago",
+          "title": "Generation 122 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-32",
+      "hostname": "lab-vm-03",
+      "fqdn": "lab-vm-03.lab.cf.internal",
+      "environment": "lab",
+      "flake": "lab-nodes",
+      "branch": "dev",
+      "commit": "ca389234",
+      "commitMessage": "stig: enforce audit rules for sudo",
+      "health": "drifted",
+      "status": "Drifted",
+      "statusColor": "#fbbf24",
+      "statusChip": "chip-warning",
+      "deploymentPolicy": "auto_latest",
+      "deploymentState": "drift",
+      "lastHeartbeat": "5m ago",
+      "heartbeatAge": 5,
+      "heartbeatIntervalSec": 90,
+      "heartbeatNextInSec": -245,
+      "generation": 41,
+      "nixosVersion": "24.11.20260401",
+      "kernel": "linux-6.6.72",
+      "storePath": "/nix/store/849fef9a65aedfee-nixos-system-lab-vm-03-24.11.20254097",
+      "targetStorePath": "/nix/store/acd197f7f287c32f-nixos-system-lab-vm-03-24.11.20253364",
+      "uptime": "13d 18h",
+      "cpu": "Ryzen 9 5950X",
+      "memGb": 128,
+      "ipv4": "10.4.170.203",
+      "ipv6": "fd42:a1:91bf::95",
+      "reachability": "pull",
+      "cves": {
+        "critical": 0,
+        "high": 1,
+        "medium": 12,
+        "low": 7,
+        "total": 20
+      },
+      "tags": [],
+      "stig": 19,
+      "events": [
+        {
+          "at": "7m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy completed",
+          "color": "#34d399"
+        },
+        {
+          "at": "7h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "23h ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "5d ago",
+          "title": "Generation 132 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-33",
+      "hostname": "lab-rig-01",
+      "fqdn": "lab-rig-01.lab.cf.internal",
+      "environment": "lab",
+      "flake": "lab-nodes",
+      "branch": "dev",
+      "commit": "a694c85c",
+      "commitMessage": "feat: enable sops-nix for secrets",
+      "health": "offline",
+      "status": "Offline",
+      "statusColor": "#f87171",
+      "statusChip": "chip-critical",
+      "deploymentPolicy": "pinned",
+      "deploymentState": "unknown",
+      "lastHeartbeat": "15h ago",
+      "heartbeatAge": 959,
+      "heartbeatIntervalSec": 60,
+      "heartbeatNextInSec": -57501,
+      "generation": 140,
+      "nixosVersion": "24.11.20260401",
+      "kernel": "linux-6.6.72",
+      "storePath": "/nix/store/6b11ec3573623937-nixos-system-lab-rig-01-24.11.20254606",
+      "targetStorePath": null,
+      "uptime": "22d 9h",
+      "cpu": "Xeon E-2336",
+      "memGb": 16,
+      "ipv4": "10.1.23.114",
+      "ipv6": "fd42:d4:33bc::86",
+      "reachability": "direct",
+      "cves": {
+        "critical": 0,
+        "high": 1,
+        "medium": 6,
+        "low": 3,
+        "total": 10
+      },
+      "tags": [],
+      "stig": 14,
+      "events": [
+        {
+          "at": "16h ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy completed",
+          "color": "#34d399"
+        },
+        {
+          "at": "6h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "20h ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "3d ago",
+          "title": "Generation 126 activated",
+          "color": "#34d399"
+        }
+      ]
+    },
+    {
+      "id": "sys-34",
+      "hostname": "lab-rig-02",
+      "fqdn": "lab-rig-02.lab.cf.internal",
+      "environment": "lab",
+      "flake": "lab-nodes",
+      "branch": "dev",
+      "commit": "1fc658f6",
+      "commitMessage": "wireguard: add peer for edge-sgp-01",
+      "health": "healthy",
+      "status": "Healthy",
+      "statusColor": "#34d399",
+      "statusChip": "chip-healthy",
+      "deploymentPolicy": "manual",
+      "deploymentState": "up-to-date",
+      "lastHeartbeat": "4m ago",
+      "heartbeatAge": 4,
+      "heartbeatIntervalSec": 60,
+      "heartbeatNextInSec": -239,
+      "generation": 197,
+      "nixosVersion": "24.05.20260218",
+      "kernel": "linux-6.6.70",
+      "storePath": "/nix/store/d7959857ac79045e-nixos-system-lab-rig-02-24.11.20256269",
+      "targetStorePath": null,
+      "uptime": "32d 4h",
+      "cpu": "EPYC 7443P",
+      "memGb": 16,
+      "ipv4": "10.4.181.16",
+      "ipv6": "fd42:a1:322f::3",
+      "reachability": "direct",
+      "cves": {
+        "critical": 5,
+        "high": 14,
+        "medium": 18,
+        "low": 16,
+        "total": 53
+      },
+      "tags": [],
+      "stig": 17,
+      "events": [
+        {
+          "at": "6m ago",
+          "title": "Heartbeat received",
+          "color": "#34d399"
+        },
+        {
+          "at": "1h ago",
+          "title": "Deploy succeeded",
+          "color": "#34d399"
+        },
+        {
+          "at": "10h ago",
+          "title": "Evaluation complete",
+          "color": "#60a5fa"
+        },
+        {
+          "at": "1d ago",
+          "title": "Configuration drift detected",
+          "color": "#fbbf24"
+        },
+        {
+          "at": "3d ago",
+          "title": "Generation 91 activated",
+          "color": "#34d399"
+        }
+      ]
+    }
+  ],
+  "builds": {
+    "active": [
+      {
+        "id": "bld-0",
+        "system": "atlas-01",
+        "name": "nixos-system-atlas-01",
+        "flake": "infrastructure",
+        "drv": "/nix/store/793620cxxxx-nixos-system-atlas-01.drv",
+        "commit": "426b484",
+        "status": "building",
+        "meta": {
+          "label": "Building",
+          "color": "#60a5fa",
+          "cls": "chip-info"
+        },
+        "worker": "reckless-builder",
+        "arch": "x86_64-linux",
+        "totalDerivs": 88,
+        "builtDerivs": 76,
+        "cachedDerivs": 60,
+        "currentPkg": "systemd-256.7",
+        "queuedAt": "just now",
+        "dur": "141s",
+        "progress": 0.86730109739369,
+        "attempts": 1,
+        "logLines": 1698,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-1",
+        "system": "gaia-web-01",
+        "name": "nixos-system-gaia-web-01",
+        "flake": "web-services",
+        "drv": "/nix/store/2302817xxxx-nixos-system-gaia-web-01.drv",
+        "commit": "c68962b",
+        "status": "building",
+        "meta": {
+          "label": "Building",
+          "color": "#60a5fa",
+          "cls": "chip-info"
+        },
+        "worker": "hydra-01",
+        "arch": "x86_64-linux",
+        "totalDerivs": 126,
+        "builtDerivs": 96,
+        "cachedDerivs": 55,
+        "currentPkg": "nodejs-22.13.0",
+        "queuedAt": "1m ago",
+        "dur": "188s",
+        "progress": 0.764673353909465,
+        "attempts": 1,
+        "logLines": 573,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-2",
+        "system": "gaia-web-03",
+        "name": "nixos-system-gaia-web-03",
+        "flake": "edge-gateway",
+        "drv": "/nix/store/eccfd32xxxx-nixos-system-gaia-web-03.drv",
+        "commit": "4a968b1",
+        "status": "building",
+        "meta": {
+          "label": "Building",
+          "color": "#60a5fa",
+          "cls": "chip-info"
+        },
+        "worker": "hydra-02",
+        "arch": "x86_64-linux",
+        "totalDerivs": 45,
+        "builtDerivs": 30,
+        "cachedDerivs": 23,
+        "currentPkg": "rustc-1.84.0",
+        "queuedAt": "4m ago",
+        "dur": "235s",
+        "progress": 0.66204561042524,
+        "attempts": 1,
+        "logLines": 1448,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-3",
+        "system": "orion-db-01",
+        "name": "nixos-system-orion-db-01",
+        "flake": "build-farm",
+        "drv": "/nix/store/a59c34dxxxx-nixos-system-orion-db-01.drv",
+        "commit": "5cdb4a4",
+        "status": "queued",
+        "meta": {
+          "label": "Queued",
+          "color": "#a78bfa",
+          "cls": "chip-info"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 83,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "12m ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 542,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-4",
+        "system": "edge-pdx-01",
+        "name": "nixos-system-edge-pdx-01",
+        "flake": "infrastructure",
+        "drv": "/nix/store/6e68858xxxx-nixos-system-edge-pdx-01.drv",
+        "commit": "d31c2bd",
+        "status": "queued",
+        "meta": {
+          "label": "Queued",
+          "color": "#a78bfa",
+          "cls": "chip-info"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 122,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "28m ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 1563,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-5",
+        "system": "edge-nyc-01",
+        "name": "nixos-system-edge-nyc-01",
+        "flake": "web-services",
+        "drv": "/nix/store/1725e63xxxx-nixos-system-edge-nyc-01.drv",
+        "commit": "4b5efd7",
+        "status": "stopping",
+        "meta": {
+          "label": "Stopping",
+          "color": "#fbbf24",
+          "cls": "chip-warning"
+        },
+        "worker": "hydra-02",
+        "arch": "x86_64-linux",
+        "totalDerivs": 40,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "1h ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 585,
+        "failedPkg": null
+      }
+    ],
+    "history": [
+      {
+        "id": "bld-100",
+        "system": "lab-vm-01",
+        "name": "nixos-system-lab-vm-01",
+        "flake": "infrastructure",
+        "drv": "/nix/store/e799d3cxxxx-nixos-system-lab-vm-01.drv",
+        "commit": "e036a7a",
+        "status": "queued",
+        "meta": {
+          "label": "Queued",
+          "color": "#a78bfa",
+          "cls": "chip-info"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 87,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "28m ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 1636,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-101",
+        "system": "atlas-02",
+        "name": "nixos-system-atlas-02",
+        "flake": "web-services",
+        "drv": "/nix/store/a066347xxxx-nixos-system-atlas-02.drv",
+        "commit": "5877894",
+        "status": "stopping",
+        "meta": {
+          "label": "Stopping",
+          "color": "#fbbf24",
+          "cls": "chip-warning"
+        },
+        "worker": "hydra-02",
+        "arch": "x86_64-linux",
+        "totalDerivs": 126,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "1h ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 658,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-102",
+        "system": "gaia-web-02",
+        "name": "nixos-system-gaia-web-02",
+        "flake": "edge-gateway",
+        "drv": "/nix/store/6932852xxxx-nixos-system-gaia-web-02.drv",
+        "commit": "0b95bda",
+        "status": "cache-pushing",
+        "meta": {
+          "label": "Pushing cache",
+          "color": "#22d3ee",
+          "cls": "chip-info"
+        },
+        "worker": "reckless-builder",
+        "arch": "x86_64-linux",
+        "totalDerivs": 44,
+        "builtDerivs": 41,
+        "cachedDerivs": 30,
+        "currentPkg": null,
+        "queuedAt": "just now",
+        "dur": "309s",
+        "progress": 0.9399271262002744,
+        "attempts": 1,
+        "logLines": 826,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-103",
+        "system": "edge-sgp-01",
+        "name": "nixos-system-edge-sgp-01",
+        "flake": "build-farm",
+        "drv": "/nix/store/22ffe7dxxxx-nixos-system-edge-sgp-01.drv",
+        "commit": "47fa3d6",
+        "status": "cache-pushed",
+        "meta": {
+          "label": "Cached",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "worker": null,
+        "arch": "aarch64-linux",
+        "totalDerivs": 83,
+        "builtDerivs": 83,
+        "cachedDerivs": 43,
+        "currentPkg": null,
+        "queuedAt": "1m ago",
+        "dur": "225s",
+        "progress": 1,
+        "attempts": 1,
+        "logLines": 1911,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-104",
+        "system": "kepler-api",
+        "name": "nixos-system-kepler-api",
+        "flake": "infrastructure",
+        "drv": "/nix/store/dbcb388xxxx-nixos-system-kepler-api.drv",
+        "commit": "cf3c0ef",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 121,
+        "builtDerivs": 121,
+        "cachedDerivs": 58,
+        "currentPkg": null,
+        "queuedAt": "4m ago",
+        "dur": "531s",
+        "progress": 1,
+        "attempts": 1,
+        "logLines": 1779,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-105",
+        "system": "atlas-01",
+        "name": "nixos-system-atlas-01",
+        "flake": "web-services",
+        "drv": "/nix/store/9498993xxxx-nixos-system-atlas-01.drv",
+        "commit": "376de09",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 39,
+        "builtDerivs": 39,
+        "cachedDerivs": 17,
+        "currentPkg": null,
+        "queuedAt": "12m ago",
+        "dur": "238s",
+        "progress": 1,
+        "attempts": 1,
+        "logLines": 1646,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-106",
+        "system": "gaia-web-01",
+        "name": "nixos-system-gaia-web-01",
+        "flake": "edge-gateway",
+        "drv": "/nix/store/5d54ebexxxx-nixos-system-gaia-web-01.drv",
+        "commit": "fafc224",
+        "status": "failed",
+        "meta": {
+          "label": "Failed",
+          "color": "#f87171",
+          "cls": "chip-critical"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 78,
+        "builtDerivs": 46,
+        "cachedDerivs": 31,
+        "currentPkg": null,
+        "queuedAt": "28m ago",
+        "dur": "469s",
+        "progress": 0.5932561728395062,
+        "attempts": 2,
+        "logLines": 447,
+        "failedPkg": "openssl-3.3.2"
+      },
+      {
+        "id": "bld-107",
+        "system": "gaia-web-03",
+        "name": "nixos-system-gaia-web-03",
+        "flake": "build-farm",
+        "drv": "/nix/store/17214c9xxxx-nixos-system-gaia-web-03.drv",
+        "commit": "27e094b",
+        "status": "cancelled",
+        "meta": {
+          "label": "Cancelled",
+          "color": "#6b7280",
+          "cls": "chip-unknown"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 116,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "1h ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 788,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-108",
+        "system": "orion-db-01",
+        "name": "nixos-system-orion-db-01",
+        "flake": "infrastructure",
+        "drv": "/nix/store/c0fd9d4xxxx-nixos-system-orion-db-01.drv",
+        "commit": "e217651",
+        "status": "building",
+        "meta": {
+          "label": "Building",
+          "color": "#60a5fa",
+          "cls": "chip-info"
+        },
+        "worker": "reckless-builder",
+        "arch": "x86_64-linux",
+        "totalDerivs": 35,
+        "builtDerivs": 27,
+        "cachedDerivs": 17,
+        "currentPkg": "rustc-1.84.0",
+        "queuedAt": "just now",
+        "dur": "107s",
+        "progress": 0.7835048010973937,
+        "attempts": 1,
+        "logLines": 197,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-109",
+        "system": "edge-pdx-01",
+        "name": "nixos-system-edge-pdx-01",
+        "flake": "web-services",
+        "drv": "/nix/store/89cafffxxxx-nixos-system-edge-pdx-01.drv",
+        "commit": "66347e8",
+        "status": "building",
+        "meta": {
+          "label": "Building",
+          "color": "#60a5fa",
+          "cls": "chip-info"
+        },
+        "worker": "hydra-01",
+        "arch": "x86_64-linux",
+        "totalDerivs": 73,
+        "builtDerivs": 50,
+        "cachedDerivs": 21,
+        "currentPkg": "python3-3.11.10",
+        "queuedAt": "1m ago",
+        "dur": "154s",
+        "progress": 0.6808770576131687,
+        "attempts": 1,
+        "logLines": 1072,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-110",
+        "system": "edge-nyc-01",
+        "name": "nixos-system-edge-nyc-01",
+        "flake": "edge-gateway",
+        "drv": "/nix/store/428650axxxx-nixos-system-edge-nyc-01.drv",
+        "commit": "ea4297e",
+        "status": "building",
+        "meta": {
+          "label": "Building",
+          "color": "#60a5fa",
+          "cls": "chip-info"
+        },
+        "worker": "hydra-02",
+        "arch": "x86_64-linux",
+        "totalDerivs": 111,
+        "builtDerivs": 64,
+        "cachedDerivs": 39,
+        "currentPkg": "python3-3.11.10",
+        "queuedAt": "4m ago",
+        "dur": "201s",
+        "progress": 0.5782493141289438,
+        "attempts": 1,
+        "logLines": 1947,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-111",
+        "system": "stg-web-01",
+        "name": "nixos-system-stg-web-01",
+        "flake": "build-farm",
+        "drv": "/nix/store/0b53a15xxxx-nixos-system-stg-web-01.drv",
+        "commit": "f6d60b1",
+        "status": "queued",
+        "meta": {
+          "label": "Queued",
+          "color": "#a78bfa",
+          "cls": "chip-info"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 30,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "12m ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 874,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-112",
+        "system": "stg-build-01",
+        "name": "nixos-system-stg-build-01",
+        "flake": "infrastructure",
+        "drv": "/nix/store/b42f021xxxx-nixos-system-stg-build-01.drv",
+        "commit": "6e17dda",
+        "status": "queued",
+        "meta": {
+          "label": "Queued",
+          "color": "#a78bfa",
+          "cls": "chip-info"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 68,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "28m ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 1896,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-113",
+        "system": "dev-node-02",
+        "name": "nixos-system-dev-node-02",
+        "flake": "web-services",
+        "drv": "/nix/store/7dec54cxxxx-nixos-system-dev-node-02.drv",
+        "commit": "e559be3",
+        "status": "stopping",
+        "meta": {
+          "label": "Stopping",
+          "color": "#fbbf24",
+          "cls": "chip-warning"
+        },
+        "worker": "hydra-02",
+        "arch": "aarch64-linux",
+        "totalDerivs": 107,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "1h ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 917,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-114",
+        "system": "hydra-03",
+        "name": "nixos-system-hydra-03",
+        "flake": "edge-gateway",
+        "drv": "/nix/store/36b8b57xxxx-nixos-system-hydra-03.drv",
+        "commit": "d9a80c8",
+        "status": "cache-pushing",
+        "meta": {
+          "label": "Pushing cache",
+          "color": "#22d3ee",
+          "cls": "chip-info"
+        },
+        "worker": "reckless-builder",
+        "arch": "x86_64-linux",
+        "totalDerivs": 25,
+        "builtDerivs": 23,
+        "cachedDerivs": 12,
+        "currentPkg": null,
+        "queuedAt": "just now",
+        "dur": "71s",
+        "progress": 0.9167738340192044,
+        "attempts": 1,
+        "logLines": 579,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-115",
+        "system": "lab-vm-01",
+        "name": "nixos-system-lab-vm-01",
+        "flake": "build-farm",
+        "drv": "/nix/store/ff85062xxxx-nixos-system-lab-vm-01.drv",
+        "commit": "c5dc626",
+        "status": "cache-pushed",
+        "meta": {
+          "label": "Cached",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 63,
+        "builtDerivs": 63,
+        "cachedDerivs": 27,
+        "currentPkg": null,
+        "queuedAt": "1m ago",
+        "dur": "303s",
+        "progress": 1,
+        "attempts": 1,
+        "logLines": 324,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-116",
+        "system": "atlas-02",
+        "name": "nixos-system-atlas-02",
+        "flake": "infrastructure",
+        "drv": "/nix/store/a84168dxxxx-nixos-system-atlas-02.drv",
+        "commit": "4d1d34f",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 102,
+        "builtDerivs": 102,
+        "cachedDerivs": 80,
+        "currentPkg": null,
+        "queuedAt": "4m ago",
+        "dur": "609s",
+        "progress": 1,
+        "attempts": 1,
+        "logLines": 192,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-117",
+        "system": "gaia-web-02",
+        "name": "nixos-system-gaia-web-02",
+        "flake": "web-services",
+        "drv": "/nix/store/621eb98xxxx-nixos-system-gaia-web-02.drv",
+        "commit": "b55e168",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 20,
+        "builtDerivs": 20,
+        "cachedDerivs": 15,
+        "currentPkg": null,
+        "queuedAt": "12m ago",
+        "dur": "316s",
+        "progress": 1,
+        "attempts": 1,
+        "logLines": 60,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-118",
+        "system": "edge-sgp-01",
+        "name": "nixos-system-edge-sgp-01",
+        "flake": "edge-gateway",
+        "drv": "/nix/store/2bea1a3xxxx-nixos-system-edge-sgp-01.drv",
+        "commit": "c80f722",
+        "status": "failed",
+        "meta": {
+          "label": "Failed",
+          "color": "#f87171",
+          "cls": "chip-critical"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 58,
+        "builtDerivs": 26,
+        "cachedDerivs": 12,
+        "currentPkg": null,
+        "queuedAt": "28m ago",
+        "dur": "593s",
+        "progress": 0.4543364197530864,
+        "attempts": 3,
+        "logLines": 947,
+        "failedPkg": "vault-1.18.3"
+      },
+      {
+        "id": "bld-119",
+        "system": "kepler-api",
+        "name": "nixos-system-kepler-api",
+        "flake": "build-farm",
+        "drv": "/nix/store/e4b77cexxxx-nixos-system-kepler-api.drv",
+        "commit": "a4c1c9b",
+        "status": "cancelled",
+        "meta": {
+          "label": "Cancelled",
+          "color": "#6b7280",
+          "cls": "chip-unknown"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 97,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "1h ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 1047,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-120",
+        "system": "atlas-01",
+        "name": "nixos-system-atlas-01",
+        "flake": "infrastructure",
+        "drv": "/nix/store/ad73cd9xxxx-nixos-system-atlas-01.drv",
+        "commit": "c03ab4f",
+        "status": "building",
+        "meta": {
+          "label": "Building",
+          "color": "#60a5fa",
+          "cls": "chip-info"
+        },
+        "worker": "reckless-builder",
+        "arch": "aarch64-linux",
+        "totalDerivs": 135,
+        "builtDerivs": 75,
+        "cachedDerivs": 33,
+        "currentPkg": "grafana-11.4.0",
+        "queuedAt": "just now",
+        "dur": "70s",
+        "progress": 0.5519718792866941,
+        "attempts": 1,
+        "logLines": 697,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-121",
+        "system": "gaia-web-01",
+        "name": "nixos-system-gaia-web-01",
+        "flake": "web-services",
+        "drv": "/nix/store/56402e4xxxx-nixos-system-gaia-web-01.drv",
+        "commit": "4447de6",
+        "status": "building",
+        "meta": {
+          "label": "Building",
+          "color": "#60a5fa",
+          "cls": "chip-info"
+        },
+        "worker": "hydra-01",
+        "arch": "x86_64-linux",
+        "totalDerivs": 54,
+        "builtDerivs": 24,
+        "cachedDerivs": 15,
+        "currentPkg": "systemd-256.7",
+        "queuedAt": "1m ago",
+        "dur": "117s",
+        "progress": 0.4493441358024691,
+        "attempts": 1,
+        "logLines": 1572,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-122",
+        "system": "gaia-web-03",
+        "name": "nixos-system-gaia-web-03",
+        "flake": "edge-gateway",
+        "drv": "/nix/store/1f1c70fxxxx-nixos-system-gaia-web-03.drv",
+        "commit": "c865f7c",
+        "status": "building",
+        "meta": {
+          "label": "Building",
+          "color": "#60a5fa",
+          "cls": "chip-info"
+        },
+        "worker": "hydra-02",
+        "arch": "aarch64-linux",
+        "totalDerivs": 92,
+        "builtDerivs": 32,
+        "cachedDerivs": 13,
+        "currentPkg": "nodejs-22.13.0",
+        "queuedAt": "4m ago",
+        "dur": "164s",
+        "progress": 0.3467163923182442,
+        "attempts": 1,
+        "logLines": 447,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-123",
+        "system": "orion-db-01",
+        "name": "nixos-system-orion-db-01",
+        "flake": "build-farm",
+        "drv": "/nix/store/d8d9d1axxxx-nixos-system-orion-db-01.drv",
+        "commit": "73c7300",
+        "status": "queued",
+        "meta": {
+          "label": "Queued",
+          "color": "#a78bfa",
+          "cls": "chip-info"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 130,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "12m ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 1133,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-124",
+        "system": "edge-pdx-01",
+        "name": "nixos-system-edge-pdx-01",
+        "flake": "infrastructure",
+        "drv": "/nix/store/91a5225xxxx-nixos-system-edge-pdx-01.drv",
+        "commit": "fb08029",
+        "status": "queued",
+        "meta": {
+          "label": "Queued",
+          "color": "#a78bfa",
+          "cls": "chip-info"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 49,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "28m ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 155,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-125",
+        "system": "edge-nyc-01",
+        "name": "nixos-system-edge-nyc-01",
+        "flake": "web-services",
+        "drv": "/nix/store/4a72830xxxx-nixos-system-edge-nyc-01.drv",
+        "commit": "633ae43",
+        "status": "stopping",
+        "meta": {
+          "label": "Stopping",
+          "color": "#fbbf24",
+          "cls": "chip-warning"
+        },
+        "worker": "hydra-02",
+        "arch": "aarch64-linux",
+        "totalDerivs": 87,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "1h ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 1176,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-126",
+        "system": "stg-web-01",
+        "name": "nixos-system-stg-web-01",
+        "flake": "edge-gateway",
+        "drv": "/nix/store/033ed5bxxxx-nixos-system-stg-web-01.drv",
+        "commit": "b7bb6c6",
+        "status": "cache-pushing",
+        "meta": {
+          "label": "Pushing cache",
+          "color": "#22d3ee",
+          "cls": "chip-info"
+        },
+        "worker": "reckless-builder",
+        "arch": "aarch64-linux",
+        "totalDerivs": 126,
+        "builtDerivs": 125,
+        "cachedDerivs": 93,
+        "currentPkg": null,
+        "queuedAt": "just now",
+        "dur": "133s",
+        "progress": 0.9936205418381344,
+        "attempts": 1,
+        "logLines": 332,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-127",
+        "system": "stg-build-01",
+        "name": "nixos-system-stg-build-01",
+        "flake": "build-farm",
+        "drv": "/nix/store/cc0b366xxxx-nixos-system-stg-build-01.drv",
+        "commit": "53bd985",
+        "status": "cache-pushed",
+        "meta": {
+          "label": "Cached",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 44,
+        "builtDerivs": 44,
+        "cachedDerivs": 32,
+        "currentPkg": null,
+        "queuedAt": "1m ago",
+        "dur": "381s",
+        "progress": 1,
+        "attempts": 1,
+        "logLines": 738,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-128",
+        "system": "dev-node-02",
+        "name": "nixos-system-dev-node-02",
+        "flake": "infrastructure",
+        "drv": "/nix/store/86d7971xxxx-nixos-system-dev-node-02.drv",
+        "commit": "cafe79f",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 82,
+        "builtDerivs": 82,
+        "cachedDerivs": 57,
+        "currentPkg": null,
+        "queuedAt": "4m ago",
+        "dur": "87s",
+        "progress": 1,
+        "attempts": 1,
+        "logLines": 606,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-129",
+        "system": "hydra-03",
+        "name": "nixos-system-hydra-03",
+        "flake": "web-services",
+        "drv": "/nix/store/3fa4e9cxxxx-nixos-system-hydra-03.drv",
+        "commit": "32304b8",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 121,
+        "builtDerivs": 121,
+        "cachedDerivs": 79,
+        "currentPkg": null,
+        "queuedAt": "12m ago",
+        "dur": "393s",
+        "progress": 1,
+        "attempts": 1,
+        "logLines": 473,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-130",
+        "system": "lab-vm-01",
+        "name": "nixos-system-lab-vm-01",
+        "flake": "edge-gateway",
+        "drv": "/nix/store/f8604a7xxxx-nixos-system-lab-vm-01.drv",
+        "commit": "a712d10",
+        "status": "failed",
+        "meta": {
+          "label": "Failed",
+          "color": "#f87171",
+          "cls": "chip-critical"
+        },
+        "worker": null,
+        "arch": "aarch64-linux",
+        "totalDerivs": 39,
+        "builtDerivs": 12,
+        "cachedDerivs": 8,
+        "currentPkg": null,
+        "queuedAt": "28m ago",
+        "dur": "117s",
+        "progress": 0.3154166666666667,
+        "attempts": 3,
+        "logLines": 1447,
+        "failedPkg": "nodejs-22.13.0"
+      },
+      {
+        "id": "bld-131",
+        "system": "atlas-02",
+        "name": "nixos-system-atlas-02",
+        "flake": "build-farm",
+        "drv": "/nix/store/b13d9b2xxxx-nixos-system-atlas-02.drv",
+        "commit": "22b3ffb",
+        "status": "cancelled",
+        "meta": {
+          "label": "Cancelled",
+          "color": "#6b7280",
+          "cls": "chip-unknown"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 78,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "1h ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 1306,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-132",
+        "system": "gaia-web-02",
+        "name": "nixos-system-gaia-web-02",
+        "flake": "infrastructure",
+        "drv": "/nix/store/7a09fddxxxx-nixos-system-gaia-web-02.drv",
+        "commit": "ae4d14d",
+        "status": "building",
+        "meta": {
+          "label": "Building",
+          "color": "#60a5fa",
+          "cls": "chip-info"
+        },
+        "worker": "reckless-builder",
+        "arch": "aarch64-linux",
+        "totalDerivs": 116,
+        "builtDerivs": 37,
+        "cachedDerivs": 24,
+        "currentPkg": "linux-6.6.72",
+        "queuedAt": "just now",
+        "dur": "33s",
+        "progress": 0.3204389574759945,
+        "attempts": 1,
+        "logLines": 1197,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-133",
+        "system": "edge-sgp-01",
+        "name": "nixos-system-edge-sgp-01",
+        "flake": "web-services",
+        "drv": "/nix/store/23c64e8xxxx-nixos-system-edge-sgp-01.drv",
+        "commit": "125a2d4",
+        "status": "building",
+        "meta": {
+          "label": "Building",
+          "color": "#60a5fa",
+          "cls": "chip-info"
+        },
+        "worker": "hydra-01",
+        "arch": "x86_64-linux",
+        "totalDerivs": 34,
+        "builtDerivs": 7,
+        "cachedDerivs": 3,
+        "currentPkg": "wireguard-tools-1.0",
+        "queuedAt": "1m ago",
+        "dur": "80s",
+        "progress": 0.21781121399176956,
+        "attempts": 1,
+        "logLines": 72,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-134",
+        "system": "kepler-api",
+        "name": "nixos-system-kepler-api",
+        "flake": "edge-gateway",
+        "drv": "/nix/store/ec92af3xxxx-nixos-system-kepler-api.drv",
+        "commit": "967846a",
+        "status": "building",
+        "meta": {
+          "label": "Building",
+          "color": "#60a5fa",
+          "cls": "chip-info"
+        },
+        "worker": "hydra-02",
+        "arch": "x86_64-linux",
+        "totalDerivs": 73,
+        "builtDerivs": 8,
+        "cachedDerivs": 5,
+        "currentPkg": "vault-1.18.3",
+        "queuedAt": "4m ago",
+        "dur": "127s",
+        "progress": 0.11518347050754459,
+        "attempts": 1,
+        "logLines": 947,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-135",
+        "system": "atlas-01",
+        "name": "nixos-system-atlas-01",
+        "flake": "build-farm",
+        "drv": "/nix/store/a56ff1exxxx-nixos-system-atlas-01.drv",
+        "commit": "f1a8660",
+        "status": "queued",
+        "meta": {
+          "label": "Queued",
+          "color": "#a78bfa",
+          "cls": "chip-info"
+        },
+        "worker": null,
+        "arch": "aarch64-linux",
+        "totalDerivs": 111,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "12m ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 1392,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-136",
+        "system": "gaia-web-01",
+        "name": "nixos-system-gaia-web-01",
+        "flake": "infrastructure",
+        "drv": "/nix/store/6e3b52axxxx-nixos-system-gaia-web-01.drv",
+        "commit": "79ea389",
+        "status": "queued",
+        "meta": {
+          "label": "Queued",
+          "color": "#a78bfa",
+          "cls": "chip-info"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 30,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "28m ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 414,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-137",
+        "system": "gaia-web-03",
+        "name": "nixos-system-gaia-web-03",
+        "flake": "web-services",
+        "drv": "/nix/store/17f8a35xxxx-nixos-system-gaia-web-03.drv",
+        "commit": "e12b192",
+        "status": "stopping",
+        "meta": {
+          "label": "Stopping",
+          "color": "#fbbf24",
+          "cls": "chip-warning"
+        },
+        "worker": "hydra-02",
+        "arch": "x86_64-linux",
+        "totalDerivs": 68,
+        "builtDerivs": 0,
+        "cachedDerivs": 0,
+        "currentPkg": null,
+        "queuedAt": "1h ago",
+        "dur": null,
+        "progress": 0,
+        "attempts": 1,
+        "logLines": 1435,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-138",
+        "system": "orion-db-01",
+        "name": "nixos-system-orion-db-01",
+        "flake": "edge-gateway",
+        "drv": "/nix/store/d1c4040xxxx-nixos-system-orion-db-01.drv",
+        "commit": "85debc4",
+        "status": "cache-pushing",
+        "meta": {
+          "label": "Pushing cache",
+          "color": "#22d3ee",
+          "cls": "chip-info"
+        },
+        "worker": "reckless-builder",
+        "arch": "x86_64-linux",
+        "totalDerivs": 106,
+        "builtDerivs": 103,
+        "cachedDerivs": 56,
+        "currentPkg": null,
+        "queuedAt": "just now",
+        "dur": "195s",
+        "progress": 0.9704672496570645,
+        "attempts": 1,
+        "logLines": 85,
+        "failedPkg": null
+      },
+      {
+        "id": "bld-139",
+        "system": "edge-pdx-01",
+        "name": "nixos-system-edge-pdx-01",
+        "flake": "build-farm",
+        "drv": "/nix/store/9a9166bxxxx-nixos-system-edge-pdx-01.drv",
+        "commit": "d09ecd5",
+        "status": "cache-pushed",
+        "meta": {
+          "label": "Cached",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "worker": null,
+        "arch": "x86_64-linux",
+        "totalDerivs": 25,
+        "builtDerivs": 25,
+        "cachedDerivs": 16,
+        "currentPkg": null,
+        "queuedAt": "1m ago",
+        "dur": "458s",
+        "progress": 1,
+        "attempts": 1,
+        "logLines": 1151,
+        "failedPkg": null
+      }
+    ],
+    "stats": {
+      "building": 3,
+      "queued": 2,
+      "failed24h": 3,
+      "workers": 3,
+      "totalWorkers": 5
+    },
+    "workers": [
+      {
+        "id": "w1",
+        "fingerprint": "SHA256:k7Hn2pQ9xR4mLwT0vBcZ8sJ1aD3eF6gY",
+        "registered": true,
+        "name": "reckless-builder",
+        "host": "reckless-builder.lab",
+        "arch": "x86_64-linux",
+        "cores": 16,
+        "mem": 64,
+        "slots": {
+          "used": 0,
+          "total": 1
+        },
+        "status": "running",
+        "load": 0.02,
+        "lastSeen": "just now",
+        "uptimeDays": 42,
+        "completed24h": 128,
+        "failed24h": 1,
+        "environments": [
+          "lab",
+          "dev"
+        ],
+        "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH9rk2pQ9xR4mLwT0vBcZ8sJ1aD3eF6gY crystal-forge@reckless-builder"
+      },
+      {
+        "id": "w2",
+        "fingerprint": "SHA256:c04eD8a52f6gH7Lp1qWnM3zX9bV5tR8yK",
+        "registered": true,
+        "name": "hydra-01",
+        "host": "hydra-01.production",
+        "arch": "x86_64-linux",
+        "cores": 64,
+        "mem": 256,
+        "slots": {
+          "used": 7,
+          "total": 8
+        },
+        "status": "running",
+        "load": 0.91,
+        "lastSeen": "2s ago",
+        "uptimeDays": 118,
+        "completed24h": 842,
+        "failed24h": 12,
+        "environments": [
+          "production",
+          "staging"
+        ],
+        "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC04eD8a52f6gH7Lp1qWnM3zX9bV5tR8yK crystal-forge@hydra-01"
+      },
+      {
+        "id": "w3",
+        "fingerprint": "SHA256:9a2b7E60c3d1mQz4kP8xH2vN6rL0tW5yB",
+        "registered": true,
+        "name": "hydra-02",
+        "host": "hydra-02.production",
+        "arch": "x86_64-linux",
+        "cores": 64,
+        "mem": 256,
+        "slots": {
+          "used": 5,
+          "total": 8
+        },
+        "status": "running",
+        "load": 0.62,
+        "lastSeen": "5s ago",
+        "uptimeDays": 118,
+        "completed24h": 617,
+        "failed24h": 8,
+        "environments": [
+          "production"
+        ],
+        "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII9a2b7E60c3d1mQz4kP8xH2vN6rL0tW5yB crystal-forge@hydra-02"
+      },
+      {
+        "id": "w4",
+        "fingerprint": "SHA256:3e8f4A19d7b2ZqA1jK6xP9mN0rT5vL8wH",
+        "registered": true,
+        "name": "graviton-01",
+        "host": "build-arm-01.lab",
+        "arch": "aarch64-linux",
+        "cores": 16,
+        "mem": 64,
+        "slots": {
+          "used": 2,
+          "total": 4
+        },
+        "status": "paused",
+        "load": 0.18,
+        "lastSeen": "4m ago",
+        "uptimeDays": 18,
+        "completed24h": 88,
+        "failed24h": 2,
+        "environments": [
+          "lab",
+          "edge"
+        ],
+        "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN3e8f4A19d7b2ZqA1jK6xP9mN0rT5vL8wH crystal-forge@graviton-01"
+      },
+      {
+        "id": "w5",
+        "fingerprint": "SHA256:6d1c0B75f9e4XaTd2hJ8xP3mN7rL1tV5wK",
+        "registered": false,
+        "name": "darwin-01",
+        "host": "mac-mini-01.lab",
+        "arch": "aarch64-darwin",
+        "cores": 8,
+        "mem": 16,
+        "slots": {
+          "used": 0,
+          "total": 2
+        },
+        "status": "offline",
+        "load": 0,
+        "lastSeen": "2d ago",
+        "uptimeDays": 0,
+        "completed24h": 0,
+        "failed24h": 0,
+        "environments": [
+          "lab"
+        ],
+        "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO6d1c0B75f9e4XaTd2hJ8xP3mN7rL1tV5wK crystal-forge@darwin-01"
+      }
+    ]
+  },
+  "evaluations": {
+    "active": [
+      {
+        "id": "eval-0",
+        "flake": "infrastructure",
+        "commit": "b9e81e40",
+        "branch": "main",
+        "status": "in_progress",
+        "meta": {
+          "label": "Evaluating",
+          "color": "#60a5fa",
+          "cls": "chip-info"
+        },
+        "systemCount": 11,
+        "policyPass": 6,
+        "policyFail": 5,
+        "queuePos": 1,
+        "startedAt": "just now",
+        "completedAt": null,
+        "dur": null,
+        "canCancel": true,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-1",
+        "flake": "web-services",
+        "commit": "c9af0b08",
+        "branch": "staging",
+        "status": "in_progress",
+        "meta": {
+          "label": "Evaluating",
+          "color": "#60a5fa",
+          "cls": "chip-info"
+        },
+        "systemCount": 14,
+        "policyPass": 9,
+        "policyFail": 5,
+        "queuePos": 2,
+        "startedAt": "1m ago",
+        "completedAt": null,
+        "dur": null,
+        "canCancel": true,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-2",
+        "flake": "edge-gateway",
+        "commit": "c866f7d1",
+        "branch": "dev",
+        "status": "pending",
+        "meta": {
+          "label": "Pending",
+          "color": "#a78bfa",
+          "cls": "chip-info"
+        },
+        "systemCount": 17,
+        "policyPass": 12,
+        "policyFail": 5,
+        "queuePos": 3,
+        "startedAt": "4m ago",
+        "completedAt": null,
+        "dur": null,
+        "canCancel": true,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-3",
+        "flake": "build-farm",
+        "commit": "d82ce499",
+        "branch": "release/0.3",
+        "status": "pending",
+        "meta": {
+          "label": "Pending",
+          "color": "#a78bfa",
+          "cls": "chip-info"
+        },
+        "systemCount": 20,
+        "policyPass": 15,
+        "policyFail": 5,
+        "queuePos": 4,
+        "startedAt": "10m ago",
+        "completedAt": null,
+        "dur": null,
+        "canCancel": true,
+        "canForceCancel": false
+      }
+    ],
+    "history": [
+      {
+        "id": "eval-200",
+        "flake": "infrastructure",
+        "commit": "575bc865",
+        "branch": "main",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 9,
+        "policyPass": 7,
+        "policyFail": 2,
+        "queuePos": null,
+        "startedAt": "1m ago",
+        "completedAt": "2m ago",
+        "dur": "64s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-201",
+        "flake": "web-services",
+        "commit": "6612b43d",
+        "branch": "staging",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 12,
+        "policyPass": 6,
+        "policyFail": 6,
+        "queuePos": null,
+        "startedAt": "8m ago",
+        "completedAt": "15m ago",
+        "dur": "31s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-202",
+        "flake": "edge-gateway",
+        "commit": "66d8a105",
+        "branch": "dev",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 15,
+        "policyPass": 8,
+        "policyFail": 7,
+        "queuePos": null,
+        "startedAt": "1h ago",
+        "completedAt": "1h ago",
+        "dur": "117s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-203",
+        "flake": "build-farm",
+        "commit": "769f9ecd",
+        "branch": "release/0.3",
+        "status": "failed",
+        "meta": {
+          "label": "Failed",
+          "color": "#f87171",
+          "cls": "chip-critical"
+        },
+        "systemCount": 18,
+        "policyPass": 11,
+        "policyFail": 7,
+        "queuePos": null,
+        "startedAt": "3h ago",
+        "completedAt": "3h ago",
+        "dur": "84s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-204",
+        "flake": "lab-nodes",
+        "commit": "76668b95",
+        "branch": "main",
+        "status": "cancelled",
+        "meta": {
+          "label": "Cancelled",
+          "color": "#6b7280",
+          "cls": "chip-unknown"
+        },
+        "systemCount": 21,
+        "policyPass": 13,
+        "policyFail": 8,
+        "queuePos": null,
+        "startedAt": "yesterday",
+        "completedAt": "8h ago",
+        "dur": "51s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-205",
+        "flake": "infrastructure",
+        "commit": "862d685d",
+        "branch": "staging",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 4,
+        "policyPass": 2,
+        "policyFail": 2,
+        "queuePos": null,
+        "startedAt": "1m ago",
+        "completedAt": "2m ago",
+        "dur": "18s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-206",
+        "flake": "web-services",
+        "commit": "86e35525",
+        "branch": "dev",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 7,
+        "policyPass": 5,
+        "policyFail": 2,
+        "queuePos": null,
+        "startedAt": "8m ago",
+        "completedAt": "15m ago",
+        "dur": "105s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-207",
+        "flake": "edge-gateway",
+        "commit": "85aa42ed",
+        "branch": "release/0.3",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 10,
+        "policyPass": 8,
+        "policyFail": 2,
+        "queuePos": null,
+        "startedAt": "1h ago",
+        "completedAt": "1h ago",
+        "dur": "71s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-208",
+        "flake": "build-farm",
+        "commit": "95613eb5",
+        "branch": "main",
+        "status": "failed",
+        "meta": {
+          "label": "Failed",
+          "color": "#f87171",
+          "cls": "chip-critical"
+        },
+        "systemCount": 13,
+        "policyPass": 11,
+        "policyFail": 2,
+        "queuePos": null,
+        "startedAt": "3h ago",
+        "completedAt": "3h ago",
+        "dur": "38s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-209",
+        "flake": "lab-nodes",
+        "commit": "95382b8d",
+        "branch": "staging",
+        "status": "cancelled",
+        "meta": {
+          "label": "Cancelled",
+          "color": "#6b7280",
+          "cls": "chip-unknown"
+        },
+        "systemCount": 16,
+        "policyPass": 8,
+        "policyFail": 8,
+        "queuePos": null,
+        "startedAt": "yesterday",
+        "completedAt": "8h ago",
+        "dur": "125s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-210",
+        "flake": "infrastructure",
+        "commit": "a5fe1846",
+        "branch": "dev",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 19,
+        "policyPass": 10,
+        "policyFail": 9,
+        "queuePos": null,
+        "startedAt": "1m ago",
+        "completedAt": "2m ago",
+        "dur": "92s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-211",
+        "flake": "web-services",
+        "commit": "a5b5051e",
+        "branch": "release/0.3",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 22,
+        "policyPass": 13,
+        "policyFail": 9,
+        "queuePos": null,
+        "startedAt": "8m ago",
+        "completedAt": "15m ago",
+        "dur": "58s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-212",
+        "flake": "edge-gateway",
+        "commit": "b57ce2d6",
+        "branch": "main",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 5,
+        "policyPass": 3,
+        "policyFail": 2,
+        "queuePos": null,
+        "startedAt": "1h ago",
+        "completedAt": "1h ago",
+        "dur": "25s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-213",
+        "flake": "build-farm",
+        "commit": "b433dfae",
+        "branch": "staging",
+        "status": "failed",
+        "meta": {
+          "label": "Failed",
+          "color": "#f87171",
+          "cls": "chip-critical"
+        },
+        "systemCount": 8,
+        "policyPass": 5,
+        "policyFail": 3,
+        "queuePos": null,
+        "startedAt": "3h ago",
+        "completedAt": "3h ago",
+        "dur": "112s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-214",
+        "flake": "lab-nodes",
+        "commit": "c409cc66",
+        "branch": "dev",
+        "status": "cancelled",
+        "meta": {
+          "label": "Cancelled",
+          "color": "#6b7280",
+          "cls": "chip-unknown"
+        },
+        "systemCount": 11,
+        "policyPass": 8,
+        "policyFail": 3,
+        "queuePos": null,
+        "startedAt": "yesterday",
+        "completedAt": "8h ago",
+        "dur": "79s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-215",
+        "flake": "infrastructure",
+        "commit": "c4c0b83e",
+        "branch": "release/0.3",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 14,
+        "policyPass": 11,
+        "policyFail": 3,
+        "queuePos": null,
+        "startedAt": "1m ago",
+        "completedAt": "2m ago",
+        "dur": "45s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-216",
+        "flake": "web-services",
+        "commit": "d487a506",
+        "branch": "main",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 17,
+        "policyPass": 14,
+        "policyFail": 3,
+        "queuePos": null,
+        "startedAt": "8m ago",
+        "completedAt": "15m ago",
+        "dur": "132s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-217",
+        "flake": "edge-gateway",
+        "commit": "d44d92ce",
+        "branch": "staging",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 20,
+        "policyPass": 10,
+        "policyFail": 10,
+        "queuePos": null,
+        "startedAt": "1h ago",
+        "completedAt": "1h ago",
+        "dur": "99s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-218",
+        "flake": "build-farm",
+        "commit": "d4048f96",
+        "branch": "dev",
+        "status": "failed",
+        "meta": {
+          "label": "Failed",
+          "color": "#f87171",
+          "cls": "chip-critical"
+        },
+        "systemCount": 3,
+        "policyPass": 1,
+        "policyFail": 2,
+        "queuePos": null,
+        "startedAt": "3h ago",
+        "completedAt": "3h ago",
+        "dur": "66s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-219",
+        "flake": "lab-nodes",
+        "commit": "e3db6c5e",
+        "branch": "release/0.3",
+        "status": "cancelled",
+        "meta": {
+          "label": "Cancelled",
+          "color": "#6b7280",
+          "cls": "chip-unknown"
+        },
+        "systemCount": 6,
+        "policyPass": 3,
+        "policyFail": 3,
+        "queuePos": null,
+        "startedAt": "yesterday",
+        "completedAt": "8h ago",
+        "dur": "33s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-220",
+        "flake": "infrastructure",
+        "commit": "e3925927",
+        "branch": "main",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 9,
+        "policyPass": 5,
+        "policyFail": 4,
+        "queuePos": null,
+        "startedAt": "1m ago",
+        "completedAt": "2m ago",
+        "dur": "119s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-221",
+        "flake": "web-services",
+        "commit": "f35845ef",
+        "branch": "staging",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 12,
+        "policyPass": 8,
+        "policyFail": 4,
+        "queuePos": null,
+        "startedAt": "8m ago",
+        "completedAt": "15m ago",
+        "dur": "86s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-222",
+        "flake": "edge-gateway",
+        "commit": "f31f32b7",
+        "branch": "dev",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 15,
+        "policyPass": 11,
+        "policyFail": 4,
+        "queuePos": null,
+        "startedAt": "1h ago",
+        "completedAt": "1h ago",
+        "dur": "53s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-223",
+        "flake": "build-farm",
+        "commit": "03d62f8f",
+        "branch": "release/0.3",
+        "status": "failed",
+        "meta": {
+          "label": "Failed",
+          "color": "#f87171",
+          "cls": "chip-critical"
+        },
+        "systemCount": 18,
+        "policyPass": 14,
+        "policyFail": 4,
+        "queuePos": null,
+        "startedAt": "3h ago",
+        "completedAt": "3h ago",
+        "dur": "20s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-224",
+        "flake": "lab-nodes",
+        "commit": "02ad1c47",
+        "branch": "main",
+        "status": "cancelled",
+        "meta": {
+          "label": "Cancelled",
+          "color": "#6b7280",
+          "cls": "chip-unknown"
+        },
+        "systemCount": 21,
+        "policyPass": 17,
+        "policyFail": 4,
+        "queuePos": null,
+        "startedAt": "yesterday",
+        "completedAt": "8h ago",
+        "dur": "106s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-225",
+        "flake": "infrastructure",
+        "commit": "1263091f",
+        "branch": "staging",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 4,
+        "policyPass": 3,
+        "policyFail": 1,
+        "queuePos": null,
+        "startedAt": "1m ago",
+        "completedAt": "2m ago",
+        "dur": "73s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-226",
+        "flake": "web-services",
+        "commit": "122ae6d7",
+        "branch": "dev",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 7,
+        "policyPass": 3,
+        "policyFail": 4,
+        "queuePos": null,
+        "startedAt": "8m ago",
+        "completedAt": "15m ago",
+        "dur": "40s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-227",
+        "flake": "edge-gateway",
+        "commit": "12e1d3af",
+        "branch": "release/0.3",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 10,
+        "policyPass": 5,
+        "policyFail": 5,
+        "queuePos": null,
+        "startedAt": "1h ago",
+        "completedAt": "1h ago",
+        "dur": "127s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-228",
+        "flake": "build-farm",
+        "commit": "22a8cf67",
+        "branch": "main",
+        "status": "failed",
+        "meta": {
+          "label": "Failed",
+          "color": "#f87171",
+          "cls": "chip-critical"
+        },
+        "systemCount": 13,
+        "policyPass": 8,
+        "policyFail": 5,
+        "queuePos": null,
+        "startedAt": "3h ago",
+        "completedAt": "3h ago",
+        "dur": "94s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-229",
+        "flake": "lab-nodes",
+        "commit": "226ebc3f",
+        "branch": "staging",
+        "status": "cancelled",
+        "meta": {
+          "label": "Cancelled",
+          "color": "#6b7280",
+          "cls": "chip-unknown"
+        },
+        "systemCount": 16,
+        "policyPass": 11,
+        "policyFail": 5,
+        "queuePos": null,
+        "startedAt": "yesterday",
+        "completedAt": "8h ago",
+        "dur": "60s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-230",
+        "flake": "infrastructure",
+        "commit": "3135a908",
+        "branch": "dev",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 19,
+        "policyPass": 14,
+        "policyFail": 5,
+        "queuePos": null,
+        "startedAt": "1m ago",
+        "completedAt": "2m ago",
+        "dur": "27s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-231",
+        "flake": "web-services",
+        "commit": "31fc96c0",
+        "branch": "release/0.3",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 22,
+        "policyPass": 17,
+        "policyFail": 5,
+        "queuePos": null,
+        "startedAt": "8m ago",
+        "completedAt": "15m ago",
+        "dur": "114s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-232",
+        "flake": "edge-gateway",
+        "commit": "41b28398",
+        "branch": "main",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 5,
+        "policyPass": 4,
+        "policyFail": 1,
+        "queuePos": null,
+        "startedAt": "1h ago",
+        "completedAt": "1h ago",
+        "dur": "81s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-233",
+        "flake": "build-farm",
+        "commit": "41796050",
+        "branch": "staging",
+        "status": "failed",
+        "meta": {
+          "label": "Failed",
+          "color": "#f87171",
+          "cls": "chip-critical"
+        },
+        "systemCount": 8,
+        "policyPass": 7,
+        "policyFail": 1,
+        "queuePos": null,
+        "startedAt": "3h ago",
+        "completedAt": "3h ago",
+        "dur": "47s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-234",
+        "flake": "lab-nodes",
+        "commit": "51305d28",
+        "branch": "dev",
+        "status": "cancelled",
+        "meta": {
+          "label": "Cancelled",
+          "color": "#6b7280",
+          "cls": "chip-unknown"
+        },
+        "systemCount": 11,
+        "policyPass": 5,
+        "policyFail": 6,
+        "queuePos": null,
+        "startedAt": "yesterday",
+        "completedAt": "8h ago",
+        "dur": "134s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-235",
+        "flake": "infrastructure",
+        "commit": "510749e0",
+        "branch": "release/0.3",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 14,
+        "policyPass": 8,
+        "policyFail": 6,
+        "queuePos": null,
+        "startedAt": "1m ago",
+        "completedAt": "2m ago",
+        "dur": "101s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-236",
+        "flake": "web-services",
+        "commit": "60cd36b8",
+        "branch": "main",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 17,
+        "policyPass": 10,
+        "policyFail": 7,
+        "queuePos": null,
+        "startedAt": "8m ago",
+        "completedAt": "15m ago",
+        "dur": "68s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-237",
+        "flake": "edge-gateway",
+        "commit": "60842380",
+        "branch": "staging",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 20,
+        "policyPass": 13,
+        "policyFail": 7,
+        "queuePos": null,
+        "startedAt": "1h ago",
+        "completedAt": "1h ago",
+        "dur": "35s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-238",
+        "flake": "build-farm",
+        "commit": "604b1048",
+        "branch": "dev",
+        "status": "failed",
+        "meta": {
+          "label": "Failed",
+          "color": "#f87171",
+          "cls": "chip-critical"
+        },
+        "systemCount": 3,
+        "policyPass": 2,
+        "policyFail": 1,
+        "queuePos": null,
+        "startedAt": "3h ago",
+        "completedAt": "3h ago",
+        "dur": "121s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-239",
+        "flake": "lab-nodes",
+        "commit": "70020d10",
+        "branch": "release/0.3",
+        "status": "cancelled",
+        "meta": {
+          "label": "Cancelled",
+          "color": "#6b7280",
+          "cls": "chip-unknown"
+        },
+        "systemCount": 6,
+        "policyPass": 4,
+        "policyFail": 2,
+        "queuePos": null,
+        "startedAt": "yesterday",
+        "completedAt": "8h ago",
+        "dur": "88s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-240",
+        "flake": "infrastructure",
+        "commit": "70d8ead9",
+        "branch": "main",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 9,
+        "policyPass": 7,
+        "policyFail": 2,
+        "queuePos": null,
+        "startedAt": "1m ago",
+        "completedAt": "2m ago",
+        "dur": "55s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-241",
+        "flake": "web-services",
+        "commit": "809fd6a1",
+        "branch": "staging",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 12,
+        "policyPass": 10,
+        "policyFail": 2,
+        "queuePos": null,
+        "startedAt": "8m ago",
+        "completedAt": "15m ago",
+        "dur": "22s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-242",
+        "flake": "edge-gateway",
+        "commit": "8f56c369",
+        "branch": "dev",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 15,
+        "policyPass": 8,
+        "policyFail": 7,
+        "queuePos": null,
+        "startedAt": "1h ago",
+        "completedAt": "1h ago",
+        "dur": "108s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-243",
+        "flake": "build-farm",
+        "commit": "9f1db031",
+        "branch": "release/0.3",
+        "status": "failed",
+        "meta": {
+          "label": "Failed",
+          "color": "#f87171",
+          "cls": "chip-critical"
+        },
+        "systemCount": 18,
+        "policyPass": 10,
+        "policyFail": 8,
+        "queuePos": null,
+        "startedAt": "3h ago",
+        "completedAt": "3h ago",
+        "dur": "75s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-244",
+        "flake": "lab-nodes",
+        "commit": "9fd3ad09",
+        "branch": "main",
+        "status": "cancelled",
+        "meta": {
+          "label": "Cancelled",
+          "color": "#6b7280",
+          "cls": "chip-unknown"
+        },
+        "systemCount": 21,
+        "policyPass": 13,
+        "policyFail": 8,
+        "queuePos": null,
+        "startedAt": "yesterday",
+        "completedAt": "8h ago",
+        "dur": "42s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-245",
+        "flake": "infrastructure",
+        "commit": "afaa9ac1",
+        "branch": "staging",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 4,
+        "policyPass": 2,
+        "policyFail": 2,
+        "queuePos": null,
+        "startedAt": "1m ago",
+        "completedAt": "2m ago",
+        "dur": "129s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-246",
+        "flake": "web-services",
+        "commit": "af618799",
+        "branch": "dev",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 7,
+        "policyPass": 5,
+        "policyFail": 2,
+        "queuePos": null,
+        "startedAt": "8m ago",
+        "completedAt": "15m ago",
+        "dur": "96s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-247",
+        "flake": "edge-gateway",
+        "commit": "af286451",
+        "branch": "release/0.3",
+        "status": "complete",
+        "meta": {
+          "label": "Complete",
+          "color": "#34d399",
+          "cls": "chip-healthy"
+        },
+        "systemCount": 10,
+        "policyPass": 7,
+        "policyFail": 3,
+        "queuePos": null,
+        "startedAt": "1h ago",
+        "completedAt": "1h ago",
+        "dur": "62s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-248",
+        "flake": "build-farm",
+        "commit": "beee5029",
+        "branch": "main",
+        "status": "failed",
+        "meta": {
+          "label": "Failed",
+          "color": "#f87171",
+          "cls": "chip-critical"
+        },
+        "systemCount": 13,
+        "policyPass": 10,
+        "policyFail": 3,
+        "queuePos": null,
+        "startedAt": "3h ago",
+        "completedAt": "3h ago",
+        "dur": "29s",
+        "canCancel": false,
+        "canForceCancel": false
+      },
+      {
+        "id": "eval-249",
+        "flake": "lab-nodes",
+        "commit": "bea54df1",
+        "branch": "staging",
+        "status": "cancelled",
+        "meta": {
+          "label": "Cancelled",
+          "color": "#6b7280",
+          "cls": "chip-unknown"
+        },
+        "systemCount": 16,
+        "policyPass": 14,
+        "policyFail": 2,
+        "queuePos": null,
+        "startedAt": "yesterday",
+        "completedAt": "8h ago",
+        "dur": "116s",
+        "canCancel": false,
+        "canForceCancel": false
+      }
+    ],
+    "stats": {
+      "active": 4,
+      "completed": 30,
+      "failed": 10,
+      "total": 54
+    }
+  },
+  "cves": {
+    "list": [
+      {
+        "id": "CVE-2026-62458",
+        "pkg": "nginx",
+        "severity": "critical",
+        "cvss": 9.6,
+        "title": "SQL injection in admin query endpoint",
+        "introducedIn": "1.24.0",
+        "fixedIn": "1.24.0",
+        "fix": "available",
+        "ageDays": 78,
+        "exploited": false,
+        "affected": [
+          "sys-8",
+          "sys-17",
+          "sys-26"
+        ],
+        "affectedCount": 3,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-62458",
+        "vector": "AV:N/AC:L/PR:N/UI:N/S:U",
+        "discoveredAt": "78d ago",
+        "acceptance": "accepted",
+        "justification": "Mitigated by network segmentation; service is internal-only.",
+        "justifiedBy": "security-team",
+        "justifiedAt": "30d ago"
+      },
+      {
+        "id": "CVE-2026-17599",
+        "pkg": "grafana",
+        "severity": "critical",
+        "cvss": 9.6,
+        "title": "Denial of service via memory exhaustion",
+        "introducedIn": "11.2.0",
+        "fixedIn": "11.4.0",
+        "fix": "available",
+        "ageDays": 35,
+        "exploited": false,
+        "affected": [
+          "sys-2",
+          "sys-11",
+          "sys-20"
+        ],
+        "affectedCount": 3,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-17599",
+        "vector": "AV:N/AC:L/PR:N/UI:N/S:U",
+        "discoveredAt": "35d ago",
+        "acceptance": "scheduled",
+        "justification": "Patch scheduled for maintenance window 1w from now.",
+        "justifiedBy": "ops-team",
+        "justifiedAt": "12d ago"
+      },
+      {
+        "id": "CVE-2026-12678",
+        "pkg": "linux-kernel",
+        "severity": "critical",
+        "cvss": 9.6,
+        "title": "Remote code execution via deserialization",
+        "introducedIn": "6.6.62",
+        "fixedIn": "6.6.70",
+        "fix": "pending",
+        "ageDays": 91,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-8",
+          "sys-9",
+          "sys-17",
+          "sys-18",
+          "sys-26",
+          "sys-27"
+        ],
+        "affectedCount": 7,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-12678",
+        "vector": "AV:N/AC:L/PR:N/UI:N/S:U",
+        "discoveredAt": "91d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2024-12301",
+        "pkg": "linux-kernel",
+        "severity": "critical",
+        "cvss": 9.5,
+        "title": "Heap corruption when parsing malformed packets",
+        "introducedIn": "6.6.62",
+        "fixedIn": "6.6.72",
+        "fix": "available",
+        "ageDays": 146,
+        "exploited": false,
+        "affected": [
+          "sys-5",
+          "sys-14",
+          "sys-23"
+        ],
+        "affectedCount": 3,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-12301",
+        "vector": "AV:N/AC:L/PR:N/UI:N/S:U",
+        "discoveredAt": "146d ago",
+        "acceptance": "accepted",
+        "justification": "Compensating control via WAF rule WAF-2025-447.",
+        "justifiedBy": "security-team",
+        "justifiedAt": "30d ago"
+      },
+      {
+        "id": "CVE-2024-67380",
+        "pkg": "glibc",
+        "severity": "critical",
+        "cvss": 9.5,
+        "title": "Server-Side Request Forgery in proxy module",
+        "introducedIn": "2.38",
+        "fixedIn": "2.39",
+        "fix": "available",
+        "ageDays": 22,
+        "exploited": false,
+        "affected": [
+          "sys-2",
+          "sys-3",
+          "sys-11",
+          "sys-12",
+          "sys-20",
+          "sys-21",
+          "sys-29",
+          "sys-30"
+        ],
+        "affectedCount": 8,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-67380",
+        "vector": "AV:N/AC:L/PR:N/UI:N/S:U",
+        "discoveredAt": "22d ago",
+        "acceptance": "accepted",
+        "justification": "Mitigated by network segmentation; service is internal-only.",
+        "justifiedBy": "mreyes",
+        "justifiedAt": "15d ago"
+      },
+      {
+        "id": "CVE-2024-17223",
+        "pkg": "grafana",
+        "severity": "critical",
+        "cvss": 9.4,
+        "title": "Out-of-bounds read in TLS handshake parser",
+        "introducedIn": "11.2.0",
+        "fixedIn": "11.4.0",
+        "fix": "available",
+        "ageDays": 91,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-8",
+          "sys-9",
+          "sys-18",
+          "sys-27"
+        ],
+        "affectedCount": 5,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-17223",
+        "vector": "AV:N/AC:L/PR:N/UI:N/S:U",
+        "discoveredAt": "91d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2024-22144",
+        "pkg": "python311",
+        "severity": "critical",
+        "cvss": 9.3,
+        "title": "Path traversal in archive extraction",
+        "introducedIn": "3.11.7",
+        "fixedIn": "3.11.7",
+        "fix": "available",
+        "ageDays": 35,
+        "exploited": false,
+        "affected": [
+          "sys-3",
+          "sys-12",
+          "sys-21",
+          "sys-22",
+          "sys-30",
+          "sys-31"
+        ],
+        "affectedCount": 6,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-22144",
+        "vector": "AV:N/AC:L/PR:N/UI:N/S:U",
+        "discoveredAt": "35d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2025-31987",
+        "pkg": "systemd",
+        "severity": "critical",
+        "cvss": 9.2,
+        "title": "Use-after-free in netfilter table cleanup",
+        "introducedIn": "254.10",
+        "fixedIn": "256.5",
+        "fix": "available",
+        "ageDays": 103,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-9",
+          "sys-18",
+          "sys-27"
+        ],
+        "affectedCount": 4,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2025-31987",
+        "vector": "AV:N/AC:L/PR:N/UI:N/S:U",
+        "discoveredAt": "103d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2025-27066",
+        "pkg": "postgresql",
+        "severity": "critical",
+        "cvss": 9.2,
+        "title": "Authentication bypass via header injection",
+        "introducedIn": "15.7",
+        "fixedIn": "16.2",
+        "fix": "available",
+        "ageDays": 159,
+        "exploited": false,
+        "affected": [
+          "sys-24",
+          "sys-33"
+        ],
+        "affectedCount": 2,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2025-27066",
+        "vector": "AV:N/AC:L/PR:N/UI:N/S:U",
+        "discoveredAt": "159d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2026-12489",
+        "pkg": "linux-kernel",
+        "severity": "high",
+        "cvss": 9,
+        "title": "Use-after-free in netfilter table cleanup",
+        "introducedIn": "6.6.62",
+        "fixedIn": "6.6.62",
+        "fix": "available",
+        "ageDays": 50,
+        "exploited": false,
+        "affected": [
+          "sys-7",
+          "sys-16",
+          "sys-25",
+          "sys-34"
+        ],
+        "affectedCount": 4,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-12489",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "50d ago",
+        "acceptance": "scheduled",
+        "justification": "Patch scheduled for maintenance window 1w from now.",
+        "justifiedBy": "ops-team",
+        "justifiedAt": "1d ago"
+      },
+      {
+        "id": "CVE-2024-42207",
+        "pkg": "linux-kernel",
+        "severity": "high",
+        "cvss": 8.9,
+        "title": "SQL injection in admin query endpoint",
+        "introducedIn": "6.6.62",
+        "fixedIn": "6.6.62",
+        "fix": "pending",
+        "ageDays": 148,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-1",
+          "sys-2",
+          "sys-9",
+          "sys-10",
+          "sys-11",
+          "sys-18",
+          "sys-19",
+          "sys-20",
+          "sys-27",
+          "sys-28",
+          "sys-29"
+        ],
+        "affectedCount": 12,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-42207",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "148d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2026-47505",
+        "pkg": "grafana",
+        "severity": "high",
+        "cvss": 8.9,
+        "title": "Improper bounds check in HTTP/2 frame parser",
+        "introducedIn": "11.2.0",
+        "fixedIn": "11.2.0",
+        "fix": "pending",
+        "ageDays": 15,
+        "exploited": false,
+        "affected": [
+          "sys-6",
+          "sys-15",
+          "sys-24",
+          "sys-33"
+        ],
+        "affectedCount": 4,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-47505",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "15d ago",
+        "acceptance": "scheduled",
+        "justification": "Patch scheduled for maintenance window 3w from now.",
+        "justifiedBy": "ops-team",
+        "justifiedAt": "3d ago"
+      },
+      {
+        "id": "CVE-2024-62270",
+        "pkg": "nginx",
+        "severity": "high",
+        "cvss": 8.5,
+        "title": "Stack-based buffer overflow in certificate validation",
+        "introducedIn": "1.24.0",
+        "fixedIn": "1.26.1",
+        "fix": "pending",
+        "ageDays": 6,
+        "exploited": false,
+        "affected": [
+          "sys-7",
+          "sys-16",
+          "sys-25",
+          "sys-34"
+        ],
+        "affectedCount": 4,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-62270",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "6d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2024-37286",
+        "pkg": "glibc",
+        "severity": "high",
+        "cvss": 8.4,
+        "title": "Integer overflow in compression handler",
+        "introducedIn": "2.38",
+        "fixedIn": "2.39",
+        "fix": "available",
+        "ageDays": 151,
+        "exploited": false,
+        "affected": [
+          "sys-6",
+          "sys-7",
+          "sys-8",
+          "sys-15",
+          "sys-16",
+          "sys-17",
+          "sys-24",
+          "sys-25",
+          "sys-26",
+          "sys-33",
+          "sys-34"
+        ],
+        "affectedCount": 11,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-37286",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "151d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2026-67568",
+        "pkg": "glibc",
+        "severity": "high",
+        "cvss": 8.4,
+        "title": "Authentication bypass via header injection",
+        "introducedIn": "2.38",
+        "fixedIn": "2.39",
+        "fix": "available",
+        "ageDays": 53,
+        "exploited": false,
+        "affected": [
+          "sys-4",
+          "sys-5",
+          "sys-13",
+          "sys-14",
+          "sys-22",
+          "sys-23",
+          "sys-31",
+          "sys-32"
+        ],
+        "affectedCount": 8,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-67568",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "53d ago",
+        "acceptance": "scheduled",
+        "justification": "Patch scheduled for maintenance window 1w from now.",
+        "justifiedBy": "ops-team",
+        "justifiedAt": "9d ago"
+      },
+      {
+        "id": "CVE-2025-67003",
+        "pkg": "curl",
+        "severity": "high",
+        "cvss": 8.3,
+        "title": "Improper bounds check in HTTP/2 frame parser",
+        "introducedIn": "8.4.0",
+        "fixedIn": "8.4.0",
+        "fix": "pending",
+        "ageDays": 68,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-8",
+          "sys-9",
+          "sys-17",
+          "sys-18",
+          "sys-26",
+          "sys-27"
+        ],
+        "affectedCount": 7,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2025-67003",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "68d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2026-42584",
+        "pkg": "linux-kernel",
+        "severity": "high",
+        "cvss": 8.3,
+        "title": "Privilege escalation through symlink race",
+        "introducedIn": "6.6.62",
+        "fixedIn": "6.6.72",
+        "fix": "available",
+        "ageDays": 18,
+        "exploited": false,
+        "affected": [
+          "sys-3",
+          "sys-4",
+          "sys-12",
+          "sys-13",
+          "sys-21",
+          "sys-22",
+          "sys-30",
+          "sys-31"
+        ],
+        "affectedCount": 8,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-42584",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "18d ago",
+        "acceptance": "scheduled",
+        "justification": "Patch scheduled for maintenance window 3w from now.",
+        "justifiedBy": "ops-team",
+        "justifiedAt": "11d ago"
+      },
+      {
+        "id": "CVE-2025-52050",
+        "pkg": "python311",
+        "severity": "high",
+        "cvss": 8,
+        "title": "Heap corruption when parsing malformed packets",
+        "introducedIn": "3.11.7",
+        "fixedIn": "3.11.9",
+        "fix": "available",
+        "ageDays": 142,
+        "exploited": false,
+        "affected": [
+          "sys-6",
+          "sys-15"
+        ],
+        "affectedCount": 2,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2025-52050",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "142d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2024-57348",
+        "pkg": "git",
+        "severity": "high",
+        "cvss": 8,
+        "title": "Denial of service via memory exhaustion",
+        "introducedIn": "2.42.1",
+        "fixedIn": "2.45.0",
+        "fix": "available",
+        "ageDays": 9,
+        "exploited": false,
+        "affected": [
+          "sys-3",
+          "sys-4",
+          "sys-12",
+          "sys-13",
+          "sys-22",
+          "sys-31"
+        ],
+        "affectedCount": 6,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-57348",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "9d ago",
+        "acceptance": "accepted",
+        "justification": "False positive — upstream backport already applied.",
+        "justifiedBy": "mreyes",
+        "justifiedAt": "3d ago"
+      },
+      {
+        "id": "CVE-2026-62646",
+        "pkg": "nginx",
+        "severity": "high",
+        "cvss": 7.9,
+        "title": "Path traversal in archive extraction",
+        "introducedIn": "1.24.0",
+        "fixedIn": "1.27.4",
+        "fix": "available",
+        "ageDays": 56,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-1",
+          "sys-2",
+          "sys-9",
+          "sys-10",
+          "sys-11",
+          "sys-19",
+          "sys-20",
+          "sys-28",
+          "sys-29",
+          "sys-30"
+        ],
+        "affectedCount": 11,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-62646",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "56d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2024-32364",
+        "pkg": "nginx",
+        "severity": "high",
+        "cvss": 7.8,
+        "title": "Information disclosure via timing side-channel",
+        "introducedIn": "1.24.0",
+        "fixedIn": "1.27.1",
+        "fix": "available",
+        "ageDays": 154,
+        "exploited": false,
+        "affected": [
+          "sys-3",
+          "sys-12",
+          "sys-21",
+          "sys-30"
+        ],
+        "affectedCount": 4,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-32364",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "154d ago",
+        "acceptance": "accepted",
+        "justification": "Vulnerable code path not reachable in this deployment.",
+        "justifiedBy": "mreyes",
+        "justifiedAt": "24d ago"
+      },
+      {
+        "id": "CVE-2026-37662",
+        "pkg": "glibc",
+        "severity": "high",
+        "cvss": 7.8,
+        "title": "Race condition in shared memory access",
+        "introducedIn": "2.38",
+        "fixedIn": "2.40",
+        "fix": "available",
+        "ageDays": 21,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-1",
+          "sys-9",
+          "sys-10",
+          "sys-18",
+          "sys-19",
+          "sys-27",
+          "sys-28",
+          "sys-29"
+        ],
+        "affectedCount": 9,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-37662",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "21d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2025-47129",
+        "pkg": "vault",
+        "severity": "high",
+        "cvss": 7.5,
+        "title": "Server-Side Request Forgery in proxy module",
+        "introducedIn": "1.16.2",
+        "fixedIn": "1.18.3",
+        "fix": "available",
+        "ageDays": 145,
+        "exploited": false,
+        "affected": [
+          "sys-3",
+          "sys-4",
+          "sys-12",
+          "sys-13",
+          "sys-21",
+          "sys-22",
+          "sys-30",
+          "sys-31"
+        ],
+        "affectedCount": 8,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2025-47129",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "145d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2026-22709",
+        "pkg": "redis",
+        "severity": "high",
+        "cvss": 7.5,
+        "title": "SQL injection in admin query endpoint",
+        "introducedIn": "7.2.4",
+        "fixedIn": "7.2.4",
+        "fix": "pending",
+        "ageDays": 95,
+        "exploited": false,
+        "affected": [
+          "sys-7",
+          "sys-16",
+          "sys-25",
+          "sys-34"
+        ],
+        "affectedCount": 4,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-22709",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "95d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2026-52427",
+        "pkg": "redis",
+        "severity": "high",
+        "cvss": 7.4,
+        "title": "Remote code execution via deserialization",
+        "introducedIn": "7.2.4",
+        "fixedIn": "7.4.0",
+        "fix": "available",
+        "ageDays": 12,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-1",
+          "sys-2",
+          "sys-9",
+          "sys-10",
+          "sys-11",
+          "sys-18",
+          "sys-19",
+          "sys-20",
+          "sys-27",
+          "sys-28",
+          "sys-29"
+        ],
+        "affectedCount": 12,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-52427",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "12d ago",
+        "acceptance": "accepted",
+        "justification": "False positive — upstream backport already applied.",
+        "justifiedBy": "jpark",
+        "justifiedAt": "18d ago"
+      },
+      {
+        "id": "CVE-2026-27442",
+        "pkg": "git",
+        "severity": "high",
+        "cvss": 7.3,
+        "title": "Cross-site scripting in error template",
+        "introducedIn": "2.42.1",
+        "fixedIn": "2.42.1",
+        "fix": "pending",
+        "ageDays": 157,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-1",
+          "sys-9",
+          "sys-10",
+          "sys-18",
+          "sys-19",
+          "sys-27",
+          "sys-28"
+        ],
+        "affectedCount": 8,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-27442",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "157d ago",
+        "acceptance": "accepted",
+        "justification": "Vulnerable code path not reachable in this deployment.",
+        "justifiedBy": "security-team",
+        "justifiedAt": "9d ago"
+      },
+      {
+        "id": "CVE-2025-63358",
+        "pkg": "systemd",
+        "severity": "medium",
+        "cvss": 6.8,
+        "title": "Remote code execution via deserialization",
+        "introducedIn": "254.10",
+        "fixedIn": "256.7",
+        "fix": "pending",
+        "ageDays": 52,
+        "exploited": false,
+        "affected": [
+          "sys-1",
+          "sys-2",
+          "sys-3",
+          "sys-10",
+          "sys-11",
+          "sys-12",
+          "sys-19",
+          "sys-20",
+          "sys-21",
+          "sys-29",
+          "sys-30"
+        ],
+        "affectedCount": 11,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2025-63358",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "52d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2026-62432",
+        "pkg": "postgresql",
+        "severity": "medium",
+        "cvss": 6.7,
+        "title": "Race condition in shared memory access",
+        "introducedIn": "15.7",
+        "fixedIn": "15.7",
+        "fix": "available",
+        "ageDays": 55,
+        "exploited": false,
+        "affected": [
+          "sys-2",
+          "sys-3",
+          "sys-4",
+          "sys-11",
+          "sys-12",
+          "sys-13",
+          "sys-20",
+          "sys-21",
+          "sys-22",
+          "sys-29",
+          "sys-30",
+          "sys-31"
+        ],
+        "affectedCount": 12,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-62432",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "55d ago",
+        "acceptance": "accepted",
+        "justification": "Risk accepted by AO until 2026-08-30 per CR-2026-118.",
+        "justifiedBy": "security-team",
+        "justifiedAt": "2d ago"
+      },
+      {
+        "id": "CVE-2024-17251",
+        "pkg": "grafana",
+        "severity": "medium",
+        "cvss": 6.7,
+        "title": "Race condition in shared memory access",
+        "introducedIn": "11.2.0",
+        "fixedIn": "11.4.0",
+        "fix": "pending",
+        "ageDays": 3,
+        "exploited": false,
+        "affected": [
+          "sys-1",
+          "sys-2",
+          "sys-10",
+          "sys-11",
+          "sys-12",
+          "sys-19",
+          "sys-20",
+          "sys-21",
+          "sys-28",
+          "sys-29",
+          "sys-30"
+        ],
+        "affectedCount": 11,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-17251",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "3d ago",
+        "acceptance": "scheduled",
+        "justification": "Patch scheduled for maintenance window 3w from now.",
+        "justifiedBy": "ops-team",
+        "justifiedAt": "13d ago"
+      },
+      {
+        "id": "CVE-2025-16325",
+        "pkg": "linux-kernel",
+        "severity": "medium",
+        "cvss": 6.5,
+        "title": "Path traversal in archive extraction",
+        "introducedIn": "6.6.62",
+        "fixedIn": "6.6.62",
+        "fix": "pending",
+        "ageDays": 6,
+        "exploited": false,
+        "affected": [
+          "sys-1",
+          "sys-2",
+          "sys-3",
+          "sys-4",
+          "sys-11",
+          "sys-12",
+          "sys-13",
+          "sys-20",
+          "sys-21",
+          "sys-22",
+          "sys-29",
+          "sys-30",
+          "sys-31"
+        ],
+        "affectedCount": 13,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2025-16325",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "6d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2024-30217",
+        "pkg": "git",
+        "severity": "medium",
+        "cvss": 6.4,
+        "title": "Server-Side Request Forgery in proxy module",
+        "introducedIn": "2.42.1",
+        "fixedIn": "2.42.1",
+        "fix": "pending",
+        "ageDays": 138,
+        "exploited": false,
+        "affected": [
+          "sys-1",
+          "sys-2",
+          "sys-3",
+          "sys-4",
+          "sys-10",
+          "sys-11",
+          "sys-12",
+          "sys-13",
+          "sys-19",
+          "sys-20",
+          "sys-21",
+          "sys-22",
+          "sys-28",
+          "sys-29",
+          "sys-30",
+          "sys-31"
+        ],
+        "affectedCount": 16,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-30217",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "138d ago",
+        "acceptance": "scheduled",
+        "justification": "Patch scheduled for maintenance window 1w from now.",
+        "justifiedBy": "ops-team",
+        "justifiedAt": "10d ago"
+      },
+      {
+        "id": "CVE-2026-29291",
+        "pkg": "redis",
+        "severity": "medium",
+        "cvss": 6.2,
+        "title": "Information disclosure via timing side-channel",
+        "introducedIn": "7.2.4",
+        "fixedIn": "7.4.0",
+        "fix": "available",
+        "ageDays": 141,
+        "exploited": false,
+        "affected": [
+          "sys-2",
+          "sys-3",
+          "sys-4",
+          "sys-5",
+          "sys-11",
+          "sys-12",
+          "sys-13",
+          "sys-14",
+          "sys-20",
+          "sys-21",
+          "sys-22",
+          "sys-23",
+          "sys-29",
+          "sys-30",
+          "sys-31",
+          "sys-32",
+          "sys-33"
+        ],
+        "affectedCount": 17,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-29291",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "141d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2024-59653",
+        "pkg": "openssl",
+        "severity": "medium",
+        "cvss": 6.1,
+        "title": "Information disclosure via timing side-channel",
+        "introducedIn": "3.0.11",
+        "fixedIn": "3.2.1",
+        "fix": "available",
+        "ageDays": 65,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-4",
+          "sys-5",
+          "sys-6",
+          "sys-7",
+          "sys-8",
+          "sys-9",
+          "sys-13",
+          "sys-14",
+          "sys-15",
+          "sys-16",
+          "sys-17",
+          "sys-18",
+          "sys-22",
+          "sys-23",
+          "sys-24",
+          "sys-25",
+          "sys-26",
+          "sys-27",
+          "sys-31",
+          "sys-32",
+          "sys-33",
+          "sys-34"
+        ],
+        "affectedCount": 23,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-59653",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "65d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2025-58727",
+        "pkg": "curl",
+        "severity": "medium",
+        "cvss": 5.9,
+        "title": "Denial of service via memory exhaustion",
+        "introducedIn": "8.4.0",
+        "fixedIn": "8.4.0",
+        "fix": "pending",
+        "ageDays": 68,
+        "exploited": false,
+        "affected": [
+          "sys-4",
+          "sys-5",
+          "sys-6",
+          "sys-14",
+          "sys-15",
+          "sys-23",
+          "sys-24",
+          "sys-32",
+          "sys-33"
+        ],
+        "affectedCount": 9,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2025-58727",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "68d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2026-57801",
+        "pkg": "systemd",
+        "severity": "medium",
+        "cvss": 5.7,
+        "title": "Privilege escalation through symlink race",
+        "introducedIn": "254.10",
+        "fixedIn": "256.5",
+        "fix": "pending",
+        "ageDays": 71,
+        "exploited": false,
+        "affected": [
+          "sys-5",
+          "sys-6",
+          "sys-7",
+          "sys-14",
+          "sys-15",
+          "sys-16",
+          "sys-23",
+          "sys-24",
+          "sys-25",
+          "sys-32",
+          "sys-33",
+          "sys-34"
+        ],
+        "affectedCount": 12,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-57801",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "71d ago",
+        "acceptance": "scheduled",
+        "justification": "Patch scheduled for maintenance window 1w from now.",
+        "justifiedBy": "ops-team",
+        "justifiedAt": "3d ago"
+      },
+      {
+        "id": "CVE-2024-12620",
+        "pkg": "redis",
+        "severity": "medium",
+        "cvss": 5.7,
+        "title": "Privilege escalation through symlink race",
+        "introducedIn": "7.2.4",
+        "fixedIn": "7.2.4",
+        "fix": "available",
+        "ageDays": 19,
+        "exploited": false,
+        "affected": [
+          "sys-4",
+          "sys-5",
+          "sys-6",
+          "sys-13",
+          "sys-14",
+          "sys-15",
+          "sys-22",
+          "sys-23",
+          "sys-24",
+          "sys-31",
+          "sys-32",
+          "sys-33"
+        ],
+        "affectedCount": 12,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-12620",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "19d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2025-11694",
+        "pkg": "grafana",
+        "severity": "medium",
+        "cvss": 5.6,
+        "title": "Authentication bypass via header injection",
+        "introducedIn": "11.2.0",
+        "fixedIn": "11.4.0",
+        "fix": "pending",
+        "ageDays": 23,
+        "exploited": false,
+        "affected": [
+          "sys-5",
+          "sys-6",
+          "sys-7",
+          "sys-14",
+          "sys-15",
+          "sys-16",
+          "sys-23",
+          "sys-24",
+          "sys-25",
+          "sys-32",
+          "sys-33",
+          "sys-34"
+        ],
+        "affectedCount": 12,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2025-11694",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "23d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2024-55022",
+        "pkg": "vault",
+        "severity": "medium",
+        "cvss": 5.1,
+        "title": "Integer overflow in compression handler",
+        "introducedIn": "1.16.2",
+        "fixedIn": "1.16.2",
+        "fix": "available",
+        "ageDays": 81,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-1",
+          "sys-2",
+          "sys-3",
+          "sys-7",
+          "sys-8",
+          "sys-9",
+          "sys-10",
+          "sys-11",
+          "sys-12",
+          "sys-16",
+          "sys-17",
+          "sys-18",
+          "sys-19",
+          "sys-20",
+          "sys-21",
+          "sys-25",
+          "sys-26",
+          "sys-27",
+          "sys-28",
+          "sys-29",
+          "sys-30",
+          "sys-34"
+        ],
+        "affectedCount": 23,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-55022",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "81d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2025-54096",
+        "pkg": "openssl",
+        "severity": "medium",
+        "cvss": 4.9,
+        "title": "Stack-based buffer overflow in certificate validation",
+        "introducedIn": "3.0.11",
+        "fixedIn": "3.0.13",
+        "fix": "available",
+        "ageDays": 84,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-8",
+          "sys-9",
+          "sys-17",
+          "sys-18",
+          "sys-26",
+          "sys-27"
+        ],
+        "affectedCount": 7,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2025-54096",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "84d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2025-20956",
+        "pkg": "glibc",
+        "severity": "medium",
+        "cvss": 4.5,
+        "title": "Out-of-bounds read in TLS handshake parser",
+        "introducedIn": "2.38",
+        "fixedIn": "2.40",
+        "fix": "available",
+        "ageDays": 170,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-1",
+          "sys-7",
+          "sys-8",
+          "sys-9",
+          "sys-10",
+          "sys-16",
+          "sys-17",
+          "sys-18",
+          "sys-19",
+          "sys-26",
+          "sys-27",
+          "sys-28"
+        ],
+        "affectedCount": 13,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2025-20956",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "170d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2025-33922",
+        "pkg": "grafana",
+        "severity": "medium",
+        "cvss": 4.1,
+        "title": "Cross-site scripting in error template",
+        "introducedIn": "11.2.0",
+        "fixedIn": "11.2.0",
+        "fix": "available",
+        "ageDays": 125,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-1",
+          "sys-2",
+          "sys-8",
+          "sys-9",
+          "sys-10",
+          "sys-11",
+          "sys-17",
+          "sys-18",
+          "sys-19",
+          "sys-20",
+          "sys-26",
+          "sys-27",
+          "sys-28",
+          "sys-29"
+        ],
+        "affectedCount": 15,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2025-33922",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "125d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2026-64284",
+        "pkg": "curl",
+        "severity": "medium",
+        "cvss": 4,
+        "title": "Cross-site scripting in error template",
+        "introducedIn": "8.4.0",
+        "fixedIn": "8.4.0",
+        "fix": "pending",
+        "ageDays": 49,
+        "exploited": false,
+        "affected": [
+          "sys-1",
+          "sys-10",
+          "sys-19",
+          "sys-28"
+        ],
+        "affectedCount": 4,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-64284",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "49d ago",
+        "acceptance": "scheduled",
+        "justification": "Patch scheduled for maintenance window 4w from now.",
+        "justifiedBy": "ops-team",
+        "justifiedAt": "2d ago"
+      },
+      {
+        "id": "CVE-2025-25586",
+        "pkg": "nginx",
+        "severity": "low",
+        "cvss": 2.4,
+        "title": "Heap corruption when parsing malformed packets",
+        "introducedIn": "1.24.0",
+        "fixedIn": "1.26.1",
+        "fix": "pending",
+        "ageDays": 154,
+        "exploited": false,
+        "affected": [
+          "sys-4",
+          "sys-5",
+          "sys-6",
+          "sys-7",
+          "sys-8",
+          "sys-13",
+          "sys-14",
+          "sys-15",
+          "sys-16",
+          "sys-17",
+          "sys-22",
+          "sys-23",
+          "sys-24",
+          "sys-25",
+          "sys-26",
+          "sys-31",
+          "sys-32",
+          "sys-33",
+          "sys-34"
+        ],
+        "affectedCount": 19,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2025-25586",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "154d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2026-24660",
+        "pkg": "git",
+        "severity": "low",
+        "cvss": 2.2,
+        "title": "Integer overflow in compression handler",
+        "introducedIn": "2.42.1",
+        "fixedIn": "2.47.1",
+        "fix": "pending",
+        "ageDays": 157,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-5",
+          "sys-6",
+          "sys-7",
+          "sys-8",
+          "sys-9",
+          "sys-10",
+          "sys-14",
+          "sys-15",
+          "sys-16",
+          "sys-17",
+          "sys-18",
+          "sys-19",
+          "sys-23",
+          "sys-24",
+          "sys-25",
+          "sys-26",
+          "sys-27",
+          "sys-28",
+          "sys-32",
+          "sys-33",
+          "sys-34"
+        ],
+        "affectedCount": 22,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-24660",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "157d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2024-23734",
+        "pkg": "redis",
+        "severity": "low",
+        "cvss": 2,
+        "title": "Stack-based buffer overflow in certificate validation",
+        "introducedIn": "7.2.4",
+        "fixedIn": "7.2.4",
+        "fix": "pending",
+        "ageDays": 160,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-1",
+          "sys-2",
+          "sys-5",
+          "sys-6",
+          "sys-7",
+          "sys-8",
+          "sys-9",
+          "sys-10",
+          "sys-11",
+          "sys-15",
+          "sys-16",
+          "sys-17",
+          "sys-18",
+          "sys-19",
+          "sys-20",
+          "sys-24",
+          "sys-25",
+          "sys-26",
+          "sys-27",
+          "sys-28",
+          "sys-29",
+          "sys-33",
+          "sys-34"
+        ],
+        "affectedCount": 24,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-23734",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "160d ago",
+        "acceptance": "scheduled",
+        "justification": "Patch scheduled for maintenance window 2w from now.",
+        "justifiedBy": "ops-team",
+        "justifiedAt": "12d ago"
+      },
+      {
+        "id": "CVE-2024-67989",
+        "pkg": "git",
+        "severity": "low",
+        "cvss": 1.8,
+        "title": "Improper bounds check in HTTP/2 frame parser",
+        "introducedIn": "2.42.1",
+        "fixedIn": "2.45.0",
+        "fix": "available",
+        "ageDays": 36,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-1",
+          "sys-7",
+          "sys-8",
+          "sys-9",
+          "sys-10",
+          "sys-16",
+          "sys-17",
+          "sys-18",
+          "sys-19",
+          "sys-25",
+          "sys-26",
+          "sys-27",
+          "sys-28",
+          "sys-34"
+        ],
+        "affectedCount": 15,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2024-67989",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "36d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2026-67063",
+        "pkg": "redis",
+        "severity": "low",
+        "cvss": 1.6,
+        "title": "Use-after-free in netfilter table cleanup",
+        "introducedIn": "7.2.4",
+        "fixedIn": "7.4.0",
+        "fix": "available",
+        "ageDays": 39,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-1",
+          "sys-2",
+          "sys-8",
+          "sys-9",
+          "sys-10",
+          "sys-11",
+          "sys-17",
+          "sys-18",
+          "sys-19",
+          "sys-20",
+          "sys-26",
+          "sys-27",
+          "sys-28",
+          "sys-29"
+        ],
+        "affectedCount": 15,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-67063",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "39d ago",
+        "acceptance": "outstanding",
+        "justification": null,
+        "justifiedBy": null,
+        "justifiedAt": null
+      },
+      {
+        "id": "CVE-2026-51318",
+        "pkg": "postgresql",
+        "severity": "low",
+        "cvss": 1.4,
+        "title": "Out-of-bounds read in TLS handshake parser",
+        "introducedIn": "15.7",
+        "fixedIn": "16.4",
+        "fix": "pending",
+        "ageDays": 94,
+        "exploited": false,
+        "affected": [
+          "sys-0",
+          "sys-1",
+          "sys-2",
+          "sys-3",
+          "sys-4",
+          "sys-5",
+          "sys-6",
+          "sys-10",
+          "sys-11",
+          "sys-12",
+          "sys-13",
+          "sys-14",
+          "sys-15",
+          "sys-19",
+          "sys-20",
+          "sys-21",
+          "sys-22",
+          "sys-23",
+          "sys-24",
+          "sys-28",
+          "sys-29",
+          "sys-30",
+          "sys-31",
+          "sys-32",
+          "sys-33"
+        ],
+        "affectedCount": 25,
+        "advisoryUrl": "https://nvd.nist.gov/vuln/detail/CVE-2026-51318",
+        "vector": "AV:N/AC:L/PR:L/UI:N/S:U",
+        "discoveredAt": "94d ago",
+        "acceptance": "scheduled",
+        "justification": "Patch scheduled for maintenance window 2w from now.",
+        "justifiedBy": "ops-team",
+        "justifiedAt": "5d ago"
+      }
+    ],
+    "stats": {
+      "total": 48,
+      "critical": 9,
+      "high": 17,
+      "medium": 16,
+      "low": 6,
+      "exploited": 0,
+      "fixable": 29,
+      "newToday": 0,
+      "systemsAffected": 35,
+      "outstanding": 29,
+      "accepted": 8,
+      "scheduled": 11
+    },
+    "insights": {
+      "byEnv": {
+        "production": [
+          {
+            "sys": {
+              "id": "sys-0",
+              "hostname": "atlas-01",
+              "fqdn": "atlas-01.production.cf.internal",
+              "environment": "production",
+              "flake": "infrastructure",
+              "branch": "main",
+              "commit": "84274a8a",
+              "commitMessage": "bump nixpkgs to 24.11",
+              "health": "healthy",
+              "status": "Healthy",
+              "statusColor": "#34d399",
+              "statusChip": "chip-healthy",
+              "deploymentPolicy": "pinned",
+              "deploymentState": "up-to-date",
+              "lastHeartbeat": "4m ago",
+              "heartbeatAge": 4,
+              "heartbeatIntervalSec": 120,
+              "heartbeatNextInSec": -210,
+              "generation": 160,
+              "nixosVersion": "24.05.20260218",
+              "kernel": "linux-6.1.115",
+              "storePath": "/nix/store/665a74a7a948081f-nixos-system-atlas-01-24.11.20254091",
+              "targetStorePath": null,
+              "uptime": "32d 22h",
+              "cpu": "Graviton3",
+              "memGb": 256,
+              "ipv4": "10.0.34.165",
+              "ipv6": "fd42:d4:f433::17",
+              "reachability": "direct",
+              "cves": {
+                "critical": 0,
+                "high": 2,
+                "medium": 13,
+                "low": 18,
+                "total": 33
+              },
+              "tags": [
+                "stig-enforced"
+              ],
+              "stig": 28,
+              "events": [
+                {
+                  "at": "6m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "1h ago",
+                  "title": "Deploy succeeded",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "9h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "21h ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "4d ago",
+                  "title": "Generation 164 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 3,
+              "high": 6,
+              "medium": 5,
+              "low": 5,
+              "total": 19,
+              "fixable": 12,
+              "exploited": 0
+            },
+            "score": 365
+          },
+          {
+            "sys": {
+              "id": "sys-9",
+              "hostname": "gaia-web-04",
+              "fqdn": "gaia-web-04.production.cf.internal",
+              "environment": "production",
+              "flake": "web-services",
+              "branch": "main",
+              "commit": "74db60b3",
+              "commitMessage": "feat: enable sops-nix for secrets",
+              "health": "healthy",
+              "status": "Healthy",
+              "statusColor": "#34d399",
+              "statusChip": "chip-healthy",
+              "deploymentPolicy": "manual",
+              "deploymentState": "up-to-date",
+              "lastHeartbeat": "3m ago",
+              "heartbeatAge": 3,
+              "heartbeatIntervalSec": 90,
+              "heartbeatNextInSec": -99,
+              "generation": 71,
+              "nixosVersion": "24.11.20260320",
+              "kernel": "linux-6.6.70",
+              "storePath": "/nix/store/3164cae318db5643-nixos-system-gaia-web-04-24.11.20258434",
+              "targetStorePath": null,
+              "uptime": "7d 6h",
+              "cpu": "EPYC 7443P",
+              "memGb": 32,
+              "ipv4": "10.3.72.69",
+              "ipv6": "fd42:a1:c6ea::7",
+              "reachability": "direct",
+              "cves": {
+                "critical": 0,
+                "high": 0,
+                "medium": 5,
+                "low": 28,
+                "total": 33
+              },
+              "tags": [
+                "stig-enforced"
+              ],
+              "stig": 30,
+              "events": [
+                {
+                  "at": "5m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "39m ago",
+                  "title": "Deploy succeeded",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "9h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "5d ago",
+                  "title": "Generation 165 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 3,
+              "high": 6,
+              "medium": 5,
+              "low": 4,
+              "total": 18,
+              "fixable": 12,
+              "exploited": 0
+            },
+            "score": 365
+          },
+          {
+            "sys": {
+              "id": "sys-8",
+              "hostname": "gaia-web-03",
+              "fqdn": "gaia-web-03.production.cf.internal",
+              "environment": "production",
+              "flake": "web-services",
+              "branch": "main",
+              "commit": "ed626e37",
+              "commitMessage": "add grafana exporter to host",
+              "health": "critical",
+              "status": "Critical",
+              "statusColor": "#f87171",
+              "statusChip": "chip-critical",
+              "deploymentPolicy": "pinned",
+              "deploymentState": "failed",
+              "lastHeartbeat": "4m ago",
+              "heartbeatAge": 4,
+              "heartbeatIntervalSec": 120,
+              "heartbeatNextInSec": -196,
+              "generation": 98,
+              "nixosVersion": "24.11.20260320",
+              "kernel": "linux-6.6.72",
+              "storePath": "/nix/store/b5c74b815cfcd127-nixos-system-gaia-web-03-24.11.20251135",
+              "targetStorePath": null,
+              "uptime": "35d 6h",
+              "cpu": "Xeon E-2336",
+              "memGb": 32,
+              "ipv4": "10.0.252.152",
+              "ipv6": "fd42:a1:a72a::19",
+              "reachability": "pull",
+              "cves": {
+                "critical": 9,
+                "high": 14,
+                "medium": 14,
+                "low": 0,
+                "total": 37
+              },
+              "tags": [
+                "stig-enforced"
+              ],
+              "stig": 30,
+              "events": [
+                {
+                  "at": "6m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "36m ago",
+                  "title": "Deploy failed",
+                  "color": "#f87171"
+                },
+                {
+                  "at": "10h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "2d ago",
+                  "title": "Generation 103 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 3,
+              "high": 2,
+              "medium": 5,
+              "low": 5,
+              "total": 15,
+              "fixable": 10,
+              "exploited": 0
+            },
+            "score": 325
+          },
+          {
+            "sys": {
+              "id": "sys-3",
+              "hostname": "hydra-01",
+              "fqdn": "hydra-01.production.cf.internal",
+              "environment": "production",
+              "flake": "build-farm",
+              "branch": "main",
+              "commit": "e11273e8",
+              "commitMessage": "harden sshd: disable password auth",
+              "health": "healthy",
+              "status": "Healthy",
+              "statusColor": "#34d399",
+              "statusChip": "chip-healthy",
+              "deploymentPolicy": "manual",
+              "deploymentState": "up-to-date",
+              "lastHeartbeat": "2m ago",
+              "heartbeatAge": 2,
+              "heartbeatIntervalSec": 90,
+              "heartbeatNextInSec": -119,
+              "generation": 81,
+              "nixosVersion": "24.11.20260320",
+              "kernel": "linux-6.1.115",
+              "storePath": "/nix/store/d9726ae5414d7ae9-nixos-system-hydra-01-24.11.20252362",
+              "targetStorePath": null,
+              "uptime": "7d 2h",
+              "cpu": "Graviton3",
+              "memGb": 64,
+              "ipv4": "10.2.207.228",
+              "ipv6": "fd42:c3:39cb::48",
+              "reachability": "pull",
+              "cves": {
+                "critical": 0,
+                "high": 4,
+                "medium": 17,
+                "low": 1,
+                "total": 22
+              },
+              "tags": [
+                "builder",
+                "stig-enforced"
+              ],
+              "stig": 29,
+              "events": [
+                {
+                  "at": "4m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "52m ago",
+                  "title": "Deploy succeeded",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "9h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "4d ago",
+                  "title": "Generation 175 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 2,
+              "high": 4,
+              "medium": 6,
+              "low": 1,
+              "total": 13,
+              "fixable": 9,
+              "exploited": 0
+            },
+            "score": 246
+          }
+        ],
+        "dev": [
+          {
+            "sys": {
+              "id": "sys-18",
+              "hostname": "dev-node-02",
+              "fqdn": "dev-node-02.dev.cf.internal",
+              "environment": "dev",
+              "flake": "infrastructure",
+              "branch": "dev",
+              "commit": "f7b4e01b",
+              "commitMessage": "stig: enforce audit rules for sudo",
+              "health": "healthy",
+              "status": "Healthy",
+              "statusColor": "#34d399",
+              "statusChip": "chip-healthy",
+              "deploymentPolicy": "manual",
+              "deploymentState": "up-to-date",
+              "lastHeartbeat": "just now",
+              "heartbeatAge": 0,
+              "heartbeatIntervalSec": 120,
+              "heartbeatNextInSec": 40,
+              "generation": 96,
+              "nixosVersion": "24.05.20260218",
+              "kernel": "linux-6.6.72",
+              "storePath": "/nix/store/fda4082038ed824c-nixos-system-dev-node-02-24.11.20260308",
+              "targetStorePath": null,
+              "uptime": "14d 3h",
+              "cpu": "Xeon E-2336",
+              "memGb": 32,
+              "ipv4": "10.2.12.106",
+              "ipv6": "fd42:b2:7e5d::33",
+              "reachability": "pull",
+              "cves": {
+                "critical": 1,
+                "high": 1,
+                "medium": 15,
+                "low": 20,
+                "total": 37
+              },
+              "tags": [],
+              "stig": 21,
+              "events": [
+                {
+                  "at": "2m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "59m ago",
+                  "title": "Deploy succeeded",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "7h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "3d ago",
+                  "title": "Generation 198 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 3,
+              "high": 5,
+              "medium": 5,
+              "low": 4,
+              "total": 17,
+              "fixable": 11,
+              "exploited": 0
+            },
+            "score": 355
+          },
+          {
+            "sys": {
+              "id": "sys-20",
+              "hostname": "dev-node-04",
+              "fqdn": "dev-node-04.dev.cf.internal",
+              "environment": "dev",
+              "flake": "web-services",
+              "branch": "dev",
+              "commit": "e5689503",
+              "commitMessage": "cve: patch openssl to 3.3.2",
+              "health": "warning",
+              "status": "Warning",
+              "statusColor": "#fbbf24",
+              "statusChip": "chip-warning",
+              "deploymentPolicy": "pinned",
+              "deploymentState": "behind",
+              "lastHeartbeat": "just now",
+              "heartbeatAge": 0,
+              "heartbeatIntervalSec": 120,
+              "heartbeatNextInSec": 1,
+              "generation": 203,
+              "nixosVersion": "24.11.20260401",
+              "kernel": "linux-6.1.115",
+              "storePath": "/nix/store/ea9dfe0c4b8ed304-nixos-system-dev-node-04-24.11.20260189",
+              "targetStorePath": "/nix/store/066623a131c5c08e-nixos-system-dev-node-04-24.11.20260219",
+              "uptime": "7d 22h",
+              "cpu": "Xeon E-2336",
+              "memGb": 256,
+              "ipv4": "10.1.37.163",
+              "ipv6": "fd42:b2:ea1a::35",
+              "reachability": "direct",
+              "cves": {
+                "critical": 1,
+                "high": 2,
+                "medium": 6,
+                "low": 11,
+                "total": 20
+              },
+              "tags": [],
+              "stig": 18,
+              "events": [
+                {
+                  "at": "2m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "47m ago",
+                  "title": "Deploy completed",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "9h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "2d ago",
+                  "title": "Generation 137 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 2,
+              "high": 3,
+              "medium": 8,
+              "low": 3,
+              "total": 16,
+              "fixable": 9,
+              "exploited": 0
+            },
+            "score": 238
+          },
+          {
+            "sys": {
+              "id": "sys-21",
+              "hostname": "dev-lab-01",
+              "fqdn": "dev-lab-01.dev.cf.internal",
+              "environment": "dev",
+              "flake": "lab-nodes",
+              "branch": "dev",
+              "commit": "d8aae228",
+              "commitMessage": "add grafana exporter to host",
+              "health": "healthy",
+              "status": "Healthy",
+              "statusColor": "#34d399",
+              "statusChip": "chip-healthy",
+              "deploymentPolicy": "manual",
+              "deploymentState": "up-to-date",
+              "lastHeartbeat": "2m ago",
+              "heartbeatAge": 2,
+              "heartbeatIntervalSec": 60,
+              "heartbeatNextInSec": -74,
+              "generation": 35,
+              "nixosVersion": "24.11.20260320",
+              "kernel": "linux-6.6.70",
+              "storePath": "/nix/store/00269e31fe9e85d9-nixos-system-dev-lab-01-24.11.20251424",
+              "targetStorePath": null,
+              "uptime": "24d 22h",
+              "cpu": "EPYC 7443P",
+              "memGb": 64,
+              "ipv4": "10.4.59.31",
+              "ipv6": "fd42:d4:93b0::29",
+              "reachability": "direct",
+              "cves": {
+                "critical": 0,
+                "high": 3,
+                "medium": 17,
+                "low": 10,
+                "total": 30
+              },
+              "tags": [],
+              "stig": 15,
+              "events": [
+                {
+                  "at": "4m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "1h ago",
+                  "title": "Deploy succeeded",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "7h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "3d ago",
+                  "title": "Generation 182 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 2,
+              "high": 3,
+              "medium": 7,
+              "low": 1,
+              "total": 13,
+              "fixable": 8,
+              "exploited": 0
+            },
+            "score": 237
+          },
+          {
+            "sys": {
+              "id": "sys-17",
+              "hostname": "dev-node-01",
+              "fqdn": "dev-node-01.dev.cf.internal",
+              "environment": "dev",
+              "flake": "infrastructure",
+              "branch": "dev",
+              "commit": "fc243aba",
+              "commitMessage": "stig: enforce audit rules for sudo",
+              "health": "healthy",
+              "status": "Healthy",
+              "statusColor": "#34d399",
+              "statusChip": "chip-healthy",
+              "deploymentPolicy": "pinned",
+              "deploymentState": "up-to-date",
+              "lastHeartbeat": "3m ago",
+              "heartbeatAge": 3,
+              "heartbeatIntervalSec": 120,
+              "heartbeatNextInSec": -120,
+              "generation": 209,
+              "nixosVersion": "24.11.20260401",
+              "kernel": "linux-6.6.70",
+              "storePath": "/nix/store/4389c3fe94226066-nixos-system-dev-node-01-24.11.20256463",
+              "targetStorePath": null,
+              "uptime": "16d 8h",
+              "cpu": "EPYC 7443P",
+              "memGb": 32,
+              "ipv4": "10.4.249.54",
+              "ipv6": "fd42:d4:3361::59",
+              "reachability": "pull",
+              "cves": {
+                "critical": 0,
+                "high": 0,
+                "medium": 3,
+                "low": 12,
+                "total": 15
+              },
+              "tags": [],
+              "stig": 16,
+              "events": [
+                {
+                  "at": "5m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "1h ago",
+                  "title": "Deploy succeeded",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "6h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "5d ago",
+                  "title": "Generation 53 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 2,
+              "high": 2,
+              "medium": 5,
+              "low": 5,
+              "total": 14,
+              "fixable": 9,
+              "exploited": 0
+            },
+            "score": 225
+          }
+        ],
+        "edge": [
+          {
+            "sys": {
+              "id": "sys-27",
+              "hostname": "edge-fra-01",
+              "fqdn": "edge-fra-01.edge.cf.internal",
+              "environment": "edge",
+              "flake": "edge-gateway",
+              "branch": "dev",
+              "commit": "5b221499",
+              "commitMessage": "add grafana exporter to host",
+              "health": "offline",
+              "status": "Offline",
+              "statusColor": "#f87171",
+              "statusChip": "chip-critical",
+              "deploymentPolicy": "pinned",
+              "deploymentState": "unknown",
+              "lastHeartbeat": "2d ago",
+              "heartbeatAge": 3478,
+              "heartbeatIntervalSec": 60,
+              "heartbeatNextInSec": -208658,
+              "generation": 39,
+              "nixosVersion": "24.11.20260401",
+              "kernel": "linux-6.1.115",
+              "storePath": "/nix/store/02a516f91a227461-nixos-system-edge-fra-01-24.11.20260014",
+              "targetStorePath": null,
+              "uptime": "20d 11h",
+              "cpu": "Xeon E-2336",
+              "memGb": 128,
+              "ipv4": "10.2.180.48",
+              "ipv6": "fd42:b2:6996::41",
+              "reachability": "pull",
+              "cves": {
+                "critical": 0,
+                "high": 2,
+                "medium": 18,
+                "low": 23,
+                "total": 43
+              },
+              "tags": [],
+              "stig": 19,
+              "events": [
+                {
+                  "at": "2d ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "1h ago",
+                  "title": "Deploy completed",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "8h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "5d ago",
+                  "title": "Generation 126 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 3,
+              "high": 5,
+              "medium": 5,
+              "low": 4,
+              "total": 17,
+              "fixable": 11,
+              "exploited": 0
+            },
+            "score": 355
+          },
+          {
+            "sys": {
+              "id": "sys-26",
+              "hostname": "edge-nyc-02",
+              "fqdn": "edge-nyc-02.edge.cf.internal",
+              "environment": "edge",
+              "flake": "edge-gateway",
+              "branch": "dev",
+              "commit": "2147b611",
+              "commitMessage": "harden sshd: disable password auth",
+              "health": "healthy",
+              "status": "Healthy",
+              "statusColor": "#34d399",
+              "statusChip": "chip-healthy",
+              "deploymentPolicy": "auto_latest",
+              "deploymentState": "up-to-date",
+              "lastHeartbeat": "4m ago",
+              "heartbeatAge": 4,
+              "heartbeatIntervalSec": 120,
+              "heartbeatNextInSec": -173,
+              "generation": 40,
+              "nixosVersion": "24.11.20260401",
+              "kernel": "linux-6.1.115",
+              "storePath": "/nix/store/70a9c4a6c715e0ec-nixos-system-edge-nyc-02-24.11.20260232",
+              "targetStorePath": null,
+              "uptime": "1d 2h",
+              "cpu": "EPYC 7443P",
+              "memGb": 16,
+              "ipv4": "10.4.133.4",
+              "ipv6": "fd42:d4:30fc::99",
+              "reachability": "pull",
+              "cves": {
+                "critical": 0,
+                "high": 1,
+                "medium": 4,
+                "low": 30,
+                "total": 35
+              },
+              "tags": [],
+              "stig": 22,
+              "events": [
+                {
+                  "at": "6m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "1h ago",
+                  "title": "Deploy succeeded",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "6h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "5d ago",
+                  "title": "Generation 103 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 2,
+              "high": 2,
+              "medium": 5,
+              "low": 5,
+              "total": 14,
+              "fixable": 9,
+              "exploited": 0
+            },
+            "score": 225
+          },
+          {
+            "sys": {
+              "id": "sys-29",
+              "hostname": "edge-sgp-01",
+              "fqdn": "edge-sgp-01.edge.cf.internal",
+              "environment": "edge",
+              "flake": "edge-gateway",
+              "branch": "dev",
+              "commit": "1e84f129",
+              "commitMessage": "harden sshd: disable password auth",
+              "health": "healthy",
+              "status": "Healthy",
+              "statusColor": "#34d399",
+              "statusChip": "chip-healthy",
+              "deploymentPolicy": "pinned",
+              "deploymentState": "up-to-date",
+              "lastHeartbeat": "3m ago",
+              "heartbeatAge": 3,
+              "heartbeatIntervalSec": 90,
+              "heartbeatNextInSec": -142,
+              "generation": 75,
+              "nixosVersion": "24.05.20260218",
+              "kernel": "linux-6.6.70",
+              "storePath": "/nix/store/dbd75c9c0362a435-nixos-system-edge-sgp-01-24.11.20254345",
+              "targetStorePath": null,
+              "uptime": "26d 4h",
+              "cpu": "Xeon E-2336",
+              "memGb": 256,
+              "ipv4": "10.4.3.59",
+              "ipv6": "fd42:a1:f61a::43",
+              "reachability": "pull",
+              "cves": {
+                "critical": 0,
+                "high": 0,
+                "medium": 8,
+                "low": 29,
+                "total": 37
+              },
+              "tags": [],
+              "stig": 21,
+              "events": [
+                {
+                  "at": "5m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "35m ago",
+                  "title": "Deploy succeeded",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "10h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "3d ago",
+                  "title": "Generation 113 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 1,
+              "high": 4,
+              "medium": 8,
+              "low": 3,
+              "total": 16,
+              "fixable": 9,
+              "exploited": 0
+            },
+            "score": 148
+          },
+          {
+            "sys": {
+              "id": "sys-24",
+              "hostname": "edge-pdx-02",
+              "fqdn": "edge-pdx-02.edge.cf.internal",
+              "environment": "edge",
+              "flake": "edge-gateway",
+              "branch": "dev",
+              "commit": "5d0d37e0",
+              "commitMessage": "stig: enforce audit rules for sudo",
+              "health": "healthy",
+              "status": "Healthy",
+              "statusColor": "#34d399",
+              "statusChip": "chip-healthy",
+              "deploymentPolicy": "auto_latest",
+              "deploymentState": "up-to-date",
+              "lastHeartbeat": "5m ago",
+              "heartbeatAge": 5,
+              "heartbeatIntervalSec": 60,
+              "heartbeatNextInSec": -275,
+              "generation": 128,
+              "nixosVersion": "24.11.20260320",
+              "kernel": "linux-6.1.115",
+              "storePath": "/nix/store/66f33c395fde60d5-nixos-system-edge-pdx-02-24.11.20252374",
+              "targetStorePath": null,
+              "uptime": "31d 11h",
+              "cpu": "Ryzen 9 5950X",
+              "memGb": 256,
+              "ipv4": "10.4.40.86",
+              "ipv6": "fd42:c3:3124::42",
+              "reachability": "pull",
+              "cves": {
+                "critical": 2,
+                "high": 8,
+                "medium": 6,
+                "low": 26,
+                "total": 42
+              },
+              "tags": [],
+              "stig": 19,
+              "events": [
+                {
+                  "at": "7m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "1h ago",
+                  "title": "Deploy succeeded",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "10h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "21h ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "2d ago",
+                  "title": "Generation 116 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 1,
+              "high": 2,
+              "medium": 5,
+              "low": 4,
+              "total": 12,
+              "fixable": 4,
+              "exploited": 0
+            },
+            "score": 125
+          }
+        ],
+        "staging": [
+          {
+            "sys": {
+              "id": "sys-12",
+              "hostname": "stg-atlas-01",
+              "fqdn": "stg-atlas-01.staging.cf.internal",
+              "environment": "staging",
+              "flake": "infrastructure",
+              "branch": "staging",
+              "commit": "d9636c89",
+              "commitMessage": "wireguard: add peer for edge-sgp-01",
+              "health": "healthy",
+              "status": "Healthy",
+              "statusColor": "#34d399",
+              "statusChip": "chip-healthy",
+              "deploymentPolicy": "manual",
+              "deploymentState": "up-to-date",
+              "lastHeartbeat": "5m ago",
+              "heartbeatAge": 5,
+              "heartbeatIntervalSec": 60,
+              "heartbeatNextInSec": -245,
+              "generation": 57,
+              "nixosVersion": "24.05.20260218",
+              "kernel": "linux-6.6.70",
+              "storePath": "/nix/store/730c796d0057597a-nixos-system-stg-atlas-01-24.11.20255495",
+              "targetStorePath": null,
+              "uptime": "5d 4h",
+              "cpu": "Graviton3",
+              "memGb": 128,
+              "ipv4": "10.4.230.6",
+              "ipv6": "fd42:a1:cef7::86",
+              "reachability": "direct",
+              "cves": {
+                "critical": 0,
+                "high": 4,
+                "medium": 11,
+                "low": 8,
+                "total": 23
+              },
+              "tags": [],
+              "stig": 23,
+              "events": [
+                {
+                  "at": "7m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "49m ago",
+                  "title": "Deploy succeeded",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "7h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "3d ago",
+                  "title": "Generation 68 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 2,
+              "high": 4,
+              "medium": 7,
+              "low": 1,
+              "total": 14,
+              "fixable": 9,
+              "exploited": 0
+            },
+            "score": 247
+          },
+          {
+            "sys": {
+              "id": "sys-14",
+              "hostname": "stg-web-01",
+              "fqdn": "stg-web-01.staging.cf.internal",
+              "environment": "staging",
+              "flake": "web-services",
+              "branch": "staging",
+              "commit": "ce1d8868",
+              "commitMessage": "feat: enable sops-nix for secrets",
+              "health": "healthy",
+              "status": "Healthy",
+              "statusColor": "#34d399",
+              "statusChip": "chip-healthy",
+              "deploymentPolicy": "pinned",
+              "deploymentState": "up-to-date",
+              "lastHeartbeat": "3m ago",
+              "heartbeatAge": 3,
+              "heartbeatIntervalSec": 120,
+              "heartbeatNextInSec": -136,
+              "generation": 122,
+              "nixosVersion": "24.11.20260401",
+              "kernel": "linux-6.6.72",
+              "storePath": "/nix/store/8d5bf0a272b39711-nixos-system-stg-web-01-24.11.20254458",
+              "targetStorePath": null,
+              "uptime": "7d 20h",
+              "cpu": "Graviton3",
+              "memGb": 32,
+              "ipv4": "10.4.56.6",
+              "ipv6": "fd42:b2:a614::7",
+              "reachability": "direct",
+              "cves": {
+                "critical": 2,
+                "high": 4,
+                "medium": 15,
+                "low": 15,
+                "total": 36
+              },
+              "tags": [],
+              "stig": 22,
+              "events": [
+                {
+                  "at": "5m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "1h ago",
+                  "title": "Deploy succeeded",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "8h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "4d ago",
+                  "title": "Generation 22 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 1,
+              "high": 1,
+              "medium": 6,
+              "low": 3,
+              "total": 11,
+              "fixable": 5,
+              "exploited": 0
+            },
+            "score": 116
+          },
+          {
+            "sys": {
+              "id": "sys-13",
+              "hostname": "stg-atlas-02",
+              "fqdn": "stg-atlas-02.staging.cf.internal",
+              "environment": "staging",
+              "flake": "infrastructure",
+              "branch": "staging",
+              "commit": "f7331db2",
+              "commitMessage": "cve: patch openssl to 3.3.2",
+              "health": "offline",
+              "status": "Offline",
+              "statusColor": "#f87171",
+              "statusChip": "chip-critical",
+              "deploymentPolicy": "pinned",
+              "deploymentState": "unknown",
+              "lastHeartbeat": "2d ago",
+              "heartbeatAge": 3260,
+              "heartbeatIntervalSec": 90,
+              "heartbeatNextInSec": -195536,
+              "generation": 163,
+              "nixosVersion": "24.11.20260401",
+              "kernel": "linux-6.6.72",
+              "storePath": "/nix/store/c23ab490d7a12b66-nixos-system-stg-atlas-02-24.11.20256087",
+              "targetStorePath": null,
+              "uptime": "27d 17h",
+              "cpu": "EPYC 7443P",
+              "memGb": 256,
+              "ipv4": "10.2.169.70",
+              "ipv6": "fd42:d4:46cb::80",
+              "reachability": "direct",
+              "cves": {
+                "critical": 0,
+                "high": 3,
+                "medium": 9,
+                "low": 9,
+                "total": 21
+              },
+              "tags": [],
+              "stig": 25,
+              "events": [
+                {
+                  "at": "2d ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "50m ago",
+                  "title": "Deploy completed",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "9h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "3d ago",
+                  "title": "Generation 72 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 0,
+              "high": 4,
+              "medium": 6,
+              "low": 2,
+              "total": 12,
+              "fixable": 8,
+              "exploited": 0
+            },
+            "score": 46
+          },
+          {
+            "sys": {
+              "id": "sys-16",
+              "hostname": "stg-build-01",
+              "fqdn": "stg-build-01.staging.cf.internal",
+              "environment": "staging",
+              "flake": "build-farm",
+              "branch": "staging",
+              "commit": "c3313ab9",
+              "commitMessage": "cve: patch openssl to 3.3.2",
+              "health": "building",
+              "status": "Deploying",
+              "statusColor": "#60a5fa",
+              "statusChip": "chip-info",
+              "deploymentPolicy": "manual",
+              "deploymentState": "deploying",
+              "lastHeartbeat": "just now",
+              "heartbeatAge": 0,
+              "heartbeatIntervalSec": 90,
+              "heartbeatNextInSec": 31,
+              "generation": 65,
+              "nixosVersion": "24.05.20260218",
+              "kernel": "linux-6.6.70",
+              "storePath": "/nix/store/d86f9e996775d943-nixos-system-stg-build-01-24.11.20253383",
+              "targetStorePath": null,
+              "uptime": "39d 1h",
+              "cpu": "Graviton3",
+              "memGb": 64,
+              "ipv4": "10.2.204.29",
+              "ipv6": "fd42:a1:db6f::16",
+              "reachability": "pull",
+              "cves": {
+                "critical": 0,
+                "high": 0,
+                "medium": 8,
+                "low": 22,
+                "total": 30
+              },
+              "tags": [
+                "builder"
+              ],
+              "stig": 27,
+              "events": [
+                {
+                  "at": "2m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "1h ago",
+                  "title": "Deploy completed",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "9h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "2d ago",
+                  "title": "Generation 99 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 0,
+              "high": 4,
+              "medium": 5,
+              "low": 4,
+              "total": 13,
+              "fixable": 6,
+              "exploited": 0
+            },
+            "score": 45
+          }
+        ],
+        "lab": [
+          {
+            "sys": {
+              "id": "sys-30",
+              "hostname": "lab-vm-01",
+              "fqdn": "lab-vm-01.lab.cf.internal",
+              "environment": "lab",
+              "flake": "lab-nodes",
+              "branch": "dev",
+              "commit": "cfe7372c",
+              "commitMessage": "add grafana exporter to host",
+              "health": "healthy",
+              "status": "Healthy",
+              "statusColor": "#34d399",
+              "statusChip": "chip-healthy",
+              "deploymentPolicy": "pinned",
+              "deploymentState": "up-to-date",
+              "lastHeartbeat": "just now",
+              "heartbeatAge": 0,
+              "heartbeatIntervalSec": 120,
+              "heartbeatNextInSec": 69,
+              "generation": 207,
+              "nixosVersion": "24.11.20260320",
+              "kernel": "linux-6.6.70",
+              "storePath": "/nix/store/d13ed0cb70096be4-nixos-system-lab-vm-01-24.11.20253545",
+              "targetStorePath": null,
+              "uptime": "32d 0h",
+              "cpu": "Xeon E-2336",
+              "memGb": 32,
+              "ipv4": "10.1.162.150",
+              "ipv6": "fd42:c3:6ae7::53",
+              "reachability": "pull",
+              "cves": {
+                "critical": 0,
+                "high": 4,
+                "medium": 12,
+                "low": 27,
+                "total": 43
+              },
+              "tags": [],
+              "stig": 19,
+              "events": [
+                {
+                  "at": "2m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "39m ago",
+                  "title": "Deploy succeeded",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "10h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "5d ago",
+                  "title": "Generation 117 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 2,
+              "high": 4,
+              "medium": 7,
+              "low": 1,
+              "total": 14,
+              "fixable": 9,
+              "exploited": 0
+            },
+            "score": 247
+          },
+          {
+            "sys": {
+              "id": "sys-31",
+              "hostname": "lab-vm-02",
+              "fqdn": "lab-vm-02.lab.cf.internal",
+              "environment": "lab",
+              "flake": "lab-nodes",
+              "branch": "dev",
+              "commit": "74477230",
+              "commitMessage": "fix: postgres role permissions migration",
+              "health": "healthy",
+              "status": "Healthy",
+              "statusColor": "#34d399",
+              "statusChip": "chip-healthy",
+              "deploymentPolicy": "pinned",
+              "deploymentState": "up-to-date",
+              "lastHeartbeat": "just now",
+              "heartbeatAge": 0,
+              "heartbeatIntervalSec": 90,
+              "heartbeatNextInSec": 60,
+              "generation": 102,
+              "nixosVersion": "24.11.20260401",
+              "kernel": "linux-6.1.115",
+              "storePath": "/nix/store/5c2eb4a8fee859e0-nixos-system-lab-vm-02-24.11.20260155",
+              "targetStorePath": null,
+              "uptime": "6d 11h",
+              "cpu": "Ryzen 9 5950X",
+              "memGb": 128,
+              "ipv4": "10.2.134.242",
+              "ipv6": "fd42:c3:6848::34",
+              "reachability": "direct",
+              "cves": {
+                "critical": 0,
+                "high": 0,
+                "medium": 7,
+                "low": 5,
+                "total": 12
+              },
+              "tags": [],
+              "stig": 16,
+              "events": [
+                {
+                  "at": "2m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "1h ago",
+                  "title": "Deploy succeeded",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "5h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "2d ago",
+                  "title": "Generation 122 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 1,
+              "high": 4,
+              "medium": 6,
+              "low": 2,
+              "total": 13,
+              "fixable": 9,
+              "exploited": 0
+            },
+            "score": 146
+          },
+          {
+            "sys": {
+              "id": "sys-33",
+              "hostname": "lab-rig-01",
+              "fqdn": "lab-rig-01.lab.cf.internal",
+              "environment": "lab",
+              "flake": "lab-nodes",
+              "branch": "dev",
+              "commit": "a694c85c",
+              "commitMessage": "feat: enable sops-nix for secrets",
+              "health": "offline",
+              "status": "Offline",
+              "statusColor": "#f87171",
+              "statusChip": "chip-critical",
+              "deploymentPolicy": "pinned",
+              "deploymentState": "unknown",
+              "lastHeartbeat": "15h ago",
+              "heartbeatAge": 959,
+              "heartbeatIntervalSec": 60,
+              "heartbeatNextInSec": -57501,
+              "generation": 140,
+              "nixosVersion": "24.11.20260401",
+              "kernel": "linux-6.6.72",
+              "storePath": "/nix/store/6b11ec3573623937-nixos-system-lab-rig-01-24.11.20254606",
+              "targetStorePath": null,
+              "uptime": "22d 9h",
+              "cpu": "Xeon E-2336",
+              "memGb": 16,
+              "ipv4": "10.1.23.114",
+              "ipv6": "fd42:d4:33bc::86",
+              "reachability": "direct",
+              "cves": {
+                "critical": 0,
+                "high": 1,
+                "medium": 6,
+                "low": 3,
+                "total": 10
+              },
+              "tags": [],
+              "stig": 14,
+              "events": [
+                {
+                  "at": "16h ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "1h ago",
+                  "title": "Deploy completed",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "6h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "20h ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "3d ago",
+                  "title": "Generation 126 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 1,
+              "high": 2,
+              "medium": 6,
+              "low": 4,
+              "total": 13,
+              "fixable": 5,
+              "exploited": 0
+            },
+            "score": 126
+          },
+          {
+            "sys": {
+              "id": "sys-34",
+              "hostname": "lab-rig-02",
+              "fqdn": "lab-rig-02.lab.cf.internal",
+              "environment": "lab",
+              "flake": "lab-nodes",
+              "branch": "dev",
+              "commit": "1fc658f6",
+              "commitMessage": "wireguard: add peer for edge-sgp-01",
+              "health": "healthy",
+              "status": "Healthy",
+              "statusColor": "#34d399",
+              "statusChip": "chip-healthy",
+              "deploymentPolicy": "manual",
+              "deploymentState": "up-to-date",
+              "lastHeartbeat": "4m ago",
+              "heartbeatAge": 4,
+              "heartbeatIntervalSec": 60,
+              "heartbeatNextInSec": -239,
+              "generation": 197,
+              "nixosVersion": "24.05.20260218",
+              "kernel": "linux-6.6.70",
+              "storePath": "/nix/store/d7959857ac79045e-nixos-system-lab-rig-02-24.11.20256269",
+              "targetStorePath": null,
+              "uptime": "32d 4h",
+              "cpu": "EPYC 7443P",
+              "memGb": 16,
+              "ipv4": "10.4.181.16",
+              "ipv6": "fd42:a1:322f::3",
+              "reachability": "direct",
+              "cves": {
+                "critical": 5,
+                "high": 14,
+                "medium": 18,
+                "low": 16,
+                "total": 53
+              },
+              "tags": [],
+              "stig": 17,
+              "events": [
+                {
+                  "at": "6m ago",
+                  "title": "Heartbeat received",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "1h ago",
+                  "title": "Deploy succeeded",
+                  "color": "#34d399"
+                },
+                {
+                  "at": "10h ago",
+                  "title": "Evaluation complete",
+                  "color": "#60a5fa"
+                },
+                {
+                  "at": "1d ago",
+                  "title": "Configuration drift detected",
+                  "color": "#fbbf24"
+                },
+                {
+                  "at": "3d ago",
+                  "title": "Generation 91 activated",
+                  "color": "#34d399"
+                }
+              ]
+            },
+            "counts": {
+              "critical": 0,
+              "high": 4,
+              "medium": 4,
+              "low": 4,
+              "total": 12,
+              "fixable": 5,
+              "exploited": 0
+            },
+            "score": 44
+          }
+        ]
+      },
+      "patchableSystems": [
+        {
+          "sys": {
+            "id": "sys-0",
+            "hostname": "atlas-01",
+            "fqdn": "atlas-01.production.cf.internal",
+            "environment": "production",
+            "flake": "infrastructure",
+            "branch": "main",
+            "commit": "84274a8a",
+            "commitMessage": "bump nixpkgs to 24.11",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "4m ago",
+            "heartbeatAge": 4,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": -210,
+            "generation": 160,
+            "nixosVersion": "24.05.20260218",
+            "kernel": "linux-6.1.115",
+            "storePath": "/nix/store/665a74a7a948081f-nixos-system-atlas-01-24.11.20254091",
+            "targetStorePath": null,
+            "uptime": "32d 22h",
+            "cpu": "Graviton3",
+            "memGb": 256,
+            "ipv4": "10.0.34.165",
+            "ipv6": "fd42:d4:f433::17",
+            "reachability": "direct",
+            "cves": {
+              "critical": 0,
+              "high": 2,
+              "medium": 13,
+              "low": 18,
+              "total": 33
+            },
+            "tags": [
+              "stig-enforced"
+            ],
+            "stig": 28,
+            "events": [
+              {
+                "at": "6m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "9h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "21h ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "4d ago",
+                "title": "Generation 164 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 3,
+            "high": 6,
+            "medium": 5,
+            "low": 5,
+            "total": 19,
+            "fixable": 12,
+            "exploited": 0
+          },
+          "score": 365
+        },
+        {
+          "sys": {
+            "id": "sys-9",
+            "hostname": "gaia-web-04",
+            "fqdn": "gaia-web-04.production.cf.internal",
+            "environment": "production",
+            "flake": "web-services",
+            "branch": "main",
+            "commit": "74db60b3",
+            "commitMessage": "feat: enable sops-nix for secrets",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "3m ago",
+            "heartbeatAge": 3,
+            "heartbeatIntervalSec": 90,
+            "heartbeatNextInSec": -99,
+            "generation": 71,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/3164cae318db5643-nixos-system-gaia-web-04-24.11.20258434",
+            "targetStorePath": null,
+            "uptime": "7d 6h",
+            "cpu": "EPYC 7443P",
+            "memGb": 32,
+            "ipv4": "10.3.72.69",
+            "ipv6": "fd42:a1:c6ea::7",
+            "reachability": "direct",
+            "cves": {
+              "critical": 0,
+              "high": 0,
+              "medium": 5,
+              "low": 28,
+              "total": 33
+            },
+            "tags": [
+              "stig-enforced"
+            ],
+            "stig": 30,
+            "events": [
+              {
+                "at": "5m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "39m ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "9h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "5d ago",
+                "title": "Generation 165 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 3,
+            "high": 6,
+            "medium": 5,
+            "low": 4,
+            "total": 18,
+            "fixable": 12,
+            "exploited": 0
+          },
+          "score": 365
+        },
+        {
+          "sys": {
+            "id": "sys-18",
+            "hostname": "dev-node-02",
+            "fqdn": "dev-node-02.dev.cf.internal",
+            "environment": "dev",
+            "flake": "infrastructure",
+            "branch": "dev",
+            "commit": "f7b4e01b",
+            "commitMessage": "stig: enforce audit rules for sudo",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "just now",
+            "heartbeatAge": 0,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": 40,
+            "generation": 96,
+            "nixosVersion": "24.05.20260218",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/fda4082038ed824c-nixos-system-dev-node-02-24.11.20260308",
+            "targetStorePath": null,
+            "uptime": "14d 3h",
+            "cpu": "Xeon E-2336",
+            "memGb": 32,
+            "ipv4": "10.2.12.106",
+            "ipv6": "fd42:b2:7e5d::33",
+            "reachability": "pull",
+            "cves": {
+              "critical": 1,
+              "high": 1,
+              "medium": 15,
+              "low": 20,
+              "total": 37
+            },
+            "tags": [],
+            "stig": 21,
+            "events": [
+              {
+                "at": "2m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "59m ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "7h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 198 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 3,
+            "high": 5,
+            "medium": 5,
+            "low": 4,
+            "total": 17,
+            "fixable": 11,
+            "exploited": 0
+          },
+          "score": 355
+        },
+        {
+          "sys": {
+            "id": "sys-27",
+            "hostname": "edge-fra-01",
+            "fqdn": "edge-fra-01.edge.cf.internal",
+            "environment": "edge",
+            "flake": "edge-gateway",
+            "branch": "dev",
+            "commit": "5b221499",
+            "commitMessage": "add grafana exporter to host",
+            "health": "offline",
+            "status": "Offline",
+            "statusColor": "#f87171",
+            "statusChip": "chip-critical",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "unknown",
+            "lastHeartbeat": "2d ago",
+            "heartbeatAge": 3478,
+            "heartbeatIntervalSec": 60,
+            "heartbeatNextInSec": -208658,
+            "generation": 39,
+            "nixosVersion": "24.11.20260401",
+            "kernel": "linux-6.1.115",
+            "storePath": "/nix/store/02a516f91a227461-nixos-system-edge-fra-01-24.11.20260014",
+            "targetStorePath": null,
+            "uptime": "20d 11h",
+            "cpu": "Xeon E-2336",
+            "memGb": 128,
+            "ipv4": "10.2.180.48",
+            "ipv6": "fd42:b2:6996::41",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 2,
+              "medium": 18,
+              "low": 23,
+              "total": 43
+            },
+            "tags": [],
+            "stig": 19,
+            "events": [
+              {
+                "at": "2d ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy completed",
+                "color": "#34d399"
+              },
+              {
+                "at": "8h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "5d ago",
+                "title": "Generation 126 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 3,
+            "high": 5,
+            "medium": 5,
+            "low": 4,
+            "total": 17,
+            "fixable": 11,
+            "exploited": 0
+          },
+          "score": 355
+        },
+        {
+          "sys": {
+            "id": "sys-8",
+            "hostname": "gaia-web-03",
+            "fqdn": "gaia-web-03.production.cf.internal",
+            "environment": "production",
+            "flake": "web-services",
+            "branch": "main",
+            "commit": "ed626e37",
+            "commitMessage": "add grafana exporter to host",
+            "health": "critical",
+            "status": "Critical",
+            "statusColor": "#f87171",
+            "statusChip": "chip-critical",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "failed",
+            "lastHeartbeat": "4m ago",
+            "heartbeatAge": 4,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": -196,
+            "generation": 98,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/b5c74b815cfcd127-nixos-system-gaia-web-03-24.11.20251135",
+            "targetStorePath": null,
+            "uptime": "35d 6h",
+            "cpu": "Xeon E-2336",
+            "memGb": 32,
+            "ipv4": "10.0.252.152",
+            "ipv6": "fd42:a1:a72a::19",
+            "reachability": "pull",
+            "cves": {
+              "critical": 9,
+              "high": 14,
+              "medium": 14,
+              "low": 0,
+              "total": 37
+            },
+            "tags": [
+              "stig-enforced"
+            ],
+            "stig": 30,
+            "events": [
+              {
+                "at": "6m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "36m ago",
+                "title": "Deploy failed",
+                "color": "#f87171"
+              },
+              {
+                "at": "10h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "2d ago",
+                "title": "Generation 103 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 3,
+            "high": 2,
+            "medium": 5,
+            "low": 5,
+            "total": 15,
+            "fixable": 10,
+            "exploited": 0
+          },
+          "score": 325
+        },
+        {
+          "sys": {
+            "id": "sys-12",
+            "hostname": "stg-atlas-01",
+            "fqdn": "stg-atlas-01.staging.cf.internal",
+            "environment": "staging",
+            "flake": "infrastructure",
+            "branch": "staging",
+            "commit": "d9636c89",
+            "commitMessage": "wireguard: add peer for edge-sgp-01",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "5m ago",
+            "heartbeatAge": 5,
+            "heartbeatIntervalSec": 60,
+            "heartbeatNextInSec": -245,
+            "generation": 57,
+            "nixosVersion": "24.05.20260218",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/730c796d0057597a-nixos-system-stg-atlas-01-24.11.20255495",
+            "targetStorePath": null,
+            "uptime": "5d 4h",
+            "cpu": "Graviton3",
+            "memGb": 128,
+            "ipv4": "10.4.230.6",
+            "ipv6": "fd42:a1:cef7::86",
+            "reachability": "direct",
+            "cves": {
+              "critical": 0,
+              "high": 4,
+              "medium": 11,
+              "low": 8,
+              "total": 23
+            },
+            "tags": [],
+            "stig": 23,
+            "events": [
+              {
+                "at": "7m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "49m ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "7h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 68 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 2,
+            "high": 4,
+            "medium": 7,
+            "low": 1,
+            "total": 14,
+            "fixable": 9,
+            "exploited": 0
+          },
+          "score": 247
+        },
+        {
+          "sys": {
+            "id": "sys-30",
+            "hostname": "lab-vm-01",
+            "fqdn": "lab-vm-01.lab.cf.internal",
+            "environment": "lab",
+            "flake": "lab-nodes",
+            "branch": "dev",
+            "commit": "cfe7372c",
+            "commitMessage": "add grafana exporter to host",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "just now",
+            "heartbeatAge": 0,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": 69,
+            "generation": 207,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/d13ed0cb70096be4-nixos-system-lab-vm-01-24.11.20253545",
+            "targetStorePath": null,
+            "uptime": "32d 0h",
+            "cpu": "Xeon E-2336",
+            "memGb": 32,
+            "ipv4": "10.1.162.150",
+            "ipv6": "fd42:c3:6ae7::53",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 4,
+              "medium": 12,
+              "low": 27,
+              "total": 43
+            },
+            "tags": [],
+            "stig": 19,
+            "events": [
+              {
+                "at": "2m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "39m ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "10h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "5d ago",
+                "title": "Generation 117 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 2,
+            "high": 4,
+            "medium": 7,
+            "low": 1,
+            "total": 14,
+            "fixable": 9,
+            "exploited": 0
+          },
+          "score": 247
+        },
+        {
+          "sys": {
+            "id": "sys-3",
+            "hostname": "hydra-01",
+            "fqdn": "hydra-01.production.cf.internal",
+            "environment": "production",
+            "flake": "build-farm",
+            "branch": "main",
+            "commit": "e11273e8",
+            "commitMessage": "harden sshd: disable password auth",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "2m ago",
+            "heartbeatAge": 2,
+            "heartbeatIntervalSec": 90,
+            "heartbeatNextInSec": -119,
+            "generation": 81,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.1.115",
+            "storePath": "/nix/store/d9726ae5414d7ae9-nixos-system-hydra-01-24.11.20252362",
+            "targetStorePath": null,
+            "uptime": "7d 2h",
+            "cpu": "Graviton3",
+            "memGb": 64,
+            "ipv4": "10.2.207.228",
+            "ipv6": "fd42:c3:39cb::48",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 4,
+              "medium": 17,
+              "low": 1,
+              "total": 22
+            },
+            "tags": [
+              "builder",
+              "stig-enforced"
+            ],
+            "stig": 29,
+            "events": [
+              {
+                "at": "4m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "52m ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "9h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "4d ago",
+                "title": "Generation 175 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 2,
+            "high": 4,
+            "medium": 6,
+            "low": 1,
+            "total": 13,
+            "fixable": 9,
+            "exploited": 0
+          },
+          "score": 246
+        }
+      ],
+      "sysScores": [
+        {
+          "sys": {
+            "id": "sys-0",
+            "hostname": "atlas-01",
+            "fqdn": "atlas-01.production.cf.internal",
+            "environment": "production",
+            "flake": "infrastructure",
+            "branch": "main",
+            "commit": "84274a8a",
+            "commitMessage": "bump nixpkgs to 24.11",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "4m ago",
+            "heartbeatAge": 4,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": -210,
+            "generation": 160,
+            "nixosVersion": "24.05.20260218",
+            "kernel": "linux-6.1.115",
+            "storePath": "/nix/store/665a74a7a948081f-nixos-system-atlas-01-24.11.20254091",
+            "targetStorePath": null,
+            "uptime": "32d 22h",
+            "cpu": "Graviton3",
+            "memGb": 256,
+            "ipv4": "10.0.34.165",
+            "ipv6": "fd42:d4:f433::17",
+            "reachability": "direct",
+            "cves": {
+              "critical": 0,
+              "high": 2,
+              "medium": 13,
+              "low": 18,
+              "total": 33
+            },
+            "tags": [
+              "stig-enforced"
+            ],
+            "stig": 28,
+            "events": [
+              {
+                "at": "6m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "9h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "21h ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "4d ago",
+                "title": "Generation 164 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 3,
+            "high": 6,
+            "medium": 5,
+            "low": 5,
+            "total": 19,
+            "fixable": 12,
+            "exploited": 0
+          },
+          "score": 365
+        },
+        {
+          "sys": {
+            "id": "sys-9",
+            "hostname": "gaia-web-04",
+            "fqdn": "gaia-web-04.production.cf.internal",
+            "environment": "production",
+            "flake": "web-services",
+            "branch": "main",
+            "commit": "74db60b3",
+            "commitMessage": "feat: enable sops-nix for secrets",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "3m ago",
+            "heartbeatAge": 3,
+            "heartbeatIntervalSec": 90,
+            "heartbeatNextInSec": -99,
+            "generation": 71,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/3164cae318db5643-nixos-system-gaia-web-04-24.11.20258434",
+            "targetStorePath": null,
+            "uptime": "7d 6h",
+            "cpu": "EPYC 7443P",
+            "memGb": 32,
+            "ipv4": "10.3.72.69",
+            "ipv6": "fd42:a1:c6ea::7",
+            "reachability": "direct",
+            "cves": {
+              "critical": 0,
+              "high": 0,
+              "medium": 5,
+              "low": 28,
+              "total": 33
+            },
+            "tags": [
+              "stig-enforced"
+            ],
+            "stig": 30,
+            "events": [
+              {
+                "at": "5m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "39m ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "9h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "5d ago",
+                "title": "Generation 165 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 3,
+            "high": 6,
+            "medium": 5,
+            "low": 4,
+            "total": 18,
+            "fixable": 12,
+            "exploited": 0
+          },
+          "score": 365
+        },
+        {
+          "sys": {
+            "id": "sys-18",
+            "hostname": "dev-node-02",
+            "fqdn": "dev-node-02.dev.cf.internal",
+            "environment": "dev",
+            "flake": "infrastructure",
+            "branch": "dev",
+            "commit": "f7b4e01b",
+            "commitMessage": "stig: enforce audit rules for sudo",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "just now",
+            "heartbeatAge": 0,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": 40,
+            "generation": 96,
+            "nixosVersion": "24.05.20260218",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/fda4082038ed824c-nixos-system-dev-node-02-24.11.20260308",
+            "targetStorePath": null,
+            "uptime": "14d 3h",
+            "cpu": "Xeon E-2336",
+            "memGb": 32,
+            "ipv4": "10.2.12.106",
+            "ipv6": "fd42:b2:7e5d::33",
+            "reachability": "pull",
+            "cves": {
+              "critical": 1,
+              "high": 1,
+              "medium": 15,
+              "low": 20,
+              "total": 37
+            },
+            "tags": [],
+            "stig": 21,
+            "events": [
+              {
+                "at": "2m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "59m ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "7h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 198 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 3,
+            "high": 5,
+            "medium": 5,
+            "low": 4,
+            "total": 17,
+            "fixable": 11,
+            "exploited": 0
+          },
+          "score": 355
+        },
+        {
+          "sys": {
+            "id": "sys-27",
+            "hostname": "edge-fra-01",
+            "fqdn": "edge-fra-01.edge.cf.internal",
+            "environment": "edge",
+            "flake": "edge-gateway",
+            "branch": "dev",
+            "commit": "5b221499",
+            "commitMessage": "add grafana exporter to host",
+            "health": "offline",
+            "status": "Offline",
+            "statusColor": "#f87171",
+            "statusChip": "chip-critical",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "unknown",
+            "lastHeartbeat": "2d ago",
+            "heartbeatAge": 3478,
+            "heartbeatIntervalSec": 60,
+            "heartbeatNextInSec": -208658,
+            "generation": 39,
+            "nixosVersion": "24.11.20260401",
+            "kernel": "linux-6.1.115",
+            "storePath": "/nix/store/02a516f91a227461-nixos-system-edge-fra-01-24.11.20260014",
+            "targetStorePath": null,
+            "uptime": "20d 11h",
+            "cpu": "Xeon E-2336",
+            "memGb": 128,
+            "ipv4": "10.2.180.48",
+            "ipv6": "fd42:b2:6996::41",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 2,
+              "medium": 18,
+              "low": 23,
+              "total": 43
+            },
+            "tags": [],
+            "stig": 19,
+            "events": [
+              {
+                "at": "2d ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy completed",
+                "color": "#34d399"
+              },
+              {
+                "at": "8h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "5d ago",
+                "title": "Generation 126 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 3,
+            "high": 5,
+            "medium": 5,
+            "low": 4,
+            "total": 17,
+            "fixable": 11,
+            "exploited": 0
+          },
+          "score": 355
+        },
+        {
+          "sys": {
+            "id": "sys-8",
+            "hostname": "gaia-web-03",
+            "fqdn": "gaia-web-03.production.cf.internal",
+            "environment": "production",
+            "flake": "web-services",
+            "branch": "main",
+            "commit": "ed626e37",
+            "commitMessage": "add grafana exporter to host",
+            "health": "critical",
+            "status": "Critical",
+            "statusColor": "#f87171",
+            "statusChip": "chip-critical",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "failed",
+            "lastHeartbeat": "4m ago",
+            "heartbeatAge": 4,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": -196,
+            "generation": 98,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/b5c74b815cfcd127-nixos-system-gaia-web-03-24.11.20251135",
+            "targetStorePath": null,
+            "uptime": "35d 6h",
+            "cpu": "Xeon E-2336",
+            "memGb": 32,
+            "ipv4": "10.0.252.152",
+            "ipv6": "fd42:a1:a72a::19",
+            "reachability": "pull",
+            "cves": {
+              "critical": 9,
+              "high": 14,
+              "medium": 14,
+              "low": 0,
+              "total": 37
+            },
+            "tags": [
+              "stig-enforced"
+            ],
+            "stig": 30,
+            "events": [
+              {
+                "at": "6m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "36m ago",
+                "title": "Deploy failed",
+                "color": "#f87171"
+              },
+              {
+                "at": "10h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "2d ago",
+                "title": "Generation 103 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 3,
+            "high": 2,
+            "medium": 5,
+            "low": 5,
+            "total": 15,
+            "fixable": 10,
+            "exploited": 0
+          },
+          "score": 325
+        },
+        {
+          "sys": {
+            "id": "sys-12",
+            "hostname": "stg-atlas-01",
+            "fqdn": "stg-atlas-01.staging.cf.internal",
+            "environment": "staging",
+            "flake": "infrastructure",
+            "branch": "staging",
+            "commit": "d9636c89",
+            "commitMessage": "wireguard: add peer for edge-sgp-01",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "5m ago",
+            "heartbeatAge": 5,
+            "heartbeatIntervalSec": 60,
+            "heartbeatNextInSec": -245,
+            "generation": 57,
+            "nixosVersion": "24.05.20260218",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/730c796d0057597a-nixos-system-stg-atlas-01-24.11.20255495",
+            "targetStorePath": null,
+            "uptime": "5d 4h",
+            "cpu": "Graviton3",
+            "memGb": 128,
+            "ipv4": "10.4.230.6",
+            "ipv6": "fd42:a1:cef7::86",
+            "reachability": "direct",
+            "cves": {
+              "critical": 0,
+              "high": 4,
+              "medium": 11,
+              "low": 8,
+              "total": 23
+            },
+            "tags": [],
+            "stig": 23,
+            "events": [
+              {
+                "at": "7m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "49m ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "7h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 68 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 2,
+            "high": 4,
+            "medium": 7,
+            "low": 1,
+            "total": 14,
+            "fixable": 9,
+            "exploited": 0
+          },
+          "score": 247
+        },
+        {
+          "sys": {
+            "id": "sys-30",
+            "hostname": "lab-vm-01",
+            "fqdn": "lab-vm-01.lab.cf.internal",
+            "environment": "lab",
+            "flake": "lab-nodes",
+            "branch": "dev",
+            "commit": "cfe7372c",
+            "commitMessage": "add grafana exporter to host",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "just now",
+            "heartbeatAge": 0,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": 69,
+            "generation": 207,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/d13ed0cb70096be4-nixos-system-lab-vm-01-24.11.20253545",
+            "targetStorePath": null,
+            "uptime": "32d 0h",
+            "cpu": "Xeon E-2336",
+            "memGb": 32,
+            "ipv4": "10.1.162.150",
+            "ipv6": "fd42:c3:6ae7::53",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 4,
+              "medium": 12,
+              "low": 27,
+              "total": 43
+            },
+            "tags": [],
+            "stig": 19,
+            "events": [
+              {
+                "at": "2m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "39m ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "10h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "5d ago",
+                "title": "Generation 117 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 2,
+            "high": 4,
+            "medium": 7,
+            "low": 1,
+            "total": 14,
+            "fixable": 9,
+            "exploited": 0
+          },
+          "score": 247
+        },
+        {
+          "sys": {
+            "id": "sys-3",
+            "hostname": "hydra-01",
+            "fqdn": "hydra-01.production.cf.internal",
+            "environment": "production",
+            "flake": "build-farm",
+            "branch": "main",
+            "commit": "e11273e8",
+            "commitMessage": "harden sshd: disable password auth",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "2m ago",
+            "heartbeatAge": 2,
+            "heartbeatIntervalSec": 90,
+            "heartbeatNextInSec": -119,
+            "generation": 81,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.1.115",
+            "storePath": "/nix/store/d9726ae5414d7ae9-nixos-system-hydra-01-24.11.20252362",
+            "targetStorePath": null,
+            "uptime": "7d 2h",
+            "cpu": "Graviton3",
+            "memGb": 64,
+            "ipv4": "10.2.207.228",
+            "ipv6": "fd42:c3:39cb::48",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 4,
+              "medium": 17,
+              "low": 1,
+              "total": 22
+            },
+            "tags": [
+              "builder",
+              "stig-enforced"
+            ],
+            "stig": 29,
+            "events": [
+              {
+                "at": "4m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "52m ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "9h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "4d ago",
+                "title": "Generation 175 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 2,
+            "high": 4,
+            "medium": 6,
+            "low": 1,
+            "total": 13,
+            "fixable": 9,
+            "exploited": 0
+          },
+          "score": 246
+        },
+        {
+          "sys": {
+            "id": "sys-2",
+            "hostname": "atlas-03",
+            "fqdn": "atlas-03.production.cf.internal",
+            "environment": "production",
+            "flake": "infrastructure",
+            "branch": "main",
+            "commit": "65fd86df",
+            "commitMessage": "stig: enforce audit rules for sudo",
+            "health": "warning",
+            "status": "Warning",
+            "statusColor": "#fbbf24",
+            "statusChip": "chip-warning",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "3m ago",
+            "heartbeatAge": 3,
+            "heartbeatIntervalSec": 90,
+            "heartbeatNextInSec": -169,
+            "generation": 145,
+            "nixosVersion": "24.11.20260401",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/cfb7ec19520f8552-nixos-system-atlas-03-24.11.20256441",
+            "targetStorePath": "/nix/store/c22d7e70305bfa69-nixos-system-atlas-03-24.11.20252862",
+            "uptime": "21d 0h",
+            "cpu": "Xeon E-2336",
+            "memGb": 64,
+            "ipv4": "10.1.70.240",
+            "ipv6": "fd42:a1:aba2::32",
+            "reachability": "direct",
+            "cves": {
+              "critical": 2,
+              "high": 5,
+              "medium": 14,
+              "low": 30,
+              "total": 51
+            },
+            "tags": [
+              "stig-enforced"
+            ],
+            "stig": 29,
+            "events": [
+              {
+                "at": "5m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "6h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "22h ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "4d ago",
+                "title": "Generation 165 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 2,
+            "high": 3,
+            "medium": 8,
+            "low": 3,
+            "total": 16,
+            "fixable": 9,
+            "exploited": 0
+          },
+          "score": 238
+        },
+        {
+          "sys": {
+            "id": "sys-11",
+            "hostname": "orion-db-02",
+            "fqdn": "orion-db-02.production.cf.internal",
+            "environment": "production",
+            "flake": "infrastructure",
+            "branch": "main",
+            "commit": "529d1e57",
+            "commitMessage": "bump nixpkgs to 24.11",
+            "health": "warning",
+            "status": "Warning",
+            "statusColor": "#fbbf24",
+            "statusChip": "chip-warning",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "behind",
+            "lastHeartbeat": "3m ago",
+            "heartbeatAge": 3,
+            "heartbeatIntervalSec": 90,
+            "heartbeatNextInSec": -156,
+            "generation": 192,
+            "nixosVersion": "24.05.20260218",
+            "kernel": "linux-6.1.115",
+            "storePath": "/nix/store/94cb4924c5521367-nixos-system-orion-db-02-24.11.20254546",
+            "targetStorePath": "/nix/store/d5e5618c5c6c9519-nixos-system-orion-db-02-24.11.20257277",
+            "uptime": "29d 23h",
+            "cpu": "EPYC 7443P",
+            "memGb": 256,
+            "ipv4": "10.0.82.225",
+            "ipv6": "fd42:a1:f557::7",
+            "reachability": "direct",
+            "cves": {
+              "critical": 3,
+              "high": 9,
+              "medium": 1,
+              "low": 20,
+              "total": 33
+            },
+            "tags": [
+              "stig-enforced",
+              "persistent-data"
+            ],
+            "stig": 29,
+            "events": [
+              {
+                "at": "5m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy completed",
+                "color": "#34d399"
+              },
+              {
+                "at": "12h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 195 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 2,
+            "high": 3,
+            "medium": 8,
+            "low": 3,
+            "total": 16,
+            "fixable": 9,
+            "exploited": 0
+          },
+          "score": 238
+        },
+        {
+          "sys": {
+            "id": "sys-20",
+            "hostname": "dev-node-04",
+            "fqdn": "dev-node-04.dev.cf.internal",
+            "environment": "dev",
+            "flake": "web-services",
+            "branch": "dev",
+            "commit": "e5689503",
+            "commitMessage": "cve: patch openssl to 3.3.2",
+            "health": "warning",
+            "status": "Warning",
+            "statusColor": "#fbbf24",
+            "statusChip": "chip-warning",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "behind",
+            "lastHeartbeat": "just now",
+            "heartbeatAge": 0,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": 1,
+            "generation": 203,
+            "nixosVersion": "24.11.20260401",
+            "kernel": "linux-6.1.115",
+            "storePath": "/nix/store/ea9dfe0c4b8ed304-nixos-system-dev-node-04-24.11.20260189",
+            "targetStorePath": "/nix/store/066623a131c5c08e-nixos-system-dev-node-04-24.11.20260219",
+            "uptime": "7d 22h",
+            "cpu": "Xeon E-2336",
+            "memGb": 256,
+            "ipv4": "10.1.37.163",
+            "ipv6": "fd42:b2:ea1a::35",
+            "reachability": "direct",
+            "cves": {
+              "critical": 1,
+              "high": 2,
+              "medium": 6,
+              "low": 11,
+              "total": 20
+            },
+            "tags": [],
+            "stig": 18,
+            "events": [
+              {
+                "at": "2m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "47m ago",
+                "title": "Deploy completed",
+                "color": "#34d399"
+              },
+              {
+                "at": "9h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "2d ago",
+                "title": "Generation 137 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 2,
+            "high": 3,
+            "medium": 8,
+            "low": 3,
+            "total": 16,
+            "fixable": 9,
+            "exploited": 0
+          },
+          "score": 238
+        },
+        {
+          "sys": {
+            "id": "sys-21",
+            "hostname": "dev-lab-01",
+            "fqdn": "dev-lab-01.dev.cf.internal",
+            "environment": "dev",
+            "flake": "lab-nodes",
+            "branch": "dev",
+            "commit": "d8aae228",
+            "commitMessage": "add grafana exporter to host",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "2m ago",
+            "heartbeatAge": 2,
+            "heartbeatIntervalSec": 60,
+            "heartbeatNextInSec": -74,
+            "generation": 35,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/00269e31fe9e85d9-nixos-system-dev-lab-01-24.11.20251424",
+            "targetStorePath": null,
+            "uptime": "24d 22h",
+            "cpu": "EPYC 7443P",
+            "memGb": 64,
+            "ipv4": "10.4.59.31",
+            "ipv6": "fd42:d4:93b0::29",
+            "reachability": "direct",
+            "cves": {
+              "critical": 0,
+              "high": 3,
+              "medium": 17,
+              "low": 10,
+              "total": 30
+            },
+            "tags": [],
+            "stig": 15,
+            "events": [
+              {
+                "at": "4m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "7h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 182 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 2,
+            "high": 3,
+            "medium": 7,
+            "low": 1,
+            "total": 13,
+            "fixable": 8,
+            "exploited": 0
+          },
+          "score": 237
+        },
+        {
+          "sys": {
+            "id": "sys-17",
+            "hostname": "dev-node-01",
+            "fqdn": "dev-node-01.dev.cf.internal",
+            "environment": "dev",
+            "flake": "infrastructure",
+            "branch": "dev",
+            "commit": "fc243aba",
+            "commitMessage": "stig: enforce audit rules for sudo",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "3m ago",
+            "heartbeatAge": 3,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": -120,
+            "generation": 209,
+            "nixosVersion": "24.11.20260401",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/4389c3fe94226066-nixos-system-dev-node-01-24.11.20256463",
+            "targetStorePath": null,
+            "uptime": "16d 8h",
+            "cpu": "EPYC 7443P",
+            "memGb": 32,
+            "ipv4": "10.4.249.54",
+            "ipv6": "fd42:d4:3361::59",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 0,
+              "medium": 3,
+              "low": 12,
+              "total": 15
+            },
+            "tags": [],
+            "stig": 16,
+            "events": [
+              {
+                "at": "5m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "6h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "5d ago",
+                "title": "Generation 53 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 2,
+            "high": 2,
+            "medium": 5,
+            "low": 5,
+            "total": 14,
+            "fixable": 9,
+            "exploited": 0
+          },
+          "score": 225
+        },
+        {
+          "sys": {
+            "id": "sys-26",
+            "hostname": "edge-nyc-02",
+            "fqdn": "edge-nyc-02.edge.cf.internal",
+            "environment": "edge",
+            "flake": "edge-gateway",
+            "branch": "dev",
+            "commit": "2147b611",
+            "commitMessage": "harden sshd: disable password auth",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "auto_latest",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "4m ago",
+            "heartbeatAge": 4,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": -173,
+            "generation": 40,
+            "nixosVersion": "24.11.20260401",
+            "kernel": "linux-6.1.115",
+            "storePath": "/nix/store/70a9c4a6c715e0ec-nixos-system-edge-nyc-02-24.11.20260232",
+            "targetStorePath": null,
+            "uptime": "1d 2h",
+            "cpu": "EPYC 7443P",
+            "memGb": 16,
+            "ipv4": "10.4.133.4",
+            "ipv6": "fd42:d4:30fc::99",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 1,
+              "medium": 4,
+              "low": 30,
+              "total": 35
+            },
+            "tags": [],
+            "stig": 22,
+            "events": [
+              {
+                "at": "6m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "6h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "5d ago",
+                "title": "Generation 103 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 2,
+            "high": 2,
+            "medium": 5,
+            "low": 5,
+            "total": 14,
+            "fixable": 9,
+            "exploited": 0
+          },
+          "score": 225
+        },
+        {
+          "sys": {
+            "id": "sys-29",
+            "hostname": "edge-sgp-01",
+            "fqdn": "edge-sgp-01.edge.cf.internal",
+            "environment": "edge",
+            "flake": "edge-gateway",
+            "branch": "dev",
+            "commit": "1e84f129",
+            "commitMessage": "harden sshd: disable password auth",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "3m ago",
+            "heartbeatAge": 3,
+            "heartbeatIntervalSec": 90,
+            "heartbeatNextInSec": -142,
+            "generation": 75,
+            "nixosVersion": "24.05.20260218",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/dbd75c9c0362a435-nixos-system-edge-sgp-01-24.11.20254345",
+            "targetStorePath": null,
+            "uptime": "26d 4h",
+            "cpu": "Xeon E-2336",
+            "memGb": 256,
+            "ipv4": "10.4.3.59",
+            "ipv6": "fd42:a1:f61a::43",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 0,
+              "medium": 8,
+              "low": 29,
+              "total": 37
+            },
+            "tags": [],
+            "stig": 21,
+            "events": [
+              {
+                "at": "5m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "35m ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "10h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 113 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 1,
+            "high": 4,
+            "medium": 8,
+            "low": 3,
+            "total": 16,
+            "fixable": 9,
+            "exploited": 0
+          },
+          "score": 148
+        },
+        {
+          "sys": {
+            "id": "sys-22",
+            "hostname": "dev-lab-02",
+            "fqdn": "dev-lab-02.dev.cf.internal",
+            "environment": "dev",
+            "flake": "lab-nodes",
+            "branch": "dev",
+            "commit": "75225271",
+            "commitMessage": "cve: patch openssl to 3.3.2",
+            "health": "unknown",
+            "status": "Unknown",
+            "statusColor": "#6b7280",
+            "statusChip": "chip-unknown",
+            "deploymentPolicy": "auto_latest",
+            "deploymentState": "unknown",
+            "lastHeartbeat": "23m ago",
+            "heartbeatAge": 23,
+            "heartbeatIntervalSec": 90,
+            "heartbeatNextInSec": -1292,
+            "generation": 36,
+            "nixosVersion": "24.11.20260401",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/da1f2a0f996e6de5-nixos-system-dev-lab-02-24.11.20257977",
+            "targetStorePath": null,
+            "uptime": "23d 16h",
+            "cpu": "Xeon E-2336",
+            "memGb": 32,
+            "ipv4": "10.3.0.158",
+            "ipv6": "fd42:b2:dd21::42",
+            "reachability": "direct",
+            "cves": {
+              "critical": 0,
+              "high": 4,
+              "medium": 15,
+              "low": 19,
+              "total": 38
+            },
+            "tags": [],
+            "stig": 18,
+            "events": [
+              {
+                "at": "25m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy completed",
+                "color": "#34d399"
+              },
+              {
+                "at": "6h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "5d ago",
+                "title": "Generation 87 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 1,
+            "high": 4,
+            "medium": 6,
+            "low": 2,
+            "total": 13,
+            "fixable": 9,
+            "exploited": 0
+          },
+          "score": 146
+        },
+        {
+          "sys": {
+            "id": "sys-31",
+            "hostname": "lab-vm-02",
+            "fqdn": "lab-vm-02.lab.cf.internal",
+            "environment": "lab",
+            "flake": "lab-nodes",
+            "branch": "dev",
+            "commit": "74477230",
+            "commitMessage": "fix: postgres role permissions migration",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "just now",
+            "heartbeatAge": 0,
+            "heartbeatIntervalSec": 90,
+            "heartbeatNextInSec": 60,
+            "generation": 102,
+            "nixosVersion": "24.11.20260401",
+            "kernel": "linux-6.1.115",
+            "storePath": "/nix/store/5c2eb4a8fee859e0-nixos-system-lab-vm-02-24.11.20260155",
+            "targetStorePath": null,
+            "uptime": "6d 11h",
+            "cpu": "Ryzen 9 5950X",
+            "memGb": 128,
+            "ipv4": "10.2.134.242",
+            "ipv6": "fd42:c3:6848::34",
+            "reachability": "direct",
+            "cves": {
+              "critical": 0,
+              "high": 0,
+              "medium": 7,
+              "low": 5,
+              "total": 12
+            },
+            "tags": [],
+            "stig": 16,
+            "events": [
+              {
+                "at": "2m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "5h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "2d ago",
+                "title": "Generation 122 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 1,
+            "high": 4,
+            "medium": 6,
+            "low": 2,
+            "total": 13,
+            "fixable": 9,
+            "exploited": 0
+          },
+          "score": 146
+        },
+        {
+          "sys": {
+            "id": "sys-33",
+            "hostname": "lab-rig-01",
+            "fqdn": "lab-rig-01.lab.cf.internal",
+            "environment": "lab",
+            "flake": "lab-nodes",
+            "branch": "dev",
+            "commit": "a694c85c",
+            "commitMessage": "feat: enable sops-nix for secrets",
+            "health": "offline",
+            "status": "Offline",
+            "statusColor": "#f87171",
+            "statusChip": "chip-critical",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "unknown",
+            "lastHeartbeat": "15h ago",
+            "heartbeatAge": 959,
+            "heartbeatIntervalSec": 60,
+            "heartbeatNextInSec": -57501,
+            "generation": 140,
+            "nixosVersion": "24.11.20260401",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/6b11ec3573623937-nixos-system-lab-rig-01-24.11.20254606",
+            "targetStorePath": null,
+            "uptime": "22d 9h",
+            "cpu": "Xeon E-2336",
+            "memGb": 16,
+            "ipv4": "10.1.23.114",
+            "ipv6": "fd42:d4:33bc::86",
+            "reachability": "direct",
+            "cves": {
+              "critical": 0,
+              "high": 1,
+              "medium": 6,
+              "low": 3,
+              "total": 10
+            },
+            "tags": [],
+            "stig": 14,
+            "events": [
+              {
+                "at": "16h ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy completed",
+                "color": "#34d399"
+              },
+              {
+                "at": "6h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "20h ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 126 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 1,
+            "high": 2,
+            "medium": 6,
+            "low": 4,
+            "total": 13,
+            "fixable": 5,
+            "exploited": 0
+          },
+          "score": 126
+        },
+        {
+          "sys": {
+            "id": "sys-24",
+            "hostname": "edge-pdx-02",
+            "fqdn": "edge-pdx-02.edge.cf.internal",
+            "environment": "edge",
+            "flake": "edge-gateway",
+            "branch": "dev",
+            "commit": "5d0d37e0",
+            "commitMessage": "stig: enforce audit rules for sudo",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "auto_latest",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "5m ago",
+            "heartbeatAge": 5,
+            "heartbeatIntervalSec": 60,
+            "heartbeatNextInSec": -275,
+            "generation": 128,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.1.115",
+            "storePath": "/nix/store/66f33c395fde60d5-nixos-system-edge-pdx-02-24.11.20252374",
+            "targetStorePath": null,
+            "uptime": "31d 11h",
+            "cpu": "Ryzen 9 5950X",
+            "memGb": 256,
+            "ipv4": "10.4.40.86",
+            "ipv6": "fd42:c3:3124::42",
+            "reachability": "pull",
+            "cves": {
+              "critical": 2,
+              "high": 8,
+              "medium": 6,
+              "low": 26,
+              "total": 42
+            },
+            "tags": [],
+            "stig": 19,
+            "events": [
+              {
+                "at": "7m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "10h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "21h ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "2d ago",
+                "title": "Generation 116 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 1,
+            "high": 2,
+            "medium": 5,
+            "low": 4,
+            "total": 12,
+            "fixable": 4,
+            "exploited": 0
+          },
+          "score": 125
+        },
+        {
+          "sys": {
+            "id": "sys-5",
+            "hostname": "hydra-03",
+            "fqdn": "hydra-03.production.cf.internal",
+            "environment": "production",
+            "flake": "build-farm",
+            "branch": "main",
+            "commit": "2d01e953",
+            "commitMessage": "harden sshd: disable password auth",
+            "health": "drifted",
+            "status": "Drifted",
+            "statusColor": "#fbbf24",
+            "statusChip": "chip-warning",
+            "deploymentPolicy": "manual",
+            "deploymentState": "drift",
+            "lastHeartbeat": "1m ago",
+            "heartbeatAge": 1,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": 29,
+            "generation": 135,
+            "nixosVersion": "24.05.20260218",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/72455989bf1544e1-nixos-system-hydra-03-24.11.20252168",
+            "targetStorePath": "/nix/store/6db5e55a637b0df5-nixos-system-hydra-03-24.11.20253580",
+            "uptime": "7d 6h",
+            "cpu": "EPYC 7443P",
+            "memGb": 32,
+            "ipv4": "10.2.210.103",
+            "ipv6": "fd42:a1:0d85::80",
+            "reachability": "pull",
+            "cves": {
+              "critical": 1,
+              "high": 3,
+              "medium": 4,
+              "low": 25,
+              "total": 33
+            },
+            "tags": [
+              "builder",
+              "stig-enforced"
+            ],
+            "stig": 30,
+            "events": [
+              {
+                "at": "3m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy completed",
+                "color": "#34d399"
+              },
+              {
+                "at": "7h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 198 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 1,
+            "high": 1,
+            "medium": 6,
+            "low": 4,
+            "total": 12,
+            "fixable": 5,
+            "exploited": 0
+          },
+          "score": 116
+        },
+        {
+          "sys": {
+            "id": "sys-14",
+            "hostname": "stg-web-01",
+            "fqdn": "stg-web-01.staging.cf.internal",
+            "environment": "staging",
+            "flake": "web-services",
+            "branch": "staging",
+            "commit": "ce1d8868",
+            "commitMessage": "feat: enable sops-nix for secrets",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "3m ago",
+            "heartbeatAge": 3,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": -136,
+            "generation": 122,
+            "nixosVersion": "24.11.20260401",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/8d5bf0a272b39711-nixos-system-stg-web-01-24.11.20254458",
+            "targetStorePath": null,
+            "uptime": "7d 20h",
+            "cpu": "Graviton3",
+            "memGb": 32,
+            "ipv4": "10.4.56.6",
+            "ipv6": "fd42:b2:a614::7",
+            "reachability": "direct",
+            "cves": {
+              "critical": 2,
+              "high": 4,
+              "medium": 15,
+              "low": 15,
+              "total": 36
+            },
+            "tags": [],
+            "stig": 22,
+            "events": [
+              {
+                "at": "5m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "8h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "4d ago",
+                "title": "Generation 22 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 1,
+            "high": 1,
+            "medium": 6,
+            "low": 3,
+            "total": 11,
+            "fixable": 5,
+            "exploited": 0
+          },
+          "score": 116
+        },
+        {
+          "sys": {
+            "id": "sys-23",
+            "hostname": "edge-pdx-01",
+            "fqdn": "edge-pdx-01.edge.cf.internal",
+            "environment": "edge",
+            "flake": "edge-gateway",
+            "branch": "dev",
+            "commit": "ec2d6c54",
+            "commitMessage": "bump nixpkgs to 24.11",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "5m ago",
+            "heartbeatAge": 5,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": -211,
+            "generation": 131,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/6ef10b9711eda6e2-nixos-system-edge-pdx-01-24.11.20257372",
+            "targetStorePath": null,
+            "uptime": "39d 23h",
+            "cpu": "Graviton3",
+            "memGb": 64,
+            "ipv4": "10.3.124.211",
+            "ipv6": "fd42:d4:cb31::2",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 0,
+              "medium": 1,
+              "low": 24,
+              "total": 25
+            },
+            "tags": [],
+            "stig": 15,
+            "events": [
+              {
+                "at": "7m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "10h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "2d ago",
+                "title": "Generation 96 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 1,
+            "high": 1,
+            "medium": 6,
+            "low": 3,
+            "total": 11,
+            "fixable": 5,
+            "exploited": 0
+          },
+          "score": 116
+        },
+        {
+          "sys": {
+            "id": "sys-1",
+            "hostname": "atlas-02",
+            "fqdn": "atlas-02.production.cf.internal",
+            "environment": "production",
+            "flake": "infrastructure",
+            "branch": "main",
+            "commit": "45d33798",
+            "commitMessage": "harden sshd: disable password auth",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "auto_latest",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "4m ago",
+            "heartbeatAge": 4,
+            "heartbeatIntervalSec": 60,
+            "heartbeatNextInSec": -187,
+            "generation": 90,
+            "nixosVersion": "24.05.20260218",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/cf8fd68e4b57e5d4-nixos-system-atlas-02-24.11.20251381",
+            "targetStorePath": null,
+            "uptime": "42d 4h",
+            "cpu": "Ryzen 9 5950X",
+            "memGb": 256,
+            "ipv4": "10.1.166.20",
+            "ipv6": "fd42:a1:803d::42",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 2,
+              "medium": 3,
+              "low": 27,
+              "total": 32
+            },
+            "tags": [
+              "stig-enforced"
+            ],
+            "stig": 30,
+            "events": [
+              {
+                "at": "6m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "8h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "6d ago",
+                "title": "Generation 136 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 0,
+            "high": 5,
+            "medium": 8,
+            "low": 4,
+            "total": 17,
+            "fixable": 8,
+            "exploited": 0
+          },
+          "score": 58
+        },
+        {
+          "sys": {
+            "id": "sys-10",
+            "hostname": "orion-db-01",
+            "fqdn": "orion-db-01.production.cf.internal",
+            "environment": "production",
+            "flake": "infrastructure",
+            "branch": "main",
+            "commit": "f3a1f0e5",
+            "commitMessage": "bump nixpkgs to 24.11",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "3m ago",
+            "heartbeatAge": 3,
+            "heartbeatIntervalSec": 90,
+            "heartbeatNextInSec": -127,
+            "generation": 68,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/1c599db37630b547-nixos-system-orion-db-01-24.11.20252031",
+            "targetStorePath": null,
+            "uptime": "34d 20h",
+            "cpu": "Xeon E-2336",
+            "memGb": 64,
+            "ipv4": "10.1.236.207",
+            "ipv6": "fd42:b2:18e5::70",
+            "reachability": "direct",
+            "cves": {
+              "critical": 1,
+              "high": 5,
+              "medium": 2,
+              "low": 5,
+              "total": 13
+            },
+            "tags": [
+              "stig-enforced",
+              "persistent-data"
+            ],
+            "stig": 28,
+            "events": [
+              {
+                "at": "5m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "9h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "2d ago",
+                "title": "Generation 183 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 0,
+            "high": 5,
+            "medium": 7,
+            "low": 5,
+            "total": 17,
+            "fixable": 8,
+            "exploited": 0
+          },
+          "score": 57
+        },
+        {
+          "sys": {
+            "id": "sys-19",
+            "hostname": "dev-node-03",
+            "fqdn": "dev-node-03.dev.cf.internal",
+            "environment": "dev",
+            "flake": "web-services",
+            "branch": "dev",
+            "commit": "f11b7710",
+            "commitMessage": "cve: patch openssl to 3.3.2",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "just now",
+            "heartbeatAge": 0,
+            "heartbeatIntervalSec": 60,
+            "heartbeatNextInSec": 46,
+            "generation": 154,
+            "nixosVersion": "24.05.20260218",
+            "kernel": "linux-6.1.115",
+            "storePath": "/nix/store/9993a74c5694fdcc-nixos-system-dev-node-03-24.11.20256536",
+            "targetStorePath": null,
+            "uptime": "17d 17h",
+            "cpu": "Graviton3",
+            "memGb": 16,
+            "ipv4": "10.2.229.117",
+            "ipv6": "fd42:a1:5ca2::14",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 3,
+              "medium": 13,
+              "low": 0,
+              "total": 16
+            },
+            "tags": [],
+            "stig": 17,
+            "events": [
+              {
+                "at": "2m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "8h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "5d ago",
+                "title": "Generation 35 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 0,
+            "high": 5,
+            "medium": 7,
+            "low": 5,
+            "total": 17,
+            "fixable": 8,
+            "exploited": 0
+          },
+          "score": 57
+        },
+        {
+          "sys": {
+            "id": "sys-28",
+            "hostname": "edge-fra-02",
+            "fqdn": "edge-fra-02.edge.cf.internal",
+            "environment": "edge",
+            "flake": "edge-gateway",
+            "branch": "dev",
+            "commit": "b85bea44",
+            "commitMessage": "bump nixpkgs to 24.11",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "auto_latest",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "4m ago",
+            "heartbeatAge": 4,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": -183,
+            "generation": 196,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/bd9a5e2e64ee6ac2-nixos-system-edge-fra-02-24.11.20255726",
+            "targetStorePath": null,
+            "uptime": "32d 22h",
+            "cpu": "Xeon E-2336",
+            "memGb": 128,
+            "ipv4": "10.4.243.170",
+            "ipv6": "fd42:c3:e65a::63",
+            "reachability": "pull",
+            "cves": {
+              "critical": 1,
+              "high": 3,
+              "medium": 15,
+              "low": 25,
+              "total": 44
+            },
+            "tags": [],
+            "stig": 16,
+            "events": [
+              {
+                "at": "6m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "8h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "4d ago",
+                "title": "Generation 209 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 0,
+            "high": 5,
+            "medium": 6,
+            "low": 5,
+            "total": 16,
+            "fixable": 8,
+            "exploited": 0
+          },
+          "score": 56
+        },
+        {
+          "sys": {
+            "id": "sys-4",
+            "hostname": "hydra-02",
+            "fqdn": "hydra-02.production.cf.internal",
+            "environment": "production",
+            "flake": "build-farm",
+            "branch": "main",
+            "commit": "858f62a1",
+            "commitMessage": "cve: patch openssl to 3.3.2",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "4m ago",
+            "heartbeatAge": 4,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": -223,
+            "generation": 111,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/113e2cdb5638debe-nixos-system-hydra-02-24.11.20252054",
+            "targetStorePath": null,
+            "uptime": "9d 12h",
+            "cpu": "Xeon E-2336",
+            "memGb": 128,
+            "ipv4": "10.3.16.98",
+            "ipv6": "fd42:b2:f3bf::21",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 1,
+              "medium": 15,
+              "low": 16,
+              "total": 32
+            },
+            "tags": [
+              "builder",
+              "stig-enforced"
+            ],
+            "stig": 30,
+            "events": [
+              {
+                "at": "6m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "31m ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "8h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "5d ago",
+                "title": "Generation 137 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 0,
+            "high": 4,
+            "medium": 7,
+            "low": 2,
+            "total": 13,
+            "fixable": 8,
+            "exploited": 0
+          },
+          "score": 47
+        },
+        {
+          "sys": {
+            "id": "sys-13",
+            "hostname": "stg-atlas-02",
+            "fqdn": "stg-atlas-02.staging.cf.internal",
+            "environment": "staging",
+            "flake": "infrastructure",
+            "branch": "staging",
+            "commit": "f7331db2",
+            "commitMessage": "cve: patch openssl to 3.3.2",
+            "health": "offline",
+            "status": "Offline",
+            "statusColor": "#f87171",
+            "statusChip": "chip-critical",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "unknown",
+            "lastHeartbeat": "2d ago",
+            "heartbeatAge": 3260,
+            "heartbeatIntervalSec": 90,
+            "heartbeatNextInSec": -195536,
+            "generation": 163,
+            "nixosVersion": "24.11.20260401",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/c23ab490d7a12b66-nixos-system-stg-atlas-02-24.11.20256087",
+            "targetStorePath": null,
+            "uptime": "27d 17h",
+            "cpu": "EPYC 7443P",
+            "memGb": 256,
+            "ipv4": "10.2.169.70",
+            "ipv6": "fd42:d4:46cb::80",
+            "reachability": "direct",
+            "cves": {
+              "critical": 0,
+              "high": 3,
+              "medium": 9,
+              "low": 9,
+              "total": 21
+            },
+            "tags": [],
+            "stig": 25,
+            "events": [
+              {
+                "at": "2d ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "50m ago",
+                "title": "Deploy completed",
+                "color": "#34d399"
+              },
+              {
+                "at": "9h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 72 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 0,
+            "high": 4,
+            "medium": 6,
+            "low": 2,
+            "total": 12,
+            "fixable": 8,
+            "exploited": 0
+          },
+          "score": 46
+        },
+        {
+          "sys": {
+            "id": "sys-7",
+            "hostname": "gaia-web-02",
+            "fqdn": "gaia-web-02.production.cf.internal",
+            "environment": "production",
+            "flake": "web-services",
+            "branch": "main",
+            "commit": "f848c902",
+            "commitMessage": "add grafana exporter to host",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "pinned",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "2m ago",
+            "heartbeatAge": 2,
+            "heartbeatIntervalSec": 90,
+            "heartbeatNextInSec": -81,
+            "generation": 100,
+            "nixosVersion": "24.05.20260218",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/84407b2bb0eac5e0-nixos-system-gaia-web-02-24.11.20253673",
+            "targetStorePath": null,
+            "uptime": "15d 21h",
+            "cpu": "Ryzen 9 5950X",
+            "memGb": 64,
+            "ipv4": "10.1.30.155",
+            "ipv6": "fd42:b2:629b::91",
+            "reachability": "direct",
+            "cves": {
+              "critical": 0,
+              "high": 1,
+              "medium": 12,
+              "low": 25,
+              "total": 38
+            },
+            "tags": [
+              "stig-enforced"
+            ],
+            "stig": 28,
+            "events": [
+              {
+                "at": "4m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "11h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 21 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 0,
+            "high": 4,
+            "medium": 5,
+            "low": 4,
+            "total": 13,
+            "fixable": 6,
+            "exploited": 0
+          },
+          "score": 45
+        },
+        {
+          "sys": {
+            "id": "sys-16",
+            "hostname": "stg-build-01",
+            "fqdn": "stg-build-01.staging.cf.internal",
+            "environment": "staging",
+            "flake": "build-farm",
+            "branch": "staging",
+            "commit": "c3313ab9",
+            "commitMessage": "cve: patch openssl to 3.3.2",
+            "health": "building",
+            "status": "Deploying",
+            "statusColor": "#60a5fa",
+            "statusChip": "chip-info",
+            "deploymentPolicy": "manual",
+            "deploymentState": "deploying",
+            "lastHeartbeat": "just now",
+            "heartbeatAge": 0,
+            "heartbeatIntervalSec": 90,
+            "heartbeatNextInSec": 31,
+            "generation": 65,
+            "nixosVersion": "24.05.20260218",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/d86f9e996775d943-nixos-system-stg-build-01-24.11.20253383",
+            "targetStorePath": null,
+            "uptime": "39d 1h",
+            "cpu": "Graviton3",
+            "memGb": 64,
+            "ipv4": "10.2.204.29",
+            "ipv6": "fd42:a1:db6f::16",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 0,
+              "medium": 8,
+              "low": 22,
+              "total": 30
+            },
+            "tags": [
+              "builder"
+            ],
+            "stig": 27,
+            "events": [
+              {
+                "at": "2m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy completed",
+                "color": "#34d399"
+              },
+              {
+                "at": "9h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "2d ago",
+                "title": "Generation 99 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 0,
+            "high": 4,
+            "medium": 5,
+            "low": 4,
+            "total": 13,
+            "fixable": 6,
+            "exploited": 0
+          },
+          "score": 45
+        },
+        {
+          "sys": {
+            "id": "sys-25",
+            "hostname": "edge-nyc-01",
+            "fqdn": "edge-nyc-01.edge.cf.internal",
+            "environment": "edge",
+            "flake": "edge-gateway",
+            "branch": "dev",
+            "commit": "9624fd22",
+            "commitMessage": "cve: patch openssl to 3.3.2",
+            "health": "warning",
+            "status": "Warning",
+            "statusColor": "#fbbf24",
+            "statusChip": "chip-warning",
+            "deploymentPolicy": "manual",
+            "deploymentState": "behind",
+            "lastHeartbeat": "3m ago",
+            "heartbeatAge": 3,
+            "heartbeatIntervalSec": 60,
+            "heartbeatNextInSec": -139,
+            "generation": 186,
+            "nixosVersion": "24.11.20260401",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/5a8be3032c01ae8d-nixos-system-edge-nyc-01-24.11.20257258",
+            "targetStorePath": "/nix/store/b00567f9dbe3798c-nixos-system-edge-nyc-01-24.11.20258707",
+            "uptime": "25d 1h",
+            "cpu": "Xeon E-2336",
+            "memGb": 64,
+            "ipv4": "10.1.165.100",
+            "ipv6": "fd42:a1:0b7b::64",
+            "reachability": "pull",
+            "cves": {
+              "critical": 4,
+              "high": 4,
+              "medium": 2,
+              "low": 23,
+              "total": 33
+            },
+            "tags": [],
+            "stig": 19,
+            "events": [
+              {
+                "at": "5m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy completed",
+                "color": "#34d399"
+              },
+              {
+                "at": "9h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 187 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 0,
+            "high": 4,
+            "medium": 4,
+            "low": 4,
+            "total": 12,
+            "fixable": 5,
+            "exploited": 0
+          },
+          "score": 44
+        },
+        {
+          "sys": {
+            "id": "sys-34",
+            "hostname": "lab-rig-02",
+            "fqdn": "lab-rig-02.lab.cf.internal",
+            "environment": "lab",
+            "flake": "lab-nodes",
+            "branch": "dev",
+            "commit": "1fc658f6",
+            "commitMessage": "wireguard: add peer for edge-sgp-01",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "4m ago",
+            "heartbeatAge": 4,
+            "heartbeatIntervalSec": 60,
+            "heartbeatNextInSec": -239,
+            "generation": 197,
+            "nixosVersion": "24.05.20260218",
+            "kernel": "linux-6.6.70",
+            "storePath": "/nix/store/d7959857ac79045e-nixos-system-lab-rig-02-24.11.20256269",
+            "targetStorePath": null,
+            "uptime": "32d 4h",
+            "cpu": "EPYC 7443P",
+            "memGb": 16,
+            "ipv4": "10.4.181.16",
+            "ipv6": "fd42:a1:322f::3",
+            "reachability": "direct",
+            "cves": {
+              "critical": 5,
+              "high": 14,
+              "medium": 18,
+              "low": 16,
+              "total": 53
+            },
+            "tags": [],
+            "stig": 17,
+            "events": [
+              {
+                "at": "6m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "10h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 91 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 0,
+            "high": 4,
+            "medium": 4,
+            "low": 4,
+            "total": 12,
+            "fixable": 5,
+            "exploited": 0
+          },
+          "score": 44
+        },
+        {
+          "sys": {
+            "id": "sys-6",
+            "hostname": "gaia-web-01",
+            "fqdn": "gaia-web-01.production.cf.internal",
+            "environment": "production",
+            "flake": "web-services",
+            "branch": "main",
+            "commit": "d165b301",
+            "commitMessage": "stig: enforce audit rules for sudo",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "3m ago",
+            "heartbeatAge": 3,
+            "heartbeatIntervalSec": 60,
+            "heartbeatNextInSec": -173,
+            "generation": 108,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.1.115",
+            "storePath": "/nix/store/e7dd80278b8f31c5-nixos-system-gaia-web-01-24.11.20253072",
+            "targetStorePath": null,
+            "uptime": "11d 17h",
+            "cpu": "EPYC 7443P",
+            "memGb": 128,
+            "ipv4": "10.2.43.97",
+            "ipv6": "fd42:d4:9e8b::19",
+            "reachability": "direct",
+            "cves": {
+              "critical": 0,
+              "high": 0,
+              "medium": 10,
+              "low": 10,
+              "total": 20
+            },
+            "tags": [
+              "stig-enforced"
+            ],
+            "stig": 30,
+            "events": [
+              {
+                "at": "5m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "5h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 191 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 0,
+            "high": 3,
+            "medium": 5,
+            "low": 4,
+            "total": 12,
+            "fixable": 4,
+            "exploited": 0
+          },
+          "score": 35
+        },
+        {
+          "sys": {
+            "id": "sys-15",
+            "hostname": "stg-web-02",
+            "fqdn": "stg-web-02.staging.cf.internal",
+            "environment": "staging",
+            "flake": "web-services",
+            "branch": "staging",
+            "commit": "17e7a9dd",
+            "commitMessage": "bump nixpkgs to 24.11",
+            "health": "healthy",
+            "status": "Healthy",
+            "statusColor": "#34d399",
+            "statusChip": "chip-healthy",
+            "deploymentPolicy": "manual",
+            "deploymentState": "up-to-date",
+            "lastHeartbeat": "1m ago",
+            "heartbeatAge": 1,
+            "heartbeatIntervalSec": 120,
+            "heartbeatNextInSec": -56,
+            "generation": 69,
+            "nixosVersion": "24.11.20260320",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/3df67b72165f810b-nixos-system-stg-web-02-24.11.20259107",
+            "targetStorePath": null,
+            "uptime": "38d 13h",
+            "cpu": "EPYC 7443P",
+            "memGb": 32,
+            "ipv4": "10.3.240.61",
+            "ipv6": "fd42:a1:adb6::23",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 4,
+              "medium": 18,
+              "low": 9,
+              "total": 31
+            },
+            "tags": [],
+            "stig": 28,
+            "events": [
+              {
+                "at": "3m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy succeeded",
+                "color": "#34d399"
+              },
+              {
+                "at": "9h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "1d ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "3d ago",
+                "title": "Generation 41 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 0,
+            "high": 3,
+            "medium": 5,
+            "low": 4,
+            "total": 12,
+            "fixable": 4,
+            "exploited": 0
+          },
+          "score": 35
+        },
+        {
+          "sys": {
+            "id": "sys-32",
+            "hostname": "lab-vm-03",
+            "fqdn": "lab-vm-03.lab.cf.internal",
+            "environment": "lab",
+            "flake": "lab-nodes",
+            "branch": "dev",
+            "commit": "ca389234",
+            "commitMessage": "stig: enforce audit rules for sudo",
+            "health": "drifted",
+            "status": "Drifted",
+            "statusColor": "#fbbf24",
+            "statusChip": "chip-warning",
+            "deploymentPolicy": "auto_latest",
+            "deploymentState": "drift",
+            "lastHeartbeat": "5m ago",
+            "heartbeatAge": 5,
+            "heartbeatIntervalSec": 90,
+            "heartbeatNextInSec": -245,
+            "generation": 41,
+            "nixosVersion": "24.11.20260401",
+            "kernel": "linux-6.6.72",
+            "storePath": "/nix/store/849fef9a65aedfee-nixos-system-lab-vm-03-24.11.20254097",
+            "targetStorePath": "/nix/store/acd197f7f287c32f-nixos-system-lab-vm-03-24.11.20253364",
+            "uptime": "13d 18h",
+            "cpu": "Ryzen 9 5950X",
+            "memGb": 128,
+            "ipv4": "10.4.170.203",
+            "ipv6": "fd42:a1:91bf::95",
+            "reachability": "pull",
+            "cves": {
+              "critical": 0,
+              "high": 1,
+              "medium": 12,
+              "low": 7,
+              "total": 20
+            },
+            "tags": [],
+            "stig": 19,
+            "events": [
+              {
+                "at": "7m ago",
+                "title": "Heartbeat received",
+                "color": "#34d399"
+              },
+              {
+                "at": "1h ago",
+                "title": "Deploy completed",
+                "color": "#34d399"
+              },
+              {
+                "at": "7h ago",
+                "title": "Evaluation complete",
+                "color": "#60a5fa"
+              },
+              {
+                "at": "23h ago",
+                "title": "Configuration drift detected",
+                "color": "#fbbf24"
+              },
+              {
+                "at": "5d ago",
+                "title": "Generation 132 activated",
+                "color": "#34d399"
+              }
+            ]
+          },
+          "counts": {
+            "critical": 0,
+            "high": 1,
+            "medium": 6,
+            "low": 3,
+            "total": 10,
+            "fixable": 4,
+            "exploited": 0
+          },
+          "score": 16
+        }
+      ]
+    }
+  },
+  "policies": [
+    {
+      "id": "manual",
+      "name": "manual",
+      "category": "deployment",
+      "description": "Operator must explicitly approve every deploy.",
+      "type": "builtin",
+      "rules": [],
+      "rationale": "Safest default for production-critical hosts. Every promotion is a human decision."
+    },
+    {
+      "id": "auto_latest",
+      "name": "auto_latest",
+      "category": "deployment",
+      "description": "Auto-deploy the newest passing commit on the assigned flake/branch.",
+      "type": "builtin",
+      "rules": [
+        {
+          "kind": "eval_passed"
+        },
+        {
+          "kind": "build_succeeded"
+        }
+      ],
+      "rationale": "Best for dev and edge nodes that should always track HEAD."
+    },
+    {
+      "id": "pinned",
+      "name": "pinned",
+      "category": "deployment",
+      "description": "Stay on a specific commit until manually changed.",
+      "type": "builtin",
+      "rules": [
+        {
+          "kind": "pin_required"
+        }
+      ],
+      "rationale": "Holds a system at a known-good revision. Use for compliance baselines."
+    },
+    {
+      "id": "cve-gated",
+      "name": "cve-gated",
+      "category": "pipeline",
+      "description": "Block deploys that introduce any critical CVE.",
+      "type": "custom",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "cve_block",
+          "severity": "critical",
+          "maxAllowed": 0
+        },
+        {
+          "kind": "cve_block",
+          "severity": "high",
+          "maxAllowed": 2
+        },
+        {
+          "kind": "eval_passed"
+        },
+        {
+          "kind": "build_succeeded"
+        }
+      ],
+      "rationale": "Catches regressions surfaced by vulnix during eval. Critical = hard block.",
+      "createdBy": "mreyes",
+      "createdAt": "3mo ago",
+      "lastModified": "2w ago"
+    },
+    {
+      "id": "business-hours",
+      "name": "business-hours",
+      "category": "rollout",
+      "description": "Auto-deploy permitted only between 09:00–17:00 weekdays, US-East.",
+      "type": "custom",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "time_window",
+          "days": [
+            "mon",
+            "tue",
+            "wed",
+            "thu",
+            "fri"
+          ],
+          "from": "09:00",
+          "to": "17:00",
+          "tz": "America/New_York"
+        },
+        {
+          "kind": "eval_passed"
+        },
+        {
+          "kind": "build_succeeded"
+        }
+      ],
+      "rationale": "Operator-coverage window. Outside hours, defer to manual.",
+      "createdBy": "jpark",
+      "createdAt": "5mo ago",
+      "lastModified": "1mo ago"
+    },
+    {
+      "id": "two-approver",
+      "name": "two-approver",
+      "category": "rollout",
+      "description": "Requires sign-off from 2 distinct operators with admin role.",
+      "type": "custom",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "approval_required",
+          "count": 2,
+          "role": "admin"
+        },
+        {
+          "kind": "eval_passed"
+        },
+        {
+          "kind": "build_succeeded"
+        }
+      ],
+      "rationale": "For tier-0 systems (auth providers, secrets brokers). 4-eyes principle.",
+      "createdBy": "security-team",
+      "createdAt": "1mo ago",
+      "lastModified": "3d ago"
+    },
+    {
+      "id": "canary-25",
+      "name": "canary-25",
+      "category": "rollout",
+      "description": "Roll out to 25% of matching systems at a time, watch for 30 min, then continue.",
+      "type": "custom",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "rollout_percent",
+          "percent": 25,
+          "observeMin": 30
+        },
+        {
+          "kind": "eval_passed"
+        },
+        {
+          "kind": "build_succeeded"
+        }
+      ],
+      "rationale": "Staged rollout for the web tier. Disabled — pending observability integration.",
+      "createdBy": "dchen",
+      "createdAt": "2w ago",
+      "lastModified": "yesterday"
+    },
+    {
+      "id": "stig-sshd",
+      "name": "stig-ssh-hardening",
+      "category": "security",
+      "description": "Anduril NixOS STIG: SSH daemon hardening — no root login, FIPS ciphers, 10-min idle timeout.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.openssh.settings.PermitRootLogin",
+          "op": "==",
+          "value": "\"no\""
+        },
+        {
+          "kind": "nixos_option",
+          "path": "services.openssh.settings.ClientAliveInterval",
+          "op": "==",
+          "value": "600"
+        },
+        {
+          "kind": "nixos_option",
+          "path": "services.openssh.settings.ClientAliveCountMax",
+          "op": "==",
+          "value": "0"
+        },
+        {
+          "kind": "custom_eval",
+          "expr": "builtins.all (c: builtins.elem c FIPS_APPROVED_CIPHERS) config.services.openssh.settings.Ciphers",
+          "message": "SSH must use only FIPS-validated ciphers"
+        }
+      ],
+      "rationale": "V-268137 (no root SSH login), V-268142 (10-min idle timeout), V-268089 (FIPS-approved remote-access encryption). SRG-OS-000109 / 000163 / 000033.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "sshd -T | grep -i permitrootlogin",
+          "expect": "permitrootlogin no"
+        },
+        {
+          "kind": "command",
+          "cmd": "sshd -T | grep -i clientaliveinterval",
+          "expect": "clientaliveinterval 600"
+        },
+        {
+          "kind": "command",
+          "cmd": "sshd -T | grep -i ciphers",
+          "expect": "FIPS-approved ciphers only"
+        },
+        {
+          "kind": "unit_state",
+          "unit": "sshd.service",
+          "state": "active"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "2mo ago",
+      "lastModified": "1w ago"
+    },
+    {
+      "id": "stig-auditd",
+      "name": "stig-audit-daemon",
+      "category": "security",
+      "description": "Anduril NixOS STIG: audit daemon enabled with the firewall to enforce host logging and ingress control.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "security.audit.enable",
+          "op": "==",
+          "value": "true"
+        },
+        {
+          "kind": "nixos_option",
+          "path": "networking.firewall.enable",
+          "op": "==",
+          "value": "true"
+        },
+        {
+          "kind": "custom_eval",
+          "expr": "builtins.length config.security.audit.rules > 0",
+          "message": "Audit rules must be configured in configuration.nix"
+        }
+      ],
+      "rationale": "V-268080 (enable the audit daemon), V-268078 (enable the built-in firewall). SRG-OS-000004 / 000298.",
+      "evidence": [
+        {
+          "kind": "unit_state",
+          "unit": "auditd.service",
+          "state": "active"
+        },
+        {
+          "kind": "command",
+          "cmd": "systemctl is-active auditd",
+          "expect": "active"
+        },
+        {
+          "kind": "command",
+          "cmd": "nixos-option networking.firewall.enable",
+          "expect": "true"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "2mo ago",
+      "lastModified": "5d ago"
+    },
+    {
+      "id": "stig-banner",
+      "name": "stig-consent-banner",
+      "category": "security",
+      "description": "Anduril NixOS STIG: DoD Notice and Consent banner on all command-line logon paths.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.openssh.banner",
+          "op": "!=",
+          "value": "null"
+        },
+        {
+          "kind": "custom_eval",
+          "expr": "(builtins.match \".*USG.*\" (builtins.readFile config.environment.etc.\"issue\".source)) != null",
+          "message": "/etc/issue must contain the DoD/USG consent banner"
+        }
+      ],
+      "rationale": "V-268082 (display the Standard Mandatory DOD Notice and Consent Banner). SRG-OS-000023-GPOS-00006.",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "/etc/issue",
+          "note": "Must contain the DoD/USG consent banner verbatim"
+        },
+        {
+          "kind": "command",
+          "cmd": "cat /etc/issue",
+          "expect": "DoD consent banner"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "2mo ago",
+      "lastModified": "3w ago"
+    },
+    {
+      "id": "stig-fips",
+      "name": "stig-fips-crypto",
+      "category": "security",
+      "description": "Anduril NixOS STIG: FIPS-validated cryptography enabled and data-at-rest encrypted.",
+      "type": "custom",
+      "severity": "high",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "security.enableFIPSMode",
+          "op": "==",
+          "value": "true"
+        },
+        {
+          "kind": "custom_eval",
+          "expr": "config.boot.initrd.luks.devices != {}",
+          "message": "Data partitions must be LUKS-encrypted via boot.initrd.luks.devices"
+        }
+      ],
+      "rationale": "V-268168 (FIPS-validated cryptography), V-268144 (protect information at rest). SRG-OS-000478 / 000185.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "cat /proc/sys/crypto/fips_enabled",
+          "expect": "1"
+        },
+        {
+          "kind": "command",
+          "cmd": "lsblk -o NAME,TYPE,MOUNTPOINT | grep crypt",
+          "expect": "LUKS devices present"
+        },
+        {
+          "kind": "attestation",
+          "note": "Agent attests security.enableFIPSMode = true at activation"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "6w ago",
+      "lastModified": "4d ago"
+    },
+    {
+      "id": "stig-usbguard",
+      "name": "stig-usbguard",
+      "category": "security",
+      "description": "Anduril NixOS STIG: USBguard enabled with an allow-list policy to control peripheral access.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": true,
+      "rules": [
+        {
+          "kind": "nixos_option",
+          "path": "services.usbguard.enable",
+          "op": "==",
+          "value": "true"
+        },
+        {
+          "kind": "custom_eval",
+          "expr": "config.services.usbguard.rules != \"\"",
+          "message": "USBguard must define an allow-list policy"
+        }
+      ],
+      "rationale": "V-268139 (enable USBguard). SRG-OS-000114 — controls unauthorized peripheral connections.",
+      "evidence": [
+        {
+          "kind": "unit_state",
+          "unit": "usbguard.service",
+          "state": "active"
+        },
+        {
+          "kind": "command",
+          "cmd": "systemctl is-active usbguard",
+          "expect": "active"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "5w ago",
+      "lastModified": "6d ago"
+    },
+    {
+      "id": "stig-pwquality",
+      "name": "stig-password-policy",
+      "category": "security",
+      "description": "Anduril NixOS STIG: enforce 15-character minimum password length and encrypted password storage.",
+      "type": "custom",
+      "severity": "medium",
+      "enabled": false,
+      "rules": [
+        {
+          "kind": "custom_eval",
+          "expr": "config.security.pam.services ? pwquality && config.security.pam.pwquality.minlen >= 15",
+          "message": "Minimum password length must be >= 15"
+        },
+        {
+          "kind": "custom_eval",
+          "expr": "builtins.elem config.security.pam.hashAlgorithm [\"yescrypt\" \"sha512\"]",
+          "message": "Passwords must be stored using yescrypt or sha512"
+        }
+      ],
+      "rationale": "V-268134 (15-char minimum length), V-268130 (encrypted password storage). SRG-OS-000078 / 000112.",
+      "evidence": [
+        {
+          "kind": "command",
+          "cmd": "grep minlen /etc/security/pwquality.conf",
+          "expect": "minlen = 15"
+        },
+        {
+          "kind": "command",
+          "cmd": "awk -F: '($2!~/^\\$/){print $1}' /etc/shadow",
+          "expect": "no unhashed passwords"
+        }
+      ],
+      "createdBy": "security-team",
+      "createdAt": "4w ago",
+      "lastModified": "1w ago"
+    }
+  ],
+  "compliance": [
+    {
+      "id": "disa-rhel9-stig",
+      "name": "Anduril NixOS STIG (v1r2)",
+      "framework": "DISA STIG",
+      "version": "NixOS v1r2",
+      "description": "Anduril NixOS Security Technical Implementation Guide — operating system controls.",
+      "layer": "system",
+      "owner": "security-team",
+      "lastReview": "2026-04-12",
+      "policyIds": [
+        "stig-ssh",
+        "stig-auditd",
+        "stig-banner",
+        "stig-usbguard",
+        "stig-pwquality",
+        "stig-fips",
+        "cve-gated"
+      ],
+      "requiredEnvs": [
+        "production",
+        "staging"
+      ]
+    },
+    {
+      "id": "disa-app-stig",
+      "name": "DISA Application Security STIG",
+      "framework": "DISA STIG",
+      "version": "v6r1",
+      "description": "Application-layer STIG: TLS, auth, logging, secrets rotation.",
+      "layer": "application",
+      "owner": "security-team",
+      "lastReview": "2026-03-18",
+      "policyIds": [
+        "tls_min_version",
+        "two-approver",
+        "cve-gated",
+        "log_remote_forward"
+      ],
+      "requiredEnvs": [
+        "production"
+      ]
+    },
+    {
+      "id": "nist-800-53-mod",
+      "name": "NIST 800-53 Moderate",
+      "framework": "NIST 800-53",
+      "version": "Rev 5",
+      "description": "FedRAMP Moderate baseline subset — access control, audit, configuration management.",
+      "layer": "system",
+      "owner": "compliance-team",
+      "lastReview": "2026-02-04",
+      "policyIds": [
+        "sshd_hardening",
+        "audit_rules",
+        "banner",
+        "pam_faillock",
+        "session_lockout",
+        "time_sync",
+        "cve-gated"
+      ],
+      "requiredEnvs": [
+        "production",
+        "staging",
+        "edge"
+      ]
+    },
+    {
+      "id": "internal-prod-baseline",
+      "name": "Internal Production Baseline",
+      "framework": "Internal",
+      "version": "v2.4",
+      "description": "Crystal Forge organization minimum bar for production hosts.",
+      "layer": "system",
+      "owner": "ops-team",
+      "lastReview": "2026-05-01",
+      "policyIds": [
+        "sshd_hardening",
+        "firewall_default_deny",
+        "audit_rules",
+        "cve-gated",
+        "two-approver",
+        "business-hours"
+      ],
+      "requiredEnvs": [
+        "production"
+      ]
+    }
+  ],
+  "caches": [
+    {
+      "id": "cache-prod-s3",
+      "name": "crystal-forge-prod-cache",
+      "type": "s3",
+      "url": "s3://crystal-forge-prod-cache?region=us-east-1",
+      "region": "us-east-1",
+      "status": "healthy",
+      "storage": {
+        "used": 487,
+        "total": 1024,
+        "unit": "GB"
+      },
+      "paths": 8421,
+      "lastPush": "2m ago",
+      "pushRate": "12 paths/min",
+      "environments": [
+        "production"
+      ],
+      "requiresAuth": true,
+      "credId": "aws-prod-role",
+      "createdAt": "6mo ago",
+      "createdBy": "mreyes"
+    },
+    {
+      "id": "cache-staging-s3",
+      "name": "crystal-forge-staging-cache",
+      "type": "s3",
+      "url": "s3://crystal-forge-staging-cache?region=us-east-1",
+      "region": "us-east-1",
+      "status": "healthy",
+      "storage": {
+        "used": 142,
+        "total": 512,
+        "unit": "GB"
+      },
+      "paths": 3210,
+      "lastPush": "5m ago",
+      "pushRate": "4 paths/min",
+      "environments": [
+        "staging"
+      ],
+      "requiresAuth": true,
+      "credId": "aws-staging-role",
+      "createdAt": "5mo ago",
+      "createdBy": "jpark"
+    },
+    {
+      "id": "cache-edge-s3",
+      "name": "crystal-forge-edge-cache",
+      "type": "s3",
+      "url": "s3://crystal-forge-edge-cache?region=us-west-2",
+      "region": "us-west-2",
+      "status": "warning",
+      "statusReason": "Push lag — backlog of 24 paths",
+      "storage": {
+        "used": 78,
+        "total": 256,
+        "unit": "GB"
+      },
+      "paths": 1842,
+      "lastPush": "14m ago",
+      "pushRate": "0.4 paths/min",
+      "environments": [
+        "edge"
+      ],
+      "requiresAuth": true,
+      "credId": "aws-edge-role",
+      "createdAt": "4mo ago",
+      "createdBy": "dchen"
+    },
+    {
+      "id": "cache-dev-attic",
+      "name": "cf-attic.dev/dev",
+      "type": "attic",
+      "url": "attic://cf-attic.dev/dev",
+      "region": null,
+      "status": "healthy",
+      "storage": {
+        "used": 38,
+        "total": 100,
+        "unit": "GB"
+      },
+      "paths": 4011,
+      "lastPush": "just now",
+      "pushRate": "18 paths/min",
+      "environments": [
+        "dev"
+      ],
+      "requiresAuth": true,
+      "credId": "attic-token-dev",
+      "createdAt": "8mo ago",
+      "createdBy": "dchen"
+    },
+    {
+      "id": "cache-internal-attic-archive",
+      "name": "cf-attic.internal/archive",
+      "type": "attic",
+      "url": "attic://cf-attic.internal/archive",
+      "region": null,
+      "status": "error",
+      "statusReason": "Token expired 2026-04-12 — push paused",
+      "storage": {
+        "used": 612,
+        "total": 800,
+        "unit": "GB"
+      },
+      "paths": 12480,
+      "lastPush": "5d ago",
+      "pushRate": null,
+      "environments": [],
+      "requiresAuth": true,
+      "credId": "attic-token-archive",
+      "createdAt": "12mo ago",
+      "createdBy": "mreyes"
+    }
+  ],
+  "scanning": {
+    "configs": [
+      {
+        "id": "sc-1",
+        "name": "gaia-web-01",
+        "flake": "web-services",
+        "commit": "c7e1902",
+        "freshness": "deployed",
+        "status": "scanning",
+        "progress": 0.62,
+        "found": {
+          "crit": 0,
+          "high": 2,
+          "med": 5
+        },
+        "lastScan": "scanning…",
+        "trigger": "post-build"
+      },
+      {
+        "id": "sc-2",
+        "name": "atlas-01",
+        "flake": "infrastructure",
+        "commit": "a3f8c12",
+        "freshness": "deployed",
+        "status": "complete",
+        "found": {
+          "crit": 1,
+          "high": 3,
+          "med": 8
+        },
+        "lastScan": "4m ago",
+        "trigger": "scheduled"
+      },
+      {
+        "id": "sc-3",
+        "name": "orion-db-01",
+        "flake": "infrastructure",
+        "commit": "a3f8c12",
+        "freshness": "deployed",
+        "status": "complete",
+        "found": {
+          "crit": 0,
+          "high": 1,
+          "med": 4
+        },
+        "lastScan": "12m ago",
+        "trigger": "scheduled"
+      },
+      {
+        "id": "sc-4",
+        "name": "edge-pdx-01",
+        "flake": "edge-gateway",
+        "commit": "4d2a801",
+        "freshness": "deployed",
+        "status": "stale",
+        "found": {
+          "crit": 2,
+          "high": 4,
+          "med": 9
+        },
+        "lastScan": "9h ago",
+        "trigger": "scheduled"
+      },
+      {
+        "id": "sc-5",
+        "name": "hydra-03",
+        "flake": "build-farm",
+        "commit": "9f0c344",
+        "freshness": "recent",
+        "status": "queued",
+        "found": null,
+        "lastScan": "pending",
+        "trigger": "post-build"
+      },
+      {
+        "id": "sc-6",
+        "name": "stg-web-02",
+        "flake": "web-services",
+        "commit": "2fa8031",
+        "freshness": "recent",
+        "status": "complete",
+        "found": {
+          "crit": 0,
+          "high": 0,
+          "med": 2
+        },
+        "lastScan": "2h ago",
+        "trigger": "scheduled"
+      },
+      {
+        "id": "sc-7",
+        "name": "gaia-web-03",
+        "flake": "web-services",
+        "commit": "d90c411",
+        "freshness": "deployed",
+        "status": "failed",
+        "found": null,
+        "lastScan": "failed 18m ago",
+        "trigger": "scheduled",
+        "error": "vulnix: derivation not in store"
+      },
+      {
+        "id": "sc-8",
+        "name": "lab-vm-01",
+        "flake": "lab-nodes",
+        "commit": "1b7e5f0",
+        "freshness": "archived",
+        "status": "unscanned",
+        "found": null,
+        "lastScan": "never",
+        "trigger": null
+      },
+      {
+        "id": "sc-9",
+        "name": "dev-node-02",
+        "flake": "infrastructure",
+        "commit": "8c4b311",
+        "freshness": "recent",
+        "status": "complete",
+        "found": {
+          "crit": 0,
+          "high": 1,
+          "med": 3
+        },
+        "lastScan": "5h ago",
+        "trigger": "scheduled"
+      },
+      {
+        "id": "sc-10",
+        "name": "edge-nyc-01",
+        "flake": "edge-gateway",
+        "commit": "9a01fc2",
+        "freshness": "archived",
+        "status": "stale",
+        "found": {
+          "crit": 1,
+          "high": 2,
+          "med": 6
+        },
+        "lastScan": "21d ago",
+        "trigger": "scheduled"
+      }
+    ],
+    "stats": {
+      "scanning": 1,
+      "queued": 1,
+      "stale": 2,
+      "unscanned": 1,
+      "failed": 1,
+      "coverage": 50
+    },
+    "activity": [
+      {
+        "at": "just now",
+        "name": "gaia-web-01",
+        "event": "Scan started",
+        "detail": "post-build trigger · vulnix 1.10.1",
+        "color": "#60a5fa",
+        "icon": "shield"
+      },
+      {
+        "at": "4m ago",
+        "name": "atlas-01",
+        "event": "Scan complete",
+        "detail": "1 critical, 3 high, 8 medium found",
+        "color": "#34d399",
+        "icon": "check"
+      },
+      {
+        "at": "12m ago",
+        "name": "orion-db-01",
+        "event": "Scan complete",
+        "detail": "1 high, 4 medium · clean of criticals",
+        "color": "#34d399",
+        "icon": "check"
+      },
+      {
+        "at": "18m ago",
+        "name": "gaia-web-03",
+        "event": "Scan failed",
+        "detail": "derivation not in store — rebuild needed",
+        "color": "#f87171",
+        "icon": "warn"
+      },
+      {
+        "at": "1h ago",
+        "name": "vuln-db",
+        "event": "Vulnerability DB updated",
+        "detail": "NVD feed synced · 412 new advisories",
+        "color": "#a78bfa",
+        "icon": "sync"
+      },
+      {
+        "at": "2h ago",
+        "name": "stg-web-02",
+        "event": "Scan complete",
+        "detail": "2 medium found",
+        "color": "#34d399",
+        "icon": "check"
+      }
+    ],
+    "history": [
+      {
+        "id": "sys-0",
+        "hostname": "atlas-01",
+        "flake": "infrastructure",
+        "environment": "production",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "84274a8a",
+            "msg": "fix postgres perms",
+            "freshness": "deployed",
+            "current": true,
+            "status": "scanning",
+            "found": null,
+            "cached": true,
+            "lastScan": "scanning…",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "c2621ff",
+            "msg": "fix postgres perms",
+            "freshness": "recent",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 3,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "8h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "09b89ad",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 3,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "20d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "b788219",
+            "msg": "harden sshd",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 0,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "16d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "29621a9",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "7d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "f6808d0",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "22d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "705f38a",
+            "msg": "add node exporter",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "034914f",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "unscanned",
+            "found": null,
+            "cached": false,
+            "lastScan": "never",
+            "trigger": null
+          },
+          {
+            "commit": "cd81f0d",
+            "msg": "add node exporter",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 3,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "28d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "b196ee2",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 1,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "27d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "4a0c348",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "4ca340f",
+            "msg": "add node exporter",
+            "freshness": "archived",
+            "current": false,
+            "status": "unscanned",
+            "found": null,
+            "cached": false,
+            "lastScan": "never",
+            "trigger": null
+          },
+          {
+            "commit": "daecc24",
+            "msg": "harden sshd",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "25d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "7342100",
+            "msg": "harden sshd",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "17d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "9d2e85b",
+            "msg": "cve: patch openssl",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "10d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "fef9919",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "17d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "10e0b6e",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 1,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "17d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "54e6bf9",
+            "msg": "cve: patch openssl",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "5d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "6637426",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "e2f3942",
+            "msg": "cve: patch openssl",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 3,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "14d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "e2c7842",
+            "msg": "cve: patch openssl",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "16d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "9bba7de",
+            "msg": "harden sshd",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 2
+            },
+            "cached": true,
+            "lastScan": "5d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "be47293",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "7b1cc2d",
+            "msg": "cve: patch openssl",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "6d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "cc36332",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "f696f33",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "3d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "f28d3ac",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "a926d5f",
+            "msg": "add node exporter",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "18d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "e6cd317",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 5
+            },
+            "cached": true,
+            "lastScan": "4d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "7bd3287",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 0,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "2d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "19872c5",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 1,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "16d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "1de94d5",
+            "msg": "add node exporter",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "9d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "c860261",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "04c04fe",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "28d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "f2082ac",
+            "msg": "harden sshd",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 0,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "8d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "cfd4e0f",
+            "msg": "harden sshd",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "29d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "5e16a8b",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "9d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "52b6169",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "28e44a0",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "19d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "cc0cf3b",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "17d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "44b9834",
+            "msg": "harden sshd",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "5bf8acb",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "unscanned",
+            "found": null,
+            "cached": false,
+            "lastScan": "never",
+            "trigger": null
+          },
+          {
+            "commit": "bf5651b",
+            "msg": "add node exporter",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "3d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "c7e2c05",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "28d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "0ad956c",
+            "msg": "cve: patch openssl",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "97114be",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "d707c1d",
+            "msg": "cve: patch openssl",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 3,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "15d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "0a70200",
+            "msg": "harden sshd",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 5
+            },
+            "cached": true,
+            "lastScan": "27d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "46c9aad",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 3,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "14d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "d6906e0",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "fadc7e1",
+            "msg": "harden sshd",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "19d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "2fa75db",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "17d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "8310028",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 0,
+              "med": 5
+            },
+            "cached": true,
+            "lastScan": "9d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "3084963",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          }
+        ],
+        "totalConfigs": 54,
+        "scanned": 21,
+        "stale": 17,
+        "needsBuild": 13,
+        "unscanned": 3,
+        "currentCrit": 0,
+        "currentHigh": 0
+      },
+      {
+        "id": "sys-1",
+        "hostname": "atlas-02",
+        "flake": "infrastructure",
+        "environment": "production",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "45d33798",
+            "msg": "bump nixpkgs",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 2
+            },
+            "cached": true,
+            "lastScan": "15m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "b181bf2",
+            "msg": "bump nixpkgs",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 3,
+              "med": 2
+            },
+            "cached": true,
+            "lastScan": "1h ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 2,
+        "scanned": 2,
+        "stale": 0,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 2
+      },
+      {
+        "id": "sys-2",
+        "hostname": "atlas-03",
+        "flake": "infrastructure",
+        "environment": "production",
+        "statusColor": "#fbbf24",
+        "commits": [
+          {
+            "commit": "65fd86df",
+            "msg": "stig: audit rules",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 2,
+              "high": 5,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "13m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "4112649",
+            "msg": "bump nixpkgs",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 3,
+              "med": 2
+            },
+            "cached": true,
+            "lastScan": "3h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "32f1d16",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "18d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 3,
+        "scanned": 2,
+        "stale": 1,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 2,
+        "currentHigh": 5
+      },
+      {
+        "id": "sys-3",
+        "hostname": "hydra-01",
+        "flake": "build-farm",
+        "environment": "production",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "e11273e8",
+            "msg": "harden sshd",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 4,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "12m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "e2b4190",
+            "msg": "fix postgres perms",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 2
+            },
+            "cached": true,
+            "lastScan": "5h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "7862ba4",
+            "msg": "cve: patch openssl",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          }
+        ],
+        "totalConfigs": 3,
+        "scanned": 2,
+        "stale": 0,
+        "needsBuild": 1,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 4
+      },
+      {
+        "id": "sys-4",
+        "hostname": "hydra-02",
+        "flake": "build-farm",
+        "environment": "production",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "858f62a1",
+            "msg": "add node exporter",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 5
+            },
+            "cached": true,
+            "lastScan": "10m ago",
+            "trigger": "post-build"
+          },
+          {
+            "commit": "7246ce7",
+            "msg": "add node exporter",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 2
+            },
+            "cached": true,
+            "lastScan": "7h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "0eb4577",
+            "msg": "harden sshd",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 5
+            },
+            "cached": true,
+            "lastScan": "15d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 3,
+        "scanned": 3,
+        "stale": 0,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 1
+      },
+      {
+        "id": "sys-5",
+        "hostname": "hydra-03",
+        "flake": "build-farm",
+        "environment": "production",
+        "statusColor": "#fbbf24",
+        "commits": [
+          {
+            "commit": "2d01e953",
+            "msg": "harden sshd",
+            "freshness": "deployed",
+            "current": true,
+            "status": "scanning",
+            "found": null,
+            "cached": true,
+            "lastScan": "scanning…",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "2402d87",
+            "msg": "stig: audit rules",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "12h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "f3a3f7e",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          }
+        ],
+        "totalConfigs": 3,
+        "scanned": 2,
+        "stale": 0,
+        "needsBuild": 1,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 0
+      },
+      {
+        "id": "sys-6",
+        "hostname": "gaia-web-01",
+        "flake": "web-services",
+        "environment": "production",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "d165b301",
+            "msg": "add node exporter",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "3m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "8a19558",
+            "msg": "fix postgres perms",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "4h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "c13bd74",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          }
+        ],
+        "totalConfigs": 3,
+        "scanned": 2,
+        "stale": 0,
+        "needsBuild": 1,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 0
+      },
+      {
+        "id": "sys-7",
+        "hostname": "gaia-web-02",
+        "flake": "web-services",
+        "environment": "production",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "f848c902",
+            "msg": "fix postgres perms",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "1m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "1bab19f",
+            "msg": "fix postgres perms",
+            "freshness": "recent",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 1,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "6h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "577d757",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "25d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "af1b103",
+            "msg": "cve: patch openssl",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "18d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 4,
+        "scanned": 2,
+        "stale": 2,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 1
+      },
+      {
+        "id": "sys-8",
+        "hostname": "gaia-web-03",
+        "flake": "web-services",
+        "environment": "production",
+        "statusColor": "#f87171",
+        "commits": [
+          {
+            "commit": "ed626e37",
+            "msg": "add node exporter",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 9,
+              "high": 14,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "6m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "2ab3dce",
+            "msg": "cve: patch openssl",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "9h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "7ecc002",
+            "msg": "add node exporter",
+            "freshness": "archived",
+            "current": false,
+            "status": "unscanned",
+            "found": null,
+            "cached": false,
+            "lastScan": "never",
+            "trigger": null
+          },
+          {
+            "commit": "d5bf24d",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "6d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 4,
+        "scanned": 3,
+        "stale": 0,
+        "needsBuild": 0,
+        "unscanned": 1,
+        "currentCrit": 9,
+        "currentHigh": 14
+      },
+      {
+        "id": "sys-9",
+        "hostname": "gaia-web-04",
+        "flake": "web-services",
+        "environment": "production",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "74db60b3",
+            "msg": "cve: patch openssl",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "28m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "4bdf73d",
+            "msg": "harden sshd",
+            "freshness": "recent",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "10h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "103afe1",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 3,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "3d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "56f4495",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 2
+            },
+            "cached": true,
+            "lastScan": "18d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 4,
+        "scanned": 1,
+        "stale": 3,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 0
+      },
+      {
+        "id": "sys-10",
+        "hostname": "orion-db-01",
+        "flake": "infrastructure",
+        "environment": "production",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "f3a1f0e5",
+            "msg": "bump nixpkgs",
+            "freshness": "deployed",
+            "current": true,
+            "status": "scanning",
+            "found": null,
+            "cached": true,
+            "lastScan": "scanning…",
+            "trigger": "post-build"
+          },
+          {
+            "commit": "cb71bda",
+            "msg": "bump nixpkgs",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "5h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "9ca25b8",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 5
+            },
+            "cached": true,
+            "lastScan": "6d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "90ce5a2",
+            "msg": "add node exporter",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 1,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "13d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 4,
+        "scanned": 3,
+        "stale": 1,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 0
+      },
+      {
+        "id": "sys-11",
+        "hostname": "orion-db-02",
+        "flake": "infrastructure",
+        "environment": "production",
+        "statusColor": "#fbbf24",
+        "commits": [
+          {
+            "commit": "529d1e57",
+            "msg": "stig: audit rules",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 3,
+              "high": 9,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "14m ago",
+            "trigger": "post-build"
+          },
+          {
+            "commit": "024e57d",
+            "msg": "add node exporter",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 5
+            },
+            "cached": true,
+            "lastScan": "7h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "5068456",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 3,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "11d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "107c4d1",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 1,
+              "med": 2
+            },
+            "cached": true,
+            "lastScan": "26d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 4,
+        "scanned": 3,
+        "stale": 1,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 3,
+        "currentHigh": 9
+      },
+      {
+        "id": "sys-12",
+        "hostname": "stg-atlas-01",
+        "flake": "infrastructure",
+        "environment": "staging",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "d9636c89",
+            "msg": "cve: patch openssl",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 4,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "5m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "4f7e31a",
+            "msg": "fix postgres perms",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "11h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "f983657",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "15d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 3,
+        "scanned": 3,
+        "stale": 0,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 4
+      },
+      {
+        "id": "sys-13",
+        "hostname": "stg-atlas-02",
+        "flake": "infrastructure",
+        "environment": "staging",
+        "statusColor": "#f87171",
+        "commits": [
+          {
+            "commit": "f7331db2",
+            "msg": "harden sshd",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "4m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "ef0ff61",
+            "msg": "add node exporter",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "1h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "8fc502a",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          }
+        ],
+        "totalConfigs": 3,
+        "scanned": 2,
+        "stale": 0,
+        "needsBuild": 1,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 3
+      },
+      {
+        "id": "sys-14",
+        "hostname": "stg-web-01",
+        "flake": "web-services",
+        "environment": "staging",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "ce1d8868",
+            "msg": "fix postgres perms",
+            "freshness": "deployed",
+            "current": true,
+            "status": "scanning",
+            "found": null,
+            "cached": true,
+            "lastScan": "scanning…",
+            "trigger": "post-build"
+          },
+          {
+            "commit": "e6d911c",
+            "msg": "harden sshd",
+            "freshness": "recent",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "5h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "bda9de1",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "5d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "621eb98",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "e168c70",
+            "msg": "add node exporter",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          }
+        ],
+        "totalConfigs": 5,
+        "scanned": 1,
+        "stale": 2,
+        "needsBuild": 2,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 0
+      },
+      {
+        "id": "sys-15",
+        "hostname": "stg-web-02",
+        "flake": "web-services",
+        "environment": "staging",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "17e7a9dd",
+            "msg": "cve: patch openssl",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 4,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "21m ago",
+            "trigger": "post-build"
+          },
+          {
+            "commit": "6aa37ed",
+            "msg": "harden sshd",
+            "freshness": "recent",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "8h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "0d08f82",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "13d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "60eb928",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "17d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "ab92198",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 2
+            },
+            "cached": true,
+            "lastScan": "21d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 5,
+        "scanned": 2,
+        "stale": 3,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 4
+      },
+      {
+        "id": "sys-16",
+        "hostname": "stg-build-01",
+        "flake": "build-farm",
+        "environment": "staging",
+        "statusColor": "#60a5fa",
+        "commits": [
+          {
+            "commit": "c3313ab9",
+            "msg": "stig: audit rules",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "14m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "6d95b87",
+            "msg": "harden sshd",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 5
+            },
+            "cached": true,
+            "lastScan": "1h ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 2,
+        "scanned": 2,
+        "stale": 0,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 0
+      },
+      {
+        "id": "sys-17",
+        "hostname": "dev-node-01",
+        "flake": "infrastructure",
+        "environment": "dev",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "fc243aba",
+            "msg": "stig: audit rules",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "29m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "cf2f0bd",
+            "msg": "fix postgres perms",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 1,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "12h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "0f1ce9d",
+            "msg": "harden sshd",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "3d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 3,
+        "scanned": 2,
+        "stale": 1,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 0
+      },
+      {
+        "id": "sys-18",
+        "hostname": "dev-node-02",
+        "flake": "infrastructure",
+        "environment": "dev",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "f7b4e01b",
+            "msg": "cve: patch openssl",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 1,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "27m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "50b0c04",
+            "msg": "fix postgres perms",
+            "freshness": "recent",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 0,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "2h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "a6336bc",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          }
+        ],
+        "totalConfigs": 3,
+        "scanned": 1,
+        "stale": 1,
+        "needsBuild": 1,
+        "unscanned": 0,
+        "currentCrit": 1,
+        "currentHigh": 1
+      },
+      {
+        "id": "sys-19",
+        "hostname": "dev-node-03",
+        "flake": "web-services",
+        "environment": "dev",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "f11b7710",
+            "msg": "cve: patch openssl",
+            "freshness": "deployed",
+            "current": true,
+            "status": "scanning",
+            "found": null,
+            "cached": true,
+            "lastScan": "scanning…",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "fcf0427",
+            "msg": "stig: audit rules",
+            "freshness": "recent",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 1,
+              "med": 5
+            },
+            "cached": true,
+            "lastScan": "9h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "73b86f8",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "27d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 3,
+        "scanned": 1,
+        "stale": 2,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 0
+      },
+      {
+        "id": "sys-20",
+        "hostname": "dev-node-04",
+        "flake": "web-services",
+        "environment": "dev",
+        "statusColor": "#fbbf24",
+        "commits": [
+          {
+            "commit": "e5689503",
+            "msg": "fix postgres perms",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "24m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "80d4292",
+            "msg": "harden sshd",
+            "freshness": "recent",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 3,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "6h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "d0c8963",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          }
+        ],
+        "totalConfigs": 3,
+        "scanned": 1,
+        "stale": 1,
+        "needsBuild": 1,
+        "unscanned": 0,
+        "currentCrit": 1,
+        "currentHigh": 2
+      },
+      {
+        "id": "sys-21",
+        "hostname": "dev-lab-01",
+        "flake": "lab-nodes",
+        "environment": "dev",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "d8aae228",
+            "msg": "add node exporter",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "11m ago",
+            "trigger": "post-build"
+          },
+          {
+            "commit": "52dcc71",
+            "msg": "bump nixpkgs",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "3h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "c50632e",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 3,
+              "med": 2
+            },
+            "cached": true,
+            "lastScan": "2d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "a373143",
+            "msg": "add node exporter",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 2
+            },
+            "cached": true,
+            "lastScan": "4d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 4,
+        "scanned": 2,
+        "stale": 2,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 3
+      },
+      {
+        "id": "sys-22",
+        "hostname": "dev-lab-02",
+        "flake": "lab-nodes",
+        "environment": "dev",
+        "statusColor": "#6b7280",
+        "commits": [
+          {
+            "commit": "75225271",
+            "msg": "fix postgres perms",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 4,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "9m ago",
+            "trigger": "post-build"
+          },
+          {
+            "commit": "e26e7c8",
+            "msg": "fix postgres perms",
+            "freshness": "recent",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "5h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "d193015",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "10d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "ac6953f",
+            "msg": "add node exporter",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "3d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 4,
+        "scanned": 2,
+        "stale": 2,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 4
+      },
+      {
+        "id": "sys-23",
+        "hostname": "edge-pdx-01",
+        "flake": "edge-gateway",
+        "environment": "edge",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "ec2d6c54",
+            "msg": "harden sshd",
+            "freshness": "deployed",
+            "current": true,
+            "status": "scanning",
+            "found": null,
+            "cached": true,
+            "lastScan": "scanning…",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "2e7ed74",
+            "msg": "cve: patch openssl",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 0,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "1h ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 2,
+        "scanned": 2,
+        "stale": 0,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 0
+      },
+      {
+        "id": "sys-24",
+        "hostname": "edge-pdx-02",
+        "flake": "edge-gateway",
+        "environment": "edge",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "5d0d37e0",
+            "msg": "harden sshd",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 2,
+              "high": 8,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "3m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "0f69fc7",
+            "msg": "cve: patch openssl",
+            "freshness": "recent",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "5h ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 2,
+        "scanned": 1,
+        "stale": 1,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 2,
+        "currentHigh": 8
+      },
+      {
+        "id": "sys-25",
+        "hostname": "edge-nyc-01",
+        "flake": "edge-gateway",
+        "environment": "edge",
+        "statusColor": "#fbbf24",
+        "commits": [
+          {
+            "commit": "9624fd22",
+            "msg": "fix postgres perms",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 4,
+              "high": 4,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "8m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "4eb4de2",
+            "msg": "fix postgres perms",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "11h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "1511e59",
+            "msg": "cve: patch openssl",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "21d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "6339dd9",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "15d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "a47f730",
+            "msg": "harden sshd",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 1,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "18d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "00a2ecd",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 0,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "21d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 6,
+        "scanned": 3,
+        "stale": 3,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 4,
+        "currentHigh": 4
+      },
+      {
+        "id": "sys-26",
+        "hostname": "edge-nyc-02",
+        "flake": "edge-gateway",
+        "environment": "edge",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "2147b611",
+            "msg": "stig: audit rules",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "7m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "de46829",
+            "msg": "add node exporter",
+            "freshness": "recent",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 1,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "1h ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 2,
+        "scanned": 1,
+        "stale": 1,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 1
+      },
+      {
+        "id": "sys-27",
+        "hostname": "edge-fra-01",
+        "flake": "edge-gateway",
+        "environment": "edge",
+        "statusColor": "#f87171",
+        "commits": [
+          {
+            "commit": "5b221499",
+            "msg": "cve: patch openssl",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "6m ago",
+            "trigger": "post-build"
+          },
+          {
+            "commit": "5af6fba",
+            "msg": "stig: audit rules",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 3,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "12h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "7a69ddd",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "13d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 3,
+        "scanned": 2,
+        "stale": 1,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 2
+      },
+      {
+        "id": "sys-28",
+        "hostname": "edge-fra-02",
+        "flake": "edge-gateway",
+        "environment": "edge",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "b85bea44",
+            "msg": "stig: audit rules",
+            "freshness": "deployed",
+            "current": true,
+            "status": "scanning",
+            "found": null,
+            "cached": true,
+            "lastScan": "scanning…",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "b3ea88a",
+            "msg": "bump nixpkgs",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "1h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "3d2ce83",
+            "msg": "harden sshd",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "3d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 3,
+        "scanned": 3,
+        "stale": 0,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 0
+      },
+      {
+        "id": "sys-29",
+        "hostname": "edge-sgp-01",
+        "flake": "edge-gateway",
+        "environment": "edge",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "1e84f129",
+            "msg": "fix postgres perms",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "8m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "4eb4de2",
+            "msg": "fix postgres perms",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "11h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "1511e59",
+            "msg": "cve: patch openssl",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "21d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "6339dd9",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "15d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "a47f730",
+            "msg": "harden sshd",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 1,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "18d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "00a2ecd",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 0,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "21d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 6,
+        "scanned": 3,
+        "stale": 3,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 0
+      },
+      {
+        "id": "sys-30",
+        "hostname": "lab-vm-01",
+        "flake": "lab-nodes",
+        "environment": "lab",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "cfe7372c",
+            "msg": "fix postgres perms",
+            "freshness": "deployed",
+            "current": true,
+            "status": "scanning",
+            "found": null,
+            "cached": true,
+            "lastScan": "scanning…",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "eaab196",
+            "msg": "cve: patch openssl",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "4h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "ba5615b",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "9d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "a78486f",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 1,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "2d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "bfb82d8",
+            "msg": "add node exporter",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 3,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "8d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 5,
+        "scanned": 5,
+        "stale": 0,
+        "needsBuild": 0,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 0
+      },
+      {
+        "id": "sys-31",
+        "hostname": "lab-vm-02",
+        "flake": "lab-nodes",
+        "environment": "lab",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "74477230",
+            "msg": "bump nixpkgs",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 5
+            },
+            "cached": true,
+            "lastScan": "7m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "3cab1cc",
+            "msg": "bump nixpkgs",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 2,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "5h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "b685d71",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 0,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "8d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "9b9042d",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "f412124",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "6d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "9bbdf3a",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "29d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 6,
+        "scanned": 3,
+        "stale": 2,
+        "needsBuild": 1,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 0
+      },
+      {
+        "id": "sys-32",
+        "hostname": "lab-vm-03",
+        "flake": "lab-nodes",
+        "environment": "lab",
+        "statusColor": "#fbbf24",
+        "commits": [
+          {
+            "commit": "ca389234",
+            "msg": "cve: patch openssl",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "6m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "cc3dc03",
+            "msg": "fix postgres perms",
+            "freshness": "recent",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 1,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "7h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "81aafab",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "d1edb25",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 0,
+              "med": 2
+            },
+            "cached": true,
+            "lastScan": "16d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "30f6a95",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 2,
+              "med": 0
+            },
+            "cached": true,
+            "lastScan": "10d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "714c40d",
+            "msg": "cve: patch openssl",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 6
+            },
+            "cached": true,
+            "lastScan": "13d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 6,
+        "scanned": 2,
+        "stale": 3,
+        "needsBuild": 1,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 1
+      },
+      {
+        "id": "sys-33",
+        "hostname": "lab-rig-01",
+        "flake": "lab-nodes",
+        "environment": "lab",
+        "statusColor": "#f87171",
+        "commits": [
+          {
+            "commit": "a694c85c",
+            "msg": "cve: patch openssl",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 4
+            },
+            "cached": true,
+            "lastScan": "6m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "1391e66",
+            "msg": "harden sshd",
+            "freshness": "recent",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 0,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "9h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "0c284bc",
+            "msg": "bump nixpkgs",
+            "freshness": "archived",
+            "current": false,
+            "status": "needs-build",
+            "found": null,
+            "cached": false,
+            "lastScan": "not in cache",
+            "trigger": null
+          },
+          {
+            "commit": "c42bc87",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 1,
+              "med": 1
+            },
+            "cached": true,
+            "lastScan": "24d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 4,
+        "scanned": 1,
+        "stale": 2,
+        "needsBuild": 1,
+        "unscanned": 0,
+        "currentCrit": 0,
+        "currentHigh": 1
+      },
+      {
+        "id": "sys-34",
+        "hostname": "lab-rig-02",
+        "flake": "lab-nodes",
+        "environment": "lab",
+        "statusColor": "#34d399",
+        "commits": [
+          {
+            "commit": "1fc658f6",
+            "msg": "harden sshd",
+            "freshness": "deployed",
+            "current": true,
+            "status": "complete",
+            "found": {
+              "crit": 5,
+              "high": 14,
+              "med": 2
+            },
+            "cached": true,
+            "lastScan": "4m ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "a3239ad",
+            "msg": "cve: patch openssl",
+            "freshness": "recent",
+            "current": false,
+            "status": "complete",
+            "found": {
+              "crit": 1,
+              "high": 0,
+              "med": 7
+            },
+            "cached": true,
+            "lastScan": "11h ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "16be9f0",
+            "msg": "fix postgres perms",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 0,
+              "high": 0,
+              "med": 5
+            },
+            "cached": true,
+            "lastScan": "27d ago",
+            "trigger": "scheduled"
+          },
+          {
+            "commit": "95dea90",
+            "msg": "stig: audit rules",
+            "freshness": "archived",
+            "current": false,
+            "status": "unscanned",
+            "found": null,
+            "cached": false,
+            "lastScan": "never",
+            "trigger": null
+          },
+          {
+            "commit": "2383323",
+            "msg": "cve: patch openssl",
+            "freshness": "archived",
+            "current": false,
+            "status": "stale",
+            "found": {
+              "crit": 1,
+              "high": 3,
+              "med": 3
+            },
+            "cached": true,
+            "lastScan": "20d ago",
+            "trigger": "scheduled"
+          }
+        ],
+        "totalConfigs": 5,
+        "scanned": 2,
+        "stale": 2,
+        "needsBuild": 0,
+        "unscanned": 1,
+        "currentCrit": 5,
+        "currentHigh": 14
+      }
+    ]
+  },
+  "admin": {
+    "users": [
+      {
+        "id": "u1",
+        "name": "Mira Reyes",
+        "email": "mreyes@acme.io",
+        "role": "admin",
+        "source": "oidc",
+        "groups": [
+          "cf-admins"
+        ],
+        "envs": [
+          "all"
+        ],
+        "status": "active",
+        "lastLogin": "2m ago",
+        "mfa": true
+      },
+      {
+        "id": "u2",
+        "name": "Jordan Park",
+        "email": "jpark@acme.io",
+        "role": "operator",
+        "source": "oidc",
+        "groups": [
+          "cf-operators",
+          "sre"
+        ],
+        "envs": [
+          "production",
+          "staging"
+        ],
+        "status": "active",
+        "lastLogin": "1h ago",
+        "mfa": true
+      },
+      {
+        "id": "u3",
+        "name": "Dana Chen",
+        "email": "dchen@acme.io",
+        "role": "operator",
+        "source": "oidc",
+        "groups": [
+          "cf-operators"
+        ],
+        "envs": [
+          "edge",
+          "lab"
+        ],
+        "status": "active",
+        "lastLogin": "3h ago",
+        "mfa": true
+      },
+      {
+        "id": "u4",
+        "name": "Kit Thomas",
+        "email": "kthomas@acme.io",
+        "role": "viewer",
+        "source": "oidc",
+        "groups": [
+          "cf-viewers"
+        ],
+        "envs": [
+          "staging"
+        ],
+        "status": "active",
+        "lastLogin": "yesterday",
+        "mfa": false
+      },
+      {
+        "id": "u5",
+        "name": "ops-bot",
+        "email": "ops-bot@acme.io",
+        "role": "operator",
+        "source": "local",
+        "groups": [],
+        "envs": [
+          "all"
+        ],
+        "status": "active",
+        "lastLogin": "just now",
+        "mfa": false,
+        "serviceAccount": true
+      },
+      {
+        "id": "u6",
+        "name": "Avery Rao",
+        "email": "arao@acme.io",
+        "role": "viewer",
+        "source": "oidc",
+        "groups": [
+          "cf-viewers"
+        ],
+        "envs": [
+          "dev"
+        ],
+        "status": "disabled",
+        "lastLogin": "3w ago",
+        "mfa": false
+      },
+      {
+        "id": "u7",
+        "name": "audit-export",
+        "email": "audit@acme.io",
+        "role": "viewer",
+        "source": "local",
+        "groups": [],
+        "envs": [
+          "all"
+        ],
+        "status": "active",
+        "lastLogin": "6h ago",
+        "mfa": false,
+        "serviceAccount": true
+      }
+    ],
+    "oidcMappings": [
+      {
+        "id": "m1",
+        "group": "cf-admins",
+        "role": "admin",
+        "envs": [
+          "all"
+        ],
+        "users": 1,
+        "priority": 1
+      },
+      {
+        "id": "m2",
+        "group": "cf-operators",
+        "role": "operator",
+        "envs": [
+          "production",
+          "staging"
+        ],
+        "users": 2,
+        "priority": 2
+      },
+      {
+        "id": "m3",
+        "group": "sre",
+        "role": "operator",
+        "envs": [
+          "all"
+        ],
+        "users": 1,
+        "priority": 3
+      },
+      {
+        "id": "m4",
+        "group": "cf-viewers",
+        "role": "viewer",
+        "envs": [],
+        "users": 2,
+        "priority": 4
+      }
+    ],
+    "roles": [
+      {
+        "role": "admin",
+        "desc": "Full control — manage users, servers, all environments.",
+        "color": "#f87171",
+        "perms": [
+          "Manage users & OIDC",
+          "Edit server config",
+          "All operator powers",
+          "View audit log"
+        ]
+      },
+      {
+        "role": "operator",
+        "desc": "Deploy, build, evaluate, and manage assigned environments.",
+        "color": "#60a5fa",
+        "perms": [
+          "Deploy & rollback",
+          "Trigger eval/build",
+          "Cancel jobs",
+          "Accept CVEs",
+          "Edit flakes/systems"
+        ]
+      },
+      {
+        "role": "viewer",
+        "desc": "Read-only access to dashboards and reports.",
+        "color": "#9ca3af",
+        "perms": [
+          "View all dashboards",
+          "Export reports",
+          "Read audit log (own actions)"
+        ]
+      }
+    ],
+    "auditLog": [
+      {
+        "id": "a1",
+        "at": "2m ago",
+        "actor": "mreyes",
+        "action": "cve.accept",
+        "target": "CVE-2025-31822 (dev, lab)",
+        "ip": "10.2.4.18",
+        "kind": "security"
+      },
+      {
+        "id": "a2",
+        "at": "8m ago",
+        "actor": "jpark",
+        "action": "system.deploy",
+        "target": "atlas-01 → a3f8c12",
+        "ip": "10.2.4.31",
+        "kind": "deploy"
+      },
+      {
+        "id": "a3",
+        "at": "14m ago",
+        "actor": "ops-bot",
+        "action": "build.complete",
+        "target": "linux-6.6.72 on hydra-01",
+        "ip": "10.0.1.9",
+        "kind": "build"
+      },
+      {
+        "id": "a4",
+        "at": "22m ago",
+        "actor": "dchen",
+        "action": "flake.sync",
+        "target": "edge-gateway",
+        "ip": "10.2.4.44",
+        "kind": "config"
+      },
+      {
+        "id": "a5",
+        "at": "38m ago",
+        "actor": "mreyes",
+        "action": "user.role_change",
+        "target": "kthomas: operator → viewer",
+        "ip": "10.2.4.18",
+        "kind": "security"
+      },
+      {
+        "id": "a6",
+        "at": "1h ago",
+        "actor": "jpark",
+        "action": "eval.cancel",
+        "target": "web-services@c7e1902",
+        "ip": "10.2.4.31",
+        "kind": "build"
+      },
+      {
+        "id": "a7",
+        "at": "1h ago",
+        "actor": "mreyes",
+        "action": "oidc.mapping_edit",
+        "target": "cf-operators → operator",
+        "ip": "10.2.4.18",
+        "kind": "security"
+      },
+      {
+        "id": "a8",
+        "at": "2h ago",
+        "actor": "dchen",
+        "action": "builder.rotate_key",
+        "target": "graviton-01",
+        "ip": "10.2.4.44",
+        "kind": "security"
+      },
+      {
+        "id": "a9",
+        "at": "3h ago",
+        "actor": "kthomas",
+        "action": "auth.login",
+        "target": "OIDC (keycloak)",
+        "ip": "10.5.2.7",
+        "kind": "auth"
+      },
+      {
+        "id": "a10",
+        "at": "3h ago",
+        "actor": "arao",
+        "action": "auth.login_denied",
+        "target": "account disabled",
+        "ip": "10.5.2.99",
+        "kind": "auth"
+      },
+      {
+        "id": "a11",
+        "at": "5h ago",
+        "actor": "mreyes",
+        "action": "cache.create",
+        "target": "crystal-forge-edge-cache",
+        "ip": "10.2.4.18",
+        "kind": "config"
+      },
+      {
+        "id": "a12",
+        "at": "6h ago",
+        "actor": "ops-bot",
+        "action": "system.deploy",
+        "target": "gaia-web-02 → c7e1902",
+        "ip": "10.0.1.9",
+        "kind": "deploy"
+      },
+      {
+        "id": "a13",
+        "at": "8h ago",
+        "actor": "jpark",
+        "action": "policy.edit",
+        "target": "stig-ssh-hardening",
+        "ip": "10.2.4.31",
+        "kind": "security"
+      },
+      {
+        "id": "a14",
+        "at": "yesterday",
+        "actor": "mreyes",
+        "action": "user.create",
+        "target": "arao (viewer)",
+        "ip": "10.2.4.18",
+        "kind": "security"
+      },
+      {
+        "id": "a15",
+        "at": "yesterday",
+        "actor": "dchen",
+        "action": "system.rollback",
+        "target": "edge-fra-01 → gen #142",
+        "ip": "10.2.4.44",
+        "kind": "deploy"
+      }
+    ],
+    "server": {
+      "version": "0.8.2",
+      "commit": "f3a9c01",
+      "uptime": "18d 4h",
+      "authMode": "OIDC (Keycloak)",
+      "oidcIssuer": "https://keycloak.acme.io/realms/crystal-forge",
+      "dbStatus": "healthy",
+      "dbSize": "2.4 GB",
+      "sessions": 6,
+      "tlsExpiry": "62d"
+    },
+    "backgroundJobs": [
+      {
+        "id": "j1",
+        "name": "Cache status poll",
+        "desc": "Query binary caches to confirm tracked store paths still exist (detect GC eviction).",
+        "interval": "15m",
+        "enabled": true,
+        "lastRun": "3m ago",
+        "lastDuration": "4.2s",
+        "nextRun": "in 12m",
+        "status": "healthy",
+        "impact": "low"
+      },
+      {
+        "id": "j2",
+        "name": "GC-eviction reconcile",
+        "desc": "Flag configs whose derivations were garbage-collected so Scanning marks them needs-build.",
+        "interval": "1h",
+        "enabled": true,
+        "lastRun": "24m ago",
+        "lastDuration": "11s",
+        "nextRun": "in 36m",
+        "status": "healthy",
+        "impact": "medium"
+      },
+      {
+        "id": "j3",
+        "name": "CVE DB refresh",
+        "desc": "Pull latest NVD / advisory feeds into the local vulnerability database.",
+        "interval": "6h",
+        "enabled": true,
+        "lastRun": "1h ago",
+        "lastDuration": "38s",
+        "nextRun": "in 5h",
+        "status": "healthy",
+        "impact": "low"
+      },
+      {
+        "id": "j4",
+        "name": "Agent heartbeat sweep",
+        "desc": "Mark systems offline if no heartbeat past their interval; recompute fleet health.",
+        "interval": "1m",
+        "enabled": true,
+        "lastRun": "32s ago",
+        "lastDuration": "0.6s",
+        "nextRun": "in 28s",
+        "status": "healthy",
+        "impact": "low"
+      },
+      {
+        "id": "j5",
+        "name": "Stale build-job reaper",
+        "desc": "Re-queue or fail builds stuck past their timeout on dead builders.",
+        "interval": "5m",
+        "enabled": true,
+        "lastRun": "2m ago",
+        "lastDuration": "1.1s",
+        "nextRun": "in 3m",
+        "status": "healthy",
+        "impact": "low"
+      },
+      {
+        "id": "j6",
+        "name": "Flake poll & sync",
+        "desc": "Fetch tracked flake repos and enqueue evals for new commits.",
+        "interval": "5m",
+        "enabled": true,
+        "lastRun": "4m ago",
+        "lastDuration": "6.8s",
+        "nextRun": "in 1m",
+        "status": "healthy",
+        "impact": "medium"
+      },
+      {
+        "id": "j7",
+        "name": "Session GC",
+        "desc": "Expire idle sessions and purge revoked tokens.",
+        "interval": "30m",
+        "enabled": true,
+        "lastRun": "18m ago",
+        "lastDuration": "0.3s",
+        "nextRun": "in 12m",
+        "status": "healthy",
+        "impact": "low"
+      },
+      {
+        "id": "j8",
+        "name": "Audit log archival",
+        "desc": "Roll audit events older than retention window to cold storage.",
+        "interval": "24h",
+        "enabled": false,
+        "lastRun": "never",
+        "lastDuration": "—",
+        "nextRun": "disabled",
+        "status": "disabled",
+        "impact": "medium"
+      },
+      {
+        "id": "j9",
+        "name": "Cache storage metrics",
+        "desc": "Pull bucket size / object counts (CloudWatch, atticd) for the Caches view.",
+        "interval": "1h",
+        "enabled": true,
+        "lastRun": "41m ago",
+        "lastDuration": "9.4s",
+        "nextRun": "in 19m",
+        "status": "degraded",
+        "impact": "medium",
+        "note": "edge-cache poll timed out last run"
+      }
+    ],
+    "heartbeat": {
+      "globalIntervalSec": 60,
+      "staleMultiplier": 2,
+      "offlineMultiplier": 5,
+      "overrides": {
+        "production": 30,
+        "edge": 120,
+        "lab": 300
+      }
+    }
+  },
+  "hardening": [
+    {
+      "id": "svc-0",
+      "name": "sshd",
+      "score": 73,
+      "risk": "OK",
+      "riskColor": "#34d399",
+      "enabled": [
+        true,
+        true,
+        false,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+        true,
+        true,
+        true
+      ],
+      "missing": 6,
+      "nixSnippet": "services.openssh.settings = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  CapabilityBoundingSet = \"CAP_NET_BIND_SERVICE\";\n};",
+      "user": "root",
+      "notes": 1
+    },
+    {
+      "id": "svc-1",
+      "name": "nginx",
+      "score": 27,
+      "risk": "HIGH",
+      "riskColor": "#f97316",
+      "enabled": [
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false
+      ],
+      "missing": 16,
+      "nixSnippet": "systemd.services.nginx.serviceConfig = {\n  PrivateTmp = true;\n  PrivateDevices = true;\n  ProtectSystem = \"strict\";\n  NoNewPrivileges = true;\n};",
+      "user": "root",
+      "notes": 3
+    },
+    {
+      "id": "svc-2",
+      "name": "postgresql",
+      "score": 23,
+      "risk": "HIGH",
+      "riskColor": "#f97316",
+      "enabled": [
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false
+      ],
+      "missing": 17,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-postgresql",
+      "notes": 2
+    },
+    {
+      "id": "svc-3",
+      "name": "crystal-forge-server",
+      "score": 59,
+      "risk": "MED",
+      "riskColor": "#fbbf24",
+      "enabled": [
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        true,
+        false,
+        true,
+        true,
+        true,
+        false,
+        true
+      ],
+      "missing": 9,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "nobody",
+      "notes": 3
+    },
+    {
+      "id": "svc-4",
+      "name": "crystal-forge-builder",
+      "score": 73,
+      "risk": "OK",
+      "riskColor": "#34d399",
+      "enabled": [
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false,
+        true
+      ],
+      "missing": 6,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-crystal",
+      "notes": 0
+    },
+    {
+      "id": "svc-5",
+      "name": "crystal-forge-agent",
+      "score": 82,
+      "risk": "OK",
+      "riskColor": "#34d399",
+      "enabled": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        true
+      ],
+      "missing": 4,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "nobody",
+      "notes": 3
+    },
+    {
+      "id": "svc-6",
+      "name": "prometheus-node-exporter",
+      "score": 68,
+      "risk": "MED",
+      "riskColor": "#fbbf24",
+      "enabled": [
+        true,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        false
+      ],
+      "missing": 7,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-prometheus",
+      "notes": 0
+    },
+    {
+      "id": "svc-7",
+      "name": "grafana",
+      "score": 36,
+      "risk": "HIGH",
+      "riskColor": "#f97316",
+      "enabled": [
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+        true,
+        true,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+        true,
+        false
+      ],
+      "missing": 14,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-grafana",
+      "notes": 0
+    },
+    {
+      "id": "svc-8",
+      "name": "nix-daemon",
+      "score": 68,
+      "risk": "MED",
+      "riskColor": "#fbbf24",
+      "enabled": [
+        true,
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        true
+      ],
+      "missing": 7,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "nobody",
+      "notes": 2
+    },
+    {
+      "id": "svc-9",
+      "name": "redis",
+      "score": 27,
+      "risk": "HIGH",
+      "riskColor": "#f97316",
+      "enabled": [
+        false,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        false,
+        false
+      ],
+      "missing": 16,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-redis",
+      "notes": 2
+    },
+    {
+      "id": "svc-10",
+      "name": "systemd-journald",
+      "score": 36,
+      "risk": "HIGH",
+      "riskColor": "#f97316",
+      "enabled": [
+        true,
+        false,
+        false,
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        true
+      ],
+      "missing": 14,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-systemd",
+      "notes": 2
+    },
+    {
+      "id": "svc-11",
+      "name": "systemd-networkd",
+      "score": 36,
+      "risk": "HIGH",
+      "riskColor": "#f97316",
+      "enabled": [
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        true,
+        false
+      ],
+      "missing": 14,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-systemd",
+      "notes": 0
+    },
+    {
+      "id": "svc-12",
+      "name": "systemd-resolved",
+      "score": 5,
+      "risk": "VULN",
+      "riskColor": "#f87171",
+      "enabled": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "missing": 21,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-systemd",
+      "notes": 0
+    },
+    {
+      "id": "svc-13",
+      "name": "systemd-logind",
+      "score": 18,
+      "risk": "HIGH",
+      "riskColor": "#f97316",
+      "enabled": [
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true
+      ],
+      "missing": 18,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "nobody",
+      "notes": 1
+    },
+    {
+      "id": "svc-14",
+      "name": "auditd",
+      "score": 41,
+      "risk": "MED",
+      "riskColor": "#fbbf24",
+      "enabled": [
+        false,
+        true,
+        true,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        true,
+        false,
+        false
+      ],
+      "missing": 13,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-auditd",
+      "notes": 4
+    },
+    {
+      "id": "svc-15",
+      "name": "rsyslog",
+      "score": 41,
+      "risk": "MED",
+      "riskColor": "#fbbf24",
+      "enabled": [
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+        true,
+        true,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true
+      ],
+      "missing": 13,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-rsyslog",
+      "notes": 1
+    },
+    {
+      "id": "svc-16",
+      "name": "cron",
+      "score": 36,
+      "risk": "HIGH",
+      "riskColor": "#f97316",
+      "enabled": [
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+        true,
+        true,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false
+      ],
+      "missing": 14,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "nobody",
+      "notes": 0
+    },
+    {
+      "id": "svc-17",
+      "name": "docker",
+      "score": 23,
+      "risk": "HIGH",
+      "riskColor": "#f97316",
+      "enabled": [
+        false,
+        true,
+        true,
+        true,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "missing": 17,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-docker",
+      "notes": 4
+    },
+    {
+      "id": "svc-18",
+      "name": "containerd",
+      "score": 23,
+      "risk": "HIGH",
+      "riskColor": "#f97316",
+      "enabled": [
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+        true,
+        false,
+        false
+      ],
+      "missing": 17,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "root",
+      "notes": 3
+    },
+    {
+      "id": "svc-19",
+      "name": "vault",
+      "score": 36,
+      "risk": "HIGH",
+      "riskColor": "#f97316",
+      "enabled": [
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false
+      ],
+      "missing": 14,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-vault",
+      "notes": 1
+    },
+    {
+      "id": "svc-20",
+      "name": "systemd-udevd",
+      "score": 41,
+      "risk": "MED",
+      "riskColor": "#fbbf24",
+      "enabled": [
+        false,
+        true,
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ],
+      "missing": 13,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "nobody",
+      "notes": 3
+    },
+    {
+      "id": "svc-21",
+      "name": "dbus",
+      "score": 55,
+      "risk": "MED",
+      "riskColor": "#fbbf24",
+      "enabled": [
+        false,
+        true,
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        true,
+        true,
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        true,
+        true
+      ],
+      "missing": 10,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-dbus",
+      "notes": 4
+    },
+    {
+      "id": "svc-22",
+      "name": "polkit",
+      "score": 41,
+      "risk": "MED",
+      "riskColor": "#fbbf24",
+      "enabled": [
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "missing": 13,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-polkit",
+      "notes": 1
+    },
+    {
+      "id": "svc-23",
+      "name": "avahi-daemon",
+      "score": 45,
+      "risk": "MED",
+      "riskColor": "#fbbf24",
+      "enabled": [
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true
+      ],
+      "missing": 12,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "nobody",
+      "notes": 2
+    },
+    {
+      "id": "svc-24",
+      "name": "cups",
+      "score": 14,
+      "risk": "VULN",
+      "riskColor": "#f87171",
+      "enabled": [
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false
+      ],
+      "missing": 19,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "nobody",
+      "notes": 1
+    },
+    {
+      "id": "svc-25",
+      "name": "systemd-oomd",
+      "score": 50,
+      "risk": "MED",
+      "riskColor": "#fbbf24",
+      "enabled": [
+        true,
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        true,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        true,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        true
+      ],
+      "missing": 11,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "svc-systemd",
+      "notes": 4
+    },
+    {
+      "id": "svc-26",
+      "name": "systemd-coredump",
+      "score": 45,
+      "risk": "MED",
+      "riskColor": "#fbbf24",
+      "enabled": [
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+        true,
+        false
+      ],
+      "missing": 12,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "nobody",
+      "notes": 0
+    },
+    {
+      "id": "svc-27",
+      "name": "fapolicyd",
+      "score": 32,
+      "risk": "HIGH",
+      "riskColor": "#f97316",
+      "enabled": [
+        true,
+        false,
+        true,
+        false,
+        true,
+        true,
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "missing": 15,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "nobody",
+      "notes": 2
+    },
+    {
+      "id": "svc-28",
+      "name": "tailscaled",
+      "score": 18,
+      "risk": "HIGH",
+      "riskColor": "#f97316",
+      "enabled": [
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        true
+      ],
+      "missing": 18,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "nobody",
+      "notes": 4
+    },
+    {
+      "id": "svc-29",
+      "name": "wireguard",
+      "score": 36,
+      "risk": "HIGH",
+      "riskColor": "#f97316",
+      "enabled": [
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        true,
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+        true
+      ],
+      "missing": 14,
+      "nixSnippet": "# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = \"strict\";\n};",
+      "user": "nobody",
+      "notes": 3
+    }
+  ]
+};
+window.__fx = function (path) {
+  var o = window.__CF_FIXTURES; if (!o) return undefined;
+  return path.split('.').reduce(function (a, k) { return a == null ? a : a[k]; }, o);
+};

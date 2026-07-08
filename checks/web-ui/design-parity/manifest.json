@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "$schema_note": "Design-parity manifest for the web-ui check. Maps each primary view to (a) the design example's internal view name (rendered headlessly from docs/design/CrystalForge with the shared fixture) and (b) the real Dioxus route. The harness screenshots both sides for each theme and computes a NON-BLOCKING design-drift metric per view/theme. See docs/web-ui-check.md and docs/design/CrystalForge/fixtures/README.md.",
+  "settings": {
+    "viewport": {
+      "width": 1920,
+      "height": 1080
+    },
+    "themes": ["dark", "light"],
+    "blocking": false,
+    "note": "Design drift is reported as a directional gauge only; React (design example) and Dioxus (real UI) are not expected to be pixel-identical. This never fails the web-ui check.",
+    "compare": {
+      "method": "imagemagick-rmse-normalized",
+      "resizeWidth": 960,
+      "note": "Both screenshots are normalized (resized to a common width, flattened on an opaque background) before ImageMagick `compare -metric RMSE` so the score is a stable perceptual-ish similarity gauge rather than a strict pixel diff."
+    }
+  },
+  "views": [
+    {
+      "name": "dashboard",
+      "designView": "dashboard",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx"
+    },
+    {
+      "name": "systems",
+      "designView": "systems",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx"
+    },
+    {
+      "name": "builds",
+      "designView": "builds",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx"
+    },
+    {
+      "name": "evaluations",
+      "designView": "evals",
+      "route": "/evaluations",
+      "designRef": "docs/design/CrystalForge/components/EvalsView.jsx"
+    },
+    {
+      "name": "flakes",
+      "designView": "flakes",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx"
+    },
+    {
+      "name": "environments",
+      "designView": "environments",
+      "route": "/environments",
+      "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx"
+    },
+    {
+      "name": "caches",
+      "designView": "caches",
+      "route": "/caches",
+      "designRef": "docs/design/CrystalForge/components/CachesView.jsx"
+    },
+    {
+      "name": "builders",
+      "designView": "builders",
+      "route": "/builders",
+      "designRef": "docs/design/CrystalForge/components/BuildersView.jsx"
+    },
+    {
+      "name": "policies",
+      "designView": "policies",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx"
+    },
+    {
+      "name": "compliance",
+      "designView": "compliance",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx"
+    },
+    {
+      "name": "cves",
+      "designView": "cves",
+      "route": "/cves",
+      "designRef": "docs/design/CrystalForge/components/CvesView.jsx"
+    },
+    {
+      "name": "scanning",
+      "designView": "scanning",
+      "route": "/scanning",
+      "designRef": "docs/design/CrystalForge/components/ScanningView.jsx"
+    },
+    {
+      "name": "admin",
+      "designView": "admin",
+      "route": "/admin",
+      "designRef": "docs/design/CrystalForge/components/AdminView.jsx"
+    }
+  ]
+}

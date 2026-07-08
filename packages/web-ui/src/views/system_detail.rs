@@ -3672,7 +3672,11 @@ fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
 /// surface a descriptive summary per kind while still preferring any richer message
 /// text carried on the entry (e.g. a commit subject in the fallback path).
 fn history_event_message(entry: &SystemHistoryEntry, kind: &HistoryEventKind) -> String {
-    if let Some(title) = entry.title.as_ref().filter(|title| !title.trim().is_empty()) {
+    if let Some(title) = entry
+        .title
+        .as_ref()
+        .filter(|title| !title.trim().is_empty())
+    {
         return title.clone();
     }
 
@@ -3821,9 +3825,11 @@ fn build_history_events(
             let older = entry
                 .previous_generation
                 .and_then(|value| i32::try_from(value).ok())
-                .or_else(|| entries
-                .get(idx + 1)
-                .and_then(|older_entry| older_entry.generation));
+                .or_else(|| {
+                    entries
+                        .get(idx + 1)
+                        .and_then(|older_entry| older_entry.generation)
+                });
             let prev = match (is_gen_changing, current, older) {
                 // Only surface a transition when the generation actually changed.
                 (true, Some(cur), Some(old)) if old != cur => Some(old),
@@ -7148,44 +7154,44 @@ fn synthesize_history_entries_from_commits(
         .map(|commit| {
             let timestamp = commit.deployed_at.unwrap_or(commit.committed_at);
             SystemHistoryEntry {
-            id: None,
-            timestamp,
-            occurred_at: Some(timestamp),
-            observed_at: None,
-            store_path: None,
-            system_configuration_name: commit.config_identity.clone(),
-            change_reason: commit.message.clone(),
-            event_type: "cf_deployment_succeeded".to_string(),
-            event_rank: Some(10),
-            title: Some("Deployed through Crystal Forge".to_string()),
-            commit_hash: Some(commit.hash.clone()),
-            flake_name: None,
-            flake_repo_url: commit.flake_repo_url.clone(),
-            actor: commit.author.clone(),
-            outcome: if commit.was_deployed || commit.is_current {
-                "success".to_string()
-            } else {
-                "pending".to_string()
-            },
-            // Commit fallback rows represent tracked flake commits, so they classify
-            // as deploys with a reconciled/tracked source.
-            event_kind: "cf_deployment".to_string(),
-            generation: None,
-            previous_generation: None,
-            new_generation: None,
-            previous_store_path: None,
-            new_store_path: None,
-            previous_boot_id: None,
-            new_boot_id: None,
-            deployment_id: None,
-            desired_target_id: None,
-            source: Some("commit_fallback".to_string()),
-            correlation_id: None,
-            metadata: serde_json::Value::Null,
-            reconciled: true,
-            generation_matches_current_store_path: None,
-            restart_type: None,
-        }
+                id: None,
+                timestamp,
+                occurred_at: Some(timestamp),
+                observed_at: None,
+                store_path: None,
+                system_configuration_name: commit.config_identity.clone(),
+                change_reason: commit.message.clone(),
+                event_type: "cf_deployment_succeeded".to_string(),
+                event_rank: Some(10),
+                title: Some("Deployed through Crystal Forge".to_string()),
+                commit_hash: Some(commit.hash.clone()),
+                flake_name: None,
+                flake_repo_url: commit.flake_repo_url.clone(),
+                actor: commit.author.clone(),
+                outcome: if commit.was_deployed || commit.is_current {
+                    "success".to_string()
+                } else {
+                    "pending".to_string()
+                },
+                // Commit fallback rows represent tracked flake commits, so they classify
+                // as deploys with a reconciled/tracked source.
+                event_kind: "cf_deployment".to_string(),
+                generation: None,
+                previous_generation: None,
+                new_generation: None,
+                previous_store_path: None,
+                new_store_path: None,
+                previous_boot_id: None,
+                new_boot_id: None,
+                deployment_id: None,
+                desired_target_id: None,
+                source: Some("commit_fallback".to_string()),
+                correlation_id: None,
+                metadata: serde_json::Value::Null,
+                reconciled: true,
+                generation_matches_current_store_path: None,
+                restart_type: None,
+            }
         })
         .collect()
 }
@@ -7420,7 +7426,10 @@ mod tests {
         assert_eq!(classify_history_entry(&entry), HistoryEventKind::Restart);
 
         entry.event_type = "agent_restart".to_string();
-        assert_eq!(classify_history_entry(&entry), HistoryEventKind::AgentRestart);
+        assert_eq!(
+            classify_history_entry(&entry),
+            HistoryEventKind::AgentRestart
+        );
     }
 
     #[test]

@@ -156,3 +156,4 @@ data
 *.pub
 *.key
 packages/slides/themes/slidev-theme-neversink
+design-shots/

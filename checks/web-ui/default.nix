@@ -1,26 +1,114 @@
-# Mega Web UI Integration Test
+# Web UI Integration Check
 #
-# Comprehensive integration test that combines:
-# - Full stack: PostgreSQL, Crystal Forge server, gitserver
-# - Cache backends: Attic + S3/MinIO
-# - Builder service with real builds
-# - Web UI with Playwright browser tests
+# Manifest-driven Playwright verification of the web UI against a real
+# Crystal Forge server (PostgreSQL + gitserver), with:
+# - Explicit build verification (served index.html/JS loader, packaged WASM magic header)
+# - Semantic assertions + screenshots per coverage-manifest.json step
+# - Design-parity visual comparison: Dioxus screenshots vs rendered design
+#   example targets (docs/design/CrystalForge, vendored offline, non-blocking)
+# - OSCAL and SARIF export validation against vendored schemas
 #
-# This consolidates what were previously 5 separate VM checks (attic_cache,
-# s3_cache, builder, and web-ui) into one comprehensive integration test,
-# significantly reducing CI time.
+# Coverage is defined in ./coverage-manifest.json — the check fails if the
+# steps in tests/integration-test.js drift from the manifest.
 #
-# Test phases:
-# 1. Cache tests (Attic + S3)
-# 2. Builder tests
-# 3. Web UI tests (Playwright screenshots)
+# Optional legacy "mega" phases (Attic/S3 cache + builder pytest suites) are
+# opt-in via CF_WEB_UI_RUN_MEGA_PHASES=1 (interactive runs only — the env var
+# cannot cross the Nix build sandbox). Their VMs are only booted when enabled.
 #
 # Note: OIDC tests remain in the separate integration check.
 #
 { lib, pkgs, inputs, ... }:
 let
   testDir = ./tests;
+  coverageManifest = ./coverage-manifest.json;
+  designParityDir = ./design-parity;
   CF_TEST_SERVER_PORT = 3000;
+
+  # ── Design-parity harness (non-blocking) ────────────────────────────────────
+  # Vendor the design example's CDN dependencies so the tracked design gold
+  # standard (docs/design/CrystalForge) renders fully offline inside the check
+  # VM. sha256 hashes from nix-prefetch-url.
+  reactUmd = pkgs.fetchurl {
+    url = "https://unpkg.com/react@18.3.1/umd/react.development.js";
+    sha256 = "0zsfq9pj3pbpiz9p6k6qflwd33s24kwflbdjxqn8pvdhdkpqyd18";
+  };
+  reactDomUmd = pkgs.fetchurl {
+    url = "https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js";
+    sha256 = "1r09hyz12n03w6fvcnv93ri0mv16wljgkpq4laqqpnrrkig4l17r";
+  };
+  babelStandalone = pkgs.fetchurl {
+    url = "https://unpkg.com/@babel/standalone@7.29.0/babel.min.js";
+    sha256 = "186f1mfjlcs49p0j0hss1m9cxpbpw9a12imli7kmr48953iaj8r6";
+  };
+
+  designExampleSrc = inputs.self + "/docs/design/CrystalForge";
+
+  # Offline copy of the design example with the three CDN <script> tags rewritten
+  # to the vendored local files so Playwright can render it with no network.
+  designExampleOffline = pkgs.runCommand "cf-design-example-offline" { } ''
+    mkdir -p $out/vendor
+    cp -r ${designExampleSrc}/. $out/
+    chmod -R u+w $out
+    cp ${reactUmd} $out/vendor/react.development.js
+    cp ${reactDomUmd} $out/vendor/react-dom.development.js
+    cp ${babelStandalone} $out/vendor/babel.min.js
+
+    # Rewrite CDN script srcs to vendored paths and drop SRI/crossorigin so the
+    # local files load without integrity/CORS checks.
+    ${pkgs.gnused}/bin/sed -i -E \
+      -e 's#src="https://unpkg.com/react@[^"]*"#src="vendor/react.development.js"#' \
+      -e 's#src="https://unpkg.com/react-dom@[^"]*"#src="vendor/react-dom.development.js"#' \
+      -e 's#src="https://unpkg.com/@babel/standalone@[^"]*"#src="vendor/babel.min.js"#' \
+      -e 's# integrity="[^"]*"##g' \
+      -e 's# crossorigin="anonymous"##g' \
+      $out/crystal-forge.html
+  '';
+
+  # Explicit web-ui build verification (AC from TASK-8.12, preserved here):
+  # index.html is served, it references a JS loader, the loader is served, and
+  # the referenced packaged WASM output has a valid wasm magic header.
+  verifyWebUiAssets = pkgs.writeShellScript "verify-web-ui-assets" ''
+    set -euo pipefail
+    base="$1"
+    ui_dist="$2"
+
+    normalize_asset_path() {
+      local p="$1"
+      p="''${p#./}"
+      p="''${p#/./}"
+      p="''${p#/}"
+      printf '%s' "$p"
+    }
+
+    index=$(curl -sf "$base/") || { echo "FAIL: index.html not served"; exit 1; }
+
+    js_path=$(printf '%s' "$index" | grep -oE '(src|href)="[^"]+\.js"' | head -1 | sed -E 's/^(src|href)="//; s/"$//')
+    [ -n "$js_path" ] || { echo "FAIL: no JS loader reference in index.html"; exit 1; }
+    case "$js_path" in
+      http*) js_url="$js_path" ;;
+      *) js_url="$base/$(normalize_asset_path "$js_path")" ;;
+    esac
+
+    js=$(curl -sf "$js_url") || { echo "FAIL: JS loader $js_url not served"; exit 1; }
+
+    wasm_ref=$(printf '%s' "$js" | grep -oE '"[^"]*\.wasm"' | head -1 | tr -d '"')
+    if [ -z "$wasm_ref" ]; then
+      wasm_ref=$(printf '%s' "$index" | grep -oE '"[^"]*\.wasm"' | head -1 | tr -d '"')
+    fi
+    [ -n "$wasm_ref" ] || { echo "FAIL: no .wasm reference found in loader or index"; exit 1; }
+
+    wasm_name=$(basename "$(normalize_asset_path "$wasm_ref")")
+    wasm_path=$(find "$ui_dist" -type f -name "$wasm_name" | head -1)
+    if [ -z "$wasm_path" ]; then
+      wasm_path=$(find "$ui_dist" -type f -name '*.wasm' | head -1)
+    fi
+    [ -n "$wasm_path" ] || { echo "FAIL: no wasm output found under $ui_dist"; exit 1; }
+
+    magic=$(head -c4 "$wasm_path" | od -An -tx1 | tr -d ' \n')
+    [ "$magic" = "0061736d" ] || { echo "FAIL: wasm output $wasm_path has invalid magic ($magic)"; exit 1; }
+
+    echo "web-ui build verification OK: index served, loader $js_path, wasm output $wasm_path"
+  '';
 
   # Use fixed test keys to avoid cf-keygen CI flakiness
   # Keys embedded directly to avoid path resolution issues in Nix build context
@@ -88,6 +176,8 @@ in pkgs.testers.runNixOSTest {
         pkgs.curl
         pkgs.jq
         pkgs.git
+        # ImageMagick provides `compare`/`identify` for screenshot baseline diffs
+        pkgs.imagemagick
         pkgs.crystal-forge.default
         pkgs.crystal-forge.default.migrate
         pkgs.crystal-forge.cf-test-suite.runTests
@@ -235,7 +325,17 @@ in pkgs.testers.runNixOSTest {
 
     os.environ["NIXOS_TEST_DRIVER"] = "1"
 
-    start_all()
+    # Cache + builder mega phases are opt-in. They can only run interactively
+    # (the env var cannot cross the Nix build sandbox), so in CI the attic and
+    # s3 cache VMs would boot and be health-waited without ever being used.
+    # Only start the VMs that this run will actually exercise.
+    run_mega_phases = os.environ.get("CF_WEB_UI_RUN_MEGA_PHASES", "0") == "1"
+
+    machine.start()
+    gitserver.start()
+    if run_mega_phases:
+        atticCache.start()
+        s3Cache.start()
 
     # === Infrastructure Warmup ===
     print("=== Infrastructure Warmup ===")
@@ -248,19 +348,20 @@ in pkgs.testers.runNixOSTest {
     from cf_test.vm_helpers import wait_for_git_server_ready
     wait_for_git_server_ready(gitserver, timeout=120)
 
-    atticCache.wait_for_unit("atticd.service")
-    atticCache.wait_for_open_port(8080)
+    if run_mega_phases:
+        atticCache.wait_for_unit("atticd.service")
+        atticCache.wait_for_open_port(8080)
 
-    try:
-        s3Cache.wait_for_unit("garage.service")
-    except Exception:
-        print(s3Cache.succeed("systemctl status garage.service --no-pager -l || true"))
-        print(s3Cache.succeed("journalctl -u garage.service --no-pager -n 200 || true"))
-        print(s3Cache.succeed("cat /etc/garage.toml || true"))
-        print(s3Cache.succeed("cat /etc/garage/garage.toml || true"))
-        raise
+        try:
+            s3Cache.wait_for_unit("garage.service")
+        except Exception:
+            print(s3Cache.succeed("systemctl status garage.service --no-pager -l || true"))
+            print(s3Cache.succeed("journalctl -u garage.service --no-pager -n 200 || true"))
+            print(s3Cache.succeed("cat /etc/garage.toml || true"))
+            print(s3Cache.succeed("cat /etc/garage/garage.toml || true"))
+            raise
 
-    s3Cache.wait_for_open_port(3900)
+        s3Cache.wait_for_open_port(3900)
 
     # Set up test environment variables
     main_head = "${
@@ -298,7 +399,6 @@ in pkgs.testers.runNixOSTest {
 
     # Optional mega phases (cache + builder) are flaky in constrained CI VMs.
     # Keep them opt-in so the web-ui check remains focused on Playwright UI validation.
-    run_mega_phases = os.environ.get("CF_WEB_UI_RUN_MEGA_PHASES", "0") == "1"
     if run_mega_phases:
       # === Phase 1: Attic Cache Tests ===
       print("=== Phase 1: Attic Cache Tests ===")
@@ -329,8 +429,8 @@ in pkgs.testers.runNixOSTest {
     else:
       print("=== Skipping mega non-UI phases (set CF_WEB_UI_RUN_MEGA_PHASES=1 to enable) ===")
 
-    # === Phase 4: Web UI Tests (Playwright) ===
-    print("=== Phase 4: Web UI Tests (Playwright) ===")
+    # === Phase 4a: Web UI Build Verification ===
+    print("=== Phase 4a: Web UI Build Verification ===")
 
     # Verify server is responding
     machine.succeed("curl -sf http://127.0.0.1:${
@@ -338,12 +438,29 @@ in pkgs.testers.runNixOSTest {
     }/status | jq .")
     print("Server is up and responding")
 
+    # Explicitly verify the UI build: index.html served, JS loader served, and
+    # the packaged WASM output has a valid magic header.
+    print(machine.succeed("${verifyWebUiAssets} http://127.0.0.1:${
+      toString CF_TEST_SERVER_PORT
+    } ${pkgs.crystal-forge.web-ui}/public"))
+
+    # === Phase 4: Web UI Tests (Playwright) ===
+    print("=== Phase 4: Web UI Tests (Playwright) ===")
+
     # Create output directories
     machine.succeed("mkdir -p /tmp/screenshots")
     machine.succeed("mkdir -p /tmp/web-ui-tests")
 
-    # Copy test files into VM
+    # Copy test files and coverage manifest into the VM
     machine.succeed("cp -r ${testDir}/* /tmp/web-ui-tests/")
+    machine.succeed("cp ${coverageManifest} /tmp/web-ui-tests/coverage-manifest.json")
+
+    # Design-parity harness inputs: scripts + manifest (read by integration-test.js
+    # at /tmp/web-ui-tests/design-parity/manifest.json) and the offline design
+    # example bundle.
+    machine.succeed("mkdir -p /tmp/web-ui-tests/design-parity")
+    machine.succeed("cp -r ${designParityDir}/. /tmp/web-ui-tests/design-parity/")
+    machine.succeed("mkdir -p /tmp/design-example && cp -r ${designExampleOffline}/. /tmp/design-example/")
 
     test_profile = "ci_fast"
 
@@ -353,18 +470,72 @@ in pkgs.testers.runNixOSTest {
           toString CF_TEST_SERVER_PORT
         } /tmp/screenshots > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )
-    machine.wait_until_succeeds("test -f /tmp/screenshots/results.json", timeout=1800)
+    machine.wait_until_succeeds(
+        "test -f /tmp/screenshots/results.json -o -f /tmp/screenshots/fatal.json",
+        timeout=1800,
+    )
     output = machine.succeed("cat /tmp/web-ui-tests/integration.log")
     print(output)
+
+    # Coverage-gate failures (manifest drift) abort before any results exist.
+    if machine.execute("test -f /tmp/screenshots/fatal.json")[0] == 0:
+        fatal_json = machine.succeed("cat /tmp/screenshots/fatal.json")
+        raise Exception(f"Web UI check aborted: {json.loads(fatal_json)['error']}")
 
     # Read results
     results_json = machine.succeed("cat /tmp/screenshots/results.json")
     results = json.loads(results_json)
 
-    # Copy screenshots out
+    # Copy screenshots + visual reports out
     for r in results:
         if r.get("ok"):
-            machine.copy_from_vm(f"/tmp/screenshots/{r['name']}.png", "screenshots")
+            for visual in r.get("visuals", []):
+                machine.copy_from_vm(f"/tmp/screenshots/{visual['name']}.png", "screenshots")
+
+    for report_file in ["results.json", "visual-report.json", "visual-summary.md"]:
+        try:
+            machine.copy_from_vm(f"/tmp/screenshots/{report_file}", "screenshots")
+        except Exception as e:
+            print(f"warning: could not copy {report_file}: {e}")
+
+    # === Visual Design-Parity Comparison (NON-BLOCKING) ===
+    # Render the tracked design example (offline, shared fixture) for the primary
+    # views/themes, then compare against the real Dioxus captures produced by the
+    # integration test above. This is the primary visual comparison — the design
+    # example IS the baseline. Results are reported as a directional drift gauge
+    # and a summary matrix, but the check never fails on visual mismatch alone.
+    print("=== Design-Parity Visual Comparison (design vs Dioxus, non-blocking) ===")
+    try:
+        machine.succeed("mkdir -p /tmp/design-targets /tmp/design-parity")
+        machine.succeed(
+            "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/generate-design-targets.js "
+            "/tmp/design-example /tmp/web-ui-tests/design-parity/manifest.json /tmp/design-targets "
+            "> /tmp/web-ui-tests/design-targets.log 2>&1 || true"
+        )
+        print(machine.succeed("cat /tmp/web-ui-tests/design-targets.log || true"))
+        machine.succeed(
+            "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/compare-design-parity.js "
+            "/tmp/web-ui-tests/design-parity/manifest.json /tmp/design-targets "
+            "/tmp/screenshots/design-parity /tmp/design-parity "
+            "> /tmp/web-ui-tests/design-parity.log 2>&1 || true"
+        )
+        print(machine.succeed("cat /tmp/web-ui-tests/design-parity.log || true"))
+
+        # Copy design-parity artifacts out (report, summary, montages, matrix grid, raw sides).
+        for report_file in ["design-drift-report.json", "design-drift-summary.md"]:
+            if machine.execute(f"test -f /tmp/design-parity/{report_file}")[0] == 0:
+                machine.copy_from_vm(f"/tmp/design-parity/{report_file}", "screenshots")
+        if machine.execute("test -d /tmp/design-parity/montages")[0] == 0:
+            machine.copy_from_vm("/tmp/design-parity/montages", "screenshots")
+        for grid_file in ["design-parity-matrix.png"]:
+            if machine.execute(f"test -f /tmp/design-parity/{grid_file}")[0] == 0:
+                machine.copy_from_vm(f"/tmp/design-parity/{grid_file}", "screenshots")
+        if machine.execute("test -d /tmp/design-targets")[0] == 0:
+            machine.copy_from_vm("/tmp/design-targets", "screenshots")
+        if machine.execute("test -d /tmp/screenshots/design-parity")[0] == 0:
+            machine.copy_from_vm("/tmp/screenshots/design-parity", "screenshots")
+    except Exception as e:
+        print(f"warning: design-parity harness error (non-blocking): {e}")
 
     ok_count = sum(1 for r in results if r.get("ok"))
 
@@ -397,6 +568,26 @@ in pkgs.testers.runNixOSTest {
     failed_critical = [r['name'] for r in results if r['name'] in critical_tests and not r.get('ok')]
     if failed_critical:
         raise Exception(f"Critical web UI checks failed: {failed_critical}")
+
+    # === Phase 4b: Visual Baseline Gate ===
+    # Steps marked "strict" in coverage-manifest.json must match their
+    # approved baseline within the configured threshold; "advisory" steps are
+    # reported (with diff images in screenshots/diffs) but never block.
+    visual_report_json = machine.succeed("cat /tmp/screenshots/visual-report.json")
+    visual_report = json.loads(visual_report_json)
+    counts = visual_report.get("counts", {})
+    print(
+        f"  Visual baselines: {counts.get('match', 0)} match, "
+        f"{counts.get('diff', 0)} differ, {counts.get('new', 0)} new, "
+        f"{counts.get('skipped', 0)} skipped"
+    )
+    visual_failures = visual_report.get("failures", [])
+    if visual_failures:
+        for f in visual_failures:
+            print(f"  STRICT VISUAL FAIL: {f['name']} ({f['status']})")
+        raise Exception(
+            f"Strict visual baseline failures: {[f['name'] for f in visual_failures]}"
+        )
 
     # === Phase 5: OSCAL Export Validation (end-to-end via web UI) ===
     print("=== Phase 5: OSCAL Export Validation ===")

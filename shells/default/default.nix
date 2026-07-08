@@ -148,6 +148,8 @@ in mkShell {
     alias oidc-stack='nix run $PROJECT_ROOT#devScripts.oidc-stack --'
     alias db-only='nix run $PROJECT_ROOT#devScripts.db-only --'
     alias run-server='nix run $PROJECT_ROOT#devScripts.runServer --'
+    alias run-ui-dev='nix run $PROJECT_ROOT#devScripts.runUiDev --'
+    alias run-ui-frontend='nix run $PROJECT_ROOT#devScripts.runUiFrontend --'
     alias run-agent='nix run $PROJECT_ROOT#devScripts.runAgent --'
     alias start-builder-api='nix run $PROJECT_ROOT#devScripts.startBuilderApi --'
     alias simulate-push='nix run $PROJECT_ROOT#devScripts.simulatePush --'
@@ -187,10 +189,12 @@ in mkShell {
     echo "  sqlx-prepare       → Just re-run sqlx prepare"
       echo "  run-db-test        → Run database tests against dev database (must run server-stack up)"
     echo ""
-      echo "🌐 UI Development:"
+      echo "🌐 UI Development:"      
       echo ""
-      echo "  dx serve           → Start Dioxus web UI dev server with hot reload"
-      echo "                       (run from packages/default/)"
+      echo "  run-ui-dev         → One-command: starts DB, seeds fixture data,"
+      echo "                       launches server (background) + Dioxus dev server (foreground)"
+      echo "  run-ui-frontend    → Frontend only: pins wasm-bindgen + builds Tailwind,"
+      echo "                       runs 'dx serve' from packages/web-ui (needs run-ui-dev's server)"
       echo ""
       echo "🧪 Test Suite Available:"
       echo ""

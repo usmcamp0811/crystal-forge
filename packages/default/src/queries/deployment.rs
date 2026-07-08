@@ -56,13 +56,8 @@ pub async fn update_desired_target(
     .await?;
 
     if let Some(system_id) = system_id {
-        set_pending_deployment_target_tx(
-            &mut tx,
-            system_id,
-            desired_target,
-            "auto_desired_target",
-        )
-        .await?;
+        set_pending_deployment_target_tx(&mut tx, system_id, desired_target, "auto_desired_target")
+            .await?;
     }
 
     tx.commit().await?;
