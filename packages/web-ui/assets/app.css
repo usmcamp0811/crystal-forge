@@ -3882,6 +3882,20 @@ tr.kbd-focused > td {
   font-size: 13px;
   color: var(--cf-text-primary);
   font-weight: 500;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.tl-title svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.tl-title span {
+  min-width: 0;
 }
 
 .tl-meta {
@@ -3889,6 +3903,15 @@ tr.kbd-focused > td {
   color: var(--cf-text-muted);
   font-family: var(--font-mono);
   margin-top: 2px;
+}
+
+.tl-sub {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--cf-text-muted);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* Heartbeat spinner */
@@ -4903,7 +4926,7 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
 .deploy-pending.failed .deploy-pending-icon { color: #f87171; }
 .deploy-pending-title { font-size: 13.5px; font-weight: 700; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .deploy-pending-commit { font-size: 11.5px; font-weight: 600; color: var(--cf-brand-purple); padding: 1px 6px; border-radius: 5px; background: color-mix(in oklab, var(--cf-brand-purple) 14%, transparent); }
-.deploy-pending-sub { font-size: 12px; color: var(--cf-text-secondary); margin-top: 2px; }
+.deploy-pending-sub { font-size: 12px; color: var(--cf-text-secondary); margin-top: 2px; overflow-wrap: anywhere; }
 .deploy-steps { display: flex; align-items: flex-start; padding: 2px 14px 12px; gap: 0; }
 .deploy-step { display: flex; flex-direction: column; align-items: center; gap: 6px; flex: 1; min-width: 0; position: relative; }
 .deploy-step-dot { width: 18px; height: 18px; border-radius: 50%; flex-shrink: 0; z-index: 1; border: 1.5px solid var(--cf-divider); display: grid; place-items: center; color: #fff; background: var(--cf-card-bg); }

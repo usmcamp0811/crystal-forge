@@ -221,6 +221,25 @@ fn activity_row_from_history(entry: &SystemHistoryEntry) -> ActivityRow {
     }
 }
 
+fn heartbeat_wait_label(next_in_sec: f64) -> String {
+    if next_in_sec < 0.0 {
+        format!("{} late", format_short_duration(next_in_sec.abs()))
+    } else {
+        format!("next in {}", format_short_duration(next_in_sec))
+    }
+}
+
+fn format_short_duration(seconds: f64) -> String {
+    let value = seconds.abs().round() as i64;
+    if value < 60 {
+        format!("{}s", value)
+    } else if value < 3600 {
+        format!("{}m {}s", value / 60, value % 60)
+    } else {
+        format!("{}h {}m", value / 3600, (value % 3600) / 60)
+    }
+}
+
 fn reachability_label(reachability: &str) -> &'static str {
     if is_pull_reachability(reachability) {
         "Agent pull-only"
@@ -859,11 +878,11 @@ pub fn SystemDetailView(id: String) -> Element {
                                             span { class: "deploy-pending-spinner", "aria-hidden": "true" }
                                             span { class: "hb-waiting-txt",
                                                 match progress.stage.as_str() {
-                                                    "queued" => "awaiting agent",
-                                                    "picked_up" => "picked up",
-                                                    "applying" => "applying",
-                                                    "failed" => "failed",
-                                                    _ => "deploying",
+                                                    "queued" => format!("awaiting agent · {}", heartbeat_wait_label(heartbeat_next_in_sec)),
+                                                    "picked_up" => "picked up".to_string(),
+                                                    "applying" => "applying".to_string(),
+                                                    "failed" => "failed".to_string(),
+                                                    _ => "deploying".to_string(),
                                                 }
                                             }
                                         }
@@ -922,6 +941,10 @@ pub fn SystemDetailView(id: String) -> Element {
                     progress,
                     hostname: system.hostname.clone(),
                     heartbeat_interval_secs: system.effective_heartbeat_interval_secs as i64,
+                    heartbeat_next_in_secs: system.last_seen.map(|dt| {
+                        system.effective_heartbeat_interval_secs as f64
+                            - now.signed_duration_since(dt).num_seconds() as f64
+                    }),
                     on_dismiss: move |_| deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1),
                     on_view_logs: move |_| active_tab.set(Tab::Logs),
                 }
@@ -2230,12 +2253,11 @@ fn OverviewTab(
                                 class: "tl-body",
                                 div {
                                     class: "tl-title",
-                                    style: "display:flex;align-items:center;gap:6px;",
                                     Icon { name: activity.icon, size: 12 }
                                     span { "{activity.title}" }
-                                    if let Some(sub) = activity.sub.as_ref() {
-                                        span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "· {sub}" }
-                                    }
+                                }
+                                if let Some(sub) = activity.sub.as_ref() {
+                                    div { class: "tl-sub mono", title: "{sub}", "{sub}" }
                                 }
                                 div { class: "tl-meta", "{relative_time(activity.timestamp)}" }
                             }

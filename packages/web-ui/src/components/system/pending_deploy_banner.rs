@@ -28,19 +28,46 @@ fn stage_subtext(
     is_rollback: bool,
     hostname: &str,
     heartbeat_interval_secs: i64,
+    heartbeat_next_in_secs: Option<f64>,
     target_label: &str,
+    failure_message: Option<&str>,
 ) -> String {
     match stage {
-        "queued" => format!(
-            "Waiting for {hostname} agent to check in (heartbeat every {heartbeat_interval_secs}s)"
-        ),
+        "queued" => heartbeat_next_in_secs
+            .map(format_heartbeat_wait)
+            .map(|next| format!("Waiting for {hostname} agent to check in — {next}"))
+            .unwrap_or_else(|| {
+                format!("Waiting for {hostname} agent to check in (heartbeat every {heartbeat_interval_secs}s)")
+            }),
         "picked_up" if is_rollback => "Agent fetched the rollback command".to_string(),
         "picked_up" => "Agent fetched the deployment command".to_string(),
         "applying" if is_rollback => format!("Switching to {target_label}"),
         "applying" => format!("Building & switching to {target_label}"),
         "activated" => "Target configuration is live".to_string(),
-        "failed" => "Deployment failed to activate. Review logs for details.".to_string(),
+        "failed" => failure_message
+            .filter(|message| !message.trim().is_empty())
+            .map(|message| format!("Deployment failed: {message}"))
+            .unwrap_or_else(|| "Deployment failed to activate. Review logs for details.".to_string()),
         _ => String::new(),
+    }
+}
+
+fn format_heartbeat_wait(seconds: f64) -> String {
+    if seconds < 0.0 {
+        format!("heartbeat is {} late", format_duration(seconds.abs()))
+    } else {
+        format!("next heartbeat expected in {}", format_duration(seconds))
+    }
+}
+
+fn format_duration(seconds: f64) -> String {
+    let value = seconds.abs().round() as i64;
+    if value < 60 {
+        format!("{}s", value)
+    } else if value < 3600 {
+        format!("{}m {}s", value / 60, value % 60)
+    } else {
+        format!("{}h {}m", value / 3600, (value % 3600) / 60)
     }
 }
 
@@ -49,6 +76,7 @@ pub fn PendingDeployBanner(
     progress: SystemDeploymentProgress,
     hostname: String,
     heartbeat_interval_secs: i64,
+    heartbeat_next_in_secs: Option<f64>,
     on_dismiss: EventHandler<()>,
     on_view_logs: EventHandler<()>,
 ) -> Element {
@@ -84,7 +112,9 @@ pub fn PendingDeployBanner(
         is_rollback,
         hostname.as_str(),
         heartbeat_interval_secs,
+        heartbeat_next_in_secs,
         target_label.as_str(),
+        progress.failure_message.as_deref(),
     );
     let root_class = format!(
         "deploy-pending{}{}{}",
@@ -116,7 +146,7 @@ pub fn PendingDeployBanner(
                         }
                         span { class: "mono deploy-pending-commit", "{target_chip}" }
                     }
-                    div { class: "deploy-pending-sub", "{subtext}" }
+                    div { class: "deploy-pending-sub", title: "{subtext}", "{subtext}" }
                 }
                 button {
                     class: "btn btn-ghost xs focus-ring",
@@ -172,8 +202,32 @@ mod tests {
     #[test]
     fn stage_subtext_describes_pull_based_queue() {
         assert_eq!(
-            stage_subtext("queued", false, "host-a", 30, "abc123"),
+            stage_subtext("queued", false, "host-a", 30, None, "abc123", None),
             "Waiting for host-a agent to check in (heartbeat every 30s)"
+        );
+    }
+
+    #[test]
+    fn stage_subtext_includes_next_heartbeat_when_available() {
+        assert_eq!(
+            stage_subtext("queued", false, "host-a", 600, Some(144.0), "abc123", None),
+            "Waiting for host-a agent to check in — next heartbeat expected in 2m 24s"
+        );
+    }
+
+    #[test]
+    fn failed_stage_surfaces_agent_error() {
+        assert_eq!(
+            stage_subtext(
+                "failed",
+                false,
+                "host-a",
+                600,
+                None,
+                "abc123",
+                Some("cache URL is not a binary cache"),
+            ),
+            "Deployment failed: cache URL is not a binary cache"
         );
     }
 }

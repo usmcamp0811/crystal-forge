@@ -17,7 +17,7 @@ use crystal_forge::{
     fixtures::seed_from_fixture,
     flake::commits::initialize_flake_commits,
     handlers::{
-        agent::{deployment_started, heartbeat, state},
+        agent::{deployment_failed, deployment_started, heartbeat, state},
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
@@ -178,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
             "/agent/deployment-started",
             post(deployment_started::report),
         )
+        .route("/agent/deployment-failed", post(deployment_failed::report))
         .route("/webhook", post(webhook_handler))
         // REST API v1
         .route(

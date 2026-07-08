@@ -1928,6 +1928,8 @@ pub async fn get_system_deployment_status(
             delivered_at: progress_row.delivered_at,
             applying_at: progress_row.applying_at,
             completed_at: progress_row.completed_at,
+            failed_at: progress_row.failed_at,
+            failure_message: progress_row.failure_message,
         }),
     )
         .into_response()

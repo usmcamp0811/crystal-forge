@@ -93,6 +93,13 @@ struct DeploymentStartedReport<'a> {
     target_store_path: &'a str,
 }
 
+#[derive(Debug, Serialize)]
+struct DeploymentFailedReport<'a> {
+    hostname: &'a str,
+    target_store_path: &'a str,
+    error: &'a str,
+}
+
 impl AgentDeploymentManager {
     pub fn new(config: DeploymentConfig) -> Self {
         Self {
@@ -198,9 +205,12 @@ impl AgentDeploymentManager {
             }
             Err(e) => {
                 error!("Deployment failed: {:#}", e);
+                let error_message = format!("{:#}", e);
+                self.report_deployment_failed_best_effort(&desired_target, &error_message)
+                    .await;
                 Ok((
                     DeploymentResult::Failed {
-                        error: e.to_string(),
+                        error: error_message,
                         desired_target: desired_target.to_string(),
                     },
                     heartbeat_interval_secs,
@@ -628,6 +638,67 @@ impl AgentDeploymentManager {
         };
         let url = format!(
             "{}://{}{}/agent/deployment-started",
+            scheme, client_cfg.server_host, port_suffix
+        );
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()?;
+        let response = client
+            .post(url)
+            .header("X-Signature", signature_b64)
+            .header("X-Key-ID", hostname)
+            .body(payload_json)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("server responded with {}", response.status());
+        }
+
+        Ok(())
+    }
+
+    async fn report_deployment_failed_best_effort(&self, store_path: &str, error: &str) {
+        if let Err(report_error) = self.report_deployment_failed(store_path, error).await {
+            debug!(
+                target_store_path = %store_path,
+                ?report_error,
+                "Failed to report deployment-failed; deployment failure already logged locally"
+            );
+        }
+    }
+
+    async fn report_deployment_failed(&self, store_path: &str, error: &str) -> Result<()> {
+        let cfg = CrystalForgeConfig::load()?;
+        let client_cfg = &cfg.client;
+        let hostname = hostname::get()?.to_string_lossy().into_owned();
+        let payload = DeploymentFailedReport {
+            hostname: &hostname,
+            target_store_path: store_path,
+            error,
+        };
+        let payload_json = serde_json::to_string(&payload)?;
+
+        let key_bytes = STANDARD
+            .decode(fs::read_to_string(&client_cfg.private_key)?.trim())
+            .context("failed to decode base64 private key")?;
+        let signing_key = SigningKey::from_bytes(
+            key_bytes
+                .as_slice()
+                .try_into()
+                .context("expected a 32-byte Ed25519 private key")?,
+        );
+        let signature = signing_key.sign(payload_json.as_bytes());
+        let signature_b64 = STANDARD.encode(signature.to_bytes());
+
+        let (scheme, port_suffix) = match client_cfg.server_port {
+            443 => ("https", "".to_string()),
+            80 => ("http", "".to_string()),
+            port => ("http", format!(":{}", port)),
+        };
+        let url = format!(
+            "{}://{}{}/agent/deployment-failed",
             scheme, client_cfg.server_host, port_suffix
         );
 

@@ -1301,6 +1301,7 @@ fn SystemPreviewPanel(
                             progress,
                             hostname: detail.hostname.clone(),
                             heartbeat_interval_secs: detail.effective_heartbeat_interval_secs as i64,
+                            heartbeat_next_in_secs: Some(heartbeat_next_in_sec),
                             on_dismiss: move |_| deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1),
                             on_view_logs: move |_| on_open_detail.call(()),
                         }
@@ -1412,9 +1413,9 @@ fn SystemPreviewPanel(
                                     span { class: "tl-dot", style: "--status-color: {row.color};" }
                                     div {
                                         class: "tl-body",
-                                        div { class: "tl-title", Icon { name: row.icon, size: 12 } "{row.title}" }
+                                        div { class: "tl-title", Icon { name: row.icon, size: 12 } span { "{row.title}" } }
                                         if let Some(sub) = row.sub {
-                                            div { class: "tl-meta mono", "{sub}" }
+                                            div { class: "tl-sub mono", title: "{sub}", "{sub}" }
                                         }
                                         div { class: "tl-meta", "{format_relative_time_from(now, row.timestamp)}" }
                                     }

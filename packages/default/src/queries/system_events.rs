@@ -27,6 +27,8 @@ pub struct PendingSystemDeployment {
     pub delivered_at: Option<DateTime<Utc>>,
     pub applying_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub failed_at: Option<DateTime<Utc>>,
+    pub failure_message: Option<String>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -40,6 +42,8 @@ pub struct SystemDeploymentProgressRow {
     pub delivered_at: Option<DateTime<Utc>>,
     pub applying_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub failed_at: Option<DateTime<Utc>>,
+    pub failure_message: Option<String>,
     pub target_commit: Option<String>,
     pub target_generation: Option<i64>,
 }
@@ -97,7 +101,9 @@ const MATCH_PENDING_DEPLOYMENT_SQL: &str = r#"
             expires_at,
             delivered_at,
             applying_at,
-            completed_at
+            completed_at,
+            failed_at,
+            failure_message
         FROM pending_system_deployments
         WHERE system_id = $1
           AND target_store_path = $2
@@ -325,6 +331,65 @@ pub async fn mark_pending_deployment_applying_tx(
     Ok(Some(row))
 }
 
+pub async fn mark_pending_deployment_failed_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+    target_store_path: &str,
+    failure_message: &str,
+) -> Result<Option<PendingSystemDeployment>> {
+    let row = find_matching_pending_deployment_tx(tx, system_id, Some(target_store_path)).await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE pending_system_deployments
+        SET status = 'failed',
+            failed_at = COALESCE(failed_at, NOW()),
+            completed_at = COALESCE(completed_at, NOW()),
+            failure_message = $2,
+            delivered_at = COALESCE(delivered_at, NOW())
+        WHERE id = $1
+          AND status = 'pending'
+        "#,
+    )
+    .bind(row.id)
+    .bind(failure_message)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(Some(row))
+}
+
+pub async fn insert_deployment_failed_event_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    pending: &PendingSystemDeployment,
+    failure_message: &str,
+) -> Result<()> {
+    let event = PendingSystemEvent {
+        event_type: SystemEventType::CfDeploymentFailed,
+        dedupe_key: pending.id.to_string(),
+        previous_generation: None,
+        new_generation: None,
+        previous_store_path: None,
+        new_store_path: Some(pending.target_store_path.clone()),
+        previous_boot_id: None,
+        new_boot_id: None,
+        deployment_id: Some(pending.id),
+        desired_target_id: Some(pending.id),
+        source: "agent_report",
+        actor: Some("agent"),
+        metadata: json!({
+            "target_store_path": pending.target_store_path,
+            "pending_deployment_id": pending.id,
+            "failure_message": failure_message,
+        }),
+    };
+
+    insert_system_event_tx(tx, pending.system_id, pending.id, Utc::now(), &event).await
+}
+
 pub async fn insert_deployment_started_event_tx(
     tx: &mut Transaction<'_, Postgres>,
     pending: &PendingSystemDeployment,
@@ -367,6 +432,8 @@ pub async fn get_system_deployment_progress_row(
             psd.delivered_at,
             psd.applying_at,
             psd.completed_at,
+            psd.failed_at,
+            psd.failure_message,
             c.git_commit_hash AS target_commit,
             NULLIF(psd.metadata->>'target_generation', '')::bigint AS target_generation
         FROM pending_system_deployments psd

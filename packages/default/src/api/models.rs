@@ -1475,6 +1475,10 @@ pub struct SystemDeploymentProgress {
     pub delivered_at: Option<DateTime<Utc>>,
     pub applying_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub failed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub failure_message: Option<String>,
 }
 
 /// A single system state transition for timeline/history views.
