@@ -38,6 +38,15 @@ pub async fn update_desired_target(
     hostname: &str,
     desired_target: Option<&str>,
 ) -> Result<()> {
+    update_desired_target_with_source(pool, hostname, desired_target, "auto_desired_target").await
+}
+
+pub async fn update_desired_target_with_source(
+    pool: &PgPool,
+    hostname: &str,
+    desired_target: Option<&str>,
+    source: &str,
+) -> Result<()> {
     let mut tx = pool.begin().await?;
 
     let system_id = sqlx::query_scalar::<_, uuid::Uuid>(
@@ -56,8 +65,7 @@ pub async fn update_desired_target(
     .await?;
 
     if let Some(system_id) = system_id {
-        set_pending_deployment_target_tx(&mut tx, system_id, desired_target, "auto_desired_target")
-            .await?;
+        set_pending_deployment_target_tx(&mut tx, system_id, desired_target, source).await?;
     }
 
     tx.commit().await?;

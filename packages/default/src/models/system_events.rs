@@ -29,6 +29,7 @@ pub struct SystemEvent {
 pub enum SystemEventType {
     SystemReboot,
     AgentRestart,
+    CfDeploymentStarted,
     CfDeploymentSucceeded,
     CfDeploymentFailed,
     LocalRebuildDetected,
@@ -39,6 +40,7 @@ impl SystemEventType {
         match self {
             Self::SystemReboot => "system_reboot",
             Self::AgentRestart => "agent_restart",
+            Self::CfDeploymentStarted => "cf_deployment_started",
             Self::CfDeploymentSucceeded => "cf_deployment_succeeded",
             Self::CfDeploymentFailed => "cf_deployment_failed",
             Self::LocalRebuildDetected => "local_rebuild_detected",
@@ -47,9 +49,10 @@ impl SystemEventType {
 
     pub fn rank(self) -> i16 {
         match self {
-            Self::CfDeploymentSucceeded | Self::CfDeploymentFailed | Self::LocalRebuildDetected => {
-                10
-            }
+            Self::CfDeploymentStarted
+            | Self::CfDeploymentSucceeded
+            | Self::CfDeploymentFailed
+            | Self::LocalRebuildDetected => 10,
             Self::SystemReboot => 20,
             Self::AgentRestart => 30,
         }

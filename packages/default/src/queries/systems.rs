@@ -594,6 +594,15 @@ pub async fn update_system_desired_target(
     system_id: Uuid,
     target: &str,
 ) -> Result<()> {
+    update_system_desired_target_with_source(pool, system_id, target, "api_desired_target").await
+}
+
+pub async fn update_system_desired_target_with_source(
+    pool: &PgPool,
+    system_id: Uuid,
+    target: &str,
+    source: &str,
+) -> Result<()> {
     let desired_target = resolve_system_deployment_target(pool, system_id, target)
         .await?
         .ok_or_else(|| {
@@ -614,13 +623,8 @@ pub async fn update_system_desired_target(
     .execute(&mut *tx)
     .await?;
 
-    set_pending_deployment_target_tx(
-        &mut tx,
-        system_id,
-        Some(desired_target.as_str()),
-        "api_desired_target",
-    )
-    .await?;
+    set_pending_deployment_target_tx(&mut tx, system_id, Some(desired_target.as_str()), source)
+        .await?;
 
     tx.commit().await?;
     Ok(())

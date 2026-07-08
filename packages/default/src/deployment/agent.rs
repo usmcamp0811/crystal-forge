@@ -1,6 +1,10 @@
-use crate::config::{CacheType, deployment::DeploymentConfig};
+use crate::config::{CacheType, CrystalForgeConfig, deployment::DeploymentConfig};
 use crate::handlers::agent::heartbeat::{LogResponse, RuntimeCacheConfig};
 use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use ed25519_dalek::{Signer, SigningKey};
+use serde::Serialize;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -81,6 +85,12 @@ pub struct AgentDeploymentManager {
     deployment_lock: Arc<Semaphore>,
     runtime_caches: Vec<RuntimeCacheConfig>,
     started_at: Instant,
+}
+
+#[derive(Debug, Serialize)]
+struct DeploymentStartedReport<'a> {
+    hostname: &'a str,
+    target_store_path: &'a str,
 }
 
 impl AgentDeploymentManager {
@@ -572,8 +582,70 @@ impl AgentDeploymentManager {
             }
         };
 
+        self.report_deployment_started_best_effort(store_path).await;
+
         self.activate_via_systemd(store_path, unit_name, action)
             .await?;
+        Ok(())
+    }
+
+    async fn report_deployment_started_best_effort(&self, store_path: &str) {
+        if let Err(error) = self.report_deployment_started(store_path).await {
+            debug!(
+                target_store_path = %store_path,
+                ?error,
+                "Failed to report deployment-started; continuing deployment"
+            );
+        }
+    }
+
+    async fn report_deployment_started(&self, store_path: &str) -> Result<()> {
+        let cfg = CrystalForgeConfig::load()?;
+        let client_cfg = &cfg.client;
+        let hostname = hostname::get()?.to_string_lossy().into_owned();
+        let payload = DeploymentStartedReport {
+            hostname: &hostname,
+            target_store_path: store_path,
+        };
+        let payload_json = serde_json::to_string(&payload)?;
+
+        let key_bytes = STANDARD
+            .decode(fs::read_to_string(&client_cfg.private_key)?.trim())
+            .context("failed to decode base64 private key")?;
+        let signing_key = SigningKey::from_bytes(
+            key_bytes
+                .as_slice()
+                .try_into()
+                .context("expected a 32-byte Ed25519 private key")?,
+        );
+        let signature = signing_key.sign(payload_json.as_bytes());
+        let signature_b64 = STANDARD.encode(signature.to_bytes());
+
+        let (scheme, port_suffix) = match client_cfg.server_port {
+            443 => ("https", "".to_string()),
+            80 => ("http", "".to_string()),
+            port => ("http", format!(":{}", port)),
+        };
+        let url = format!(
+            "{}://{}{}/agent/deployment-started",
+            scheme, client_cfg.server_host, port_suffix
+        );
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()?;
+        let response = client
+            .post(url)
+            .header("X-Signature", signature_b64)
+            .header("X-Key-ID", hostname)
+            .body(payload_json)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("server responded with {}", response.status());
+        }
+
         Ok(())
     }
 

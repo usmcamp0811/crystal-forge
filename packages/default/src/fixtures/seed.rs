@@ -138,7 +138,41 @@ struct FixtureSystem {
     cves: Option<FixtureSystemCves>,
     tags: Option<Vec<String>>,
     stig: Option<i32>,
-    events: Option<Vec<serde_json::Value>>,
+    events: Option<Vec<FixtureSystemEvent>>,
+    #[serde(rename = "pendingDeployment")]
+    pending_deployment: Option<FixturePendingDeployment>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+#[serde(rename_all = "camelCase")]
+struct FixturePendingDeployment {
+    target_store_path: String,
+    source: Option<String>,
+    status: Option<String>,
+    issued_at: Option<String>,
+    delivered_at: Option<String>,
+    applying_at: Option<String>,
+    completed_at: Option<String>,
+    target_generation: Option<i32>,
+    target_commit: Option<String>,
+    kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+#[serde(rename_all = "camelCase")]
+struct FixtureSystemEvent {
+    at: Option<String>,
+    title: Option<String>,
+    color: Option<String>,
+    event_type: Option<String>,
+    outcome: Option<String>,
+    source: Option<String>,
+    generation: Option<i64>,
+    store_path: Option<String>,
+    commit_hash: Option<String>,
+    actor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -370,6 +404,7 @@ pub async fn seed_from_fixture(pool: &PgPool, path: &Path) -> Result<()> {
     let _user_ids = seed_users(pool, &fixture.admin).await?;
     let system_ids = seed_systems(pool, &fixture.systems, &flake_ids, &policy_ids).await?;
     seed_system_states(pool, &fixture.systems, &system_ids).await?;
+    seed_system_events_and_pending_deployments(pool, &fixture.systems, &system_ids).await?;
     seed_cves(pool, &fixture.cves, &fixture.systems, &system_ids).await?;
     // Builders and build jobs are seeded after systems
     seed_builders_and_jobs(pool, &fixture.builds, &fixture.systems, &system_ids).await?;
@@ -925,6 +960,124 @@ async fn seed_system_states(
         "Seeded {} system_states and {} heartbeats",
         systems.len(),
         hb_count
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Seed: pending_system_deployments + system_events
+// ---------------------------------------------------------------------------
+
+async fn seed_system_events_and_pending_deployments(
+    pool: &PgPool,
+    systems: &[FixtureSystem],
+    system_ids: &SystemIdMap,
+) -> Result<()> {
+    let mut pending_count = 0usize;
+    let mut event_count = 0usize;
+
+    for sys in systems {
+        let Some(system_id) = system_ids.get(&sys.id) else {
+            continue;
+        };
+
+        let mut pending_deployment_id: Option<Uuid> = None;
+        if let Some(pending) = sys.pending_deployment.as_ref() {
+            let issued_at = parse_relative_time(pending.issued_at.as_deref().unwrap_or("now"))
+                .unwrap_or_else(chrono::Utc::now);
+            let delivered_at = pending
+                .delivered_at
+                .as_deref()
+                .and_then(parse_relative_time);
+            let applying_at = pending.applying_at.as_deref().and_then(parse_relative_time);
+            let completed_at = pending
+                .completed_at
+                .as_deref()
+                .and_then(parse_relative_time);
+            let status = pending.status.as_deref().unwrap_or("pending");
+            let source = pending.source.as_deref().unwrap_or("fixture");
+            let metadata = serde_json::json!({
+                "target_generation": pending.target_generation,
+                "target_commit": pending.target_commit,
+                "kind": pending.kind.as_deref().unwrap_or("deployment"),
+                "fixture": true
+            });
+
+            let deployment_id: Uuid = sqlx::query_scalar(
+                r#"
+                INSERT INTO pending_system_deployments
+                    (system_id, target_store_path, status, source, issued_at, expires_at,
+                     completed_at, delivered_at, applying_at, metadata)
+                VALUES ($1, $2, $3, $4, $5, $5 + interval '2 hours', $6, $7, $8, $9)
+                RETURNING id
+                "#,
+            )
+            .bind(system_id)
+            .bind(&pending.target_store_path)
+            .bind(status)
+            .bind(source)
+            .bind(issued_at)
+            .bind(completed_at)
+            .bind(delivered_at)
+            .bind(applying_at)
+            .bind(metadata)
+            .fetch_one(pool)
+            .await
+            .with_context(|| format!("Failed to seed pending deployment for '{}'", sys.hostname))?;
+
+            pending_deployment_id = Some(deployment_id);
+            pending_count += 1;
+        }
+
+        for (index, event) in sys.events.as_deref().unwrap_or(&[]).iter().enumerate() {
+            let event_type = event
+                .event_type
+                .as_deref()
+                .unwrap_or("cf_deployment_succeeded");
+            let occurred_at = parse_relative_time(event.at.as_deref().unwrap_or("now"))
+                .unwrap_or_else(chrono::Utc::now);
+            let source = event.source.as_deref().unwrap_or("fixture");
+            let metadata = serde_json::json!({
+                "title": event.title,
+                "outcome": event.outcome,
+                "commit_hash": event.commit_hash,
+                "fixture_color": event.color,
+                "fixture": true
+            });
+            let dedupe_key = format!("fixture:{}:{}:{}", sys.id, event_type, index);
+
+            sqlx::query(
+                r#"
+                INSERT INTO system_events
+                    (system_id, event_type, event_rank, dedupe_key, occurred_at, observed_at,
+                     new_generation, new_store_path, deployment_id, desired_target_id,
+                     source, actor, metadata)
+                VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $8, $9, $10, $11)
+                ON CONFLICT (system_id, event_type, dedupe_key) DO NOTHING
+                "#,
+            )
+            .bind(system_id)
+            .bind(event_type)
+            .bind(index as i16)
+            .bind(dedupe_key)
+            .bind(occurred_at)
+            .bind(event.generation)
+            .bind(event.store_path.as_deref().or(sys.store_path.as_deref()))
+            .bind(pending_deployment_id)
+            .bind(source)
+            .bind(event.actor.as_deref().unwrap_or("fixture"))
+            .bind(metadata)
+            .execute(pool)
+            .await
+            .with_context(|| format!("Failed to seed system event for '{}'", sys.hostname))?;
+            event_count += 1;
+        }
+    }
+
+    tracing::info!(
+        "Seeded {} pending deployments and {} system events",
+        pending_count,
+        event_count
     );
     Ok(())
 }

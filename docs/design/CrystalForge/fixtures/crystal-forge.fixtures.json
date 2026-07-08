@@ -1137,7 +1137,30 @@
         "stig-enforced"
       ],
       "stig": 29,
+      "pendingDeployment": {
+        "targetStorePath": "/nix/store/c22d7e70305bfa69-nixos-system-atlas-03-24.11.20252862",
+        "source": "manual_deploy",
+        "status": "pending",
+        "issuedAt": "7m ago",
+        "deliveredAt": "4m ago",
+        "applyingAt": "2m ago",
+        "targetGeneration": 166,
+        "targetCommit": "a3f8c12",
+        "kind": "deployment"
+      },
       "events": [
+        {
+          "at": "7m ago",
+          "title": "Deployment started",
+          "eventType": "cf_deployment_started",
+          "outcome": "started",
+          "source": "manual_deploy",
+          "generation": 166,
+          "storePath": "/nix/store/c22d7e70305bfa69-nixos-system-atlas-03-24.11.20252862",
+          "commitHash": "a3f8c12",
+          "actor": "mreyes",
+          "color": "#60a5fa"
+        },
         {
           "at": "5m ago",
           "title": "Heartbeat received",

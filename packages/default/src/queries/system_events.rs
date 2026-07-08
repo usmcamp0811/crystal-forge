@@ -24,6 +24,24 @@ pub struct PendingSystemDeployment {
     pub source: String,
     pub issued_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    pub delivered_at: Option<DateTime<Utc>>,
+    pub applying_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SystemDeploymentProgressRow {
+    pub id: Uuid,
+    pub target_store_path: String,
+    pub status: String,
+    pub source: String,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub delivered_at: Option<DateTime<Utc>>,
+    pub applying_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub target_commit: Option<String>,
+    pub target_generation: Option<i64>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -69,7 +87,17 @@ struct PendingSystemEvent {
 }
 
 const MATCH_PENDING_DEPLOYMENT_SQL: &str = r#"
-        SELECT id, system_id, target_store_path, status, source, issued_at, expires_at
+        SELECT
+            id,
+            system_id,
+            target_store_path,
+            status,
+            source,
+            issued_at,
+            expires_at,
+            delivered_at,
+            applying_at,
+            completed_at
         FROM pending_system_deployments
         WHERE system_id = $1
           AND target_store_path = $2
@@ -79,6 +107,32 @@ const MATCH_PENDING_DEPLOYMENT_SQL: &str = r#"
         LIMIT 1
         FOR UPDATE
         "#;
+
+pub fn deployment_progress_stage(
+    status: &str,
+    expires_at: DateTime<Utc>,
+    delivered_at: Option<DateTime<Utc>>,
+    applying_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<&'static str> {
+    match status {
+        "pending" if expires_at <= now => None,
+        "pending" if applying_at.is_some() => Some("applying"),
+        "pending" if delivered_at.is_some() => Some("picked_up"),
+        "pending" => Some("queued"),
+        "succeeded" => Some("activated"),
+        "failed" => Some("failed"),
+        _ => None,
+    }
+}
+
+pub fn deployment_progress_kind(source: &str) -> &'static str {
+    if source.starts_with("manual_rollback") || source.contains("rollback") {
+        "rollback"
+    } else {
+        "deploy"
+    }
+}
 
 fn meaningful_generation_or_store_changed(
     previous_generation: Option<i32>,
@@ -220,6 +274,185 @@ pub async fn set_pending_deployment_target(
         set_pending_deployment_target_tx(&mut tx, system_id, desired_target, source).await?;
     tx.commit().await?;
     Ok(result)
+}
+
+pub async fn mark_pending_deployment_delivered(
+    pool: &PgPool,
+    system_id: Uuid,
+    target_store_path: &str,
+) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE pending_system_deployments
+        SET delivered_at = NOW()
+        WHERE system_id = $1
+          AND target_store_path = $2
+          AND status = 'pending'
+          AND delivered_at IS NULL
+        "#,
+    )
+    .bind(system_id)
+    .bind(target_store_path)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
+pub async fn mark_pending_deployment_applying_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+    target_store_path: &str,
+) -> Result<Option<PendingSystemDeployment>> {
+    let row = find_matching_pending_deployment_tx(tx, system_id, Some(target_store_path)).await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE pending_system_deployments
+        SET applying_at = COALESCE(applying_at, NOW()),
+            delivered_at = COALESCE(delivered_at, NOW())
+        WHERE id = $1
+          AND status = 'pending'
+        "#,
+    )
+    .bind(row.id)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(Some(row))
+}
+
+pub async fn insert_deployment_started_event_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    pending: &PendingSystemDeployment,
+) -> Result<()> {
+    let event = PendingSystemEvent {
+        event_type: SystemEventType::CfDeploymentStarted,
+        dedupe_key: pending.id.to_string(),
+        previous_generation: None,
+        new_generation: None,
+        previous_store_path: None,
+        new_store_path: Some(pending.target_store_path.clone()),
+        previous_boot_id: None,
+        new_boot_id: None,
+        deployment_id: Some(pending.id),
+        desired_target_id: Some(pending.id),
+        source: "agent_report",
+        actor: Some("agent"),
+        metadata: json!({
+            "target_store_path": pending.target_store_path,
+            "pending_deployment_id": pending.id,
+        }),
+    };
+
+    insert_system_event_tx(tx, pending.system_id, pending.id, Utc::now(), &event).await
+}
+
+pub async fn get_system_deployment_progress_row(
+    pool: &PgPool,
+    system_id: Uuid,
+) -> Result<Option<SystemDeploymentProgressRow>> {
+    let row = sqlx::query_as::<_, SystemDeploymentProgressRow>(
+        r#"
+        SELECT
+            psd.id,
+            psd.target_store_path,
+            psd.status,
+            psd.source,
+            psd.issued_at,
+            psd.expires_at,
+            psd.delivered_at,
+            psd.applying_at,
+            psd.completed_at,
+            c.git_commit_hash AS target_commit,
+            NULLIF(psd.metadata->>'target_generation', '')::bigint AS target_generation
+        FROM pending_system_deployments psd
+        LEFT JOIN derivations d
+          ON d.store_path = psd.target_store_path
+          OR d.expected_store_path = psd.target_store_path
+        LEFT JOIN commits c ON c.id = d.commit_id
+        WHERE psd.system_id = $1
+          AND (
+            (psd.status = 'pending' AND psd.expires_at > NOW())
+            OR (psd.status IN ('succeeded', 'failed') AND psd.completed_at > NOW() - INTERVAL '2 minutes')
+          )
+        ORDER BY
+          CASE WHEN psd.status = 'pending' THEN 0 ELSE 1 END,
+          psd.issued_at DESC,
+          psd.id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(system_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row)
+}
+
+#[cfg(test)]
+mod deployment_progress_tests {
+    use super::*;
+
+    #[test]
+    fn deployment_progress_stage_derives_pending_lifecycle() {
+        let now = Utc::now();
+        let future = now + Duration::minutes(10);
+
+        assert_eq!(
+            deployment_progress_stage("pending", future, None, None, now),
+            Some("queued")
+        );
+        assert_eq!(
+            deployment_progress_stage("pending", future, Some(now), None, now),
+            Some("picked_up")
+        );
+        assert_eq!(
+            deployment_progress_stage("pending", future, Some(now), Some(now), now),
+            Some("applying")
+        );
+    }
+
+    #[test]
+    fn deployment_progress_stage_handles_terminal_and_expired_rows() {
+        let now = Utc::now();
+        let future = now + Duration::minutes(10);
+        let past = now - Duration::minutes(1);
+
+        assert_eq!(
+            deployment_progress_stage("succeeded", future, None, None, now),
+            Some("activated")
+        );
+        assert_eq!(
+            deployment_progress_stage("failed", future, None, None, now),
+            Some("failed")
+        );
+        assert_eq!(
+            deployment_progress_stage("pending", past, None, None, now),
+            None
+        );
+        assert_eq!(
+            deployment_progress_stage("superseded", future, None, None, now),
+            None
+        );
+    }
+
+    #[test]
+    fn deployment_progress_kind_distinguishes_rollbacks() {
+        assert_eq!(deployment_progress_kind("manual_deploy"), "deploy");
+        assert_eq!(deployment_progress_kind("auto_desired_target"), "deploy");
+        assert_eq!(
+            deployment_progress_kind("manual_rollback_commit"),
+            "rollback"
+        );
+        assert_eq!(
+            deployment_progress_kind("manual_rollback_generation"),
+            "rollback"
+        );
+    }
 }
 
 async fn expire_stale_pending_deployments_tx(

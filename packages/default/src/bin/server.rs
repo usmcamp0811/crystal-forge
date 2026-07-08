@@ -17,7 +17,7 @@ use crystal_forge::{
     fixtures::seed_from_fixture,
     flake::commits::initialize_flake_commits,
     handlers::{
-        agent::{heartbeat, state},
+        agent::{deployment_started, heartbeat, state},
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
@@ -174,6 +174,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/system_state", post(state::update))
         .route("/agent/heartbeat", post(heartbeat::log))
         .route("/agent/state", post(state::update))
+        .route(
+            "/agent/deployment-started",
+            post(deployment_started::report),
+        )
         .route("/webhook", post(webhook_handler))
         // REST API v1
         .route(
@@ -316,6 +320,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:id/verify-generation-closure",
             post(systems::verify_generation_closure),
+        )
+        .route(
+            "/api/v1/systems/:id/deployment-status",
+            get(systems::get_system_deployment_status),
         )
         .route(
             "/api/v1/systems/:id/history",

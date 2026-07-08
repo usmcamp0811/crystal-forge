@@ -882,6 +882,19 @@
       "baseline": "advisory"
     },
     {
+      "name": "12d2-systems-side-panel-deployment-progress",
+      "description": "Systems side panel captures live deployment progress banner and real Recent activity for atlas-03 fixture",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
       "name": "12e-systems-edit-modal",
       "description": "Systems edit modal for existing systems",
       "route": "/systems",

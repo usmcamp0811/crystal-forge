@@ -13,11 +13,12 @@ use crate::api::models::{
     ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse,
     CveScanStatusResponse, CveScanTriggerResponse, CveSummary, DeploySystemRequest,
     DeploymentStatus, FieldUpdate, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
-    SystemAgentEvent, SystemCommitsResponse, SystemDetail, SystemGeneration,
-    SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
-    SystemNetworkInfo, SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
-    SystemSummary, SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest,
-    UpdateSystemRequest, VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
+    SystemAgentEvent, SystemCommitsResponse, SystemDeploymentProgress, SystemDetail,
+    SystemGeneration, SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry,
+    SystemMutationResponse, SystemNetworkInfo, SystemRollbackGenerationRequest,
+    SystemRollbackRequest, SystemSecurityInfo, SystemSummary, SystemVulnerability,
+    SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
 };
 use crate::auth::models::Role;
 use crate::handlers::agent_request::CFState;
@@ -26,7 +27,10 @@ use crate::handlers::api::rbac::{
 };
 use crate::models::auth_identity::AuthRole;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
-use crate::queries::system_events::list_system_event_history_rows;
+use crate::queries::system_events::{
+    deployment_progress_kind, deployment_progress_stage, get_system_deployment_progress_row,
+    list_system_event_history_rows,
+};
 use crate::queries::system_states::{
     fetch_system_generations, find_generation_store_path_last_seen,
 };
@@ -35,7 +39,7 @@ use crate::queries::systems::{
     commit_belongs_to_system_flake, deactivate_system, find_system_access_row,
     get_system_detail_by_id, get_user_environment_membership_ids, list_recent_commits_for_system,
     list_system_access_rows, list_system_agent_event_rows, list_system_history_rows,
-    touch_system_updated_at, update_public_key, update_system_desired_target,
+    touch_system_updated_at, update_public_key, update_system_desired_target_with_source,
     update_system_metadata,
 };
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
@@ -975,9 +979,14 @@ pub async fn rollback_system(
         return not_found();
     }
 
-    if update_system_desired_target(&pool, system_id, target_commit)
-        .await
-        .is_err()
+    if update_system_desired_target_with_source(
+        &pool,
+        system_id,
+        target_commit,
+        "manual_rollback_commit",
+    )
+    .await
+    .is_err()
     {
         return internal_error("Failed to request rollback");
     }
@@ -1044,9 +1053,14 @@ pub async fn rollback_system_generation(
         return not_found();
     }
 
-    if update_system_desired_target(&pool, system_id, store_path)
-        .await
-        .is_err()
+    if update_system_desired_target_with_source(
+        &pool,
+        system_id,
+        store_path,
+        "manual_rollback_generation",
+    )
+    .await
+    .is_err()
     {
         return internal_error("Failed to request generation rollback");
     }
@@ -1522,7 +1536,7 @@ pub async fn deploy_system(
     }
 
     // Set the desired_target to trigger deployment
-    if update_system_desired_target(&pool, system_id, commit_sha)
+    if update_system_desired_target_with_source(&pool, system_id, commit_sha, "manual_deploy")
         .await
         .is_err()
     {
@@ -1856,6 +1870,69 @@ pub async fn verify_generation_closure(
     (StatusCode::OK, Json(response)).into_response()
 }
 
+pub async fn get_system_deployment_status(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    let progress_row = match get_system_deployment_progress_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return StatusCode::NO_CONTENT.into_response(),
+        Err(_) => return internal_error("Failed to load deployment status"),
+    };
+
+    let Some(stage) = deployment_progress_stage(
+        &progress_row.status,
+        progress_row.expires_at,
+        progress_row.delivered_at,
+        progress_row.applying_at,
+        chrono::Utc::now(),
+    ) else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+
+    (
+        StatusCode::OK,
+        Json(SystemDeploymentProgress {
+            id: progress_row.id,
+            stage: stage.to_string(),
+            kind: deployment_progress_kind(&progress_row.source).to_string(),
+            target_store_path: progress_row.target_store_path,
+            target_commit: progress_row.target_commit,
+            target_generation: progress_row.target_generation,
+            source: progress_row.source,
+            issued_at: progress_row.issued_at,
+            delivered_at: progress_row.delivered_at,
+            applying_at: progress_row.applying_at,
+            completed_at: progress_row.completed_at,
+        }),
+    )
+        .into_response()
+}
+
 /// Classify a history row into `(event_kind, actor)`.
 ///
 /// `cf_deployment` = deploy driven through Crystal Forge; `config_change` =
@@ -1891,6 +1968,7 @@ fn classify_history_event(
 
 fn event_history_kind(event_type: &str) -> (&'static str, &'static str, &'static str) {
     match event_type {
+        "cf_deployment_started" => ("cf_deployment", "crystal-forge", "started"),
         "cf_deployment_succeeded" => ("cf_deployment", "crystal-forge", "succeeded"),
         "cf_deployment_failed" => ("cf_deployment", "crystal-forge", "failed"),
         "local_rebuild_detected" => ("local_rebuild", "on-host", "recorded"),
@@ -1902,6 +1980,7 @@ fn event_history_kind(event_type: &str) -> (&'static str, &'static str, &'static
 
 fn event_history_title(event_type: &str) -> &'static str {
     match event_type {
+        "cf_deployment_started" => "Deployment started",
         "cf_deployment_succeeded" => "Deployed through Crystal Forge",
         "cf_deployment_failed" => "Deploy failed to activate",
         "local_rebuild_detected" => "nixos-rebuild switch on host",
