@@ -3,9 +3,10 @@ id: TASK-384
 title: >-
   Systems view: fully functional deployment/rollback progress, real Recent
   activity, design-parity rollback
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-07-08 02:49'
+updated_date: '2026-07-08 03:09'
 labels:
   - design-parity
   - systems
@@ -32,7 +33,7 @@ documentation:
   - docs/design/CrystalForge/components/Systems.jsx
   - docs/design/CrystalForge/styles.css
 priority: high
-ordinal: 328000
+ordinal: 321000
 ---
 
 ## Description
