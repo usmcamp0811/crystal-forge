@@ -1,10 +1,10 @@
 ---
 id: TASK-347.1
 title: 'Builds: queue/table + detail pane parity and real queue actions'
-status: Review
+status: Done
 assignee: []
 created_date: '2026-06-10 13:33'
-updated_date: '2026-06-15 17:51'
+updated_date: '2026-07-08 07:22'
 labels:
   - design-parity
   - builds
@@ -87,4 +87,6 @@ Pixel-align the full Builds surface to `BuildsView.jsx`:
 LOCK: opencode-agent on host in /home/mcamp/code/crystal-forge/TASK-347.1-builds-parity
 
 MR !278: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/278
+
+Closed during 2026-07-08 backlog grooming: branch merged into dev (e359272c). Remaining drift vs the updated design example is superseded by the new visual-drift audit task.
 <!-- SECTION:NOTES:END -->
