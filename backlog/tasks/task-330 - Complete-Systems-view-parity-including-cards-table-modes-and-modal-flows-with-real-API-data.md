@@ -3,11 +3,11 @@ id: TASK-330
 title: >-
   Complete Systems view parity including cards/table modes and modal flows with
   real API data
-status: In Progress
+status: Done
 assignee:
   - '@gpt-5.4'
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-13 14:36'
+updated_date: '2026-07-08 07:21'
 labels:
   - design-parity
   - systems
@@ -77,4 +77,6 @@ Scope details:
 2026-06-13: Removed unrelated dashboard parity step from the systems integration test and restored dashboard widget component files back to dev so TASK-330 can ship without TASK-342.2 scope pollution.
 
 2026-06-13 verification: `nix develop -c node --check checks/web-ui/tests/integration-test.js` passed; `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed; `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml --all -- --check` ran successfully; `nix build .#checks.x86_64-linux.web-ui` was started and produced no error output before command completion, but I did not capture an explicit final success line beyond the build output stream.
+
+Closed during 2026-07-08 backlog grooming: MR !273 merged into dev (a1149ac0). Remaining parity drift vs the UPDATED (Jul 7) design example is superseded by the new visual-drift audit task.
 <!-- SECTION:NOTES:END -->
