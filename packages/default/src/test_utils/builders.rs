@@ -287,6 +287,9 @@ impl FlakeBuilder {
             branch: self.branch.clone(),
             build_scope: "cf_systems_only".to_string(),
             deleted_at: None,
+            sync_status: Some("unknown".to_string()),
+            last_sync_at: None,
+            last_sync_error: None,
         }
     }
 }
