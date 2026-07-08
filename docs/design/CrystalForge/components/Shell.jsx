@@ -281,7 +281,7 @@ const NAV_SYS = [
   { key: "admin",    label: "Server",   icon: "gear", route: "admin" },
 ];
 
-function Sidebar({ rail, topView, onNav }) {
+function Sidebar({ rail, topView, onNav, onToggleRail }) {
   const acked = useAcknowledgedViews();
   const NavItem = ({ item }) => {
     const isActive = (item.route && topView === item.route) ||
@@ -310,6 +310,10 @@ function Sidebar({ rail, topView, onNav }) {
           <div className="brand-name">Crystal Forge</div>
           <div className="brand-sub">v0.3.0 · dev</div>
         </div>
+        <button className="sidebar-collapse focus-ring" onClick={onToggleRail}
+          title={rail ? "Expand sidebar" : "Collapse sidebar"} aria-label={rail ? "Expand sidebar" : "Collapse sidebar"}>
+          <Icon name={rail ? "chevron-right" : "chevron-left"} size={15} />
+        </button>
       </div>
       <div className="nav-section-label">Fleet</div>
       {NAV.map(i => <NavItem key={i.key} item={{ ...i, route: i.route || (["systems","flakes","environments"].includes(i.key) ? i.key : undefined) }} />)}

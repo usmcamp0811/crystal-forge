@@ -120,7 +120,7 @@ function DeploymentChip({ state }) {
 }
 
 // Deploy modal
-function DeployModal({ sys, onClose }) {
+function DeployModal({ sys, onClose, onQueued }) {
   const [branch, setBranch] = React.useState(sys.branch);
   const [commit, setCommit] = React.useState(sys.commit);
   const [posting, setPosting] = React.useState(false);
@@ -177,7 +177,7 @@ function DeployModal({ sys, onClose }) {
         </div>
         <div className="modal-foot">
           <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary focus-ring" onClick={() => { setPosting(true); setTimeout(onClose, 800); }}>
+          <button className="btn btn-primary focus-ring" onClick={() => { setPosting(true); setTimeout(() => { onQueued?.(commit); onClose(); }, 800); }}>
             {posting ? <><Spinner size={12} /> Queueing…</> : <><Icon name="deploy" size={12} /> Deploy commit</>}
           </button>
         </div>
@@ -187,7 +187,8 @@ function DeployModal({ sys, onClose }) {
 }
 
 // Side panel — system detail peek
-function SystemPanel({ sys, onClose, onDeploy, onEdit, onOpenDetail, onTagClick }) {
+function SystemPanel({ sys, onClose, onDeploy, onEdit, onOpenDetail, onTagClick, pendingDeploy, onClearPending }) {
+  const deployStage = useDeployStages(pendingDeploy, onClearPending);
   return (
     <>
       <div className="side-panel-backdrop" onClick={onClose} />
@@ -206,6 +207,18 @@ function SystemPanel({ sys, onClose, onDeploy, onEdit, onOpenDetail, onTagClick 
           </button>
         </div>
         <div className="panel-body">
+          {deployStage && (
+            <section className="panel-section" style={{ paddingTop: 0 }}>
+              <PendingDeployBanner
+                stage={deployStage}
+                stages={["queued", "picked-up", "applying", "activated"]}
+                commit={pendingDeploy.commit}
+                sys={sys}
+                onDismiss={onClearPending}
+                onViewLogs={() => onOpenDetail?.(sys)}
+              />
+            </section>
+          )}
           <section className="panel-section">
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <EnvBadge env={sys.environment} />
@@ -260,11 +273,17 @@ function SystemPanel({ sys, onClose, onDeploy, onEdit, onOpenDetail, onTagClick 
           <section className="panel-section">
             <h3>Recent activity</h3>
             <div className="timeline">
-              {sys.events.map((e, i) => (
-                <div key={i} className="tl-item">
-                  <span className="tl-dot" style={{ "--status-color": e.color }} />
+              {(typeof buildActivityFeed === "function" ? buildActivityFeed(sys, deployStage, pendingDeploy?.commit) : sys.events).map((e, i) => (
+                <div key={i} className={`tl-item${e.live ? " tl-item-live" : ""}`}>
+                  <span className="tl-dot" style={{ "--status-color": e.color }}>
+                    {e.live ? <span className="tl-dot-pulse" /> : null}
+                  </span>
                   <div className="tl-body">
-                    <div className="tl-title">{e.title}</div>
+                    <div className="tl-title" style={{ display:"flex", alignItems:"center", gap:6 }}>
+                      {e.icon && <Icon name={e.icon} size={12} style={{ color:e.color, flexShrink:0 }} />}
+                      <span>{e.title}</span>
+                      {e.sub && <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>· {e.sub}</span>}
+                    </div>
                     <div className="tl-meta">{e.at}</div>
                   </div>
                 </div>

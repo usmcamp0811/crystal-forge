@@ -1,8 +1,73 @@
 // Full System Detail view — Overview / Deploy / History / Logs tabs
 
-function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, onOpenCommit }) {
+// Deployment-command progress banner. Deployments are pull-based: the server queues the
+// command and the agent picks it up on its next heartbeat, so the operator needs to know
+// they're waiting on the agent — not on a stuck server.
+function PendingDeployBanner({ stage, stages, commit, sys, kind, gen, onDismiss, onViewLogs }) {
+  const idx = stages.indexOf(stage);
+  const done = stage === "activated";
+  const isRollback = kind === "rollback";
+  const targetGen = isRollback ? gen : sys.generation + 1;
+  const stepMeta = {
+    "queued":    { label: "Queued", sub: `Waiting for ${sys.hostname} agent to check in (heartbeat every ${sys.heartbeatIntervalSec}s)` },
+    "picked-up": { label: "Picked up", sub: `Agent fetched the ${isRollback ? "rollback" : "deployment"} command` },
+    "applying":  { label: isRollback ? "Reverting" : "Applying", sub: isRollback ? `Switching to generation #${gen} (${commit})` : `Building & switching to ${commit}` },
+    "activated": { label: "Activated", sub: `Generation #${targetGen} is live` },
+  };
+  const cur = stepMeta[stage] || {};
+  const verb = isRollback ? "Rollback" : "Deployment";
+  return (
+    <div className={`deploy-pending${done ? " done" : ""}${isRollback ? " rollback" : ""}`}>
+      <div className="deploy-pending-main">
+        <div className="deploy-pending-icon">
+          {done ? <Icon name="check" size={16} /> : <Spinner size={16} />}
+        </div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div className="deploy-pending-title">
+            {done ? `${verb} complete` : `${verb} in progress`}
+            <span className="mono deploy-pending-commit">{isRollback ? `#${gen} · ` : ""}{commit}</span>
+          </div>
+          <div className="deploy-pending-sub">{cur.sub}</div>
+        </div>
+        <button className="btn btn-ghost xs focus-ring" onClick={onViewLogs}><Icon name="terminal" size={12} /> Logs</button>
+        {done && <button className="btn-icon focus-ring" onClick={onDismiss} aria-label="Dismiss"><Icon name="x" size={14} /></button>}
+      </div>
+      <div className="deploy-steps">
+        {stages.map((s, i) => (
+          <div key={s} className={`deploy-step${i < idx ? " past" : ""}${i === idx ? " current" : ""}`}>
+            <span className="deploy-step-dot">
+              {i < idx || done ? <Icon name="check" size={10} /> : i === idx ? <span className="deploy-step-pulse" /> : null}
+            </span>
+            <span className="deploy-step-label">{stepMeta[s].label}</span>
+            {i < stages.length - 1 && <span className="deploy-step-bar" />}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Deployment-command lifecycle stage machine (shared by SystemDetail + SystemPanel).
+// Pull-based: server queues → agent checks in → applies → activates.
+const DEPLOY_STAGES = ["queued", "picked-up", "applying", "activated"];
+function useDeployStages(pendingDeploy, onClear) {
+  const [stage, setStage] = React.useState(null);
+  React.useEffect(() => {
+    if (!pendingDeploy) { setStage(null); return; }
+    setStage("queued");
+    const t1 = setTimeout(() => setStage("picked-up"), 4200);
+    const t2 = setTimeout(() => setStage("applying"), 6400);
+    const t3 = setTimeout(() => setStage("activated"), 9800);
+    const t4 = setTimeout(() => onClear?.(), 13500);
+    return () => { [t1,t2,t3,t4].forEach(clearTimeout); };
+  }, [pendingDeploy?.at]);
+  return stage;
+}
+
+function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, onOpenCommit, pendingDeploy, onStartPending, onClearPending }) {
   const [tab, setTab] = React.useState("overview");
   const [editSystem, setEditSystem] = React.useState(false);
+  const deployStage = useDeployStages(pendingDeploy, onClearPending);
   const [logsJump, setLogsJump] = React.useState(null);
   const [rollbackTarget, setRollbackTarget] = React.useState(null);
   const [rollbackConfirm, setRollbackConfirm] = React.useState(false);
@@ -50,7 +115,15 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
           <div className="sd-metric">
             <div className="sd-metric-label">Heartbeat</div>
             <div className="sd-metric-val">
-              <HeartbeatSpinner intervalSec={sys.heartbeatIntervalSec} nextInSec={sys.heartbeatNextInSec} size={36} />
+              {deployStage
+                ? <div className="hb-waiting" title="Waiting for the agent to check in">
+                    {deployStage === "queued"
+                      ? <><Spinner size={18} /><span className="hb-waiting-txt">awaiting agent</span></>
+                      : deployStage === "activated"
+                        ? <><Icon name="check" size={18} style={{ color:"#34d399" }} /><span className="hb-waiting-txt" style={{ color:"#34d399" }}>activated</span></>
+                        : <><Spinner size={18} /><span className="hb-waiting-txt">{deployStage === "picked-up" ? "picked up" : "applying"}</span></>}
+                  </div>
+                : <HeartbeatSpinner intervalSec={sys.heartbeatIntervalSec} nextInSec={sys.heartbeatNextInSec} size={36} />}
             </div>
           </div>
           <div className="sd-metric">
@@ -76,6 +149,19 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
             <div className="sd-metric-sub">env: {sys.environment}</div>
           </div>
         </div>
+
+        {deployStage && (
+          <PendingDeployBanner
+            stage={deployStage}
+            stages={DEPLOY_STAGES}
+            commit={pendingDeploy.commit}
+            kind={pendingDeploy.kind}
+            gen={pendingDeploy.gen}
+            sys={sys}
+            onDismiss={onClearPending}
+            onViewLogs={() => setTab("logs")}
+          />
+        )}
 
         {/* Tabs */}
         <div className="sd-tabs" role="tablist">
@@ -105,7 +191,7 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
 
       {/* Tab panels */}
       <div className="sd-body">
-        {tab === "overview"   && <OverviewTab sys={sys} onViewCves={() => setTab("cves")} onTagFilter={onTagFilter} />}
+        {tab === "overview"   && <OverviewTab sys={sys} onViewCves={() => setTab("cves")} onTagFilter={onTagFilter} deployStage={deployStage} pendingCommit={pendingDeploy?.commit} pendingKind={pendingDeploy?.kind} pendingGen={pendingDeploy?.gen} onViewHistory={() => setTab("history")} />}
         {tab === "deploy"     && <DeployTab sys={sys} onDeploy={onDeploy} />}
         {tab === "history"    && <HistoryTab sys={sys} onRollback={(sha,gen)=>{ setRollbackTarget({sha,gen}); setRollbackConfirm(true); }} onLogsJump={(id)=>{ setTab("logs"); setLogsJump({ id, nonce: Date.now() }); }} onOpenCommit={onOpenCommit} />}
         {tab === "logs"       && <LogsTab sys={sys} jump={logsJump} />}
@@ -115,7 +201,7 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
         {tab === "hardening"  && <HardeningTab sys={sys} />}
       </div>
       {sshOpen && <SshConnectModal sys={sys} onClose={() => setSshOpen(false)} />}
-      {(rollbackConfirm || rollbackOpen) && <RollbackModal sys={sys} targetGen={rollbackTarget?.gen} targetSha={rollbackTarget?.sha} onClose={() => { setRollbackConfirm(false); setRollbackOpen(false); setRollbackTarget(null); }} onConfirm={(g) => { setRollbackConfirm(false); setRollbackOpen(false); setRollbackTarget(null); onDeploy?.({ ...sys, pendingCommit: g.sha, rollbackTo: g.id }); }} />}
+      {(rollbackConfirm || rollbackOpen) && <RollbackModal sys={sys} targetGen={rollbackTarget?.gen} targetSha={rollbackTarget?.sha} onClose={() => { setRollbackConfirm(false); setRollbackOpen(false); setRollbackTarget(null); }} onConfirm={(g) => { setRollbackConfirm(false); setRollbackOpen(false); setRollbackTarget(null); setTab("overview"); onStartPending?.({ commit: g.sha.substring(0,7), kind: "rollback", gen: g.id }); }} />}
     </div>
   );
 }
@@ -258,7 +344,49 @@ function SshConnectModal({ sys, onClose }) {
 }
 
 /* ---------- Overview ---------- */
-function OverviewTab({ sys, onViewCves, onTagFilter }) {
+// Build a realistic activity feed from the same event stream that powers History + Logs,
+// so the overview reflects what actually happened (and what's happening right now).
+function buildActivityFeed(sys, deployStage, pendingCommit, pendingKind, pendingGen) {
+  const feed = [];
+  // 1) live deployment / rollback, if one is in flight
+  if (deployStage) {
+    const isRb = pendingKind === "rollback";
+    const targetGen = isRb ? pendingGen : sys.generation + 1;
+    const map = isRb ? {
+      "queued":    { t:`Rollback queued — awaiting agent check-in`, c:"#fbbf24", ic:"rollback", live:true },
+      "picked-up": { t:`Agent picked up rollback to gen #${pendingGen}`, c:"#fbbf24", ic:"rollback", live:true },
+      "applying":  { t:`Reverting to gen #${pendingGen} (${pendingCommit})`, c:"#fbbf24", ic:"rollback", live:true },
+      "activated": { t:`Rolled back — generation #${targetGen} live`, c:"#34d399", ic:"check" },
+    } : {
+      "queued":    { t:`Deployment queued — awaiting agent check-in`, c:"#a78bfa", ic:"deploy", live:true },
+      "picked-up": { t:`Agent picked up deploy ${pendingCommit}`,     c:"#60a5fa", ic:"deploy", live:true },
+      "applying":  { t:`Applying ${pendingCommit} — building & switching`, c:"#60a5fa", ic:"deploy", live:true },
+      "activated": { t:`Generation #${targetGen} activated`,  c:"#34d399", ic:"check" },
+    };
+    const m = map[deployStage];
+    feed.push({ at:"now", title:m.t, color:m.c, icon:m.ic, live:m.live });
+  }
+  // 2) latest heartbeat (the always-fresh signal)
+  feed.push({ at: sys.lastHeartbeat, title:`Heartbeat received`, color:"#34d399", icon:"activity",
+    sub: sys.reachability === "reachable" ? undefined : sys.reachability });
+  // 3) recent real events from the deployment history
+  const events = (typeof buildHistory === "function" ? buildHistory(sys) : []).slice(0, 8);
+  for (const e of events) {
+    if (e.type === "startup") {
+      feed.push({ at:e.at, title:`System restarted`, sub:`ran ${e.ran} · gen #${e.gen}`, color:"#60a5fa", icon:"power" });
+    } else if (e.source === "local") {
+      feed.push({ at:e.at, title:`Local rebuild ${e.resolution==="matched"?"(reconciled)":"(out of band)"}`,
+        sub:e.msg, color: e.resolution==="matched" ? "#60a5fa" : "#fbbf24", icon:"edit" });
+    } else if (e.status === "failed") {
+      feed.push({ at:e.at, title:`Deploy failed`, sub:e.msg, color:"#f87171", icon:"x" });
+    } else {
+      feed.push({ at:e.at, title:`Deployed #${e.gen}`, sub:`${e.sha} · ${e.msg}`, color:"#a78bfa", icon:"deploy" });
+    }
+  }
+  return feed.slice(0, 9);
+}
+
+function OverviewTab({ sys, onViewCves, onTagFilter, deployStage, pendingCommit, pendingKind, pendingGen, onViewHistory }) {
   const [tags, setTags] = React.useState(sys.tags || []);
   const [adding, setAdding] = React.useState(false);
   const [draft, setDraft] = React.useState("");
@@ -351,33 +479,24 @@ function OverviewTab({ sys, onViewCves, onTagFilter }) {
       <section className="card sd-card sd-card-wide">
         <div className="sd-card-head">
           <h2>Recent activity</h2>
-          <span className="sd-card-meta">last 24h</span>
+          <button className="btn btn-ghost xs focus-ring" onClick={onViewHistory}>View all</button>
         </div>
         <div className="timeline sd-timeline">
-          {sys.events.map((e, i) => (
-            <div key={i} className="tl-item">
-              <span className="tl-dot" style={{ "--status-color": e.color }} />
+          {buildActivityFeed(sys, deployStage, pendingCommit, pendingKind, pendingGen).map((e, i) => (
+            <div key={i} className={`tl-item${e.live ? " tl-item-live" : ""}`}>
+              <span className="tl-dot" style={{ "--status-color": e.color }}>
+                {e.live ? <span className="tl-dot-pulse" /> : null}
+              </span>
               <div className="tl-body">
-                <div className="tl-title">{e.title}</div>
+                <div className="tl-title" style={{ display:"flex", alignItems:"center", gap:6 }}>
+                  <Icon name={e.icon} size={12} style={{ color:e.color, flexShrink:0 }} />
+                  <span>{e.title}</span>
+                  {e.sub && <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>· {e.sub}</span>}
+                </div>
                 <div className="tl-meta">{e.at}</div>
               </div>
             </div>
           ))}
-          {/* a few more synthesized events */}
-          <div className="tl-item">
-            <span className="tl-dot" style={{ "--status-color": "#60a5fa" }} />
-            <div className="tl-body">
-              <div className="tl-title">Policy check <span className="mono">{sys.deploymentPolicy}</span> passed</div>
-              <div className="tl-meta">2h ago</div>
-            </div>
-          </div>
-          <div className="tl-item">
-            <span className="tl-dot" style={{ "--status-color": "#a78bfa" }} />
-            <div className="tl-body">
-              <div className="tl-title">Agent upgraded to v0.3.0</div>
-              <div className="tl-meta">yesterday</div>
-            </div>
-          </div>
         </div>
       </section>
 

@@ -8,6 +8,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
   const [query, setQuery] = React.useState("");
   const [selected, setSelected] = React.useState(null);
   const [deployTarget, setDeployTarget] = React.useState(null);
+  const [pendingDeploy, setPendingDeploy] = React.useState(null);
   const [editTarget, setEditTarget] = React.useState(null);
   const [addOpen, setAddOpen] = React.useState(false);
   const setTag = onTag || (() => {});
@@ -214,13 +215,16 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
         onTagClick={(t) => { setTag(t); setSelected(null); }}
         onDeploy={(s) => {setDeployTarget(s);setSelected(null);}}
         onEdit={(s) => {setEditTarget(s);setSelected(null);}}
-        onOpenDetail={(s) => {setSelected(null);onOpenDetail(s);}} />
+        onOpenDetail={(s) => {setSelected(null);onOpenDetail(s);}}
+        pendingDeploy={pendingDeploy && pendingDeploy.sysId === selected.id ? pendingDeploy : null}
+        onClearPending={() => setPendingDeploy(null)} />
 
       }
       {deployTarget &&
       <DeployModal
         sys={deployTarget}
-        onClose={() => setDeployTarget(null)} />
+        onClose={() => setDeployTarget(null)}
+        onQueued={(commit) => { setPendingDeploy({ sysId: deployTarget.id, commit, at: Date.now() }); setSelected(deployTarget); }} />
 
       }
       {editTarget &&
@@ -309,6 +313,7 @@ function App() {
   const [deployTarget, setDeployTarget] = React.useState(null);
   const [editTarget, setEditTarget] = React.useState(null);
   const [complianceBundleId, setComplianceBundleId] = React.useState(null);
+  const [pendingDeploy, setPendingDeploy] = React.useState(null);
   const [flakeFocus, setFlakeFocus] = React.useState(null);
   const [topView, setTopView] = React.useState("dashboard"); // dashboard | systems | builds | evals | flakes | environments | caches | cves
   const coach = useCoach();
@@ -348,7 +353,7 @@ function App() {
     <div className="app" style={{ "--sidebar-w": sidebarMode === "rail" ? "64px" : "240px", "--classif-h": classif.enabled ? "24px" : "0px", boxSizing: "border-box", paddingTop: classif.enabled ? 24 : 0, paddingBottom: classif.enabled ? 24 : 0 }}>
       {classif.enabled && <ClassificationBanner level={classif.level} text={classif.text} position="top" />}
       {classif.enabled && <ClassificationBanner level={classif.level} text={classif.text} position="bottom" />}
-      <Sidebar rail={sidebarMode === "rail"} topView={topView} onNav={(v) => {setTopView(v);setDetailSystem(null);}} />
+      <Sidebar rail={sidebarMode === "rail"} topView={topView} onNav={(v) => {setTopView(v);setDetailSystem(null);}} onToggleRail={() => sw.sidebarMode(sidebarMode === "rail" ? "full" : "rail")} />
       <div className="main">
         <Topbar
           theme={theme}
@@ -397,7 +402,10 @@ function App() {
             onTagFilter={(t) => { setSysTag(t); setTopView("systems"); setDetailSystem(null); }}
             onOpenCommit={(c) => { setFlakeFocus(c); setTopView("flakes"); setDetailSystem(null); }}
             onDeploy={(s) => setDeployTarget(s)}
-            onEdit={(s) => setEditTarget(s)} /> :
+            onEdit={(s) => setEditTarget(s)}
+            pendingDeploy={pendingDeploy && pendingDeploy.sysId === detailSystem.id ? pendingDeploy : null}
+            onStartPending={(p) => setPendingDeploy({ sysId: detailSystem.id, at: Date.now(), ...p })}
+            onClearPending={() => setPendingDeploy(null)} /> :
 
 
           <SystemsView
@@ -414,7 +422,9 @@ function App() {
           }
         </div>
         {deployTarget &&
-        <DeployModal sys={deployTarget} onClose={() => setDeployTarget(null)} />
+        <DeployModal sys={deployTarget}
+          onClose={() => setDeployTarget(null)}
+          onQueued={(commit) => setPendingDeploy({ sysId: deployTarget.id, commit, at: Date.now() })} />
         }
         {editTarget &&
         <EditSystemModal sys={editTarget} onClose={() => setEditTarget(null)} />

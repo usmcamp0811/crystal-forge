@@ -165,6 +165,24 @@ function FlakeTray({ flake, focusSha, onClose, onEdit }) {
           </div>
         </header>
 
+        {/* Sync error banner — surfaces WHY the flake failed to sync */}
+        {flake.status === "error" && (
+          <div className="fl-sync-error">
+            <div className="fl-sync-error-head">
+              <Icon name="warn" size={14}/>
+              <span>Sync failed</span>
+              <span className="fl-sync-error-when">{flake.lastSyncAt}</span>
+              <span style={{ flex:1 }}/>
+              <button className="btn btn-ghost focus-ring xs"><Icon name="sync" size={11}/> Retry sync</button>
+            </div>
+            <pre className="fl-sync-error-msg mono">$ nix flake metadata {flake.url}{"\n"}error: {flake.errorMsg || "unknown error"}</pre>
+            <div className="fl-sync-error-meta">
+              <span><span style={{ color:"var(--cf-text-muted)" }}>last good commit</span> <span className="mono">{flake.latestCommit}</span></span>
+              <span><span style={{ color:"var(--cf-text-muted)" }}>remote</span> <span className="mono">{flake.url}</span></span>
+            </div>
+          </div>
+        )}
+
         {/* Body: 2-pane — commit list (left) / detail (right) */}
         <div className="fl-tray-body">
           {/* Commit list */}
