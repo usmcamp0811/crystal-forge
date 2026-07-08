@@ -2759,6 +2759,9 @@ mod tests {
             branch: "main".to_string(),
             build_scope: "cf_systems_only".to_string(),
             system_count: 3,
+            sync_status: "synced".to_string(),
+            last_sync_at: None,
+            last_sync_error: None,
         };
 
         let mapped = map_registry_flake_to_view(&item);
