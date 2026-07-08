@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-07-08 02:49'
-updated_date: '2026-07-08 18:20'
+updated_date: '2026-07-08 19:26'
 labels:
   - design-parity
   - systems
@@ -176,6 +176,8 @@ Per doc-17 §8: fmt + clippy `-D warnings` + tests in both crates; `db-only up` 
 LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-384-systems-deployment-progress
 
 Approved implementation plan recorded. Starting code work in /home/mcamp/code/crystal-forge/TASK-384-systems-deployment-progress.
+
+Follow-up runtime polish pushed in `ea26dd14 feat: report deployment failures to systems UI` on branch `TASK-384-systems-deployment-progress`. Adds migration `0157_deployment_failure_details.sql`, agent `POST /agent/deployment-failed` reporting, persisted `failed_at`/`failure_message`, deployment-status failure details, UI failed-banner messaging, queued heartbeat countdown text, and Recent activity wrapping polish. Updated agent failure reporting to send the expanded anyhow chain (`{:#}`), so root causes like `nix copy failed: ... no substituter that can build it` should reach the UI. Verification run for follow-up: `cargo sqlx prepare` succeeded after applying migration 0157 to local dev DB; `git diff --check` passed; backend and web-ui fmt checks passed; `SQLX_OFFLINE=true cargo check --all-targets` for packages/default passed; web-ui `cargo check --all-targets` passed before final backend-only tweak; `cargo test deployment_progress_tests --lib` passed; `cargo test pending_deploy_banner` passed; `nix build .#packages.x86_64-linux.server --no-link` passed; `nix build .#packages.x86_64-linux.web-ui --no-link` passed. Clippy `-D warnings` remains blocked by known baseline TASK-80 warning debt, not this follow-up. MR remains deferred pending maintainer runtime evaluation, per request.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
