@@ -761,6 +761,43 @@ pub struct FlakeRegistryItem {
     #[serde(default = "default_flake_build_scope")]
     pub build_scope: String,
     pub system_count: i64,
+    /// Current sync state: "unknown" | "synced" | "syncing" | "error"
+    #[serde(default = "default_sync_status")]
+    pub sync_status: String,
+    /// Timestamp of the most recent sync attempt (success or failure).
+    #[serde(default)]
+    pub last_sync_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The error text from the most recent failed sync, if any.
+    #[serde(default)]
+    pub last_sync_error: Option<String>,
+}
+
+fn default_sync_status() -> String {
+    "unknown".to_string()
+}
+
+/// Navigation badge aggregate returned by GET /api/v1/navigation/badges.
+/// Polled by the sidebar every 30 seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct NavigationBadges {
+    #[serde(default)]
+    pub systems_attention: i64,
+    #[serde(default)]
+    pub systems_total: i64,
+    #[serde(default)]
+    pub flakes_errored: i64,
+    #[serde(default)]
+    pub flakes_total: i64,
+    #[serde(default)]
+    pub environments_attention: i64,
+    #[serde(default)]
+    pub environments_total: i64,
+    #[serde(default)]
+    pub builds_failed_24h: i64,
+    #[serde(default)]
+    pub evals_failed_24h: i64,
+    #[serde(default)]
+    pub cves_critical: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

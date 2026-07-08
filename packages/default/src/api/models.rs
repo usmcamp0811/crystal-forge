@@ -932,6 +932,35 @@ pub struct FlakeRegistryItem {
     pub branch: String,
     pub build_scope: String,
     pub system_count: i64,
+    /// Current sync state: "unknown" | "synced" | "syncing" | "error"
+    pub sync_status: String,
+    /// Timestamp of the most recent sync attempt (success or failure).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_sync_at: Option<DateTime<Utc>>,
+    /// The error text from the most recent failed sync, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_sync_error: Option<String>,
+}
+
+/// Navigation badge aggregate — counts of items needing attention per view.
+/// Returned by GET /api/v1/navigation/badges; polled by the sidebar every 30s.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NavigationBadges {
+    /// Systems whose health is "critical" or "offline".
+    pub systems_attention: i64,
+    pub systems_total: i64,
+    /// Flakes whose sync_status is "error".
+    pub flakes_errored: i64,
+    pub flakes_total: i64,
+    /// Environments containing ≥1 attention system.
+    pub environments_attention: i64,
+    pub environments_total: i64,
+    /// Build derivations that failed within the last 24 hours.
+    pub builds_failed_24h: i64,
+    /// Commit evaluations that failed within the last 24 hours.
+    pub evals_failed_24h: i64,
+    /// Open critical CVEs across the fleet.
+    pub cves_critical: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

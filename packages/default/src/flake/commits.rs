@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tokio::time::{Duration, sleep, timeout};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, error};
 
 const GIT_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -256,7 +256,7 @@ async fn sync_all_watched_flakes_commits_inner(
         info!("🔗 Syncing commits for flake: {}", flake.name);
 
         let inserted = if let Some(flake_id) = flake_id_opt {
-            sync_commits_for_flake(pool, &flake.repo_url, &flake.branch(), flake_id).await
+            sync_flake_recorded(pool, flake_id, &flake.repo_url, &flake.branch()).await
         } else {
             sync_commits_for_repo(pool, &flake.repo_url, &flake.branch()).await
         };
@@ -303,6 +303,68 @@ pub async fn sync_commits_for_flake(
             None
         });
     sync_commits_for_repo_inner(pool, repo_url, branch, creds.as_ref()).await
+}
+
+/// Sync commits for a flake and record the sync outcome (syncing → synced|error)
+/// on the flake row. Status writes are best-effort and never mask the sync result.
+///
+/// This is the preferred entry point for all sync call sites when `flake_id` is
+/// available — it is the only way to persist real sync-failure information.
+pub async fn sync_flake_recorded(
+    pool: &PgPool,
+    flake_id: i32,
+    repo_url: &str,
+    branch: &str,
+) -> Result<usize> {
+    // Mark syncing (best-effort — failure is logged but does not block the sync)
+    if let Err(e) = sqlx::query(
+        "UPDATE flakes SET sync_status = 'syncing' WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(flake_id)
+    .execute(pool)
+    .await
+    {
+        warn!("Failed to set sync_status=syncing for flake {flake_id}: {e:#}");
+    }
+
+    let result = sync_commits_for_flake(pool, repo_url, branch, flake_id).await;
+
+    match &result {
+        Ok(_) => {
+            if let Err(e) = sqlx::query(
+                "UPDATE flakes SET sync_status = 'synced', last_sync_at = now(), last_sync_error = NULL \
+                 WHERE id = $1 AND deleted_at IS NULL",
+            )
+            .bind(flake_id)
+            .execute(pool)
+            .await
+            {
+                warn!("Failed to set sync_status=synced for flake {flake_id}: {e:#}");
+            }
+        }
+        Err(sync_err) => {
+            // Truncate error text to 4000 chars to avoid pathological messages
+            let error_text = sync_err.to_string();
+            let truncated = if error_text.len() > 4000 {
+                format!("{}…", &error_text[..3997])
+            } else {
+                error_text
+            };
+            if let Err(e) = sqlx::query(
+                "UPDATE flakes SET sync_status = 'error', last_sync_at = now(), last_sync_error = $2 \
+                 WHERE id = $1 AND deleted_at IS NULL",
+            )
+            .bind(flake_id)
+            .bind(&truncated)
+            .execute(pool)
+            .await
+            {
+                error!("Failed to set sync_status=error for flake {flake_id}: {e:#}");
+            }
+        }
+    }
+
+    result
 }
 
 async fn sync_commits_for_repo_inner(

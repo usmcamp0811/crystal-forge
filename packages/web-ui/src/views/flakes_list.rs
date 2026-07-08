@@ -31,6 +31,8 @@ use crate::api::models::{
     EnvironmentSummary, FlakeCommitSystemPath, FlakeRegistryItem, FlakeTimeline, SystemsListParams,
     TestFlakeCredentialRequest, UpdateFlakeRequest,
 };
+use crate::alerts::{acknowledge, should_flash};
+use crate::components::flake::FlakeSyncErrorBanner;
 use crate::components::layout::Card;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::routes::Route;
@@ -2920,20 +2922,30 @@ pub fn FlakesListViewNew() -> Element {
                     mapped.latest_commit = latest.sha.clone();
                     mapped.latest_message = latest.msg.clone();
                     mapped.latest_author = latest.author.clone();
-                    mapped.last_sync_at = latest.at.clone();
                     mapped.total_commits = commits.len() as i32;
-                    mapped.status = if latest.eval_status.as_deref() == Some("failed")
-                        || latest.build_status.as_deref() == Some("failed")
-                    {
-                        "error".to_string()
-                    } else if matches!(
-                        latest.build_status.as_deref(),
-                        Some("building") | Some("pending")
-                    ) {
-                        "syncing".to_string()
-                    } else {
-                        "synced".to_string()
-                    };
+                    // Enrich last_sync_at from latest commit only if the DB has no timestamp.
+                    if mapped.last_sync_at == "Not synced yet" {
+                        mapped.last_sync_at = latest.at.clone();
+                    }
+                    // Only derive pipeline-based status when the DB reports "unknown" or
+                    // "synced". If the DB reports "error" or "syncing", preserve it — that
+                    // is the actual sync state (TASK-385).
+                    if matches!(mapped.status.as_str(), "unknown" | "synced") {
+                        mapped.status = if latest.eval_status.as_deref() == Some("failed")
+                            || latest.build_status.as_deref() == Some("failed")
+                        {
+                            // Pipeline failure — not a sync failure; leave chip as synced
+                            // but note the pipeline issue. Keep "synced" so the chip is green.
+                            "synced".to_string()
+                        } else if matches!(
+                            latest.build_status.as_deref(),
+                            Some("building") | Some("pending")
+                        ) {
+                            "syncing".to_string()
+                        } else {
+                            "synced".to_string()
+                        };
+                    }
                 }
             }
             mapped
@@ -2977,6 +2989,15 @@ pub fn FlakesListViewNew() -> Element {
         .iter()
         .filter(|f| f.status == "error")
         .count();
+
+    // Acknowledge the "flakes" sidebar badge on first visit and trigger attention
+    // flash on errored rows (TASK-385).
+    let has_flake_errors = error_count > 0;
+    let flash_flakes = should_flash("flakes", has_flake_errors);
+    use_effect(move || {
+        acknowledge("flakes");
+    });
+
     let selected_flake_value = selected_flake.read().clone();
     let selected_flake_for_timeline = selected_flake.clone();
     // Use extended commit limit (200) for the tray view
@@ -3273,7 +3294,7 @@ pub fn FlakesListViewNew() -> Element {
 
                     if mode == "table" {
                         let all_flakes_for_edit = all_flakes.clone();
-                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), flash_errors: flash_flakes, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
                                 let result = request_sync_flake(flake_id).await;
@@ -3688,11 +3709,18 @@ fn map_registry_flake_to_view(item: &FlakeRegistryItem) -> MockFlakeItem {
         item.build_scope.trim()
     };
 
+    // Map real sync fields from the API (TASK-385).
+    let last_sync_display = item
+        .last_sync_at
+        .as_ref()
+        .map(|dt| relative_time_label(*dt))
+        .unwrap_or_else(|| "Not synced yet".to_string());
+
     MockFlakeItem {
         id: item.id,
         name: item.name.clone(),
         description: format!("Build scope: {build_scope_label}"),
-        status: "synced".to_string(),
+        status: item.sync_status.clone(),
         url: item.repo_url.clone(),
         branch: item.branch.clone(),
         build_scope: item.build_scope.clone(),
@@ -3700,11 +3728,11 @@ fn map_registry_flake_to_view(item: &FlakeRegistryItem) -> MockFlakeItem {
         latest_commit: "—".to_string(),
         latest_message: "No commits yet".to_string(),
         latest_author: "—".to_string(),
-        last_sync_at: "Not synced yet".to_string(),
+        last_sync_at: last_sync_display,
         // The current registry API does not expose the environments spanned by a flake.
         // Render this as an explicit unsupported/pending value instead of fabricating one.
         environment: String::new(),
-        error_msg: None,
+        error_msg: item.last_sync_error.clone(),
         total_commits: 0,
     }
 }
@@ -4235,6 +4263,9 @@ fn FlakeTableNew(
     selected_id: Option<i32>,
     is_admin: bool,
     #[props(default)] env_colors: Vec<EnvironmentSummary>,
+    /// When true, error rows receive the attention-flash CSS class (one-shot on first visit).
+    #[props(default)]
+    flash_errors: bool,
     on_select: EventHandler<MockFlakeItem>,
     on_sync: EventHandler<i32>,
     on_edit: EventHandler<i32>,
@@ -4260,7 +4291,13 @@ fn FlakeTableNew(
                     for flake in flakes {
                         {
                             let is_selected = selected_id == Some(flake.id);
-                            let row_class = if is_selected { "selected" } else { "" };
+                            let is_error = flake.status == "error";
+                            let row_class = match (is_selected, is_error && flash_errors) {
+                                (true, true)   => "selected attention-flash",
+                                (true, false)  => "selected",
+                                (false, true)  => "attention-flash",
+                                (false, false) => "",
+                            };
                             let flake_for_select = flake.clone();
                             let flake_id_for_sync = flake.id;
                             let flake_id_for_edit = flake.id;
@@ -4902,6 +4939,26 @@ fn FlakeTrayNew(
                 div {
                     style: "margin: 0 12px 10px; padding: 8px 10px; border: 1px solid var(--cf-divider); border-radius: 8px; font-size: 12px; color: var(--cf-text-secondary); background: color-mix(in oklab, var(--cf-page-bg) 35%, var(--cf-card-bg));",
                     "{msg}"
+                }
+            }
+
+            // Sync-error banner — shows when sync_status is "error" (TASK-385)
+            if flake.status == "error" {
+                if let Some(ref error_msg) = flake.error_msg {
+                    {
+                        let error_msg = error_msg.clone();
+                        let repo_url = flake.url.clone();
+                        let latest_commit = if flake.latest_commit == "—" { None } else { Some(flake.latest_commit.clone()) };
+                        let flake_id = flake.id;
+                        rsx! {
+                            FlakeSyncErrorBanner {
+                                repo_url,
+                                last_sync_error: error_msg,
+                                latest_commit,
+                                on_retry: move |_| on_sync.call(flake_id),
+                            }
+                        }
+                    }
                 }
             }
 

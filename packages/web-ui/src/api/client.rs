@@ -1198,6 +1198,12 @@ pub async fn accept_flake_history_rewrite(
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Fetch navigation badge counts for the sidebar.
+pub async fn get_navigation_badges() -> Result<NavigationBadges, ApiClientError> {
+    let url = format!("{}/navigation/badges", base_url());
+    fetch_json(&url).await
+}
+
 /// Fetch the git diff for a specific commit in a flake.
 pub async fn fetch_commit_diff(
     flake_id: i32,

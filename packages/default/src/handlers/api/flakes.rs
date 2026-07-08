@@ -18,7 +18,7 @@ use crate::api::models::{
 };
 use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth, RequireOperator};
 use crate::config::CrystalForgeConfig;
-use crate::flake::commits::sync_commits_for_flake;
+use crate::flake::commits::{sync_commits_for_flake, sync_flake_recorded};
 use crate::flake::commits::{
     GitCommitMetadata, branch_exists, branch_exists_with_creds, get_commit_changed_files,
     get_commit_diff_with_creds, get_commit_metadata, get_commit_nixos_configurations,
@@ -1743,7 +1743,7 @@ pub async fn accept_flake_history_rewrite(
     };
 
     let inserted =
-        match sync_commits_for_flake(&pool, &flake.repo_url, &flake.branch, flake.id).await {
+        match sync_flake_recorded(&pool, flake.id, &flake.repo_url, &flake.branch).await {
             Ok(inserted) => inserted,
             Err(e) => {
                 error!(
@@ -1852,7 +1852,7 @@ pub async fn sync_all_flakes_handler(
     let mut inserted = 0usize;
     let mut failed = Vec::new();
     for flake in flakes {
-        match sync_commits_for_flake(&pool, &flake.repo_url, &flake.branch, flake.id).await {
+        match sync_flake_recorded(&pool, flake.id, &flake.repo_url, &flake.branch).await {
             Ok(new_commits) => {
                 synced += 1;
                 inserted += new_commits;
@@ -2004,7 +2004,7 @@ pub async fn sync_flake_handler(
         }
     };
 
-    match sync_commits_for_flake(&pool, &flake.repo_url, &sync_branch, flake.id).await {
+    match sync_flake_recorded(&pool, flake.id, &flake.repo_url, &sync_branch).await {
         Ok(new_commits) => {
             if new_commits > 0 {
                 state.queue_notifier.notify_eval_queue();

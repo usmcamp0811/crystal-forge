@@ -2,6 +2,9 @@
 
 use dioxus::prelude::*;
 
+use crate::alerts::{ALERT_STATE, badge_visible};
+use crate::api::client::get_navigation_badges;
+use crate::api::models::NavigationBadges;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
@@ -77,6 +80,22 @@ pub fn SidebarNav() -> Element {
     let show_dev_tools = true;
     #[cfg(not(debug_assertions))]
     let show_dev_tools = false;
+
+    // Fetch navigation badge counts and re-poll every 30 seconds.
+    let badges = use_resource(|| async move {
+        let mut current = get_navigation_badges().await.unwrap_or_default();
+        loop {
+            gloo_timers::future::TimeoutFuture::new(30_000).await;
+            if let Ok(fresh) = get_navigation_badges().await {
+                current = fresh;
+            }
+        }
+        #[allow(unreachable_code)]
+        current
+    });
+    let badges: NavigationBadges = badges.read().clone().unwrap_or_default();
+    // Subscribe to ALERT_STATE so re-renders happen when badges are acknowledged.
+    let _alert = ALERT_STATE.read();
 
     // Get user data for profile section
     let user_initials = if let Some(name) = auth::user_short_name(&auth_context) {
@@ -159,6 +178,10 @@ pub fn SidebarNav() -> Element {
                     collapsed: is_collapsed,
                     to: Route::SystemsView {},
                     label: "Systems",
+                    badge_count: if badges.systems_attention > 0 { Some(badges.systems_attention) } else { None },
+                    badge_attention: badges.systems_attention > 0,
+                    badge_hidden: !badge_visible("systems", badges.systems_attention, true),
+                    badge_title: Some(format!("{} of {} systems need attention (critical or offline)", badges.systems_attention, badges.systems_total)),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -176,6 +199,14 @@ pub fn SidebarNav() -> Element {
                     collapsed: is_collapsed,
                     to: Route::FlakesView {},
                     label: "Flakes",
+                    badge_count: if badges.flakes_errored > 0 { Some(badges.flakes_errored) } else { None },
+                    badge_attention: badges.flakes_errored > 0,
+                    badge_hidden: !badge_visible("flakes", badges.flakes_errored, true),
+                    badge_title: Some(if badges.flakes_errored > 0 {
+                        format!("{} of {} flakes failing to sync", badges.flakes_errored, badges.flakes_total)
+                    } else {
+                        format!("{} flakes tracked", badges.flakes_total)
+                    }),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -193,6 +224,14 @@ pub fn SidebarNav() -> Element {
                     collapsed: is_collapsed,
                     to: Route::EnvironmentsView {},
                     label: "Environments",
+                    badge_count: if badges.environments_attention > 0 { Some(badges.environments_attention) } else { None },
+                    badge_attention: badges.environments_attention > 0,
+                    badge_hidden: !badge_visible("environments", badges.environments_attention, true),
+                    badge_title: Some(if badges.environments_attention > 0 {
+                        format!("{} of {} environments have critical or offline systems", badges.environments_attention, badges.environments_total)
+                    } else {
+                        format!("{} deployment environments", badges.environments_total)
+                    }),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -213,6 +252,12 @@ pub fn SidebarNav() -> Element {
                     collapsed: is_collapsed,
                     to: Route::BuildsView {},
                     label: "Builds",
+                    // Builds badge is acknowledged only when the failures tab is opened (not on mount).
+                    // The view itself calls acknowledge("builds") when the completed/failed tab opens.
+                    badge_count: if badges.builds_failed_24h > 0 { Some(badges.builds_failed_24h) } else { None },
+                    badge_attention: badges.builds_failed_24h > 0,
+                    badge_hidden: !badge_visible("builds", badges.builds_failed_24h, true),
+                    badge_title: Some(format!("{} failed build{} in the last 24h", badges.builds_failed_24h, if badges.builds_failed_24h == 1 { "" } else { "s" })),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -228,6 +273,11 @@ pub fn SidebarNav() -> Element {
                     collapsed: is_collapsed,
                     to: Route::EvaluationsView {},
                     label: "Evaluations",
+                    // Evals badge is acknowledged only when the failures tab is opened (not on mount).
+                    badge_count: if badges.evals_failed_24h > 0 { Some(badges.evals_failed_24h) } else { None },
+                    badge_attention: badges.evals_failed_24h > 0,
+                    badge_hidden: !badge_visible("evals", badges.evals_failed_24h, true),
+                    badge_title: Some(format!("{} failed evaluation{} in the last 24h", badges.evals_failed_24h, if badges.evals_failed_24h == 1 { "" } else { "s" })),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -266,6 +316,10 @@ pub fn SidebarNav() -> Element {
                         collapsed: is_collapsed,
                         to: Route::CvesView {},
                         label: "CVEs",
+                        badge_count: if badges.cves_critical > 0 { Some(badges.cves_critical) } else { None },
+                        badge_attention: badges.cves_critical > 0,
+                        badge_hidden: !badge_visible("cves", badges.cves_critical, true),
+                        badge_title: Some(format!("{} critical CVEs open across the fleet", badges.cves_critical)),
                         icon: rsx!(
                             svg {
                                 class: "w-4 h-4",
@@ -776,8 +830,30 @@ pub fn MobileDrawer() -> Element {
 }
 
 /// A sidebar navigation link.
+///
+/// Accepts optional badge props for the alert badge system.  When `badge_count`
+/// is `Some(n)` with `n > 0` (and `badge_hidden` is false), a `.nav-count`
+/// badge is rendered; when `badge_attention` is `true` the badge is red
+/// (`.nav-count-alert`).
 #[component]
-fn NavLink(collapsed: bool, to: Route, label: &'static str, icon: Element) -> Element {
+fn NavLink(
+    collapsed: bool,
+    to: Route,
+    label: &'static str,
+    icon: Element,
+    /// Badge count to display. None or 0 → no badge.
+    #[props(default)]
+    badge_count: Option<i64>,
+    /// When true, the badge is rendered in red (`.nav-count-alert`).
+    #[props(default)]
+    badge_attention: bool,
+    /// Tooltip text for the badge element.
+    #[props(default)]
+    badge_title: Option<String>,
+    /// When true, the badge is hidden (used for acknowledged attention badges).
+    #[props(default)]
+    badge_hidden: bool,
+) -> Element {
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
     let current_route = use_route::<Route>();
@@ -792,6 +868,13 @@ fn NavLink(collapsed: bool, to: Route, label: &'static str, icon: Element) -> El
         "nav-item active focus-ring"
     } else {
         "nav-item focus-ring"
+    };
+
+    let show_badge = badge_count.is_some_and(|c| c > 0) && !badge_hidden;
+    let badge_class = if badge_attention {
+        "nav-count nav-count-alert"
+    } else {
+        "nav-count"
     };
 
     rsx! {
@@ -809,6 +892,13 @@ fn NavLink(collapsed: bool, to: Route, label: &'static str, icon: Element) -> El
                 span {
                     class: "nav-label",
                     "{label}"
+                }
+            }
+            if show_badge {
+                span {
+                    class: "{badge_class}",
+                    title: badge_title.as_deref().unwrap_or(""),
+                    "{badge_count.unwrap_or(0)}"
                 }
             }
         }

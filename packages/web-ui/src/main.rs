@@ -3,6 +3,7 @@
 //! This is the entry point for the WASM web application.
 //! It sets up routing, global state, and launches the Dioxus app.
 
+mod alerts;
 mod api;
 mod bootstrap;
 mod components;
