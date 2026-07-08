@@ -3,6 +3,8 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
+use crate::alerts::acknowledge;
+
 use crate::components::environments::{
     EnvironmentCard, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentFormModal,
     EnvironmentItem, EnvironmentTable, NewEnvironmentDraft, PolicyOption, RemoveEnvironmentDialog,
@@ -54,6 +56,9 @@ pub fn EnvironmentsListView() -> Element {
     let mut loading = use_signal(|| true);
     let mut redirect_to_login = use_signal(|| false);
     let nav = use_navigator();
+
+    // Acknowledge the "environments" sidebar attention badge on first visit (TASK-385).
+    use_effect(move || { acknowledge("environments"); });
 
     use_effect(move || {
         spawn(async move {

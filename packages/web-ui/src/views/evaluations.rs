@@ -4,6 +4,8 @@ use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use gloo_timers::future::TimeoutFuture;
 
+use crate::alerts::acknowledge;
+
 use crate::api::{
     client::{
         ApiClientError, cancel_commit_evaluation, fetch_eval_dependency_graph, fetch_eval_history,
@@ -356,7 +358,12 @@ fn EvaluationsPage() -> Element {
                             } else {
                                 "sd-tab focus-ring"
                             },
-                            onclick: move |_| { active_tab.set(EvaluationsTab::History); focused_index.set(None); },
+                            onclick: move |_| {
+                                active_tab.set(EvaluationsTab::History);
+                                focused_index.set(None);
+                                // Acknowledge the "evals" sidebar badge only when History tab is opened (TASK-385).
+                                acknowledge("evals");
+                            },
                             "History"
                         }
                     }

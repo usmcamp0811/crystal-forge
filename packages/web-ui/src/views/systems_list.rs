@@ -3,6 +3,8 @@
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 
+use crate::alerts::acknowledge;
+
 use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
     DeploymentStatus, HealthStatus, SystemDetail, SystemHistoryEntry, SystemSummary,
@@ -149,6 +151,9 @@ pub fn SystemsListView() -> Element {
             let _ = LocalStorage::set(VIEW_PREF_KEY, mode.as_storage());
         }
     });
+
+    // Acknowledge the "systems" sidebar attention badge on first visit (TASK-385).
+    use_effect(move || { acknowledge("systems"); });
 
     // Poll for density changes from topbar tweaks
     use_effect(move || {

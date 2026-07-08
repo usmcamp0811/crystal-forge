@@ -3,6 +3,8 @@
 use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
+use crate::alerts::acknowledge;
+
 use crate::api::{
     self,
     client::{
@@ -593,6 +595,8 @@ pub fn BuildsView() -> Element {
                                     fh.set(false);
                                 });
                             }
+                            // Acknowledge the "builds" sidebar badge only when this tab is opened (TASK-385).
+                            acknowledge("builds");
                         },
                         "Completed "
                         span { class: "sd-tab-badge", "{build_history.read().len()}" }

@@ -9,6 +9,8 @@
 
 use dioxus::prelude::*;
 
+use crate::alerts::acknowledge;
+
 use crate::api::client;
 use crate::api::models::{
     CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
@@ -154,6 +156,9 @@ pub fn CvesView() -> Element {
     let mut view_mode = use_signal(move || initial_view.clone()); // "flat" or "grouped"
     let mut selected_cve_id = use_signal(move || initial_cve.clone());
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None);
+
+    // Acknowledge the "cves" sidebar attention badge on first visit (TASK-385).
+    use_effect(move || { acknowledge("cves"); });
 
     use_effect(move || {
         let severity = severity_filter();
