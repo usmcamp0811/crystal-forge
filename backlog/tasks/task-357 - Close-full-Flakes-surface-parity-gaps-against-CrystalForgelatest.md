@@ -1,11 +1,11 @@
 ---
 id: TASK-357
 title: Close full Flakes surface parity gaps against CrystalForgelatest
-status: In Progress
+status: Done
 assignee:
   - gpt-5.5
 created_date: '2026-06-14 18:56'
-updated_date: '2026-06-15 03:20'
+updated_date: '2026-07-08 07:22'
 labels:
   - design-parity
   - flakes
@@ -92,6 +92,8 @@ LOCK: opencode-agent on host in /home/mcamp/code/crystal-forge/TASK-357-flakes-s
 MR !277 opened with two reviewer blockers:
 1. Admin-only Flakes mutations are hard-coded as `is_admin: true` — need to derive actual viewer/admin state and gate mutations
 2. Edit modal Description field is writable but silently discarded — need to make read-only/disabled with "not persisted" label
+
+Closed during 2026-07-08 backlog grooming: MR !277 merged into dev (c619809a). Sync-error surfaces from the updated (Jul 7) design are covered by the new flakes sync-error + sidebar alerts task. Concrete follow-ups TASK-357.1/357.2 remain open.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
