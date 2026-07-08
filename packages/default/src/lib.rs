@@ -4,6 +4,7 @@ pub mod builder;
 pub mod config;
 pub mod deployment;
 pub mod derivations;
+pub mod fixtures;
 pub mod flake;
 pub mod handlers;
 pub mod hardening;

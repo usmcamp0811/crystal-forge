@@ -8,13 +8,76 @@
  * 4. Takes screenshots of all major authenticated routes
  *
  * Usage: node integration-test.js <baseUrl> <outputDir>
+ *
+ * Coverage and profiles are driven by coverage-manifest.json (same directory):
+ * every step defined below must exist in the manifest and vice versa, and the
+ * ci_fast profile is the set of manifest steps whose profiles include
+ * "ci_fast". Themed screenshots are captured for every theme listed in
+ * manifest settings.visualThemes and later compared against the design example
+ * targets (generated offline by generate-design-targets.js) to produce a
+ * non-blocking design-drift report and visual parity grid for the MR.
  */
 const { chromium } = require("playwright");
 const fs = require("fs");
+const path = require("path");
 const { execSync } = require("child_process");
 
 const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
+
+const MANIFEST = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "coverage-manifest.json"), "utf8"),
+);
+const MANIFEST_STEPS = new Map(MANIFEST.steps.map((s) => [s.name, s]));
+const DESIGN_FIXTURE = MANIFEST.settings.designFixture || null;
+
+/**
+ * Fail hard on coverage drift, writing a fatal marker the Nix driver can
+ * detect (results.json will never appear when the gate trips).
+ */
+function fatal(message) {
+  console.error(`FATAL: ${message}`);
+  try {
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.writeFileSync(
+      `${outputDir}/fatal.json`,
+      JSON.stringify({ error: message }, null, 2),
+    );
+  } catch (_) {}
+  process.exit(1);
+}
+
+
+
+async function applyVisualTheme(page, theme) {
+  await page.evaluate((themeName) => {
+    localStorage.setItem("cf.ui.theme", themeName);
+    document.documentElement.setAttribute("data-theme", themeName);
+  }, theme);
+
+  const actual = await page.locator("html").getAttribute("data-theme");
+  if (actual !== theme) {
+    throw new Error(`Expected visual baseline theme ${theme}, got: ${actual}`);
+  }
+}
+
+async function captureThemedBaselines(page, step, visualThemes) {
+  const visuals = [];
+
+  for (const theme of visualThemes) {
+    await applyVisualTheme(page, theme);
+
+    const captureName = `${step.name}--${theme}`;
+    const outputPath = `${outputDir}/${captureName}.png`;
+    await page.screenshot({ path: outputPath });
+
+    const stats = fs.statSync(outputPath);
+    console.log(`  OK: ${captureName}.png (${stats.size} bytes)`);
+    visuals.push({ name: captureName, theme });
+  }
+
+  return visuals;
+}
 
 // Test user credentials
 const TEST_USER = {
@@ -1471,6 +1534,15 @@ const steps = [
     action: async (page) => {
       await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000); // Wait for WASM hydration
+
+      await assertVisible(
+        page.locator('input[type="password"]').first(),
+        "Expected password input on login page",
+      );
+      await assertVisible(
+        page.locator('button[type="submit"]').first(),
+        "Expected submit button on login page",
+      );
     },
   },
   {
@@ -1480,6 +1552,11 @@ const steps = [
       await page.goto(`${baseUrl}/register`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000); // Wait for WASM hydration
 
+      await assertVisible(
+        page.locator('input[type="email"]').first(),
+        "Expected email input on registration page",
+      );
+
       // Fill out registration form - use more robust selectors
       await page.locator('input[type="text"]').first().fill(TEST_USER.username);
       await page.locator('input[type="email"]').fill(TEST_USER.email);
@@ -1487,6 +1564,11 @@ const steps = [
       await page.locator('input[type="password"]').last().fill(TEST_USER.password);
 
       await page.waitForTimeout(500);
+
+      await assertEnabled(
+        page.locator('button[type="submit"]').first(),
+        "Expected registration submit to be enabled after filling the form",
+      );
     },
   },
   {
@@ -1497,6 +1579,10 @@ const steps = [
       const submitBtn = page.locator('button[type="submit"]');
       await submitBtn.click();
       await page.waitForTimeout(3000); // Wait for registration + redirect
+
+      if (page.url().includes("/register")) {
+        throw new Error("Expected registration to navigate away from /register");
+      }
     },
   },
   {
@@ -1505,6 +1591,11 @@ const steps = [
     action: async (page) => {
       await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
+
+      await assertVisible(
+        page.locator('input[type="password"]').first(),
+        "Expected password input on post-registration login page",
+      );
 
       // Fill login form
       await page.locator('input[type="text"]').fill(TEST_USER.username);
@@ -1520,6 +1611,10 @@ const steps = [
       const submitBtn = page.locator('button[type="submit"]');
       await submitBtn.click();
       await page.waitForTimeout(3000); // Wait for login + redirect
+
+      if (page.url().includes("/login")) {
+        throw new Error("Expected login to navigate away from /login");
+      }
     },
   },
 
@@ -5062,6 +5157,11 @@ const steps = [
     action: async (page) => {
       await page.goto(`${baseUrl}/style-guide`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
+
+      await assertVisible(
+        page.getByRole("heading", { name: "Component Isolation Surface" }).first(),
+        "Expected style guide heading on /style-guide",
+      );
     },
   },
   {
@@ -6624,114 +6724,89 @@ const steps = [
       }
     },
   },
+  {
+    name: "30-admin",
+    description: "Admin / Server Management view renders for the logged-in session",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/admin`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      await assertVisible(
+        page.getByRole("heading", { name: "Server Management" }).first(),
+        "Expected Server Management heading on /admin",
+      );
+      await assertHidden(
+        page.getByText("Page not found").first(),
+        "Admin route must not fall through to the 404 view",
+      );
+    },
+  },
+  {
+    name: "31-not-found",
+    description: "Catch-all 404 page renders for unknown routes inside the app shell",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/definitely-not-a-real-route`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      await assertVisible(
+        page.getByRole("heading", { name: "404" }).first(),
+        "Expected 404 heading on unknown route",
+      );
+      await assertVisible(
+        page.getByText("Page not found: /definitely-not-a-real-route").first(),
+        "Expected not-found path message on unknown route",
+      );
+    },
+  },
 ];
 
-const CI_FAST_STEP_NAMES = new Set([
-  "01-login-page",
-  "02-registration",
-  "03-registration-submit",
-  "04-post-register-login",
-  "05-login-submit",
-  "06-dashboard",
-  "06-dashboard-loading-spinner",
-  "06x-pipeline-readiness-scroll",
-  "06y-recent-deployments-scroll",
-  "06z-fleet-health-widget-assert",
-  "06z2-dashboard-error-no-fabricated-data",
-  "06z3-dashboard-widget-visuals-parity",
-  "09e-sidebar-sections-fullwidth",
-  "09f-sidebar-light-expanded",
-  "09g-topbar-notifications-dark",
-  "09h-topbar-notifications-light",
-  "09i-topbar-notifications-non-admin",
-  "11b-builders",
-  "11c-builders-edit-modal",
-  "15-builds",
-  "11b-builds-queue-card-focus",
-  "12-systems",
-  "12a-systems-empty-state",
-  "12b-systems-config-warning",
-  "12e-systems-edit-modal",
-  "12f-systems-deploy-modal",
-  "12h-system-detail-cves-grouped-justification",
-  "12i-system-detail-generation-metric",
-  "12j-system-detail-deploy-generation-list",
-  "12k-system-detail-tab-icons",
-  "12d-systems-api-error-no-mock-fallback",
-  "12g-systems-warning-clears-after-link",
-  "13-flakes",
-  "13a-flakes-cards-parity",
-  "13aa-flakes-tray-diff-parity",
-  "13ea-flakes-delete-confirm-parity",
-  "13d-flakes-stress-dataset",
-  "13e-flakes-add-modal-credentials",
-  "13f-flakes-edit-modal-credentials",
-  "13g-flakes-edit-modal-ssh-save-persist",
-  "13h-flakes-force-push-rewrite-recovery",
-  "13i-flakes-non-admin",
-  // TASK-358: Environments parity evidence
-  "14-environments",
-  "14a-environments-add-modal",
-  "14b-environments-config-warning",
-  // TASK-237: builds queue controls evidence
-  "15d-builds-queue-table-view",
-  "15e-builds-cancelling-state",
-  "15f-builds-human-duration",
-  "15g-builds-action-visibility",
-  "15h-builds-completed-restart-action",
-  "15i-builds-non-operator",
-  // TASK-17: CVE dashboard evidence
-  "16-cves",
-  "16b-cves-severity-filter",
-  // TASK-326: Scanning view evidence
-  "16c-scanning-view",
-  // TASK-340.1: Policies parity evidence
-  "18-policies",
-  "19-policies-new-modal-fields",
-  "20-policies-new-modal-rule-builder",
-  "20b-policies-cve-gate-create-roundtrip",
-  "20c-policies-multirule-create-roundtrip",
-  "20d-policies-cve-gate-invalid-rejected",
-  "20e-policies-multirule-rules-only-no-expression-required",
-  // TASK-303: Caches view and modal evidence
-  "21-caches",
-  "22-caches-modal-nix",
-  "23-caches-modal-http",
-  "24-caches-modal-s3",
-  "25-caches-modal-attic",
-  // TASK-273: Evaluation cancellation + history evidence
-  "26-evaluations",
-  "26b-evaluations-history",
-  // TASK-276: Hardening dashboard + system tab evidence
-  "27-hardening-fleet",
-  "28-system-hardening-tab",
-  // TASK-334: Compliance view evidence
-  "29-compliance-empty",
-  "29a-compliance-populated",
-  "29b-compliance-evidence-drawer",
-  "29c-compliance-export-modal",
-  "29d-compliance-new-bundle-modal",
-  "29e-compliance-api-error",
-]);
-
 (async () => {
+  // ── Coverage gate: steps and manifest must agree exactly ──────────────────
+  const stepNames = new Set(steps.map((s) => s.name));
+  const manifestNames = new Set(MANIFEST.steps.map((s) => s.name));
+  const missingInManifest = [...stepNames].filter((n) => !manifestNames.has(n));
+  const missingInSteps = [...manifestNames].filter((n) => !stepNames.has(n));
+  if (missingInManifest.length || missingInSteps.length) {
+    fatal(
+      "coverage manifest drift — " +
+        `steps missing from coverage-manifest.json: [${missingInManifest.join(", ")}]; ` +
+        `manifest entries with no matching step: [${missingInSteps.join(", ")}]. ` +
+        "Update checks/web-ui/coverage-manifest.json when adding/removing steps.",
+    );
+  }
+  if (stepNames.size !== steps.length) {
+    fatal("duplicate step names detected in integration-test.js");
+  }
+
   const testProfile = process.env.CF_UI_TEST_PROFILE || "full";
   const stepsToRun =
-    testProfile === "ci_fast"
-      ? steps.filter((step) => CI_FAST_STEP_NAMES.has(step.name))
-      : steps;
+    testProfile === "full"
+      ? steps
+      : steps.filter((step) =>
+          MANIFEST_STEPS.get(step.name).profiles.includes(testProfile),
+        );
+  if (stepsToRun.length === 0) {
+    fatal(`profile "${testProfile}" selects no steps from the coverage manifest`);
+  }
 
   console.log("Starting Crystal Forge Web UI Integration Test");
   console.log(`  Base URL: ${baseUrl}`);
   console.log(`  Output: ${outputDir}`);
+  console.log("  Visual: design-parity comparison (design example vs Dioxus)");
   console.log(`  Profile: ${testProfile}`);
   console.log(`  Steps: ${stepsToRun.length}`);
+  const visualThemes = MANIFEST.settings.visualThemes || ["dark", "light"];
+  console.log(`  Visual themes: ${visualThemes.join(", ")}`);
   console.log("");
 
   const browser = await chromium.launch();
-  // Use a single browser context to maintain session/cookies across steps
+  // Use a single browser context to maintain session/cookies across steps.
+  // Timezone and locale are pinned by the manifest so rendered timestamps and
+  // number formats are reproducible across local Nix and CI runs.
   const context = await browser.newContext({
-    viewport: { width: 1920, height: 1080 },
+    viewport: MANIFEST.settings.viewport,
+    timezoneId: MANIFEST.settings.timezoneId,
+    locale: MANIFEST.settings.locale,
   });
 
   const createStepPage = async () => {
@@ -6749,16 +6824,15 @@ const CI_FAST_STEP_NAMES = new Set([
     console.log(`Step: ${step.name} - ${step.description}`);
     let ok = true;
     let error = null;
+    let visuals = [];
 
     try {
       await step.action(page);
 
-      // Take screenshot
-      const outputPath = `${outputDir}/${step.name}.png`;
-      await page.screenshot({ path: outputPath });
-
-      const stats = fs.statSync(outputPath);
-      console.log(`  OK: ${step.name}.png (${stats.size} bytes)`);
+      // Take one screenshot per required visual theme. Baseline names include
+      // the theme suffix so reviewers can approve dark and light mode
+      // independently: <step>--dark.png and <step>--light.png.
+      visuals = await captureThemedBaselines(page, step, visualThemes);
     } catch (err) {
       ok = false;
       error = err.message;
@@ -6782,23 +6856,99 @@ const CI_FAST_STEP_NAMES = new Set([
       description: step.description,
       ok,
       error,
+      visuals,
     });
   }
+
+  // ── Design-parity capture pass (non-blocking) ───────────────────────────────
+  // Capture the real Dioxus UI for the primary views in both themes so the
+  // design-parity harness can compare them against the design-example targets.
+  // These captures never fail the check; compare-design-parity.js scores drift.
+  const designParityDir = `${outputDir}/design-parity`;
+  let designParityCaptured = 0;
+  try {
+    const parityManifestPath = path.join(__dirname, "design-parity", "manifest.json");
+    if (fs.existsSync(parityManifestPath)) {
+      const parityManifest = JSON.parse(fs.readFileSync(parityManifestPath, "utf8"));
+      const parityThemes = parityManifest.settings.themes || ["dark", "light"];
+      fs.mkdirSync(designParityDir, { recursive: true });
+      const parityPage = await context.newPage();
+      for (const view of parityManifest.views) {
+        for (const theme of parityThemes) {
+          const name = `${view.name}--${theme}`;
+          try {
+            // Seed the CF theme, then load the route so the app applies its own
+            // theme through the real cf.ui.theme path (not a forced attribute).
+            await parityPage.goto(`${baseUrl}/?ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
+            await parityPage.evaluate((t) => localStorage.setItem("cf.ui.theme", t), theme);
+            await parityPage.goto(`${baseUrl}${view.route}?ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
+            await parityPage.waitForTimeout(2000);
+            await parityPage.screenshot({ path: `${designParityDir}/${name}.dioxus.png` });
+            designParityCaptured += 1;
+            console.log(`  OK design-parity capture: ${name}`);
+          } catch (err) {
+            console.error(`  design-parity capture failed (non-blocking): ${name} - ${err.message}`);
+            try {
+              await parityPage.screenshot({ path: `${designParityDir}/${name}.dioxus.png` });
+            } catch (_) {}
+          }
+        }
+      }
+      await parityPage.close();
+    }
+  } catch (err) {
+    console.error(`Design-parity capture pass error (non-blocking): ${err.message}`);
+  }
+  console.log(`Design-parity Dioxus captures: ${designParityCaptured}`);
 
   await context.close();
   await browser.close();
 
-  // Write results
-  fs.writeFileSync(`${outputDir}/results.json`, JSON.stringify(results, null, 2));
-
-  // Summary
+  // ── Visual report ──────────────────────────────────────────────────────────
   const okCount = results.filter((r) => r.ok).length;
   const failCount = results.filter((r) => !r.ok).length;
+  const designReferenced = stepsToRun.filter((s) => s.designRef).length;
+  const themed = results.flatMap((r) => r.visuals || []);
+
+  const visualReport = {
+    profile: testProfile,
+    visualThemes,
+    designGauge: {
+      policy: DESIGN_FIXTURE ? DESIGN_FIXTURE.policy : "unconfigured",
+      fixturePath: DESIGN_FIXTURE ? DESIGN_FIXTURE.path : null,
+      stepsWithDesignRef: designReferenced,
+      totalSteps: stepsToRun.length,
+      percentWithDesignRef:
+        stepsToRun.length > 0 ? Number(((designReferenced / stepsToRun.length) * 100).toFixed(1)) : 0,
+      note: DESIGN_FIXTURE ? DESIGN_FIXTURE.note : null,
+    },
+    themedCaptures: themed.length,
+    steps: results.map((r) => ({ name: r.name, ok: r.ok, visuals: r.visuals })),
+  };
+  fs.writeFileSync(
+    `${outputDir}/visual-report.json`,
+    JSON.stringify(visualReport, null, 2),
+  );
+
+  // Markdown summary consumed by the MR-comment CI job.
+  const md = [
+    `**Web UI check** — profile \`${testProfile}\`: ${okCount}/${results.length} steps passed.`,
+    `**Themed captures** — ${themed.length} screenshots (${visualThemes.join(", ")}) captured for design-parity comparison.`,
+    `Design-drift scoring is computed by \`compare-design-parity.js\` against the design example targets and posted as a visual parity grid below.`,
+  ];
+  fs.writeFileSync(`${outputDir}/visual-summary.md`, md.join("\n\n") + "\n");
+
+  // Write results (the Nix driver waits on this file — keep it last so all
+  // reports exist by the time the driver proceeds).
+  fs.writeFileSync(`${outputDir}/results.json`, JSON.stringify(results, null, 2));
 
   console.log("");
   console.log("=== Summary ===");
   console.log(`  Passed: ${okCount}/${results.length}`);
   console.log(`  Failed: ${failCount}/${results.length}`);
+  console.log(
+    `  Themed captures: ${themed.length} screenshots (${visualThemes.join(", ")})`,
+  );
 
   if (failCount > 0) {
     console.log("");

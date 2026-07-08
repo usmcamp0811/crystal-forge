@@ -26,10 +26,10 @@ use crate::handlers::api::rbac::{
 };
 use crate::models::auth_identity::AuthRole;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
+use crate::queries::system_events::list_system_event_history_rows;
 use crate::queries::system_states::{
     fetch_system_generations, find_generation_store_path_last_seen,
 };
-use crate::queries::system_events::list_system_event_history_rows;
 use crate::queries::systems::{
     FqdnUpdate, HeartbeatIntervalUpdate, SystemAccessRow, SystemDetailRow, SystemListRow,
     commit_belongs_to_system_flake, deactivate_system, find_system_access_row,
@@ -1950,8 +1950,13 @@ pub async fn get_system_history(
             .map(|row| {
                 let (event_kind, default_actor, outcome) = event_history_kind(&row.event_type);
                 let title = event_history_title(&row.event_type).to_string();
-                let actor = row.actor.clone().unwrap_or_else(|| default_actor.to_string());
-                let generation = row.new_generation.and_then(|value| i32::try_from(value).ok());
+                let actor = row
+                    .actor
+                    .clone()
+                    .unwrap_or_else(|| default_actor.to_string());
+                let generation = row
+                    .new_generation
+                    .and_then(|value| i32::try_from(value).ok());
                 let store_path = row.new_store_path.clone();
                 let reconciled = row.commit_hash.is_some();
                 let restart_type = match row.event_type.as_str() {

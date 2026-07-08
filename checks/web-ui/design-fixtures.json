@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "$schema_note": "Canonical visual fixture data for aligning docs/design/CrystalForge mocked examples with checks/web-ui Playwright states. This is intentionally product-shaped, stable, and non-secret. Use it when refactoring design examples so non-blocking design-parity comparisons are based on the same representative data as the web-ui check.",
+  "themeCoverage": ["dark", "light"],
+  "fleet": {
+    "systems": [
+      {
+        "hostname": "builder-primary",
+        "environment": "Production",
+        "status": "healthy",
+        "nixosGeneration": 42,
+        "agentVersion": "0.7.0",
+        "lastSeen": "2026-07-02T12:00:00Z"
+      },
+      {
+        "hostname": "edge-01",
+        "environment": "Edge",
+        "status": "warning",
+        "nixosGeneration": 17,
+        "agentVersion": "0.7.0",
+        "lastSeen": "2026-07-02T11:45:00Z"
+      },
+      {
+        "hostname": "orion-db",
+        "environment": "Database",
+        "status": "critical",
+        "nixosGeneration": 31,
+        "agentVersion": "0.6.4",
+        "lastSeen": "2026-07-02T10:15:00Z"
+      }
+    ],
+    "summary": {
+      "totalSystems": 13,
+      "healthySystems": 10,
+      "warningSystems": 2,
+      "criticalSystems": 1,
+      "activeBuilds": 1
+    }
+  },
+  "flakes": [
+    {
+      "name": "platform",
+      "repository": "git@gitlab.com:crystal-forge/platform.git",
+      "branch": "main",
+      "buildScope": "cf_systems_only",
+      "latestEvaluation": "passed"
+    },
+    {
+      "name": "edge-lab",
+      "repository": "git@gitlab.com:crystal-forge/edge-lab.git",
+      "branch": "staging",
+      "buildScope": "all_outputs",
+      "latestEvaluation": "warning"
+    }
+  ],
+  "builds": [
+    {
+      "system": "builder-primary",
+      "derivation": "system-closure",
+      "status": "building",
+      "duration": "7m 12s"
+    },
+    {
+      "system": "edge-01",
+      "derivation": "nginx-edge-profile",
+      "status": "queued",
+      "duration": "pending"
+    },
+    {
+      "system": "orion-db",
+      "derivation": "postgresql-ha-profile",
+      "status": "failed",
+      "duration": "18m 04s"
+    }
+  ],
+  "security": {
+    "cves": [
+      {
+        "id": "CVE-2026-1234",
+        "severity": "critical",
+        "package": "openssl",
+        "affectedSystems": 2
+      },
+      {
+        "id": "CVE-2026-2345",
+        "severity": "high",
+        "package": "curl",
+        "affectedSystems": 5
+      }
+    ],
+    "policy": {
+      "name": "Production baseline",
+      "mode": "blocking",
+      "rules": ["No critical CVEs", "Require signed deployments"]
+    }
+  },
+  "compliance": {
+    "profile": "NIST 800-53 rev5 High baseline",
+    "score": 87,
+    "controlsPassing": 148,
+    "controlsFailing": 12
+  }
+}

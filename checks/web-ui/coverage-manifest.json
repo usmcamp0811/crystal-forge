@@ -1,0 +1,1762 @@
+{
+  "version": 1,
+  "$schema_note": "Coverage manifest for the web-ui Nix check. Single source of truth for which Playwright steps run per profile, how each maps to app routes and the design reference, and how screenshots are compared to approved baselines. The check fails if the steps in integration-test.js drift from this manifest.",
+  "settings": {
+    "viewport": {
+      "width": 1920,
+      "height": 1080
+    },
+    "timezoneId": "UTC",
+    "locale": "en-US",
+    "visualThemes": [
+      "dark",
+      "light"
+    ],
+    "designFixture": {
+      "path": "checks/web-ui/design-fixtures.json",
+      "policy": "non-blocking-gauge",
+      "note": "Canonical fixture data for aligning docs/design/CrystalForge mocked JSX examples with representative Playwright states. The web-ui check reports designRef + fixture coverage as a non-blocking visual parity gauge; pixel comparison against rendered design examples is intentionally not a hard gate in TASK-139."
+    },
+    "visualDiff": {
+      "fuzzPercent": 3,
+      "maxDiffPixelRatio": 0.005,
+      "note": "ImageMagick compare -metric AE with -fuzz; a step fails visually only when its baseline policy is 'strict' and the diff pixel ratio exceeds maxDiffPixelRatio (per-step override via step.maxDiffPixelRatio)."
+    },
+    "baselinePolicies": {
+      "none": "No comparison performed.",
+      "advisory": "Compared when a baseline exists; differences are reported in the visual report but never fail the check.",
+      "strict": "Baseline must exist and match within threshold; missing baseline or excess diff fails the check."
+    }
+  },
+  "routes": [
+    {
+      "path": "/",
+      "covered": true,
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx"
+    },
+    {
+      "path": "/systems",
+      "covered": true,
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx"
+    },
+    {
+      "path": "/systems/:id",
+      "covered": true,
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx"
+    },
+    {
+      "path": "/environments",
+      "covered": true,
+      "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx"
+    },
+    {
+      "path": "/flakes",
+      "covered": true,
+      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx"
+    },
+    {
+      "path": "/builds",
+      "covered": true,
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx"
+    },
+    {
+      "path": "/evaluations",
+      "covered": true,
+      "designRef": "docs/design/CrystalForge/components/EvalsView.jsx"
+    },
+    {
+      "path": "/evaluations/:commit_id",
+      "covered": false,
+      "designRef": "docs/design/CrystalForge/components/EvalDrawer.jsx",
+      "reason": "Commit-scoped evaluation view; the evaluation drawer is exercised via /evaluations steps. Dedicated deep-link coverage is a candidate future addition."
+    },
+    {
+      "path": "/builders",
+      "covered": true,
+      "designRef": "docs/design/CrystalForge/components/BuildersView.jsx"
+    },
+    {
+      "path": "/caches",
+      "covered": true,
+      "designRef": "docs/design/CrystalForge/components/CachesView.jsx"
+    },
+    {
+      "path": "/cves",
+      "covered": true,
+      "designRef": "docs/design/CrystalForge/components/CvesView.jsx"
+    },
+    {
+      "path": "/scanning",
+      "covered": true,
+      "designRef": "docs/design/CrystalForge/components/ScanningView.jsx"
+    },
+    {
+      "path": "/deployment-policies",
+      "covered": true,
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx"
+    },
+    {
+      "path": "/compliance",
+      "covered": true,
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx"
+    },
+    {
+      "path": "/admin",
+      "covered": true,
+      "designRef": "docs/design/CrystalForge/components/AdminView.jsx"
+    },
+    {
+      "path": "/style-guide",
+      "covered": true,
+      "designRef": null
+    },
+    {
+      "path": "/:..route",
+      "covered": true,
+      "designRef": null
+    },
+    {
+      "path": "/login",
+      "covered": true,
+      "designRef": null
+    },
+    {
+      "path": "/register",
+      "covered": true,
+      "designRef": null
+    },
+    {
+      "path": "/setup",
+      "covered": false,
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "reason": "First-run setup wizard conflicts with the already-configured test instance; setup-coach onboarding states are covered via the dashboard onboarding steps (06c*-06f*) instead."
+    },
+    {
+      "path": "/dev/login",
+      "covered": false,
+      "designRef": null,
+      "reason": "Development-only login bypass; not part of the supported production UI surface."
+    }
+  ],
+  "exclusions": [
+    {
+      "area": "Destructive system removal (Remove system from registry confirm)",
+      "reason": "Removal deactivates a registered system; exercised only against mocked/disposable data in modal-open steps (12e) without confirming against the real seeded system."
+    },
+    {
+      "area": "Flake deletion confirm",
+      "reason": "Delete confirm modal is exercised with mocked flake data (13ea) — the destructive path is never executed against the real seeded flake."
+    },
+    {
+      "area": "Real deploy/rollback triggers",
+      "reason": "Deploy and rollback modals are opened and asserted (12f, 12j) but not confirmed, to keep the seeded system state stable for subsequent steps."
+    },
+    {
+      "area": "OIDC auth flows",
+      "reason": "Covered by the separate integration check; the web-ui check runs with local auth."
+    }
+  ],
+  "steps": [
+    {
+      "name": "01-login-page",
+      "description": "Initial login page (first visit)",
+      "route": "/login",
+      "designRef": null,
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "02-registration",
+      "description": "Registration page with form filled",
+      "route": "/register",
+      "designRef": null,
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "03-registration-submit",
+      "description": "After clicking register",
+      "route": "/register",
+      "designRef": null,
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "04-post-register-login",
+      "description": "Login page after registration",
+      "route": "/login",
+      "designRef": null,
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "05-login-submit",
+      "description": "After clicking sign in",
+      "route": "/login",
+      "designRef": null,
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06-dashboard",
+      "description": "Dashboard after login",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06-dashboard-loading-spinner",
+      "description": "Dashboard loading spinner remains visible while dashboard data is pending",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06y-recent-deployments-scroll",
+      "description": "Dashboard recent deployments widget scrolls when list exceeds visible height",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06z-fleet-health-widget-assert",
+      "description": "Dashboard Fleet Health widget matches expected status counts",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06z2-dashboard-error-no-fabricated-data",
+      "description": "",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06z3-dashboard-widget-visuals-parity",
+      "description": "",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06a-onboarding-coach-dashboard",
+      "description": "Non-blocking onboarding coach panel on dashboard",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06b-onboarding-environments-callout",
+      "description": "Environments: page callouts visible, policies guidance present",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06b2-onboarding-environments-form-callouts",
+      "description": "Environments: open form, assert policies field callout",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06b3-onboarding-environments-create",
+      "description": "Environments: fill form, submit, assert step Configured",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06c-onboarding-flakes-callout",
+      "description": "Flakes: page callouts visible",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06c2-onboarding-flakes-form-callouts",
+      "description": "Flakes: open form, assert progressive callouts, fill and submit",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06c3-onboarding-flakes-create",
+      "description": "Flakes: assert step Configured after creation",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06d-onboarding-builders-callout",
+      "description": "Builders: page callouts visible",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06d2-onboarding-builders-form-callouts",
+      "description": "Builders: open modal, assert progressive callouts, fill and submit",
+      "route": "/builders",
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06d3-onboarding-builders-create",
+      "description": "Builders: assert step Configured after creation",
+      "route": "/builders",
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06e-onboarding-caches-callout",
+      "description": "Caches: page callouts visible",
+      "route": "/builders",
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06e2-onboarding-caches-form-callouts",
+      "description": "Caches: open modal, assert progressive callouts, fill and submit",
+      "route": "/caches",
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06e3-onboarding-caches-create",
+      "description": "Caches: assert step Configured after creation",
+      "route": "/caches",
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06f-onboarding-systems-callout",
+      "description": "Systems: page callouts visible",
+      "route": "/caches",
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06f2-onboarding-systems-form-callouts",
+      "description": "Systems: open form, assert progressive callouts, generate key",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06f3-onboarding-systems-keygen",
+      "description": "Systems: create flake in real DB via API, select env + flake in form",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": false,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06f4-onboarding-systems-create",
+      "description": "Systems: submit, assert step and agent Configured",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06g-onboarding-coach-minimized",
+      "description": "Coach panel: minimize to tab, verify tab visible and styled",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06h-onboarding-coach-all-configured",
+      "description": "Coach panel: expand from tab, all steps show Configured",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06b-config-health-bar",
+      "description": "Dashboard top notification bar for admin config health issues",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06c-config-health-widget",
+      "description": "Dashboard Pipeline Readiness widget with actionable warning links",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06x-pipeline-readiness-scroll",
+      "description": "Dashboard pipeline readiness widget supports scrolling for many issues",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "07-sidebar-desktop-expanded",
+      "description": "Desktop: sidebar expanded — grouped sections with labels visible",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "08-sidebar-desktop-collapsed",
+      "description": "Desktop: sidebar in icons-only collapsed state with edge toggle",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "08b-sidebar-desktop-toggle-expand",
+      "description": "Desktop: sidebar expanded via toggle click — full labels and sections",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "09-sidebar-tablet-collapsed",
+      "description": "Tablet (900px): default icons-only state, edge toggle visible",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "09b-sidebar-tablet-expanded",
+      "description": "Tablet (900px): sidebar expanded via toggle — section labels visible",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "09c-sidebar-mobile-drawer",
+      "description": "Mobile (375px): drawer open with grouped navigation sections",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "09d-sidebar-narrow-collapsed",
+      "description": "Narrow desktop (560px): default icons-only — no hamburger, edge toggle present",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "09e-sidebar-sections-fullwidth",
+      "description": "Desktop: full-width sidebar showing all section group headers",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "09f-sidebar-light-expanded",
+      "description": "Desktop light theme: expanded shell parity screenshot",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "09g-topbar-notifications-dark",
+      "description": "Dark theme notifications panel opens with unread badge and settings placeholder",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "09h-topbar-notifications-light",
+      "description": "Light theme notifications panel opens with unread badge and settings placeholder",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "09i-topbar-notifications-non-admin",
+      "description": "Non-admin shell hides admin-gated notifications",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "10-responsive-reset-desktop",
+      "description": "Reset viewport and localStorage to desktop defaults for remaining screenshots",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": false,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "11-user-menu",
+      "description": "User dropdown menu",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": false,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "11b-builders",
+      "description": "Builders list cards/table parity with real-shaped API data",
+      "route": "/builders",
+      "designRef": "docs/design/CrystalForge/components/BuildersView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "11c-builders-edit-modal",
+      "description": "Builders edit modal with keypair actions",
+      "route": "/builders",
+      "designRef": "docs/design/CrystalForge/components/BuildersView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12-systems",
+      "description": "Systems list cards/table parity with view toggle and shown count",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12a-systems-empty-state",
+      "description": "Systems empty state from real API data",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12b-systems-config-warning",
+      "description": "Systems warning state for missing flake linkage and agent heartbeat",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12c-systems-modal-config-field",
+      "description": "Systems add modal opens with save action",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12d-systems-side-panel-open",
+      "description": "Systems side panel opens from selection and exposes design actions",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12e-systems-edit-modal",
+      "description": "Systems edit modal for existing systems",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/EditSystemModal.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12f-systems-deploy-modal",
+      "description": "Systems deploy modal with commit selector",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/DeployGate.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12g-system-detail-history-logs-edit",
+      "description": "System detail history/logs tabs and edit action",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12k-system-detail-tab-icons",
+      "description": "System detail tab rail renders shared Icon SVGs for every tab (design parity)",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12h-system-detail-cves-grouped-justification",
+      "description": "System detail CVEs tab grouped list, filters, details link, and justification save",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12d-systems-api-error-no-mock-fallback",
+      "description": "Systems API failures show error state without deterministic mock hosts",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12g-systems-warning-clears-after-link",
+      "description": "Systems missing-flake warning clears after linking flake via Edit modal",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "13-flakes",
+      "description": "Flakes registry list/table parity",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "13a-flakes-cards-parity",
+      "description": "Flakes cards mode parity",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "13aa-flakes-tray-diff-parity",
+      "description": "Flake side tray commit explorer and diff modal parity",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "13e-flakes-add-modal-credentials",
+      "description": "Flake add modal with build scope and credential controls",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "13ea-flakes-delete-confirm-parity",
+      "description": "Flake delete confirmation requires typing the flake name",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "13f-flakes-edit-modal-credentials",
+      "description": "Flake edit modal showing existing build scope and credential controls",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "13g-flakes-edit-modal-ssh-save-persist",
+      "description": "Flakes edit modal persists SSH auth settings after save/reopen",
+      "route": "/systems",
+      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "13d-flakes-stress-dataset",
+      "description": "Flakes view remains responsive with production-shaped timeline payload",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "13b-flakes-config-warning",
+      "description": "Flakes warning state for latest evaluation errors",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "13c-flakes-history-rewrite-modal",
+      "description": "Flakes view history rewrite conflict modal after sync",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "13h-flakes-force-push-rewrite-recovery",
+      "description": "Real git force-push rewrite + sync updates flake timeline state",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "14-environments",
+      "description": "Environments registry cards/table parity",
+      "route": "/environments",
+      "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "14a-environments-add-modal",
+      "description": "Environments unified Add/Edit modal parity",
+      "route": "/environments",
+      "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "14b-environments-config-warning",
+      "description": "Environments warning state for missing builder and cache assignments",
+      "route": "/environments",
+      "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "15-builds",
+      "description": "Builds page",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "15a-builds-header-and-metrics",
+      "description": "Builds header actions and stat strip labels",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "11b-builds-queue-card-focus",
+      "description": "Build queue row selection focus",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "15b-builds-completed-tab",
+      "description": "Builds page - Completed Builds tab",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "15c-builds-completed-filters",
+      "description": "Builds page - Completed Builds with filters",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "full"
+      ],
+      "semanticAssertions": false,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "15d-builds-queue-table-view",
+      "description": "Build queue default table view",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "15e-builds-cancelling-state",
+      "description": "Build queue showing cancelling/stopping state",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "15f-builds-human-duration",
+      "description": "Build queue showing human-readable duration format",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "15g-builds-action-visibility",
+      "description": "Build queue action buttons shown only for valid states",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "15h-builds-completed-restart-action",
+      "description": "Completed tab restart action requeues cancelled build",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "15i-builds-non-operator",
+      "description": "Builds view hides retry and mutating controls for non-operators",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "16-cves",
+      "description": "CVE dashboard - fleet overview",
+      "route": "/cves",
+      "designRef": "docs/design/CrystalForge/components/CvesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "16b-cves-severity-filter",
+      "description": "CVE dashboard - severity filter re-issues request with ?severity=critical",
+      "route": "/cves",
+      "designRef": "docs/design/CrystalForge/components/CvesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "17-style-guide",
+      "description": "Style guide",
+      "route": "/style-guide",
+      "designRef": null,
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "18-policies",
+      "description": "Policies view",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "19-policies-new-modal-fields",
+      "description": "Policies new modal shows the unified design-faithful form",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "20-policies-new-modal-rule-builder",
+      "description": "Policies new modal can add an assertion rule via the builder",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "20b-policies-cve-gate-create-roundtrip",
+      "description": "API: create require_cve_check policy and verify it round-trips correctly",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "20c-policies-multirule-create-roundtrip",
+      "description": "API: create multi-rule custom_check (mode=any) and verify rules[] round-trips",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "20d-policies-cve-gate-invalid-rejected",
+      "description": "API: require_cve_check with invalid when_no_scan value is rejected 400",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "20e-policies-multirule-rules-only-no-expression-required",
+      "description": "API: rules-only custom_check (no top-level expression) is accepted",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "16c-scanning-view",
+      "description": "Scanning view - live endpoint wiring, nested rows, and schedule modal",
+      "route": "/scanning",
+      "designRef": "docs/design/CrystalForge/components/ScanningView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "21-caches",
+      "description": "Cache management view with stats and Push Jobs tab",
+      "route": "/caches",
+      "designRef": "docs/design/CrystalForge/components/CachesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "22-caches-modal-nix",
+      "description": "Add cache modal with Nix type selected and public test UX",
+      "route": "/caches",
+      "designRef": "docs/design/CrystalForge/components/CachesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "23-caches-modal-http",
+      "description": "Add cache modal save flow creates a destination row",
+      "route": "/caches",
+      "designRef": "docs/design/CrystalForge/components/CachesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "24-caches-modal-s3",
+      "description": "Add cache modal with S3 type selected",
+      "route": "/caches",
+      "designRef": "docs/design/CrystalForge/components/CachesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "25-caches-modal-attic",
+      "description": "Add cache modal with Attic type selected",
+      "route": "/caches",
+      "designRef": "docs/design/CrystalForge/components/CachesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "26-evaluations",
+      "description": "Evaluations page — Active Queue tab with cancel buttons (TASK-273)",
+      "route": "/evaluations",
+      "designRef": "docs/design/CrystalForge/components/EvalsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "26b-evaluations-history",
+      "description": "Evaluations page — History tab with completed/failed/cancelled rows (TASK-273)",
+      "route": "/evaluations",
+      "designRef": "docs/design/CrystalForge/components/EvalsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12i-system-detail-generation-metric",
+      "description": "System detail shows API-provided generation in overview metrics",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12j-system-detail-deploy-generation-list",
+      "description": "Deploy tab generation selector matches generation row text styling expectations",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "27-hardening-fleet",
+      "description": "Systemd hardening fleet dashboard route and summary cards",
+      "route": "/hardening",
+      "designRef": null,
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory",
+      "knownIssue": "Route /hardening is not registered in packages/web-ui/src/routes.rs; this step currently renders the NotFound catch-all. Tracked as TASK-377."
+    },
+    {
+      "name": "28-system-hardening-tab",
+      "description": "System detail hardening tab table and scan eligibility state",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/HardeningTab.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29-compliance-empty",
+      "description": "Compliance view renders empty state when no bundles exist",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29a-compliance-populated",
+      "description": "Compliance view renders bundle catalog, header, score strip, and systems matrix",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29b-compliance-evidence-drawer",
+      "description": "Compliance evidence drawer opens and renders control evidence",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29c-compliance-export-modal",
+      "description": "Compliance export evidence modal renders format picker and toggles",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29d-compliance-new-bundle-modal",
+      "description": "Compliance new bundle modal renders fields, policy picker, and validates",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29e-compliance-api-error",
+      "description": "Compliance view renders error state when bundle API fails",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "13i-flakes-non-admin",
+      "description": "Flakes view hides admin-only mutations for non-admin users",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "30-admin",
+      "description": "Admin / Server Management view renders for the logged-in session",
+      "route": "/admin",
+      "designRef": "docs/design/CrystalForge/components/AdminView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "31-not-found",
+      "description": "Catch-all 404 page renders for unknown routes inside the app shell",
+      "route": "/:..route",
+      "designRef": null,
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    }
+  ]
+}

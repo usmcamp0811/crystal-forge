@@ -1880,10 +1880,17 @@ mod tests {
 
     #[test]
     fn deployment_target_resolution_uses_nixos_store_path_for_commit() {
-        assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("COALESCE(d.store_path, d.expected_store_path)"));
+        assert!(
+            RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL
+                .contains("COALESCE(d.store_path, d.expected_store_path)")
+        );
         assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("d.derivation_type = 'nixos'"));
-        assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)"));
-        assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("LOWER(c.git_commit_hash) = LOWER($2)"));
+        assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains(
+            "d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)"
+        ));
+        assert!(
+            RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("LOWER(c.git_commit_hash) = LOWER($2)")
+        );
     }
 
     #[test]

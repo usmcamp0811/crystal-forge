@@ -163,16 +163,17 @@ pub async fn log(
         }
     };
 
-    let previous_observed = match lock_observed_system_state_by_hostname_tx(&mut tx, &payload.hostname).await {
-        Ok(value) => value,
-        Err(e) => {
-            debug!(
-                "❌ failed to lock observed state for {}: {e:?}",
-                payload.hostname
-            );
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+    let previous_observed =
+        match lock_observed_system_state_by_hostname_tx(&mut tx, &payload.hostname).await {
+            Ok(value) => value,
+            Err(e) => {
+                debug!(
+                    "❌ failed to lock observed state for {}: {e:?}",
+                    payload.hostname
+                );
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
 
     let boot_id_change = if let Some(ref new_boot_id) = payload.boot_id {
         match update_boot_id_tx(&mut tx, &payload.hostname, new_boot_id).await {
@@ -253,7 +254,11 @@ pub async fn log(
             Err(state_change_reason) => {
                 info!("🔍 Heartbeat became state change: {}", state_change_reason);
                 let (change_reason_override, event_restart_type) =
-                    classify_non_reboot_state_change_reason(&payload, restart_type, previous_observed.as_ref());
+                    classify_non_reboot_state_change_reason(
+                        &payload,
+                        restart_type,
+                        previous_observed.as_ref(),
+                    );
 
                 if let Err(e) = insert_system_state(
                     &mut *tx,

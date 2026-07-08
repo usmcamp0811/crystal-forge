@@ -216,7 +216,8 @@ pub async fn set_pending_deployment_target(
     source: &str,
 ) -> Result<Option<Uuid>> {
     let mut tx = pool.begin().await?;
-    let result = set_pending_deployment_target_tx(&mut tx, system_id, desired_target, source).await?;
+    let result =
+        set_pending_deployment_target_tx(&mut tx, system_id, desired_target, source).await?;
     tx.commit().await?;
     Ok(result)
 }
@@ -250,10 +251,10 @@ async fn find_matching_pending_deployment_tx(
     };
 
     let row = sqlx::query_as::<_, PendingSystemDeployment>(MATCH_PENDING_DEPLOYMENT_SQL)
-    .bind(system_id)
-    .bind(store_path)
-    .fetch_optional(&mut **tx)
-    .await?;
+        .bind(system_id)
+        .bind(store_path)
+        .fetch_optional(&mut **tx)
+        .await?;
 
     Ok(row)
 }

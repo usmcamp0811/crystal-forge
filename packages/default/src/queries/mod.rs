@@ -23,8 +23,8 @@ pub mod flakes;
 pub mod hardening_scans;
 pub mod scanning;
 pub mod status;
-pub mod system_states;
 pub mod system_events;
+pub mod system_states;
 pub mod systems;
 pub mod users;
 
