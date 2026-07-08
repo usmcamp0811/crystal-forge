@@ -3,10 +3,10 @@ id: TASK-385
 title: >-
   Flakes sync-error surfaces (real backend errors) + sidebar alert badge system
   with attention flash
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-08 07:26'
-updated_date: '2026-07-08 13:12'
+updated_date: '2026-07-08 13:13'
 labels:
   - design-parity
   - flakes
@@ -107,3 +107,12 @@ Per doc-18 §8: fmt + clippy `-D warnings` + tests in both crates; `db-only up` 
 - [ ] #11 Fixtures seed one errored flake (realistic multi-line error, relative timestamps), one synced, one unknown; checks/web-ui coverage-manifest asserts + screenshots: sidebar badge counts, flakes error chip/callout with attention-flash class, tray Sync failed banner with seeded error text, and badge hidden after view acknowledgment
 - [ ] #12 All verification passes: fmt + clippy -D warnings + cargo test in packages/default and packages/web-ui; sqlx prepare; nix build of server, web-ui, checks web-ui; nix flake check --keep-going; MR attaches web-ui check screenshots via GitLab uploads (not committed)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-agent on host in /home/mcamp/code/crystal-forge/TASK-385-flakes-sync-errors-sidebar-badges
+
+Branch: TASK-385-flakes-sync-errors-sidebar-badges
+Base: dev (2f326543)
+<!-- SECTION:NOTES:END -->
