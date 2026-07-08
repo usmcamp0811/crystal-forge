@@ -878,6 +878,9 @@ pub async fn create_flake(
                 branch: flake.branch,
                 build_scope: flake.build_scope,
                 system_count: 0,
+                sync_status: flake.sync_status.unwrap_or_else(|| "unknown".to_string()),
+                last_sync_at: flake.last_sync_at,
+                last_sync_error: flake.last_sync_error,
             }),
         )
             .into_response(),
@@ -950,6 +953,9 @@ pub async fn update_flake_handler(
                 branch: flake.branch,
                 build_scope: flake.build_scope,
                 system_count: count_systems_for_flake(&pool, flake_id).await.unwrap_or(0),
+                sync_status: flake.sync_status.unwrap_or_else(|| "unknown".to_string()),
+                last_sync_at: flake.last_sync_at,
+                last_sync_error: flake.last_sync_error,
             }),
         )
             .into_response(),
