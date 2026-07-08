@@ -3,9 +3,10 @@ id: TASK-385
 title: >-
   Flakes sync-error surfaces (real backend errors) + sidebar alert badge system
   with attention flash
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-07-08 07:26'
+updated_date: '2026-07-08 13:12'
 labels:
   - design-parity
   - flakes
