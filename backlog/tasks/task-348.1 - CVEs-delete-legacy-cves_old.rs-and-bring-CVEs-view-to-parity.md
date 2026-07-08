@@ -1,11 +1,11 @@
 ---
 id: TASK-348.1
 title: 'CVEs: delete legacy cves_old.rs and bring CVEs view to parity'
-status: Review
+status: Done
 assignee:
   - opencode-agent
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 03:44'
+updated_date: '2026-07-08 07:22'
 labels:
   - design-parity
   - cves
@@ -75,3 +75,9 @@ Bring the CVEs view to parity (grouped + flat views, severity filter, stat strip
 <!-- SECTION:PLAN:BEGIN -->
 Executed: confirmed legacy file removal + mod.rs cleanliness; verified view parity; added missing CVE triage review/target date field in disabled deferred-persistence state; strengthened web-ui check for grouped + drawer + triage date labels + disabled state; created TASK-348.1.1 for persistence; ran targeted fmt/check and nix web-ui check; updated MR !280; task remains in Review.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Closed during 2026-07-08 backlog grooming: branch merged into dev (fd4501af). Remaining drift vs the updated design example is superseded by the new visual-drift audit task. Concrete follow-up TASK-348.1.1 remains open.
+<!-- SECTION:NOTES:END -->
