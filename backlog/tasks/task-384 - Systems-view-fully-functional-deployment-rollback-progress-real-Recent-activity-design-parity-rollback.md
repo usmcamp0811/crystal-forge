@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-07-08 02:49'
-updated_date: '2026-07-08 19:26'
+updated_date: '2026-07-09 03:07'
 labels:
   - design-parity
   - systems
@@ -178,6 +178,8 @@ LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-384-systems-dep
 Approved implementation plan recorded. Starting code work in /home/mcamp/code/crystal-forge/TASK-384-systems-deployment-progress.
 
 Follow-up runtime polish pushed in `ea26dd14 feat: report deployment failures to systems UI` on branch `TASK-384-systems-deployment-progress`. Adds migration `0157_deployment_failure_details.sql`, agent `POST /agent/deployment-failed` reporting, persisted `failed_at`/`failure_message`, deployment-status failure details, UI failed-banner messaging, queued heartbeat countdown text, and Recent activity wrapping polish. Updated agent failure reporting to send the expanded anyhow chain (`{:#}`), so root causes like `nix copy failed: ... no substituter that can build it` should reach the UI. Verification run for follow-up: `cargo sqlx prepare` succeeded after applying migration 0157 to local dev DB; `git diff --check` passed; backend and web-ui fmt checks passed; `SQLX_OFFLINE=true cargo check --all-targets` for packages/default passed; web-ui `cargo check --all-targets` passed before final backend-only tweak; `cargo test deployment_progress_tests --lib` passed; `cargo test pending_deploy_banner` passed; `nix build .#packages.x86_64-linux.server --no-link` passed; `nix build .#packages.x86_64-linux.web-ui --no-link` passed. Clippy `-D warnings` remains blocked by known baseline TASK-80 warning debt, not this follow-up. MR remains deferred pending maintainer runtime evaluation, per request.
+
+Runtime deploy failure follow-up pushed in `bb69d039 fix: require cached deployment targets`. Root cause from live agent logs: agent was receiving a store path that Attic reported as unavailable (`no substituter that can build it`). Fix changes commit-hash deployment target resolution to require `derivations.store_path` (not `expected_store_path`) and a completed `cache_push_jobs` row before setting `systems.desired_target`, so uncached/predicted paths fail at request time instead of making the agent retry every heartbeat. Verification: `cargo fmt --all -- --check` for packages/default passed; `git diff --check` passed; targeted test `deployment_target_resolution_uses_nixos_store_path_for_commit` passed; `SQLX_OFFLINE=true cargo check --all-targets` for packages/default passed; `nix build .#packages.x86_64-linux.server --no-link` passed; `cargo sqlx prepare` succeeded against local dev DB after restarting `db-only`; no `.sqlx` metadata drift was shown.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
