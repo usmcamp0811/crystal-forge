@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 const RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL: &str = r#"
-SELECT COALESCE(d.store_path, d.expected_store_path) AS store_path
+SELECT d.store_path AS store_path
 FROM systems s
 JOIN commits c ON c.flake_id = s.flake_id
 JOIN derivations d ON d.commit_id = c.id
@@ -16,8 +16,14 @@ WHERE s.id = $1
   AND LOWER(c.git_commit_hash) = LOWER($2)
   AND d.derivation_type = 'nixos'
   AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
-  AND COALESCE(d.store_path, d.expected_store_path) IS NOT NULL
-  AND BTRIM(COALESCE(d.store_path, d.expected_store_path)) <> ''
+  AND d.store_path IS NOT NULL
+  AND BTRIM(d.store_path) <> ''
+  AND EXISTS (
+      SELECT 1
+      FROM cache_push_jobs cpj
+      WHERE cpj.derivation_id = d.id
+        AND cpj.status = 'completed'
+  )
 ORDER BY d.id DESC
 LIMIT 1
 "#;
@@ -607,7 +613,7 @@ pub async fn update_system_desired_target_with_source(
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "No NixOS store path is available for deployment target {target} on system {system_id}"
+                "No cached NixOS store path is available for deployment target {target} on system {system_id}"
             )
         })?;
 
@@ -1884,9 +1890,14 @@ mod tests {
 
     #[test]
     fn deployment_target_resolution_uses_nixos_store_path_for_commit() {
+        assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("SELECT d.store_path AS store_path"));
         assert!(
-            RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL
-                .contains("COALESCE(d.store_path, d.expected_store_path)")
+            !RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("expected_store_path"),
+            "deployment target resolution must not send predicted paths to agents"
+        );
+        assert!(
+            RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("cpj.status = 'completed'"),
+            "deployment target resolution must require cache availability before agents pull"
         );
         assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("d.derivation_type = 'nixos'"));
         assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains(
