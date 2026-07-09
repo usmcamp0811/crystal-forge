@@ -96,10 +96,9 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
         run_heartbeat_loop(heartbeat_client, heartbeat_interval).await;
     });
 
-    // Cache push and CVE scanning are handled via the server API in API mode and
-    // are queued/performed server-side. Remote builders do not open a database
-    // connection for these loops.
-    info!("📤 Cache push queued server-side on job completion (no builder DB pool)");
+    // Remote API builders must push successful outputs from the builder host,
+    // because the built closure may not exist in the server's local store.
+    info!("📤 Cache push performed builder-side after successful builds");
     info!("🔍 CVE scanning handled server-side (no builder DB pool)");
 
     // Spawn job polling loop
@@ -1270,8 +1269,45 @@ async fn execute_build_job(
                 }
             }
 
-            // Report success to the server. The server marks the derivation
-            // complete and queues the cache-push job (no builder DB access).
+            if !execution_mode.is_mock() {
+                let _ = client
+                    .append_logs(job_id, "📤 Pushing build output to cache...\n")
+                    .await;
+
+                match derivation
+                    .push_to_cache_with_retry(&store_path, &cache_config, &build_config)
+                    .await
+                {
+                    Ok(()) => {
+                        let _ = client
+                            .append_logs(job_id, "✅ Build output pushed to cache\n")
+                            .await;
+                    }
+                    Err(e) => {
+                        error!("❌ Cache push failed for job #{}: {:#}", job_id, e);
+                        let _ = client
+                            .append_logs(job_id, &format!("❌ Cache push failed: {:#}\n", e))
+                            .await;
+                        if let Err(report_error) = client
+                            .fail_job(
+                                job_id,
+                                &format!("Cache push failed after successful build: {:#}", e),
+                            )
+                            .await
+                        {
+                            error!(
+                                "❌ Failed to report cache-push failure for job #{}: {}",
+                                job_id, report_error
+                            );
+                        }
+                        return;
+                    }
+                }
+            }
+
+            // Report success to the server after the builder-side cache push.
+            // The server records completion and may create a cache-push audit row,
+            // but remote deployability depends on the builder push above.
             if let Err(e) = client.complete_job(job_id, &store_path).await {
                 error!("❌ Failed to report job #{} completion: {}", job_id, e);
             }

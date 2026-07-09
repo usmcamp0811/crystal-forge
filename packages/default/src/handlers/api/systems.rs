@@ -27,8 +27,8 @@ use crate::handlers::api::rbac::{
 };
 use crate::models::auth_identity::AuthRole;
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
-use crate::queries::cache_push::create_cache_push_job;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
+use crate::queries::derivations::reset_derivation_for_rebuild;
 use crate::queries::system_events::{
     deployment_progress_kind, deployment_progress_stage, get_system_deployment_progress_row,
     list_system_event_history_rows,
@@ -1474,27 +1474,51 @@ async fn queue_deployment_target_prerequisite(
             );
         }
 
-        match create_cache_push_job(&state.pool, row.id, store_path, None).await {
-            Ok(job_id) => {
-                return if row.has_active_cache_push {
-                    format!(
-                        "Deployment target {target} is built but not yet available from cache. Cache push job #{job_id} is already pending or running; try deploy again after it completes."
-                    )
-                } else {
-                    format!(
-                        "Deployment target {target} is built but not yet available from cache. Queued cache push job #{job_id}; try deploy again after it completes."
-                    )
-                };
+        if row.has_active_cache_push {
+            return format!(
+                "Deployment target {target} is built as {store_path}, but it is not yet available from cache. A cache push job is pending or running; try deploy again after it completes."
+            );
+        }
+
+        if row.has_active_build_job {
+            return format!(
+                "Deployment target {target} is built as {store_path}, but no completed cache push exists. A rebuild is already queued or running so a builder can push it to cache; try deploy again after it completes."
+            );
+        }
+
+        if let Err(error) = reset_derivation_for_rebuild(&state.pool, row.id).await {
+            tracing::warn!(
+                derivation_id = row.id,
+                target,
+                error = %error,
+                "failed to reset built-but-uncached deployment target for rebuild"
+            );
+            return format!(
+                "Deployment target {target} is built as {store_path}, but no completed cache push exists. The server could not queue a rebuild for builder-side cache push; check the build queue."
+            );
+        }
+
+        match enqueue_build_job_for_derivation(&state.pool, row.id).await {
+            Ok(true) => {
+                state.queue_notifier.notify_build_queue();
+                return format!(
+                    "Deployment target {target} is built as {store_path}, but no completed cache push exists. Queued a rebuild so the builder can push it to cache; try deploy again after build and cache push complete."
+                );
+            }
+            Ok(false) => {
+                return format!(
+                    "Deployment target {target} is built as {store_path}, but no completed cache push exists. A rebuild could not be queued because a build job already exists or the target is no longer buildable; check the build queue."
+                );
             }
             Err(error) => {
                 tracing::warn!(
                     derivation_id = row.id,
                     target,
                     error = %error,
-                    "failed to queue cache push for undeployable target"
+                    "failed to queue rebuild for built-but-uncached deployment target"
                 );
                 return format!(
-                    "Deployment target {target} is built as {store_path}, but no completed cache push exists and queuing a cache push failed. Check cache push jobs before deploying."
+                    "Deployment target {target} is built as {store_path}, but no completed cache push exists. Queueing a rebuild for builder-side cache push failed; check the build queue."
                 );
             }
         }
