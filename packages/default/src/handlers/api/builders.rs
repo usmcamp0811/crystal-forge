@@ -1916,6 +1916,8 @@ pub async fn start_job(
 pub struct CompleteJobRequest {
     #[serde(default)]
     pub output_path: Option<String>,
+    #[serde(default)]
+    pub cache_pushed: bool,
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/complete - Mark job as complete
@@ -1940,7 +1942,10 @@ pub async fn complete_job(
 
     // Output path is optional for backwards compatibility but expected from API builders.
     let request: CompleteJobRequest = if body.is_empty() {
-        CompleteJobRequest { output_path: None }
+        CompleteJobRequest {
+            output_path: None,
+            cache_pushed: false,
+        }
     } else {
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?
     };
@@ -1978,7 +1983,7 @@ pub async fn complete_job(
                     .ok()
                     .and_then(|dests| dests.into_iter().next().map(|d| d.name));
 
-            if let Err(e) = crate::queries::cache_push::create_cache_push_job(
+            match crate::queries::cache_push::create_cache_push_job(
                 &state.pool,
                 completed_job.derivation_id,
                 store_path,
@@ -1986,12 +1991,33 @@ pub async fn complete_job(
             )
             .await
             {
-                tracing::warn!(
-                    "Failed to queue cache push for derivation {} (job {}): {}",
-                    completed_job.derivation_id,
-                    job_id,
-                    e
-                );
+                Ok(cache_job_id) if request.cache_pushed => {
+                    if let Err(e) = crate::queries::cache_push::mark_cache_push_completed(
+                        &state.pool,
+                        cache_job_id,
+                        None,
+                        None,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            "Failed to mark builder-side cache push completed for derivation {} (job {} cache job {}): {}",
+                            completed_job.derivation_id,
+                            job_id,
+                            cache_job_id,
+                            e
+                        );
+                    }
+                }
+                Ok(_cache_job_id) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to queue cache push for derivation {} (job {}): {}",
+                        completed_job.derivation_id,
+                        job_id,
+                        e
+                    );
+                }
             }
         }
     }

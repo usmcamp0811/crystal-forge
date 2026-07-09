@@ -711,6 +711,7 @@ impl BuilderApiClient {
         #[derive(Serialize)]
         struct CompleteRequest {
             output_path: String,
+            cache_pushed: bool,
         }
 
         let path = format!(
@@ -720,6 +721,7 @@ impl BuilderApiClient {
         let url = format!("{}{}", self.server_url, path);
         let request = CompleteRequest {
             output_path: output_path.to_string(),
+            cache_pushed: true,
         };
         let body = serde_json::to_vec(&request)?;
         let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
