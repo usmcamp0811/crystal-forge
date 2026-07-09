@@ -28,6 +28,47 @@ ORDER BY d.id DESC
 LIMIT 1
 "#;
 
+const FIND_SYSTEM_DEPLOYMENT_DERIVATION_SQL: &str = r#"
+SELECT
+    d.id,
+    d.store_path,
+    d.status_id,
+    EXISTS (
+        SELECT 1
+        FROM cache_push_jobs cpj
+        WHERE cpj.derivation_id = d.id
+          AND cpj.status = 'completed'
+    ) AS has_completed_cache_push,
+    EXISTS (
+        SELECT 1
+        FROM cache_push_jobs cpj
+        WHERE cpj.derivation_id = d.id
+          AND cpj.status IN ('pending', 'in_progress')
+    ) AS has_active_cache_push,
+    EXISTS (
+        SELECT 1
+        FROM cache_push_jobs cpj
+        WHERE cpj.derivation_id = d.id
+          AND cpj.status = 'failed'
+          AND cpj.attempts >= 5
+    ) AS has_permanent_cache_failure,
+    EXISTS (
+        SELECT 1
+        FROM build_jobs bj
+        WHERE bj.derivation_id = d.id
+          AND bj.status IN ('queued', 'building', 'cancelling')
+    ) AS has_active_build_job
+FROM systems s
+JOIN commits c ON c.flake_id = s.flake_id
+JOIN derivations d ON d.commit_id = c.id
+WHERE s.id = $1
+  AND LOWER(c.git_commit_hash) = LOWER($2)
+  AND d.derivation_type = 'nixos'
+  AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
+ORDER BY d.id DESC
+LIMIT 1
+"#;
+
 const DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL: &str = "UPDATE systems
      SET is_active = FALSE,
          updated_at = NOW()
@@ -896,6 +937,48 @@ pub async fn resolve_system_deployment_target(
         .await?;
 
     Ok(store_path)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SystemDeploymentDerivationRow {
+    pub id: i32,
+    pub store_path: Option<String>,
+    pub status_id: i32,
+    pub has_completed_cache_push: bool,
+    pub has_active_cache_push: bool,
+    pub has_permanent_cache_failure: bool,
+    pub has_active_build_job: bool,
+}
+
+impl SystemDeploymentDerivationRow {
+    pub fn has_store_path(&self) -> bool {
+        self.store_path
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    }
+
+    pub fn is_buildable(&self) -> bool {
+        self.status_id == 5
+    }
+}
+
+pub async fn find_system_deployment_derivation(
+    pool: &PgPool,
+    system_id: Uuid,
+    target: &str,
+) -> Result<Option<SystemDeploymentDerivationRow>> {
+    if target.starts_with("/nix/store/") {
+        return Ok(None);
+    }
+
+    let row =
+        sqlx::query_as::<_, SystemDeploymentDerivationRow>(FIND_SYSTEM_DEPLOYMENT_DERIVATION_SQL)
+            .bind(system_id)
+            .bind(target)
+            .fetch_optional(pool)
+            .await?;
+
+    Ok(row)
 }
 
 pub async fn get_user_environment_membership_ids(

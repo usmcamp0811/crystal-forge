@@ -26,6 +26,8 @@ use crate::handlers::api::rbac::{
     authenticated_user_roles, extract_request_origin, require_viewer_or_above,
 };
 use crate::models::auth_identity::AuthRole;
+use crate::queries::build_jobs::enqueue_build_job_for_derivation;
+use crate::queries::cache_push::create_cache_push_job;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
 use crate::queries::system_events::{
     deployment_progress_kind, deployment_progress_stage, get_system_deployment_progress_row,
@@ -37,10 +39,10 @@ use crate::queries::system_states::{
 use crate::queries::systems::{
     FqdnUpdate, HeartbeatIntervalUpdate, SystemAccessRow, SystemDetailRow, SystemListRow,
     commit_belongs_to_system_flake, deactivate_system, find_system_access_row,
-    get_system_detail_by_id, get_user_environment_membership_ids, list_recent_commits_for_system,
-    list_system_access_rows, list_system_agent_event_rows, list_system_history_rows,
-    touch_system_updated_at, update_public_key, update_system_desired_target_with_source,
-    update_system_metadata,
+    find_system_deployment_derivation, get_system_detail_by_id,
+    get_user_environment_membership_ids, list_recent_commits_for_system, list_system_access_rows,
+    list_system_agent_event_rows, list_system_history_rows, touch_system_updated_at,
+    update_public_key, update_system_desired_target_with_source, update_system_metadata,
 };
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
 use crate::services::systems::SystemsListContext;
@@ -1429,6 +1431,113 @@ fn is_uncached_deployment_target_error(error: &anyhow::Error) -> bool {
         .contains("No cached NixOS store path is available")
 }
 
+async fn queue_deployment_target_prerequisite(
+    state: &CFState,
+    system_id: Uuid,
+    target: &str,
+) -> String {
+    let row = match find_system_deployment_derivation(&state.pool, system_id, target).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return format!(
+                "No deployable NixOS derivation was found for target {target}. Re-run evaluation for this commit, then try deploy again."
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                system_id = %system_id,
+                target,
+                error = %error,
+                "failed to inspect undeployable target derivation"
+            );
+            return format!(
+                "No cached NixOS store path is available for deployment target {target}. Failed to inspect build/cache prerequisites."
+            );
+        }
+    };
+
+    if row.has_completed_cache_push {
+        return format!(
+            "Deployment target {target} has a completed cache push but did not resolve to a deployable store path. Refresh commit metadata and try again."
+        );
+    }
+
+    if let Some(store_path) = row
+        .store_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if row.has_permanent_cache_failure {
+            return format!(
+                "Deployment target {target} is built as {store_path}, but its cache push has permanently failed. Retry or fix the cache push job before deploying."
+            );
+        }
+
+        match create_cache_push_job(&state.pool, row.id, store_path, None).await {
+            Ok(job_id) => {
+                return if row.has_active_cache_push {
+                    format!(
+                        "Deployment target {target} is built but not yet available from cache. Cache push job #{job_id} is already pending or running; try deploy again after it completes."
+                    )
+                } else {
+                    format!(
+                        "Deployment target {target} is built but not yet available from cache. Queued cache push job #{job_id}; try deploy again after it completes."
+                    )
+                };
+            }
+            Err(error) => {
+                tracing::warn!(
+                    derivation_id = row.id,
+                    target,
+                    error = %error,
+                    "failed to queue cache push for undeployable target"
+                );
+                return format!(
+                    "Deployment target {target} is built as {store_path}, but no completed cache push exists and queuing a cache push failed. Check cache push jobs before deploying."
+                );
+            }
+        }
+    }
+
+    if row.has_active_build_job {
+        return format!(
+            "Deployment target {target} is not built yet. A build job is already queued or running; try deploy again after build and cache push complete."
+        );
+    }
+
+    if row.is_buildable() {
+        match enqueue_build_job_for_derivation(&state.pool, row.id).await {
+            Ok(true) => {
+                state.queue_notifier.notify_build_queue();
+                return format!(
+                    "Deployment target {target} is not built yet. Queued a build job; try deploy again after build and cache push complete."
+                );
+            }
+            Ok(false) => {
+                return format!(
+                    "Deployment target {target} is not built yet. A build job already exists or the target is no longer buildable; check the build queue."
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    derivation_id = row.id,
+                    target,
+                    error = %error,
+                    "failed to queue build for undeployable target"
+                );
+                return format!(
+                    "Deployment target {target} is not built yet, and queuing a build job failed. Check the build queue before deploying."
+                );
+            }
+        }
+    }
+
+    format!(
+        "Deployment target {target} is not deployable yet. It must finish evaluation, build successfully, and be pushed to cache before deploy."
+    )
+}
+
 fn not_found() -> axum::response::Response {
     (
         StatusCode::NOT_FOUND,
@@ -1503,6 +1612,7 @@ fn validate_target_commit(value: &str) -> Result<(), String> {
 }
 
 pub async fn deploy_system(
+    State(state): State<CFState>,
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
@@ -1561,7 +1671,8 @@ pub async fn deploy_system(
             .await
     {
         if is_uncached_deployment_target_error(&error) {
-            return deployment_target_unavailable(&error.to_string());
+            let message = queue_deployment_target_prerequisite(&state, system_id, commit_sha).await;
+            return deployment_target_unavailable(&message);
         }
         return internal_error("Failed to request deployment");
     }
@@ -2720,11 +2831,11 @@ mod tests {
 
     #[tokio::test]
     async fn deploy_system_requires_authenticated_role() {
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
-            .expect("lazy pool should construct");
+        let state = test_cf_state();
+        let pool = state.pool.clone();
 
         let response = deploy_system(
+            State(state),
             State(pool),
             HeaderMap::new(),
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
@@ -2736,6 +2847,33 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn deploy_target_prerequisite_distinguishes_built_and_buildable_rows() {
+        let built = crate::queries::systems::SystemDeploymentDerivationRow {
+            id: 1,
+            store_path: Some("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system".to_string()),
+            status_id: 10,
+            has_completed_cache_push: false,
+            has_active_cache_push: false,
+            has_permanent_cache_failure: false,
+            has_active_build_job: false,
+        };
+        assert!(built.has_store_path());
+        assert!(!built.is_buildable());
+
+        let buildable = crate::queries::systems::SystemDeploymentDerivationRow {
+            id: 2,
+            store_path: None,
+            status_id: 5,
+            has_completed_cache_push: false,
+            has_active_cache_push: false,
+            has_permanent_cache_failure: false,
+            has_active_build_job: false,
+        };
+        assert!(!buildable.has_store_path());
+        assert!(buildable.is_buildable());
     }
 
     #[tokio::test]
