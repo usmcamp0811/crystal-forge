@@ -7,7 +7,7 @@ status: Review
 assignee:
   - '@gpt-5.5'
 created_date: '2026-07-08 02:49'
-updated_date: '2026-07-09 03:13'
+updated_date: '2026-07-09 03:49'
 labels:
   - design-parity
   - systems
@@ -182,6 +182,8 @@ Follow-up runtime polish pushed in `ea26dd14 feat: report deployment failures to
 Runtime deploy failure follow-up pushed in `bb69d039 fix: require cached deployment targets`. Root cause from live agent logs: agent was receiving a store path that Attic reported as unavailable (`no substituter that can build it`). Fix changes commit-hash deployment target resolution to require `derivations.store_path` (not `expected_store_path`) and a completed `cache_push_jobs` row before setting `systems.desired_target`, so uncached/predicted paths fail at request time instead of making the agent retry every heartbeat. Verification: `cargo fmt --all -- --check` for packages/default passed; `git diff --check` passed; targeted test `deployment_target_resolution_uses_nixos_store_path_for_commit` passed; `SQLX_OFFLINE=true cargo check --all-targets` for packages/default passed; `nix build .#packages.x86_64-linux.server --no-link` passed; `cargo sqlx prepare` succeeded against local dev DB after restarting `db-only`; no `.sqlx` metadata drift was shown.
 
 Opened MR https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/295 and moved TASK-384 to Review. MR description uses the project template and includes verification results, runtime risk notes, migration details, and the note that MR web-ui checks are expected to generate screenshot artifacts per maintainer instruction.
+
+MR !295 review fixes pushed in `5d9ed624 fix: stop retrying failed manual deployments`. Addressed reviewer findings: agent-reported failed manual deployments now clear matching desired targets in the failure transaction; heartbeat desired-target lookup suppresses terminal manual/pinned manual targets; stale manual desired target cleanup also expires matching pending manual deployments; uncached commit deploy/rollback now returns `409 deployment_target_unavailable` with the specific cached-target message; deployment progress commit display lookup is constrained to matching NixOS/system configuration derivations. Verification: `git diff --check` passed; backend fmt check passed; targeted backend tests for deployment progress, agent desired-target policy, stale manual target SQL guards, terminal manual target suppression SQL guard, and cached deployment target resolver passed; `SQLX_OFFLINE=true cargo check --all-targets` passed; `cargo sqlx prepare` passed against local dev DB with no metadata drift observed before final guard-only tweak; `nix build .#packages.x86_64-linux.server --no-link` passed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
