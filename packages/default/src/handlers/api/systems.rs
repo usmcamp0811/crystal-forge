@@ -979,15 +979,17 @@ pub async fn rollback_system(
         return not_found();
     }
 
-    if update_system_desired_target_with_source(
+    if let Err(error) = update_system_desired_target_with_source(
         &pool,
         system_id,
         target_commit,
         "manual_rollback_commit",
     )
     .await
-    .is_err()
     {
+        if is_uncached_deployment_target_error(&error) {
+            return deployment_target_unavailable(&error.to_string());
+        }
         return internal_error("Failed to request rollback");
     }
 
@@ -1409,6 +1411,24 @@ fn bad_request(message: &str) -> axum::response::Response {
         .into_response()
 }
 
+fn deployment_target_unavailable(message: &str) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "deployment_target_unavailable".to_string(),
+            message: message.to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn is_uncached_deployment_target_error(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .contains("No cached NixOS store path is available")
+}
+
 fn not_found() -> axum::response::Response {
     (
         StatusCode::NOT_FOUND,
@@ -1536,10 +1556,13 @@ pub async fn deploy_system(
     }
 
     // Set the desired_target to trigger deployment
-    if update_system_desired_target_with_source(&pool, system_id, commit_sha, "manual_deploy")
-        .await
-        .is_err()
+    if let Err(error) =
+        update_system_desired_target_with_source(&pool, system_id, commit_sha, "manual_deploy")
+            .await
     {
+        if is_uncached_deployment_target_error(&error) {
+            return deployment_target_unavailable(&error.to_string());
+        }
         return internal_error("Failed to request deployment");
     }
 

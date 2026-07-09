@@ -359,7 +359,34 @@ pub async fn mark_pending_deployment_failed_tx(
     .execute(&mut **tx)
     .await?;
 
+    if row.source.starts_with("manual_") {
+        clear_matching_manual_desired_target_tx(tx, system_id, target_store_path).await?;
+    }
+
     Ok(Some(row))
+}
+
+async fn clear_matching_manual_desired_target_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+    target_store_path: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE systems
+        SET desired_target = NULL,
+            desired_target_set_at = NULL,
+            updated_at = NOW()
+        WHERE id = $1
+          AND desired_target = $2
+        "#,
+    )
+    .bind(system_id)
+    .bind(target_store_path)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
 }
 
 pub async fn insert_deployment_failed_event_tx(
@@ -437,9 +464,11 @@ pub async fn get_system_deployment_progress_row(
             c.git_commit_hash AS target_commit,
             NULLIF(psd.metadata->>'target_generation', '')::bigint AS target_generation
         FROM pending_system_deployments psd
+        LEFT JOIN systems s ON s.id = psd.system_id
         LEFT JOIN derivations d
-          ON d.store_path = psd.target_store_path
-          OR d.expected_store_path = psd.target_store_path
+          ON (d.store_path = psd.target_store_path OR d.expected_store_path = psd.target_store_path)
+          AND d.derivation_type = 'nixos'
+          AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
         LEFT JOIN commits c ON c.id = d.commit_id
         WHERE psd.system_id = $1
           AND (

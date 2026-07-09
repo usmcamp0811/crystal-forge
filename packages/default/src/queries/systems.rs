@@ -329,6 +329,7 @@ pub async fn get_desired_target_by_hostname(
 
 #[derive(Debug, sqlx::FromRow)]
 struct AgentDesiredTargetRow {
+    id: Uuid,
     deployment_policy: String,
     desired_target: Option<String>,
     desired_target_set_at: Option<DateTime<Utc>>,
@@ -339,10 +340,28 @@ const MANUAL_DESIRED_TARGET_MAX_AGE_MINUTES: i64 = 30;
 const CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL: &str = r#"
 UPDATE systems
 SET desired_target = NULL, desired_target_set_at = NULL, updated_at = NOW()
-WHERE hostname = $1
-  AND deployment_policy = 'manual'
+WHERE id = $1
   AND desired_target IS NOT DISTINCT FROM $2
   AND desired_target_set_at IS NOT DISTINCT FROM $3
+"#;
+
+const EXPIRE_STALE_MANUAL_PENDING_DEPLOYMENT_SQL: &str = r#"
+UPDATE pending_system_deployments
+SET status = 'expired', completed_at = NOW()
+WHERE system_id = $1
+  AND target_store_path = $2
+  AND status = 'pending'
+  AND source LIKE 'manual_%'
+"#;
+
+const LATEST_MANUAL_PENDING_DEPLOYMENT_STATUS_SQL: &str = r#"
+SELECT status
+FROM pending_system_deployments
+WHERE system_id = $1
+  AND target_store_path = $2
+  AND source LIKE 'manual_%'
+ORDER BY issued_at DESC, id DESC
+LIMIT 1
 "#;
 
 fn should_send_desired_target_to_agent(
@@ -371,7 +390,7 @@ pub async fn get_agent_desired_target_by_hostname(
     hostname: &str,
 ) -> Result<Option<String>> {
     let row = sqlx::query_as::<_, AgentDesiredTargetRow>(
-        "SELECT deployment_policy, desired_target, desired_target_set_at FROM systems WHERE hostname = $1",
+        "SELECT id, deployment_policy, desired_target, desired_target_set_at FROM systems WHERE hostname = $1",
     )
     .bind(hostname)
     .fetch_optional(pool)
@@ -382,6 +401,19 @@ pub async fn get_agent_desired_target_by_hostname(
     };
 
     let now = Utc::now();
+    if matches!(row.deployment_policy.as_str(), "manual" | "pinned")
+        && manual_target_has_terminal_pending_deployment(
+            pool,
+            row.id,
+            row.desired_target.as_deref(),
+        )
+        .await?
+    {
+        clear_manual_desired_target(pool, row.id, &row.desired_target, row.desired_target_set_at)
+            .await?;
+        return Ok(None);
+    }
+
     if should_send_desired_target_to_agent(
         &row.deployment_policy,
         row.desired_target.as_deref(),
@@ -392,15 +424,55 @@ pub async fn get_agent_desired_target_by_hostname(
     }
 
     if row.deployment_policy == "manual" && row.desired_target.is_some() {
-        sqlx::query(CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL)
-            .bind(hostname)
-            .bind(&row.desired_target)
-            .bind(row.desired_target_set_at)
-            .execute(pool)
+        clear_manual_desired_target(pool, row.id, &row.desired_target, row.desired_target_set_at)
             .await?;
+
+        if let Some(target) = row.desired_target.as_deref() {
+            sqlx::query(EXPIRE_STALE_MANUAL_PENDING_DEPLOYMENT_SQL)
+                .bind(row.id)
+                .bind(target)
+                .execute(pool)
+                .await?;
+        }
     }
 
     Ok(None)
+}
+
+async fn manual_target_has_terminal_pending_deployment(
+    pool: &PgPool,
+    system_id: Uuid,
+    desired_target: Option<&str>,
+) -> Result<bool> {
+    let Some(target) = desired_target else {
+        return Ok(false);
+    };
+
+    let status = sqlx::query_scalar::<_, String>(LATEST_MANUAL_PENDING_DEPLOYMENT_STATUS_SQL)
+        .bind(system_id)
+        .bind(target)
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(matches!(
+        status.as_deref(),
+        Some("failed" | "superseded" | "expired")
+    ))
+}
+
+async fn clear_manual_desired_target(
+    pool: &PgPool,
+    system_id: Uuid,
+    desired_target: &Option<String>,
+    desired_target_set_at: Option<DateTime<Utc>>,
+) -> Result<()> {
+    sqlx::query(CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL)
+        .bind(system_id)
+        .bind(desired_target)
+        .bind(desired_target_set_at)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Fetch the per-system heartbeat interval from the systems table.
@@ -2048,6 +2120,7 @@ mod tests {
 
     #[test]
     fn stale_manual_target_clear_is_guarded_against_concurrent_replacement() {
+        assert!(CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL.contains("WHERE id = $1"));
         assert!(
             CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL
                 .contains("desired_target IS NOT DISTINCT FROM $2")
@@ -2056,6 +2129,20 @@ mod tests {
             CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL
                 .contains("desired_target_set_at IS NOT DISTINCT FROM $3")
         );
+    }
+
+    #[test]
+    fn stale_manual_pending_deployments_expire_with_stale_manual_target() {
+        assert!(EXPIRE_STALE_MANUAL_PENDING_DEPLOYMENT_SQL.contains("status = 'expired'"));
+        assert!(EXPIRE_STALE_MANUAL_PENDING_DEPLOYMENT_SQL.contains("status = 'pending'"));
+        assert!(EXPIRE_STALE_MANUAL_PENDING_DEPLOYMENT_SQL.contains("source LIKE 'manual_%'"));
+    }
+
+    #[test]
+    fn manual_terminal_pending_deployments_suppress_agent_target() {
+        assert!(LATEST_MANUAL_PENDING_DEPLOYMENT_STATUS_SQL.contains("target_store_path = $2"));
+        assert!(LATEST_MANUAL_PENDING_DEPLOYMENT_STATUS_SQL.contains("source LIKE 'manual_%'"));
+        assert!(LATEST_MANUAL_PENDING_DEPLOYMENT_STATUS_SQL.contains("ORDER BY issued_at DESC"));
     }
 
     #[test]
