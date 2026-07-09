@@ -296,6 +296,7 @@ pub fn SystemDetailView(id: String) -> Element {
 
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
+    let mut deploy_action_notice: Signal<Option<(String, bool)>> = use_signal(|| None);
 
     // Live clock tick for relative timers/heartbeat countdowns while page is open.
     let mut now_tick = use_signal(Utc::now);
@@ -1016,24 +1017,42 @@ pub fn SystemDetailView(id: String) -> Element {
                             generations: generations_result.generations.clone(),
                             current_generation: generations_result.current_generation,
                             allow_mutations: can_mutate,
+                            deploy_notice: deploy_action_notice.read().clone(),
+                            on_clear_deploy_notice: move |_| deploy_action_notice.set(None),
                             on_deploy_commit: {
                                 let system_id = system.id;
                                 let hostname = system.hostname.clone();
                                 let toast_message = toast_message.clone();
+                                let mut deploy_action_notice = deploy_action_notice.clone();
                                 move |commit_sha: String| {
                                     let hostname = hostname.clone();
                                     let toast_message = toast_message.clone();
+                                    let mut deploy_action_notice = deploy_action_notice.clone();
+                                    deploy_action_notice.set(Some((
+                                        format!(
+                                            "Requesting deployment of {} to {}…",
+                                            hostname,
+                                            commit_sha.chars().take(7).collect::<String>()
+                                        ),
+                                        true,
+                                    )));
                                     spawn(async move {
-                                        let message = match deploy_system_via_api(system_id, commit_sha.clone()).await {
-                                            Ok(response) if !response.trim().is_empty() => response,
-                                            Ok(_) => format!(
-                                                "Requested deployment of {} to {}",
-                                                hostname,
-                                                commit_sha.chars().take(7).collect::<String>()
+                                        let (message, success) = match deploy_system_via_api(system_id, commit_sha.clone()).await {
+                                            Ok(response) if !response.trim().is_empty() => (response, true),
+                                            Ok(_) => (
+                                                format!(
+                                                    "Requested deployment of {} to {}",
+                                                    hostname,
+                                                    commit_sha.chars().take(7).collect::<String>()
+                                                ),
+                                                true,
                                             ),
-                                            Err(error) => format!("Deploy request failed for {}: {}", hostname, error),
+                                            Err(error) => (
+                                                format!("Deploy request failed for {}: {}", hostname, error),
+                                                false,
+                                            ),
                                         };
-                                        let success = !message.to_ascii_lowercase().contains("failed");
+                                        deploy_action_notice.set(Some((message.clone(), success)));
                                         let _ = dispatch_sync_notification(message, success, toast_message).await;
                                     });
                                 }
@@ -1042,11 +1061,17 @@ pub fn SystemDetailView(id: String) -> Element {
                                 let system_id = system.id;
                                 let hostname = system.hostname.clone();
                                 let toast_message = toast_message.clone();
+                                let mut deploy_action_notice = deploy_action_notice.clone();
                                 move |store_path: String| {
                                     let hostname = hostname.clone();
                                     let toast_message = toast_message.clone();
+                                    let mut deploy_action_notice = deploy_action_notice.clone();
+                                    deploy_action_notice.set(Some((
+                                        format!("Requesting generation rollback for {}…", hostname),
+                                        true,
+                                    )));
                                     spawn(async move {
-                                        let message = match request_system_generation_rollback(
+                                        let (message, success) = match request_system_generation_rollback(
                                             &system_id,
                                             &SystemRollbackGenerationRequest {
                                                 store_path: store_path.clone(),
@@ -1054,14 +1079,22 @@ pub fn SystemDetailView(id: String) -> Element {
                                         )
                                         .await
                                         {
-                                            Ok(response) if !response.message.trim().is_empty() => response.message,
-                                            Ok(_) => format!("Requested generation rollback for {}", hostname),
-                                            Err(error) => format!(
-                                                "Generation rollback request failed for {}: {}",
-                                                hostname, error
+                                            Ok(response) if !response.message.trim().is_empty() => {
+                                                (response.message, true)
+                                            }
+                                            Ok(_) => (
+                                                format!("Requested generation rollback for {}", hostname),
+                                                true,
+                                            ),
+                                            Err(error) => (
+                                                format!(
+                                                    "Generation rollback request failed for {}: {}",
+                                                    hostname, error
+                                                ),
+                                                false,
                                             ),
                                         };
-                                        let success = !message.to_ascii_lowercase().contains("failed");
+                                        deploy_action_notice.set(Some((message.clone(), success)));
                                         let _ = dispatch_sync_notification(message, success, toast_message).await;
                                     });
                                 }
@@ -2370,6 +2403,8 @@ fn DeployTab(
     generations: Vec<SystemGeneration>,
     current_generation: Option<i32>,
     allow_mutations: bool,
+    deploy_notice: Option<(String, bool)>,
+    on_clear_deploy_notice: EventHandler<()>,
     on_deploy_commit: EventHandler<String>,
     on_deploy_generation: EventHandler<String>,
 ) -> Element {
@@ -2466,6 +2501,7 @@ fn DeployTab(
                                 mode.set("commit".to_string());
                                 show_diff.set(false);
                                 verify_notice.set(None);
+                                on_clear_deploy_notice.call(());
                             },
                             svg {
                                 class: "w-3 h-3",
@@ -2483,6 +2519,7 @@ fn DeployTab(
                                 mode.set("generation".to_string());
                                 show_diff.set(false);
                                 verify_notice.set(None);
+                                on_clear_deploy_notice.call(());
                             },
                             svg {
                                 class: "w-3 h-3",
@@ -2540,6 +2577,7 @@ fn DeployTab(
                                         onclick: move |_| {
                                             selected_commit.set(commit_hash_for_select.clone());
                                             verify_notice.set(None);
+                                            on_clear_deploy_notice.call(());
                                         },
                                         span {
                                             class: "mono sd-commit-sha",
@@ -2610,6 +2648,7 @@ fn DeployTab(
                                         onclick: move |_| {
                                             selected_generation.set(Some(gen_num));
                                             verify_notice.set(None);
+                                            on_clear_deploy_notice.call(());
                                         },
                                         span { class: "mono sd-commit-sha sd-generation-number", "{gen_label}" }
                                         span { class: "sd-commit-msg", "generation rollback" }
@@ -2787,6 +2826,22 @@ fn DeployTab(
                                 }
                             }
 
+                            if let Some((message, is_success)) = deploy_notice.as_ref() {
+                                div {
+                                    class: if *is_success { "sd-callout sd-callout-info" } else { "sd-callout sd-callout-danger" },
+                                    svg {
+                                        class: "w-3 h-3",
+                                        style: if *is_success { "color: #60a5fa; flex-shrink: 0; margin-top: 1px;" } else { "color: #f87171; flex-shrink: 0; margin-top: 1px;" },
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path { d: if *is_success { "M13 16h-1v-4h-1m1-4h.01M12 22a10 10 0 100-20 10 10 0 000 20z" } else { "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" } }
+                                    }
+                                    div { "{message}" }
+                                }
+                            }
+
                             if let Some(note) = verify_notice() {
                                 div {
                                     class: "sd-callout sd-callout-info",
@@ -2888,6 +2943,22 @@ fn DeployTab(
                                         path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
                                     }
                                     "{deploy_label}"
+                                }
+                            }
+
+                            if let Some((message, is_success)) = deploy_notice.as_ref() {
+                                div {
+                                    class: if *is_success { "sd-callout sd-callout-info" } else { "sd-callout sd-callout-danger" },
+                                    svg {
+                                        class: "w-3 h-3",
+                                        style: if *is_success { "color: #60a5fa; flex-shrink: 0; margin-top: 1px;" } else { "color: #f87171; flex-shrink: 0; margin-top: 1px;" },
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path { d: if *is_success { "M13 16h-1v-4h-1m1-4h.01M12 22a10 10 0 100-20 10 10 0 000 20z" } else { "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" } }
+                                    }
+                                    div { "{message}" }
                                 }
                             }
                         }
