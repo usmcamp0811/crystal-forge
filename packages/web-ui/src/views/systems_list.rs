@@ -1413,7 +1413,7 @@ fn SystemPreviewPanel(
                                     span { class: "tl-dot", style: "--status-color: {row.color};" }
                                     div {
                                         class: "tl-body",
-                                        div { class: "tl-title", Icon { name: row.icon, size: 12 } span { "{row.title}" } }
+                                        div { class: "tl-title", span { style: "color: {row.color}; flex-shrink: 0; line-height: 0;", Icon { name: row.icon, size: 12 } } span { "{row.title}" } }
                                         if let Some(sub) = row.sub {
                                             div { class: "tl-sub mono", title: "{sub}", "{sub}" }
                                         }

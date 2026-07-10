@@ -2309,7 +2309,7 @@ fn OverviewTab(
                                 class: "tl-body",
                                 div {
                                     class: "tl-title",
-                                    Icon { name: activity.icon, size: 12 }
+                                    span { style: "color: {activity.color}; flex-shrink: 0; line-height: 0;", Icon { name: activity.icon, size: 12 } }
                                     span { "{activity.title}" }
                                 }
                                 if let Some(sub) = activity.sub.as_ref() {
