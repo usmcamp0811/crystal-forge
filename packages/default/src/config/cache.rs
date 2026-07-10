@@ -71,7 +71,7 @@ impl CacheConfig {
         Duration::from_secs(30)
     }
 
-    fn default_push_timeout_seconds() -> u64 {
+    pub(crate) fn default_push_timeout_seconds() -> u64 {
         3600 // 1 hour - large systems (40GB+) need more time. Increase to 7200+ if needed.
     }
 

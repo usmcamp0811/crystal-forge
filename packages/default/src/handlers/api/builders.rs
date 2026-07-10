@@ -31,19 +31,63 @@ use crate::handlers::builder_request::{
     authenticate_builder_request, authenticate_builder_request_allow_inactive,
 };
 use crate::models::builders::{
-    AppendLogsRequest, BuildJob, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary,
-    BuilderWithEnvironments, CreateBuilderRequest, EstablishBuilderSessionRequest,
-    EstablishBuilderSessionResponse, EvaluatorFingerprint, KeypairRegeneratedResponse,
-    NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
-    ResolveBuilderIdResponse, SourceInputDeliveryMode, UpdateBuilderEnvironmentsRequest,
-    UpdateBuilderPublicKeyRequest, UpdateBuilderRequest, VerifiedSourceIdentity,
+    AppendLogsRequest, BuildJob, Builder, BuilderCachePushConfig, BuilderCreatedResponse,
+    BuilderMetrics, BuilderSummary, BuilderWithEnvironments, CreateBuilderRequest,
+    EstablishBuilderSessionRequest, EstablishBuilderSessionResponse, EvaluatorFingerprint,
+    KeypairRegeneratedResponse, NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest,
+    ResolveBuilderIdRequest, ResolveBuilderIdResponse, SourceInputDeliveryMode,
+    UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
+    VerifiedSourceIdentity,
 };
+use crate::models::cache_destination::CacheDestination;
 use crate::models::public_key::PublicKey;
 use crate::queries::builders;
 
 const NIX_STORE_EXPORT_ARG_BYTES_LIMIT: usize = 128 * 1024;
 const ATTIC_PUSH_PATH_CHUNK_SIZE: usize = 200;
 const BUILDER_SESSION_STALE_TIMEOUT_SECS: i64 = 60;
+
+fn forwarded_header_has_https(value: &str) -> bool {
+    value
+        .split(',')
+        .flat_map(|part| part.split(';'))
+        .map(str::trim)
+        .any(|part| {
+            let Some((name, value)) = part.split_once('=') else {
+                return false;
+            };
+
+            name.eq_ignore_ascii_case("proto")
+                && value.trim_matches('"').eq_ignore_ascii_case("https")
+        })
+}
+
+fn builder_request_uses_https(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("https"))
+        || headers
+            .get("forwarded")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(forwarded_header_has_https)
+        || headers
+            .get("x-forwarded-ssl")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("on"))
+        || headers
+            .get("x-url-scheme")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("https"))
+}
+
+fn cache_push_config_contains_credentials(config: &BuilderCachePushConfig) -> bool {
+    config.attic_token.is_some()
+        || config.s3_access_key_id.is_some()
+        || config.s3_secret_access_key.is_some()
+        || config.s3_session_token.is_some()
+}
 
 fn parse_derivation_requisites(stdout: &[u8], drv_path: &str) -> Vec<String> {
     let mut paths = Vec::new();
@@ -176,6 +220,69 @@ async fn resolve_cache_destinations_for_derivation(
 
     destinations.retain(|destination| destination.enabled);
     Ok(destinations)
+}
+
+fn cache_type_from_destination(value: &str) -> crate::config::CacheType {
+    match value {
+        "S3" => crate::config::CacheType::S3,
+        "Attic" => crate::config::CacheType::Attic,
+        "Http" => crate::config::CacheType::Http,
+        _ => crate::config::CacheType::Nix,
+    }
+}
+
+fn builder_cache_push_config_from_destination(
+    destination: &CacheDestination,
+) -> BuilderCachePushConfig {
+    BuilderCachePushConfig {
+        cache_type: cache_type_from_destination(&destination.cache_type),
+        push_to: destination.push_to.clone(),
+        push_after_build: true,
+        signing_key: destination.signing_key_path.clone(),
+        compression: destination.compression.clone(),
+        s3_region: destination.s3_region.clone(),
+        s3_profile: destination.s3_profile.clone(),
+        s3_access_key_id: destination.s3_access_key_id.clone(),
+        s3_secret_access_key: destination.s3_secret_access_key.clone(),
+        s3_session_token: destination.s3_session_token.clone(),
+        s3_endpoint_url: destination.s3_endpoint_url.clone(),
+        attic_token: destination.attic_token.clone(),
+        attic_cache_name: destination.attic_cache_name.clone(),
+        attic_ignore_upstream_cache_filter: destination
+            .attic_ignore_upstream_cache_filter
+            .unwrap_or(true),
+        attic_jobs: destination
+            .attic_jobs
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(5),
+        max_retries: destination
+            .max_retries
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(3),
+        retry_delay_seconds: destination
+            .retry_delay_seconds
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(5),
+        push_timeout_seconds: destination
+            .push_timeout_seconds
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or_else(crate::config::CacheConfig::default_push_timeout_seconds),
+        force_repush: destination.force_repush.unwrap_or(false),
+        require_sigs: destination.require_sigs.unwrap_or(true),
+    }
+}
+
+async fn builder_cache_push_config_for_derivation(
+    pool: &sqlx::PgPool,
+    derivation: &crate::derivations::Derivation,
+) -> Result<BuilderCachePushConfig, StatusCode> {
+    let destinations = resolve_cache_destinations_for_derivation(pool, derivation).await?;
+
+    Ok(destinations
+        .first()
+        .map(builder_cache_push_config_from_destination)
+        .unwrap_or_else(BuilderCachePushConfig::disabled))
 }
 
 async fn verified_source_identity_for_derivation(
@@ -1511,6 +1618,51 @@ pub async fn get_next_job(
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    let cache_push = match builder_cache_push_config_for_derivation(&state.pool, &derivation).await
+    {
+        Ok(cache_push) => Some(cache_push),
+        Err(status) => {
+            tracing::error!(
+                job_id = %job.id,
+                derivation_id = derivation.id,
+                "failed to assemble builder cache-push config; requeueing claimed job"
+            );
+            requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        job_id = %job.id,
+                        "failed to requeue job after cache-push config assembly error: {e}"
+                    );
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            return Err(status);
+        }
+    };
+
+    if cache_push
+        .as_ref()
+        .is_some_and(cache_push_config_contains_credentials)
+        && !builder_request_uses_https(&headers)
+    {
+        tracing::error!(
+            job_id = %job.id,
+            derivation_id = derivation.id,
+            builder_id = %builder_id,
+            "refusing to send cache push credentials to builder over non-HTTPS transport"
+        );
+        requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    job_id = %job.id,
+                    "failed to requeue job after insecure builder credential transport rejection: {e}"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        return Err(StatusCode::UPGRADE_REQUIRED);
+    }
+
     let payload = crate::models::builders::BuildJobDerivation {
         id: derivation.id,
         derivation_name: derivation.derivation_name.clone(),
@@ -1525,6 +1677,7 @@ pub async fn get_next_job(
         source_input_delivery,
         expected_drv_path,
         evaluator: Some(current_evaluator_fingerprint()),
+        cache_push,
     };
 
     Ok(Json(crate::models::builders::NextJobResponse {

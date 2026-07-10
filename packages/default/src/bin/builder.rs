@@ -963,7 +963,7 @@ async fn execute_build_job(
     mut derivation_payload: BuildJobDerivation,
     client: BuilderApiClient,
     build_config: crystal_forge::config::BuildConfig,
-    cache_config: crystal_forge::config::CacheConfig,
+    local_cache_config: crystal_forge::config::CacheConfig,
     execution_mode: crystal_forge::config::ExecutionMode,
     remote_runtime: RemoteBuildRuntime,
 ) {
@@ -971,6 +971,12 @@ async fn execute_build_job(
         "🔨 Starting build for job #{} (derivation: {})",
         job_id, derivation_payload.id
     );
+
+    let cache_config = derivation_payload
+        .cache_push
+        .as_ref()
+        .map(|cache_push| cache_push.to_cache_config(&local_cache_config))
+        .unwrap_or(local_cache_config);
 
     let source_mirror_root = remote_runtime.source_mirror_root.as_path();
     let source_worktree_root = remote_runtime.source_worktree_root.as_path();
@@ -1920,6 +1926,7 @@ mod tests {
             source_input_delivery: SourceInputDeliveryMode::LocalGitWorktree,
             expected_drv_path: Some("/nix/store/server-host.drv".to_string()),
             evaluator: None,
+            cache_push: None,
         };
 
         let cleanup = cleanup_candidate_worktree(
