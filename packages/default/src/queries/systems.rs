@@ -855,6 +855,8 @@ pub async fn list_system_agent_event_rows(
         )
         SELECT *
         FROM (
+            -- Agent state transitions (startup, config_change, cf_deployment only;
+            -- state_delta is reclassified heartbeat telemetry, not shown in logs)
             SELECT
                 ss.timestamp,
                 CASE
@@ -865,15 +867,41 @@ pub async fn list_system_agent_event_rows(
                 END AS level,
                 'state_change'::text AS event_type,
                 CONCAT(
-                    'agent reported ', COALESCE(ss.change_reason, 'state_delta'),
+                    CASE ss.change_reason
+                        WHEN 'startup' THEN 'Agent started'
+                        WHEN 'config_change' THEN 'Configuration changed'
+                        WHEN 'cf_deployment' THEN 'Deployment state recorded'
+                        ELSE CONCAT('agent reported ', COALESCE(ss.change_reason, 'state_delta'))
+                    END,
                     COALESCE(CONCAT(' (', ss.store_path, ')'), '')
                 ) AS message,
                 (ss.change_reason = 'cf_deployment') AS deployment_related
             FROM target t
             JOIN system_states ss ON ss.hostname = t.hostname
+            WHERE ss.change_reason IS DISTINCT FROM 'state_delta'
 
             UNION ALL
 
+            -- Deployment lifecycle events from the event system
+            SELECT
+                se.occurred_at AS timestamp,
+                'info'::text AS level,
+                se.event_type,
+                CASE se.event_type
+                    WHEN 'cf_deployment_started'  THEN 'Deployment started — applying new configuration'
+                    WHEN 'cf_deployment_succeeded' THEN 'Deployment activated successfully'
+                    WHEN 'cf_deployment_failed'    THEN 'Deployment failed to activate'
+                    ELSE se.event_type
+                END AS message,
+                true AS deployment_related
+            FROM target t
+            JOIN systems s ON s.hostname = t.hostname
+            JOIN system_events se ON se.system_id = s.id
+            WHERE se.event_type IN ('cf_deployment_started', 'cf_deployment_succeeded', 'cf_deployment_failed')
+
+            UNION ALL
+
+            -- Heartbeats
             SELECT
                 ah.timestamp,
                 'debug'::text AS level,

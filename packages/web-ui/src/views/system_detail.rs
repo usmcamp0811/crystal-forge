@@ -354,18 +354,6 @@ pub fn SystemDetailView(id: String) -> Element {
         }
     });
 
-    let id_for_history = id.clone();
-    let history_resource = use_resource(move || {
-        let id = id_for_history.clone();
-        async move {
-            let Ok(system_id) = Uuid::parse_str(&id) else {
-                return Vec::<SystemHistoryEntry>::new();
-            };
-
-            load_system_history_with_fallback(system_id).await.entries
-        }
-    });
-
     let mut deployment_progress_poll_tick = use_signal(|| 0_u64);
     let id_for_deployment_progress = id.clone();
     let deployment_progress_tick_for_resource = deployment_progress_poll_tick.clone();
@@ -393,6 +381,41 @@ pub fn SystemDetailView(id: String) -> Element {
             }
             #[cfg(not(target_arch = "wasm32"))]
             break;
+        }
+    });
+
+    // History polling tick — only active during a deployment so Recent Activity and the
+    // History tab pick up deployment-started/succeeded/failed events as they happen.
+    // Declared `let mut` so the use_future move closure can call .set().
+    let mut history_poll_tick = use_signal(|| 0_u64);
+    {
+        let dep_resource = deployment_progress_resource.clone();
+        let mut tick = history_poll_tick.clone();
+        use_future(move || async move {
+            loop {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    gloo_timers::future::TimeoutFuture::new(4000).await;
+                    if dep_resource.read_unchecked().is_some() {
+                        tick.set(tick() + 1);
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                break;
+            }
+        });
+    }
+
+    let id_for_history = id.clone();
+    let history_resource = use_resource(move || {
+        let _ = history_poll_tick();
+        let id = id_for_history.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return Vec::<SystemHistoryEntry>::new();
+            };
+
+            load_system_history_with_fallback(system_id).await.entries
         }
     });
 
