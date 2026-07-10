@@ -1920,6 +1920,76 @@ pub struct CompleteJobRequest {
     pub cache_pushed: bool,
 }
 
+async fn record_builder_confirmed_cache_push(
+    state: &CFState,
+    derivation_id: i32,
+    job_id: Uuid,
+) -> Result<(), StatusCode> {
+    let derivation = crate::queries::derivations::get_derivation_by_id(&state.pool, derivation_id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                derivation_id,
+                job_id = %job_id,
+                error = %e,
+                "failed to load derivation while recording builder-confirmed cache push"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let Some(store_path) = derivation
+        .store_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        tracing::warn!(
+            derivation_id,
+            job_id = %job_id,
+            "builder reported cache_pushed but derivation has no persisted store_path"
+        );
+        return Err(StatusCode::CONFLICT);
+    };
+
+    let cache_destination =
+        crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
+            .await
+            .ok()
+            .and_then(|dests| dests.into_iter().next().map(|d| d.name));
+
+    let cache_job_id = crate::queries::cache_push::create_cache_push_job(
+        &state.pool,
+        derivation_id,
+        store_path,
+        cache_destination.as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!(
+            derivation_id,
+            job_id = %job_id,
+            error = %e,
+            "failed to create/reuse cache push job for builder-confirmed cache push"
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    crate::queries::cache_push::mark_cache_push_completed(&state.pool, cache_job_id, None, None)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                derivation_id,
+                job_id = %job_id,
+                cache_job_id,
+                error = %e,
+                "failed to mark builder-confirmed cache push completed"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(())
+}
+
 /// POST /api/v1/builders/:id/jobs/:job_id/complete - Mark job as complete
 ///
 /// In addition to closing the build job, the server performs the derivation
@@ -1972,10 +2042,11 @@ pub async fn complete_job(
         StatusCode::CONFLICT
     })?;
 
-    // Best-effort cache-push queueing only for new completions.
-    // Idempotent retries use the originally persisted store path and must not
-    // queue a new push from a potentially different request path.
-    if is_new {
+    if request.cache_pushed {
+        record_builder_confirmed_cache_push(&state, completed_job.derivation_id, job_id).await?;
+    } else if is_new {
+        // Old builder compatibility: builders that do not report builder-side cache
+        // push still create a pending server-side cache-push row on first completion.
         if let Some(ref store_path) = request.output_path {
             let cache_destination =
                 crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
@@ -1983,7 +2054,7 @@ pub async fn complete_job(
                     .ok()
                     .and_then(|dests| dests.into_iter().next().map(|d| d.name));
 
-            match crate::queries::cache_push::create_cache_push_job(
+            if let Err(e) = crate::queries::cache_push::create_cache_push_job(
                 &state.pool,
                 completed_job.derivation_id,
                 store_path,
@@ -1991,33 +2062,12 @@ pub async fn complete_job(
             )
             .await
             {
-                Ok(cache_job_id) if request.cache_pushed => {
-                    if let Err(e) = crate::queries::cache_push::mark_cache_push_completed(
-                        &state.pool,
-                        cache_job_id,
-                        None,
-                        None,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            "Failed to mark builder-side cache push completed for derivation {} (job {} cache job {}): {}",
-                            completed_job.derivation_id,
-                            job_id,
-                            cache_job_id,
-                            e
-                        );
-                    }
-                }
-                Ok(_cache_job_id) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to queue cache push for derivation {} (job {}): {}",
-                        completed_job.derivation_id,
-                        job_id,
-                        e
-                    );
-                }
+                tracing::warn!(
+                    "Failed to queue cache push for derivation {} (job {}): {}",
+                    completed_job.derivation_id,
+                    job_id,
+                    e
+                );
             }
         }
     }
