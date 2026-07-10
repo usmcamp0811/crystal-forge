@@ -1918,12 +1918,160 @@ pub struct CompleteJobRequest {
     pub output_path: Option<String>,
     #[serde(default)]
     pub cache_pushed: bool,
+    #[serde(default)]
+    pub cache_reference: Option<String>,
+}
+
+fn cache_reference_matches_destination(
+    reported: &str,
+    destination: &crate::models::cache_destination::CacheDestination,
+) -> bool {
+    let reported = reported.trim();
+    if reported.is_empty() {
+        return false;
+    }
+
+    destination.name == reported
+        || destination.push_to.as_deref() == Some(reported)
+        || destination.attic_cache_name.as_deref() == Some(reported)
+}
+
+async fn validated_reported_cache_destination(
+    state: &CFState,
+    request: &CompleteJobRequest,
+    builder_id: Uuid,
+    job_id: Uuid,
+) -> Result<Option<crate::models::cache_destination::CacheDestination>, StatusCode> {
+    if !request.cache_pushed {
+        return Ok(None);
+    }
+
+    let Some(reported) = request
+        .cache_reference
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        tracing::warn!(
+            builder_id = %builder_id,
+            job_id = %job_id,
+            "builder reported cache_pushed without cache_reference"
+        );
+        return Err(StatusCode::CONFLICT);
+    };
+
+    let destinations =
+        crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    builder_id = %builder_id,
+                    job_id = %job_id,
+                    error = %e,
+                    "failed to load cache destinations while validating builder cache push"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+    let Some(destination) = destinations
+        .iter()
+        .find(|destination| cache_reference_matches_destination(reported, destination))
+    else {
+        tracing::warn!(
+            builder_id = %builder_id,
+            job_id = %job_id,
+            reported_cache = reported,
+            "builder reported cache push to a cache that does not match any active server cache destination"
+        );
+        return Err(StatusCode::CONFLICT);
+    };
+
+    Ok(Some(destination.clone()))
+}
+
+async fn verify_store_path_available_from_cache(
+    destination: &crate::models::cache_destination::CacheDestination,
+    store_path: &str,
+    derivation_id: i32,
+    job_id: Uuid,
+) -> Result<(), StatusCode> {
+    let Some(cache_url) = destination
+        .push_to
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        tracing::warn!(
+            derivation_id,
+            job_id = %job_id,
+            cache_destination = %destination.name,
+            "cannot verify builder cache push because destination has no push_to/substituter URL"
+        );
+        return Err(StatusCode::CONFLICT);
+    };
+
+    let mut command = Command::new("nix");
+    command.args(["path-info", "--store", cache_url, store_path]);
+
+    if let Some(public_key) = destination
+        .attic_public_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        command.env(
+            "NIX_CONFIG",
+            format!("extra-substituters = {cache_url}\nextra-trusted-public-keys = {public_key}\n"),
+        );
+    }
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), command.output())
+        .await
+        .map_err(|_| {
+            tracing::warn!(
+                derivation_id,
+                job_id = %job_id,
+                cache_destination = %destination.name,
+                cache_url,
+                store_path,
+                "timed out verifying builder cache push"
+            );
+            StatusCode::CONFLICT
+        })?
+        .map_err(|e| {
+            tracing::warn!(
+                derivation_id,
+                job_id = %job_id,
+                cache_destination = %destination.name,
+                cache_url,
+                store_path,
+                error = %e,
+                "failed to run cache availability probe"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !output.status.success() {
+        tracing::warn!(
+            derivation_id,
+            job_id = %job_id,
+            cache_destination = %destination.name,
+            cache_url,
+            store_path,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "builder reported cache_pushed, but server cache probe could not find store path"
+        );
+        return Err(StatusCode::CONFLICT);
+    }
+
+    Ok(())
 }
 
 async fn record_builder_confirmed_cache_push(
     state: &CFState,
     derivation_id: i32,
     job_id: Uuid,
+    cache_destination: &crate::models::cache_destination::CacheDestination,
 ) -> Result<(), StatusCode> {
     let derivation = crate::queries::derivations::get_derivation_by_id(&state.pool, derivation_id)
         .await
@@ -1951,17 +2099,14 @@ async fn record_builder_confirmed_cache_push(
         return Err(StatusCode::CONFLICT);
     };
 
-    let cache_destination =
-        crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
-            .await
-            .ok()
-            .and_then(|dests| dests.into_iter().next().map(|d| d.name));
+    verify_store_path_available_from_cache(cache_destination, store_path, derivation_id, job_id)
+        .await?;
 
     let cache_job_id = crate::queries::cache_push::create_cache_push_job(
         &state.pool,
         derivation_id,
         store_path,
-        cache_destination.as_deref(),
+        Some(cache_destination.name.as_str()),
     )
     .await
     .map_err(|e| {
@@ -2015,10 +2160,14 @@ pub async fn complete_job(
         CompleteJobRequest {
             output_path: None,
             cache_pushed: false,
+            cache_reference: None,
         }
     } else {
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?
     };
+
+    let reported_cache_destination =
+        validated_reported_cache_destination(&state, &request, builder_id, job_id).await?;
 
     // Perform atomic completion (job + derivation update in one transaction).
     // Idempotent: if the job is already 'success' with matching builder+session,
@@ -2043,7 +2192,21 @@ pub async fn complete_job(
     })?;
 
     if request.cache_pushed {
-        record_builder_confirmed_cache_push(&state, completed_job.derivation_id, job_id).await?;
+        let Some(cache_destination) = reported_cache_destination.as_ref() else {
+            tracing::warn!(
+                builder_id = %builder_id,
+                job_id = %job_id,
+                "builder reported cache_pushed but no validated cache destination is available"
+            );
+            return Err(StatusCode::CONFLICT);
+        };
+        record_builder_confirmed_cache_push(
+            &state,
+            completed_job.derivation_id,
+            job_id,
+            cache_destination,
+        )
+        .await?;
     } else if is_new {
         // Old builder compatibility: builders that do not report builder-side cache
         // push still create a pending server-side cache-push row on first completion.

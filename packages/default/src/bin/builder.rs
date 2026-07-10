@@ -1,6 +1,6 @@
 use crystal_forge::builder::api_client::{ApiBuildReporter, BuilderApiClient};
 use crystal_forge::builder::metrics::SystemMetrics;
-use crystal_forge::config::CrystalForgeConfig;
+use crystal_forge::config::{CacheConfig, CacheType, CrystalForgeConfig};
 use crystal_forge::derivations::build::{BuildCancelledError, LogSink};
 use crystal_forge::models::builders::{
     BuildFailurePhase, BuildJobDerivation, NextJobResponse, RemoteBuildExecutionStrategy,
@@ -31,6 +31,37 @@ use tracing_subscriber::EnvFilter;
 /// task cannot keep up with build output.
 const LOG_CHANNEL_CAPACITY: usize = 64;
 const LOG_DRAIN_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn required_cache_push_reference(
+    cache_config: &CacheConfig,
+    target_name: &str,
+    store_path: &str,
+) -> anyhow::Result<String> {
+    if !cache_config.should_push(target_name) {
+        anyhow::bail!(
+            "cache push is disabled or filtered out for target {target_name}; refusing to report a deployable build"
+        );
+    }
+
+    if cache_config.cache_command(store_path).is_none() {
+        anyhow::bail!(
+            "cache push is enabled for {target_name}, but no cache push command can be built from builder configuration"
+        );
+    }
+
+    match cache_config.cache_type {
+        CacheType::Attic => cache_config
+            .attic_cache_name
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Attic cache push requires attic_cache_name")),
+        CacheType::S3 | CacheType::Http | CacheType::Nix => cache_config
+            .push_to
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("cache push requires push_to")),
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -1270,6 +1301,39 @@ async fn execute_build_job(
             }
 
             if !execution_mode.is_mock() {
+                let _cache_reference = match required_cache_push_reference(
+                    &cache_config,
+                    &derivation.derivation_name,
+                    &store_path,
+                ) {
+                    Ok(reference) => reference,
+                    Err(e) => {
+                        error!(
+                            "❌ Cache push is not configured for job #{}: {:#}",
+                            job_id, e
+                        );
+                        let _ = client
+                            .append_logs(
+                                job_id,
+                                &format!("❌ Cache push is not configured: {:#}\n", e),
+                            )
+                            .await;
+                        if let Err(report_error) = client
+                            .fail_job(
+                                job_id,
+                                &format!("Cache push is required but not configured: {:#}", e),
+                            )
+                            .await
+                        {
+                            error!(
+                                "❌ Failed to report cache-configuration failure for job #{}: {}",
+                                job_id, report_error
+                            );
+                        }
+                        return;
+                    }
+                };
+
                 let _ = client
                     .append_logs(job_id, "📤 Pushing build output to cache...\n")
                     .await;
@@ -1308,7 +1372,29 @@ async fn execute_build_job(
             // Report success to the server after the builder-side cache push.
             // The server records completion and may create a cache-push audit row,
             // but remote deployability depends on the builder push above.
-            if let Err(e) = client.complete_job(job_id, &store_path).await {
+            let cache_reference = if execution_mode.is_mock() {
+                None
+            } else {
+                match required_cache_push_reference(
+                    &cache_config,
+                    &derivation.derivation_name,
+                    &store_path,
+                ) {
+                    Ok(reference) => Some(reference),
+                    Err(e) => {
+                        error!(
+                            "❌ Cache reference unavailable after push for job #{}: {:#}",
+                            job_id, e
+                        );
+                        return;
+                    }
+                }
+            };
+
+            if let Err(e) = client
+                .complete_job(job_id, &store_path, cache_reference.as_deref())
+                .await
+            {
                 error!("❌ Failed to report job #{} completion: {}", job_id, e);
             }
         }
