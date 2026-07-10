@@ -15,7 +15,13 @@ function envVars(env) {
 
 // HeartbeatSpinner: ring that drains over the expected interval. Goes amber when past
 // due (0..interval sec late), red past 2x interval. `size` is diameter in px.
-function HeartbeatSpinner({ intervalSec, nextInSec, size = 36, showLabel = true }) {
+// `deployStage`/`deployStartedAt` let a live deploy borrow this same ring/label instead
+// of swapping in a different widget. Each stage has a known simulated duration (the
+// agent's own pull cadence — not the fleet-wide heartbeat countdown), so we drain the
+// ring across that stage and count down to the next one, same as the idle countdown.
+const DEPLOY_STAGE_END_MS   = { queued: 15000, "picked-up": 17200, applying: 20600, activated: 24300 };
+const DEPLOY_STAGE_START_MS = { queued: 0,     "picked-up": 15000, applying: 17200, activated: 20600 };
+function HeartbeatSpinner({ intervalSec, nextInSec, size = 36, showLabel = true, deployStage, deployStartedAt }) {
   const [now, setNow] = React.useState(() => Date.now());
   const mountRef = React.useRef(Date.now());
   React.useEffect(() => {
@@ -32,15 +38,41 @@ function HeartbeatSpinner({ intervalSec, nextInSec, size = 36, showLabel = true 
   // state
   const overdue = remaining < 0;
   const critical = lateBy > intervalSec; // past 2x interval
-  const color = critical ? "#f87171" : overdue ? "#fbbf24" : "#34d399";
+
+  const activated = deployStage === "activated";
+  const applyingPhase = deployStage === "applying"; // unknown real-world duration — the
+  // agent's own heartbeats keep flowing during this phase, so the ring reverts to the
+  // normal heartbeat countdown and we just track elapsed time on the side.
+  const deploying = deployStage && !activated && !applyingPhase;
+
+  // Countdown within the current deploy stage (queued / picked-up)
+  let stageRemainSec = 0, stageProgress = 0;
+  if (deploying && deployStartedAt) {
+    const stageStart = DEPLOY_STAGE_START_MS[deployStage] ?? 0;
+    const stageEnd = DEPLOY_STAGE_END_MS[deployStage] ?? stageStart;
+    const stageDurMs = Math.max(1, stageEnd - stageStart);
+    const elapsedMs = (now - deployStartedAt) - stageStart;
+    stageProgress = Math.max(0, Math.min(1, elapsedMs / stageDurMs));
+    stageRemainSec = Math.max(0, (stageDurMs - elapsedMs) / 1000);
+  }
+  // Elapsed time counts UP through applying, since we don't know when it'll finish.
+  let applyingElapsedSec = 0;
+  if (applyingPhase && deployStartedAt) {
+    applyingElapsedSec = Math.max(0, ((now - deployStartedAt) - DEPLOY_STAGE_START_MS.applying) / 1000);
+  }
+
+  const color = activated ? "#34d399"
+    : deploying ? "var(--cf-brand-purple)"
+    : critical ? "#f87171" : overdue ? "#fbbf24" : "#34d399";
   const trackColor = "rgba(148,163,184,0.18)";
 
   // SVG ring
   const stroke = Math.max(2, Math.round(size / 12));
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
-  // when overdue, ring fills red/amber and pulses; otherwise it drains as we approach next beat
-  const dashOffset = overdue ? 0 : c * (1 - progress);
+  // Ring drains from full to empty as we count down (to the next heartbeat, or the
+  // next deploy stage), then flips to a solid, flashing ring once overdue.
+  const dashOffset = activated ? 0 : deploying ? c * stageProgress : (overdue ? 0 : c * progress);
 
   // label
   const fmt = (s) => {
@@ -49,8 +81,13 @@ function HeartbeatSpinner({ intervalSec, nextInSec, size = 36, showLabel = true 
     if (a < 3600) return `${Math.floor(a / 60)}m ${a % 60}s`;
     return `${Math.floor(a / 3600)}h ${Math.floor((a % 3600) / 60)}m`;
   };
-  const label = overdue ? `${fmt(lateBy)} late` : `next in ${fmt(remaining)}`;
-  const sub = `every ${fmt(intervalSec)}`;
+  const label = activated ? "activated"
+    : deployStage === "queued" ? `picks up in ${fmt(stageRemainSec)}`
+    : deployStage === "picked-up" ? `applying in ${fmt(stageRemainSec)}`
+    : overdue ? `${fmt(lateBy)} late` : `next in ${fmt(remaining)}`;
+  const sub = activated ? "generation live"
+    : applyingPhase ? `applying · ${fmt(applyingElapsedSec)} elapsed`
+    : deploying ? "deploy in progress" : `every ${fmt(intervalSec)}`;
 
   return (
     <div className="hb-spinner" title={`Heartbeat ${label} · ${sub}`}>
@@ -64,7 +101,7 @@ function HeartbeatSpinner({ intervalSec, nextInSec, size = 36, showLabel = true 
             strokeDasharray={c}
             strokeDashoffset={dashOffset}
             transform={`rotate(-90 ${size/2} ${size/2})`}
-            style={{ transition: overdue ? "none" : "stroke-dashoffset 0.8s linear, stroke 0.3s" }}
+            style={{ transition: (overdue || deploying) ? "none" : "stroke-dashoffset 0.8s linear, stroke 0.3s" }}
           />
         </svg>
         <span className="hb-pulse" style={{ background: color }} />
@@ -187,7 +224,7 @@ function DeployModal({ sys, onClose, onQueued }) {
 }
 
 // Side panel — system detail peek
-function SystemPanel({ sys, onClose, onDeploy, onEdit, onOpenDetail, onTagClick, pendingDeploy, onClearPending }) {
+function SystemPanel({ sys, onClose, onEdit, onOpenDetail, onTagClick, pendingDeploy, onClearPending }) {
   const deployStage = useDeployStages(pendingDeploy, onClearPending);
   return (
     <>
@@ -207,12 +244,12 @@ function SystemPanel({ sys, onClose, onDeploy, onEdit, onOpenDetail, onTagClick,
           </button>
         </div>
         <div className="panel-body">
-          {deployStage && (
+          {deployStage && pendingDeploy && (
             <section className="panel-section" style={{ paddingTop: 0 }}>
               <PendingDeployBanner
                 stage={deployStage}
                 stages={["queued", "picked-up", "applying", "activated"]}
-                commit={pendingDeploy.commit}
+                commit={pendingDeploy?.commit}
                 sys={sys}
                 onDismiss={onClearPending}
                 onViewLogs={() => onOpenDetail?.(sys)}
@@ -294,7 +331,7 @@ function SystemPanel({ sys, onClose, onDeploy, onEdit, onOpenDetail, onTagClick,
         <div className="panel-actions">
           <button className="btn btn-ghost focus-ring" onClick={() => onOpenDetail?.(sys)}><Icon name="arrow-right" size={12} /> Open full detail</button>
           <button className="btn btn-ghost focus-ring" onClick={() => onEdit?.(sys)}><Icon name="gear" size={12} /> Edit</button>
-          <button className="btn btn-primary focus-ring" onClick={() => onDeploy(sys)}><Icon name="deploy" size={12} /> Deploy</button>
+          <button className="btn btn-primary focus-ring" onClick={() => onOpenDetail?.(sys, "deploy")}><Icon name="deploy" size={12} /> Deploy</button>
         </div>
       </aside>
     </>

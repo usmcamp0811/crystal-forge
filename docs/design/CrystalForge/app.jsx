@@ -7,7 +7,6 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
   const [flake, setFlake] = React.useState("all");
   const [query, setQuery] = React.useState("");
   const [selected, setSelected] = React.useState(null);
-  const [deployTarget, setDeployTarget] = React.useState(null);
   const [pendingDeploy, setPendingDeploy] = React.useState(null);
   const [editTarget, setEditTarget] = React.useState(null);
   const [addOpen, setAddOpen] = React.useState(false);
@@ -170,7 +169,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
           compact={compact}
           flash={flashAttention && isAttention(sys)}
           onOpen={setSelected}
-          onDeploy={setDeployTarget}
+          onDeploy={(s) => onOpenDetail(s, "deploy")}
           onEdit={setEditTarget} />
 
         )}
@@ -199,7 +198,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
               flash={flashAttention && isAttention(sys)}
               selected={selected?.id === sys.id}
               onOpen={setSelected}
-              onDeploy={setDeployTarget}
+              onDeploy={(s) => onOpenDetail(s, "deploy")}
               onEdit={setEditTarget} />
 
             )}
@@ -213,18 +212,10 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
         sys={selected}
         onClose={() => setSelected(null)}
         onTagClick={(t) => { setTag(t); setSelected(null); }}
-        onDeploy={(s) => {setDeployTarget(s);setSelected(null);}}
         onEdit={(s) => {setEditTarget(s);setSelected(null);}}
-        onOpenDetail={(s) => {setSelected(null);onOpenDetail(s);}}
+        onOpenDetail={(s, tab) => {setSelected(null);onOpenDetail(s, tab);}}
         pendingDeploy={pendingDeploy && pendingDeploy.sysId === selected.id ? pendingDeploy : null}
         onClearPending={() => setPendingDeploy(null)} />
-
-      }
-      {deployTarget &&
-      <DeployModal
-        sys={deployTarget}
-        onClose={() => setDeployTarget(null)}
-        onQueued={(commit) => { setPendingDeploy({ sysId: deployTarget.id, commit, at: Date.now() }); setSelected(deployTarget); }} />
 
       }
       {editTarget &&
@@ -310,11 +301,11 @@ function App() {
   const [tweaksOpen, setTweaksOpen] = React.useState(false);
   const [detailSystem, setDetailSystem] = React.useState(null);
   const [sysTag, setSysTag] = React.useState("all");
-  const [deployTarget, setDeployTarget] = React.useState(null);
   const [editTarget, setEditTarget] = React.useState(null);
   const [complianceBundleId, setComplianceBundleId] = React.useState(null);
   const [pendingDeploy, setPendingDeploy] = React.useState(null);
   const [flakeFocus, setFlakeFocus] = React.useState(null);
+  const [detailTab, setDetailTab] = React.useState("overview");
   const [topView, setTopView] = React.useState("dashboard"); // dashboard | systems | builds | evals | flakes | environments | caches | cves
   const coach = useCoach();
   const [classif, setClassif] = React.useState(() => {
@@ -324,6 +315,7 @@ function App() {
   React.useEffect(() => { try { localStorage.setItem("cf.classification", JSON.stringify(classif)); } catch {} }, [classif]);
 
   const goTo = (v) => { setTopView(v); setDetailSystem(null); };
+  const openDetail = (s, tab) => { setDetailSystem(s); setDetailTab(tab || "overview"); };
 
   React.useEffect(() => {document.documentElement.setAttribute("data-theme", theme);}, [theme]);
 
@@ -386,9 +378,9 @@ function App() {
           {topView === "environments" && <EnvironmentsView defaultView={defaultView} />}
           {topView === "caches" && <CachesView />}
           {topView === "builders" && <BuildersView defaultView={defaultView} />}
-          {topView === "policies" && <PoliciesView onOpenSystem={(s)=>{ setTopView("systems"); setDetailSystem(s); }}/>}
-          {topView === "compliance" && <ComplianceView selectedBundleId={complianceBundleId} onClearBundle={() => setComplianceBundleId(null)} onOpenSystem={(s)=>{ setTopView("systems"); setDetailSystem(s); }}/>}
-          {topView === "cves" && <CvesView onOpenSystem={(s)=>{ setTopView("systems"); setDetailSystem(s); }}/>}
+          {topView === "policies" && <PoliciesView onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }}/>}
+          {topView === "compliance" && <ComplianceView selectedBundleId={complianceBundleId} onClearBundle={() => setComplianceBundleId(null)} onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }}/>}
+          {topView === "cves" && <CvesView onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }}/>}
           {topView === "dashboard" && <DashboardView onNavigate={(r) => { setTopView(r); setDetailSystem(null); }}/>}
           {topView === "admin" && <AdminView onNavigate={(r) => { setTopView(r); setDetailSystem(null); }} coach={coach} classif={classif} onClassif={setClassif}/>}
           {topView === "scanning" && <ScanningView onNavigate={(r) => { setTopView(r); setDetailSystem(null); }}/>}
@@ -401,8 +393,9 @@ function App() {
             onNavigate={(view, bundleId) => { setTopView(view); setDetailSystem(null); if (bundleId) setComplianceBundleId(bundleId); }}
             onTagFilter={(t) => { setSysTag(t); setTopView("systems"); setDetailSystem(null); }}
             onOpenCommit={(c) => { setFlakeFocus(c); setTopView("flakes"); setDetailSystem(null); }}
-            onDeploy={(s) => setDeployTarget(s)}
+            onDeploy={(s) => setPendingDeploy({ sysId: detailSystem.id, commit: s.pendingCommit, at: Date.now() })}
             onEdit={(s) => setEditTarget(s)}
+            initialTab={detailTab}
             pendingDeploy={pendingDeploy && pendingDeploy.sysId === detailSystem.id ? pendingDeploy : null}
             onStartPending={(p) => setPendingDeploy({ sysId: detailSystem.id, at: Date.now(), ...p })}
             onClearPending={() => setPendingDeploy(null)} /> :
@@ -416,16 +409,11 @@ function App() {
             coach={coach}
             tag={sysTag}
             onTag={setSysTag}
-            onOpenDetail={(s) => setDetailSystem(s)} />)
+            onOpenDetail={(s, tab) => openDetail(s, tab)} />)
 
 
           }
         </div>
-        {deployTarget &&
-        <DeployModal sys={deployTarget}
-          onClose={() => setDeployTarget(null)}
-          onQueued={(commit) => setPendingDeploy({ sysId: deployTarget.id, commit, at: Date.now() })} />
-        }
         {editTarget &&
         <EditSystemModal sys={editTarget} onClose={() => setEditTarget(null)} />
         }
