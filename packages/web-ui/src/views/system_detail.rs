@@ -2780,15 +2780,7 @@ fn DeployTab(
 
                             div {
                                 class: "sd-callout sd-callout-info",
-                                svg {
-                                    class: "w-3 h-3",
-                                    style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
-                                    fill: "none",
-                                    stroke: "currentColor",
-                                    stroke_width: "2",
-                                    view_box: "0 0 24 24",
-                                    path { d: "M5 13l4 4L19 7" }
-                                }
+                                span { style: "color: #60a5fa; flex-shrink: 0;", Icon { name: IconName::Check, size: 13 } }
                                 div {
                                     "Policy check "
                                     strong { class: "mono", "{policy_for_callout}" }
@@ -2837,14 +2829,7 @@ fn DeployTab(
                                     class: "btn btn-primary focus-ring",
                                     disabled: !allow_mutations || !can_rollback,
                                     onclick: move |_| on_deploy_generation.call(store_path_for_deploy.clone()),
-                                    svg {
-                                        class: "w-3.5 h-3.5",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        view_box: "0 0 24 24",
-                                        path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
-                                    }
+                                    Icon { name: IconName::Rollback, size: 13 }
                                     "{deploy_label}"
                                 }
                             }
@@ -2852,14 +2837,13 @@ fn DeployTab(
                             if let Some((message, is_success)) = deploy_notice.as_ref() {
                                 div {
                                     class: if *is_success { "sd-callout sd-callout-info" } else { "sd-callout sd-callout-danger" },
-                                    svg {
-                                        class: "w-3 h-3",
-                                        style: if *is_success { "color: #60a5fa; flex-shrink: 0; margin-top: 1px;" } else { "color: #f87171; flex-shrink: 0; margin-top: 1px;" },
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        view_box: "0 0 24 24",
-                                        path { d: if *is_success { "M13 16h-1v-4h-1m1-4h.01M12 22a10 10 0 100-20 10 10 0 000 20z" } else { "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" } }
+                                    span {
+                                        style: if *is_success { "color: #60a5fa; flex-shrink: 0;" } else { "color: #f87171; flex-shrink: 0;" },
+                                        if *is_success {
+                                            Icon { name: IconName::Check, size: 13 }
+                                        } else {
+                                            Icon { name: IconName::Warn, size: 13 }
+                                        }
                                     }
                                     div { "{message}" }
                                 }
@@ -2868,15 +2852,7 @@ fn DeployTab(
                             if let Some(note) = verify_notice() {
                                 div {
                                     class: "sd-callout sd-callout-info",
-                                    svg {
-                                        class: "w-3 h-3",
-                                        style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        view_box: "0 0 24 24",
-                                        path { d: "M13 16h-1v-4h-1m1-4h.01M12 22a10 10 0 100-20 10 10 0 000 20z" }
-                                    }
+                                    span { style: "color: #60a5fa; flex-shrink: 0;", Icon { name: IconName::Check, size: 13 } }
                                     div { "{note}" }
                                 }
                             }
@@ -2931,15 +2907,7 @@ fn DeployTab(
 
                             div {
                                 class: "sd-callout sd-callout-info",
-                                svg {
-                                    class: "w-3 h-3",
-                                    style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
-                                    fill: "none",
-                                    stroke: "currentColor",
-                                    stroke_width: "2",
-                                    view_box: "0 0 24 24",
-                                    path { d: "M5 13l4 4L19 7" }
-                                }
+                                span { style: "color: #60a5fa; flex-shrink: 0;", Icon { name: IconName::Check, size: 13 } }
                                 div {
                                     "Policy check "
                                     strong { class: "mono", "{policy_for_callout}" }
@@ -2957,14 +2925,7 @@ fn DeployTab(
                                     class: "btn btn-primary focus-ring",
                                     disabled: !allow_mutations,
                                     onclick: move |_| on_deploy_commit.call(commit_sha_for_deploy.clone()),
-                                    svg {
-                                        class: "w-3.5 h-3.5",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        view_box: "0 0 24 24",
-                                        path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
-                                    }
+                                    Icon { name: IconName::Deploy, size: 13 }
                                     "{deploy_label}"
                                 }
                             }
@@ -2972,14 +2933,13 @@ fn DeployTab(
                             if let Some((message, is_success)) = deploy_notice.as_ref() {
                                 div {
                                     class: if *is_success { "sd-callout sd-callout-info" } else { "sd-callout sd-callout-danger" },
-                                    svg {
-                                        class: "w-3 h-3",
-                                        style: if *is_success { "color: #60a5fa; flex-shrink: 0; margin-top: 1px;" } else { "color: #f87171; flex-shrink: 0; margin-top: 1px;" },
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        view_box: "0 0 24 24",
-                                        path { d: if *is_success { "M13 16h-1v-4h-1m1-4h.01M12 22a10 10 0 100-20 10 10 0 000 20z" } else { "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" } }
+                                    span {
+                                        style: if *is_success { "color: #60a5fa; flex-shrink: 0;" } else { "color: #f87171; flex-shrink: 0;" },
+                                        if *is_success {
+                                            Icon { name: IconName::Check, size: 13 }
+                                        } else {
+                                            Icon { name: IconName::Warn, size: 13 }
+                                        }
                                     }
                                     div { "{message}" }
                                 }
