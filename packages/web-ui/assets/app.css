@@ -1576,6 +1576,24 @@ body {
 .sd-timeline {
   max-height: 320px;
   overflow-y: auto;
+  position: relative;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    black calc(100% - 32px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    black calc(100% - 32px),
+    transparent 100%
+  );
+  transition: -webkit-mask-image 0.2s ease;
+  transition: mask-image 0.2s ease;
+}
+
+.sd-timeline:hover {
+  -webkit-mask-image: none;
+  mask-image: none;
 }
 
 /* Deploy tab */
@@ -3854,20 +3872,44 @@ tr.kbd-focused > td {
 .timeline {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
+  position: relative;
+}
+
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 16px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--cf-timeline-line, #4b5563);
+  opacity: 0.3;
+  pointer-events: none;
 }
 
 .tl-item {
   display: flex;
-  gap: 12px;
+  gap: 14px;
   align-items: flex-start;
+  padding: 4px 8px;
+  margin: -4px -8px;
+  border-radius: 6px;
+  transition: background 0.12s ease;
+  position: relative;
+}
+
+.tl-item:hover {
+  background: var(--cf-hover-bg);
 }
 
 .tl-dot {
-  width: 10px;
-  height: 10px;
+  position: relative;
+  z-index: 1;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
-  margin-top: 5px;
+  margin-top: 4px;
   background: var(--status-color, var(--cf-gray-dot));
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--status-color, var(--cf-gray-dot)) 22%, transparent);
   flex-shrink: 0;
@@ -3881,17 +3923,17 @@ tr.kbd-focused > td {
 .tl-title {
   font-size: 13px;
   color: var(--cf-text-primary);
-  font-weight: 500;
+  font-weight: 600;
   display: flex;
   align-items: flex-start;
   gap: 6px;
   min-width: 0;
-  line-height: 1.35;
+  line-height: 1.4;
 }
 
 .tl-title svg {
   flex-shrink: 0;
-  margin-top: 2px;
+  margin-top: 3px;
 }
 
 .tl-title span {
@@ -3902,16 +3944,26 @@ tr.kbd-focused > td {
   font-size: 11px;
   color: var(--cf-text-muted);
   font-family: var(--font-mono);
-  margin-top: 2px;
+  margin-top: 3px;
+  letter-spacing: -0.01em;
 }
 
 .tl-sub {
-  margin-top: 3px;
+  margin-top: 4px;
   font-size: 11px;
-  line-height: 1.35;
+  line-height: 1.4;
   color: var(--cf-text-muted);
   overflow-wrap: anywhere;
   word-break: break-word;
+  opacity: 0.85;
+}
+
+.tl-empty {
+  font-size: 12px;
+  color: var(--cf-text-muted);
+  padding: 16px 0 16px 26px;
+  font-style: italic;
+  line-height: 1.5;
 }
 
 /* Heartbeat spinner */
