@@ -445,10 +445,20 @@ pub fn BuildsView() -> Element {
         .iter()
         .filter(|item| item.status == BuildStatus::Failed)
         .count();
-    let flash_builds = should_flash("builds", completed_failed_count > 0);
+    let mut flash_builds_signal = use_signal(|| false);
+    let flash_builds = flash_builds_signal();
     use_effect(move || {
         set_attention_count("builds", completed_failed_count as i64);
+        if should_flash("builds", completed_failed_count > 0) {
+            flash_builds_signal.set(true);
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(3200).await;
+                flash_builds_signal.set(false);
+            });
+        }
     });
+    // Tab flash: pulses until the Completed tab is opened for the first time.
+    let mut acked_hist = use_signal(|| false);
     completed_rows.sort_by(|left, right| {
         let left_key = left.completed_at.unwrap_or_else(Utc::now);
         let right_key = right.completed_at.unwrap_or_else(Utc::now);
@@ -582,11 +592,12 @@ pub fn BuildsView() -> Element {
                     }
                     button {
                         // JSX: `sd-tab focus-ring${tab===t.k?" active":""}${flashTab && t.k==="history"?" attention-flash-tab":""}`
-                        class: match (active_view() == BuildsTab::Completed, flash_tab) {
-                            (true, true) => "sd-tab focus-ring active attention-flash-tab",
-                            (true, false) => "sd-tab focus-ring active",
-                            (false, true) => "sd-tab focus-ring attention-flash-tab",
-                            (false, false) => "sd-tab focus-ring",
+                        class: if active_view() == BuildsTab::Completed {
+                            "sd-tab focus-ring active"
+                        } else if completed_failed_count > 0 && !acked_hist() {
+                            "sd-tab focus-ring attention-flash-tab"
+                        } else {
+                            "sd-tab focus-ring"
                         }
                         },
                         onclick: move |_| {

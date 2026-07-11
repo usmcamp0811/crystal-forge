@@ -51,6 +51,8 @@ fn EvaluationsPage() -> Element {
     // Keyboard navigation: index into the currently visible list (queue or history).
     // Start at 0 so the first row is auto-selected when the page loads (matching JSX).
     let mut focused_index: Signal<Option<usize>> = use_signal(|| None);
+    // Tab flash: pulses until the History tab is opened for the first time.
+    let mut acked_hist = use_signal(|| false);
 
     // Active queue multi-select (bulk cancel)
     let mut active_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
@@ -192,10 +194,18 @@ fn EvaluationsPage() -> Element {
         })
         .unwrap_or(0);
     let has_failed_history = history_failed_count > 0;
-    let flash_evals = should_flash("evals", has_failed_history);
     let evals_attention_count = failed_count.max(history_failed_count);
+    let mut flash_evals_signal = use_signal(|| false);
+    let flash_evals = flash_evals_signal();
     use_effect(move || {
         set_attention_count("evals", evals_attention_count);
+        if should_flash("evals", has_failed_history) {
+            flash_evals_signal.set(true);
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(3200).await;
+                flash_evals_signal.set(false);
+            });
+        }
     });
 
     rsx! {
@@ -392,7 +402,7 @@ fn EvaluationsPage() -> Element {
                         button {
                             class: if active_tab() == EvaluationsTab::History {
                                 "sd-tab focus-ring active"
-                            } else if failed_count > 0 {
+                            } else if failed_count > 0 && !acked_hist() {
                                 "sd-tab focus-ring attention-flash-tab"
                             } else {
                                 "sd-tab focus-ring"
@@ -400,6 +410,7 @@ fn EvaluationsPage() -> Element {
                             onclick: move |_| {
                                 active_tab.set(EvaluationsTab::History);
                                 focused_index.set(None);
+                                acked_hist.set(true);
                                 // Acknowledge the "evals" sidebar badge only when History tab is opened (TASK-385).
                                 acknowledge("evals");
                             },

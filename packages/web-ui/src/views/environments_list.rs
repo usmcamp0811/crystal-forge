@@ -3,7 +3,9 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use crate::alerts::acknowledge;
+use crate::alerts::{
+    acknowledge, set_attention_count, should_flash,
+};
 
 use crate::components::environments::{
     EnvironmentCard, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentFormModal,
@@ -57,9 +59,6 @@ pub fn EnvironmentsListView() -> Element {
     let mut redirect_to_login = use_signal(|| false);
     let nav = use_navigator();
 
-    // Acknowledge the "environments" sidebar attention badge on first visit (TASK-385).
-    use_effect(move || { acknowledge("environments"); });
-
     use_effect(move || {
         spawn(async move {
             let policies_result = load_policies_with_fallback().await;
@@ -106,6 +105,29 @@ pub fn EnvironmentsListView() -> Element {
     let items = environments.read().clone();
     let filtered = filtered_environments(&items, &query());
     let totals = EnvironmentTotals::from(&items);
+
+    // Attention flash for environments with critical/offline systems (TASK-385).
+    let env_needs_attention = |env: &EnvironmentItem| -> bool {
+        env.health.critical > 0 || env.health.offline > 0
+    };
+    let attention_count = items.iter().filter(|e| env_needs_attention(e)).count() as i64;
+    let mut flash_signal = use_signal(|| false);
+    let flash_global = flash_signal();
+    use_effect(move || {
+        set_attention_count("environments", attention_count);
+        if should_flash("environments", attention_count > 0) {
+            flash_signal.set(true);
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(3200).await;
+                flash_signal.set(false);
+            });
+        }
+        // Acknowledge the "environments" sidebar badge on every visit.
+        acknowledge("environments");
+    });
+
+    // Pre-compute per-item flash booleans for cards/table (outside rsx! to avoid parse issues).
+    let flashes: Vec<bool> = filtered.iter().map(|env| flash_global && env_needs_attention(env)).collect();
 
     rsx! {
         div { style: "display:flex; flex-direction:column; gap:16px;",
@@ -211,6 +233,7 @@ pub fn EnvironmentsListView() -> Element {
                             key: "{env.id}",
                             environment: env.clone(),
                             policy_library: policy_library_state.read().clone(),
+                            flash: flash_global && env_needs_attention(env),
                             on_edit: move |env| {
                                 form_error.set(None);
                                 form_draft.set(Some(form_draft_from_environment(&env)));
@@ -222,6 +245,7 @@ pub fn EnvironmentsListView() -> Element {
                 EnvironmentTable {
                     environments: filtered.clone(),
                     policy_library: policy_library_state.read().clone(),
+                    flashes: flashes.clone(),
                     on_edit: move |env| {
                         form_error.set(None);
                         form_draft.set(Some(form_draft_from_environment(&env)));

@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::{ALERT_STATE, attention_count, badge_visible};
+use crate::alerts::{ALERT_STATE, attention_count};
 use crate::api::client::get_navigation_badges;
 use crate::api::models::NavigationBadges;
 use crate::routes::Route;
@@ -72,6 +72,7 @@ pub fn SidebarNav() -> Element {
     // Get sidebar context
     let sidebar_ctx = use_context::<SidebarContext>();
     let is_collapsed = (sidebar_ctx.is_collapsed)();
+    let mut collapsed_signal = sidebar_ctx.is_collapsed;
 
     // Match design-example sizing for sidebar and rail mode.
     let nav_width = if is_collapsed { "64px" } else { "240px" };
@@ -96,7 +97,8 @@ pub fn SidebarNav() -> Element {
     });
     let badges = badges();
     // Subscribe to ALERT_STATE so re-renders happen when badges are acknowledged.
-    let _alert = ALERT_STATE.read();
+    let alert_state = ALERT_STATE.read();
+    let acked = alert_state.acknowledged.clone();
     let systems_attention = badges.systems_attention.max(attention_count("systems"));
     let flakes_errored = badges.flakes_errored.max(attention_count("flakes"));
     let environments_attention = badges
@@ -160,6 +162,37 @@ pub fn SidebarNav() -> Element {
                         }
                     }
                 }
+                // Collapse button matching the design example (Shell.jsx).
+                button {
+                    class: "sidebar-collapse focus-ring",
+                    onclick: move |_| {
+                        let new_state = !collapsed_signal();
+                        collapsed_signal.set(new_state);
+                        if let Some(window) = web_sys::window() {
+                            if let Ok(Some(storage)) = window.local_storage() {
+                                let _ = storage.set_item(
+                                    "cf-sidebar-collapsed",
+                                    if new_state { "true" } else { "false" },
+                                );
+                            }
+                        }
+                    },
+                    title: if is_collapsed { "Expand sidebar" } else { "Collapse sidebar" },
+                    "aria-label": if is_collapsed { "Expand sidebar" } else { "Collapse sidebar" },
+                    svg {
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        if is_collapsed {
+                            // chevron-right
+                            path { d: "M9 18l6-6-6-6" }
+                        } else {
+                            // chevron-left
+                            path { d: "M15 18l-6-6 6-6" }
+                        }
+                    }
+                }
             }
             div {
                 class: "flex-1 px-3 overflow-y-auto",
@@ -189,7 +222,7 @@ pub fn SidebarNav() -> Element {
                     label: "Systems",
                     badge_count: if systems_attention > 0 { Some(systems_attention) } else { None },
                     badge_attention: systems_attention > 0,
-                    badge_hidden: !badge_visible("systems", systems_attention, true),
+                    badge_hidden: systems_attention == 0 || (systems_attention > 0 && acked.contains("systems")),
                     badge_title: Some(format!("{} of {} systems need attention (critical or offline)", systems_attention, badges.systems_total)),
                     icon: rsx!(
                         svg {
@@ -210,7 +243,7 @@ pub fn SidebarNav() -> Element {
                     label: "Flakes",
                     badge_count: if flakes_errored > 0 { Some(flakes_errored) } else { None },
                     badge_attention: flakes_errored > 0,
-                    badge_hidden: !badge_visible("flakes", flakes_errored, true),
+                    badge_hidden: flakes_errored == 0 || (flakes_errored > 0 && acked.contains("flakes")),
                     badge_title: Some(if flakes_errored > 0 {
                         format!("{} of {} flakes failing to sync", flakes_errored, badges.flakes_total)
                     } else {
@@ -235,7 +268,7 @@ pub fn SidebarNav() -> Element {
                     label: "Environments",
                     badge_count: if environments_attention > 0 { Some(environments_attention) } else { None },
                     badge_attention: environments_attention > 0,
-                    badge_hidden: !badge_visible("environments", environments_attention, true),
+                    badge_hidden: environments_attention == 0 || (environments_attention > 0 && acked.contains("environments")),
                     badge_title: Some(if environments_attention > 0 {
                         format!("{} of {} environments have critical or offline systems", environments_attention, badges.environments_total)
                     } else {
@@ -265,8 +298,8 @@ pub fn SidebarNav() -> Element {
                     // The view itself calls acknowledge("builds") when the completed/failed tab opens.
                     badge_count: if builds_failed > 0 { Some(builds_failed) } else { None },
                     badge_attention: builds_failed > 0,
-                    badge_hidden: !badge_visible("builds", builds_failed, true),
-                    badge_title: Some(format!("{} failed build{}", builds_failed, if builds_failed == 1 { "" } else { "s" })),
+                    badge_hidden: builds_failed == 0 || (builds_failed > 0 && acked.contains("builds")),
+                    badge_title: Some(format!("{} failed build{} in the last 24h", builds_failed, if builds_failed == 1 { "" } else { "s" })),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -285,8 +318,8 @@ pub fn SidebarNav() -> Element {
                     // Evals badge is acknowledged only when the failures tab is opened (not on mount).
                     badge_count: if evals_failed > 0 { Some(evals_failed) } else { None },
                     badge_attention: evals_failed > 0,
-                    badge_hidden: !badge_visible("evals", evals_failed, true),
-                    badge_title: Some(format!("{} failed evaluation{}", evals_failed, if evals_failed == 1 { "" } else { "s" })),
+                    badge_hidden: evals_failed == 0 || (evals_failed > 0 && acked.contains("evals")),
+                    badge_title: Some(format!("{} failed evaluation{} in the last 24h", evals_failed, if evals_failed == 1 { "" } else { "s" })),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -327,7 +360,7 @@ pub fn SidebarNav() -> Element {
                         label: "CVEs",
                         badge_count: if cves_critical > 0 { Some(cves_critical) } else { None },
                         badge_attention: cves_critical > 0,
-                        badge_hidden: !badge_visible("cves", cves_critical, true),
+                        badge_hidden: cves_critical == 0 || (cves_critical > 0 && acked.contains("cves")),
                         badge_title: Some(format!("{} critical CVEs open across the fleet", cves_critical)),
                         icon: rsx!(
                             svg {

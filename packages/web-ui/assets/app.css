@@ -2020,6 +2020,33 @@ html[data-theme="light"] .sd-nix {
   min-height: 60px;
 }
 
+/* Collapse / expand button inside sidebar-brand (design example Shell.jsx). */
+.sidebar-collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--cf-text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.sidebar-collapse:hover {
+  background: var(--cf-subtle-bg);
+  color: var(--cf-text-primary);
+}
+.sidebar-collapse svg {
+  width: 15px;
+  height: 15px;
+}
+.sidebar.rail .sidebar-collapse {
+  margin: 0 auto;
+}
+
 .brand-mark {
   width: 28px;
   height: 28px;

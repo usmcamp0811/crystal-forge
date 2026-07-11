@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 
-use crate::alerts::acknowledge;
+use crate::alerts::{acknowledge, set_attention_count};
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
@@ -152,9 +152,6 @@ pub fn SystemsListView() -> Element {
         }
     });
 
-    // Acknowledge the "systems" sidebar attention badge on first visit (TASK-385).
-    use_effect(move || { acknowledge("systems"); });
-
     // Poll for density changes from topbar tweaks
     use_effect(move || {
         spawn(async move {
@@ -193,6 +190,19 @@ pub fn SystemsListView() -> Element {
 
     // Local mutable state for systems (allows client-side add/remove until backend supports it)
     let mut local_systems = use_signal(Vec::<SystemSummary>::new);
+
+    // Sync attention count and acknowledge the "systems" sidebar badge (TASK-385).
+    // Placed after `local_systems` so the closure can capture it.
+    use_effect(move || {
+        let attention_count = local_systems
+            .read()
+            .iter()
+            .filter(|s| matches!(s.health_status, HealthStatus::Critical | HealthStatus::Offline))
+            .count() as i64;
+        set_attention_count("systems", attention_count);
+        acknowledge("systems");
+    });
+
     let mut load_error = use_signal(|| None::<String>);
     let mut api_notice = use_signal(|| None::<String>);
     let mut loading = use_signal(|| true);
