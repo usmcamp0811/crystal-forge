@@ -929,6 +929,10 @@ body {
 .hb-ring.hb-critical svg circle:last-child {
   animation: hb-flash 0.7s ease-in-out infinite;
 }
+.hb-ring.hb-indeterminate svg { animation: hb-spin 0.9s linear infinite; }
+@keyframes hb-spin {
+  100% { transform: rotate(360deg); }
+}
 @keyframes hb-pulse {
   0%, 100% { transform: scale(0.7); opacity: 0.85; }
   50%      { transform: scale(1.15); opacity: 0.45; }

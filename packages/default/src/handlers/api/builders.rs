@@ -31,19 +31,86 @@ use crate::handlers::builder_request::{
     authenticate_builder_request, authenticate_builder_request_allow_inactive,
 };
 use crate::models::builders::{
-    AppendLogsRequest, BuildJob, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary,
-    BuilderWithEnvironments, CreateBuilderRequest, EstablishBuilderSessionRequest,
-    EstablishBuilderSessionResponse, EvaluatorFingerprint, KeypairRegeneratedResponse,
-    NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
-    ResolveBuilderIdResponse, SourceInputDeliveryMode, UpdateBuilderEnvironmentsRequest,
-    UpdateBuilderPublicKeyRequest, UpdateBuilderRequest, VerifiedSourceIdentity,
+    AppendLogsRequest, BuildJob, Builder, BuilderCachePushConfig, BuilderCreatedResponse,
+    BuilderMetrics, BuilderSummary, BuilderWithEnvironments, CreateBuilderRequest,
+    EstablishBuilderSessionRequest, EstablishBuilderSessionResponse, EvaluatorFingerprint,
+    KeypairRegeneratedResponse, NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest,
+    ResolveBuilderIdRequest, ResolveBuilderIdResponse, SourceInputDeliveryMode,
+    UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
+    VerifiedSourceIdentity,
 };
+use crate::models::cache_destination::CacheDestination;
 use crate::models::public_key::PublicKey;
 use crate::queries::builders;
 
 const NIX_STORE_EXPORT_ARG_BYTES_LIMIT: usize = 128 * 1024;
 const ATTIC_PUSH_PATH_CHUNK_SIZE: usize = 200;
 const BUILDER_SESSION_STALE_TIMEOUT_SECS: i64 = 60;
+
+/// Returns true only when the server is explicitly configured to trust
+/// forwarded-proto headers from its reverse proxy AND those headers assert
+/// HTTPS for the current request.
+///
+/// The two-layer check prevents a builder from spoofing the header over a
+/// direct plaintext connection:
+///   1. `trust_forwarded_builder_https` must be `true` in `[server]` config —
+///      the operator opts in by confirming their proxy strips/rewrites these
+///      headers before forwarding.
+///   2. At least one of the standard forwarded-proto headers in the request
+///      must assert "https".
+///
+/// When `trust_forwarded_builder_https` is `false` (the default) this always
+/// returns `false`, so credential-bearing cache config is never sent.
+fn builder_https_verified_by_trusted_proxy(
+    server_config: &crate::config::ServerConfig,
+    headers: &HeaderMap,
+) -> bool {
+    if !server_config.trust_forwarded_builder_https {
+        return false;
+    }
+    forwarded_header_asserts_https(headers)
+}
+
+fn forwarded_header_asserts_https(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("https"))
+        || headers
+            .get("forwarded")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| forwarded_field_has_https(v))
+        || headers
+            .get("x-forwarded-ssl")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("on"))
+        || headers
+            .get("x-url-scheme")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("https"))
+}
+
+fn forwarded_field_has_https(value: &str) -> bool {
+    value
+        .split(',')
+        .flat_map(|part| part.split(';'))
+        .map(str::trim)
+        .any(|part| {
+            let Some((name, val)) = part.split_once('=') else {
+                return false;
+            };
+            name.eq_ignore_ascii_case("proto")
+                && val.trim_matches('"').eq_ignore_ascii_case("https")
+        })
+}
+
+fn cache_push_config_contains_credentials(config: &BuilderCachePushConfig) -> bool {
+    config.attic_token.is_some()
+        || config.s3_access_key_id.is_some()
+        || config.s3_secret_access_key.is_some()
+        || config.s3_session_token.is_some()
+}
 
 fn parse_derivation_requisites(stdout: &[u8], drv_path: &str) -> Vec<String> {
     let mut paths = Vec::new();
@@ -176,6 +243,69 @@ async fn resolve_cache_destinations_for_derivation(
 
     destinations.retain(|destination| destination.enabled);
     Ok(destinations)
+}
+
+fn cache_type_from_destination(value: &str) -> crate::config::CacheType {
+    match value {
+        "S3" => crate::config::CacheType::S3,
+        "Attic" => crate::config::CacheType::Attic,
+        "Http" => crate::config::CacheType::Http,
+        _ => crate::config::CacheType::Nix,
+    }
+}
+
+fn builder_cache_push_config_from_destination(
+    destination: &CacheDestination,
+) -> BuilderCachePushConfig {
+    BuilderCachePushConfig {
+        cache_type: cache_type_from_destination(&destination.cache_type),
+        push_to: destination.push_to.clone(),
+        push_after_build: true,
+        signing_key: destination.signing_key_path.clone(),
+        compression: destination.compression.clone(),
+        s3_region: destination.s3_region.clone(),
+        s3_profile: destination.s3_profile.clone(),
+        s3_access_key_id: destination.s3_access_key_id.clone(),
+        s3_secret_access_key: destination.s3_secret_access_key.clone(),
+        s3_session_token: destination.s3_session_token.clone(),
+        s3_endpoint_url: destination.s3_endpoint_url.clone(),
+        attic_token: destination.attic_token.clone(),
+        attic_cache_name: destination.attic_cache_name.clone(),
+        attic_ignore_upstream_cache_filter: destination
+            .attic_ignore_upstream_cache_filter
+            .unwrap_or(true),
+        attic_jobs: destination
+            .attic_jobs
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(5),
+        max_retries: destination
+            .max_retries
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(3),
+        retry_delay_seconds: destination
+            .retry_delay_seconds
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(5),
+        push_timeout_seconds: destination
+            .push_timeout_seconds
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or_else(crate::config::CacheConfig::default_push_timeout_seconds),
+        force_repush: destination.force_repush.unwrap_or(false),
+        require_sigs: destination.require_sigs.unwrap_or(true),
+    }
+}
+
+async fn builder_cache_push_config_for_derivation(
+    pool: &sqlx::PgPool,
+    derivation: &crate::derivations::Derivation,
+) -> Result<BuilderCachePushConfig, StatusCode> {
+    let destinations = resolve_cache_destinations_for_derivation(pool, derivation).await?;
+
+    Ok(destinations
+        .first()
+        .map(builder_cache_push_config_from_destination)
+        .unwrap_or_else(BuilderCachePushConfig::disabled))
 }
 
 async fn verified_source_identity_for_derivation(
@@ -1511,6 +1641,53 @@ pub async fn get_next_job(
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    let cache_push = match builder_cache_push_config_for_derivation(&state.pool, &derivation).await
+    {
+        Ok(cache_push) => Some(cache_push),
+        Err(status) => {
+            tracing::error!(
+                job_id = %job.id,
+                derivation_id = derivation.id,
+                "failed to assemble builder cache-push config; requeueing claimed job"
+            );
+            requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        job_id = %job.id,
+                        "failed to requeue job after cache-push config assembly error: {e}"
+                    );
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            return Err(status);
+        }
+    };
+
+    if cache_push
+        .as_ref()
+        .is_some_and(cache_push_config_contains_credentials)
+        && !builder_https_verified_by_trusted_proxy(&state.server_config, &headers)
+    {
+        tracing::error!(
+            job_id = %job.id,
+            derivation_id = derivation.id,
+            builder_id = %builder_id,
+            trust_forwarded = state.server_config.trust_forwarded_builder_https,
+            "refusing to send cache push credentials: server.trust_forwarded_builder_https \
+             is false or forwarded-proto header does not assert HTTPS"
+        );
+        requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    job_id = %job.id,
+                    "failed to requeue job after builder credential transport rejection: {e}"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        return Err(StatusCode::UPGRADE_REQUIRED);
+    }
+
     let payload = crate::models::builders::BuildJobDerivation {
         id: derivation.id,
         derivation_name: derivation.derivation_name.clone(),
@@ -1525,6 +1702,7 @@ pub async fn get_next_job(
         source_input_delivery,
         expected_drv_path,
         evaluator: Some(current_evaluator_fingerprint()),
+        cache_push,
     };
 
     Ok(Json(crate::models::builders::NextJobResponse {
@@ -1916,6 +2094,223 @@ pub async fn start_job(
 pub struct CompleteJobRequest {
     #[serde(default)]
     pub output_path: Option<String>,
+    #[serde(default)]
+    pub cache_pushed: bool,
+    #[serde(default)]
+    pub cache_reference: Option<String>,
+}
+
+fn cache_reference_matches_destination(
+    reported: &str,
+    destination: &crate::models::cache_destination::CacheDestination,
+) -> bool {
+    let reported = reported.trim();
+    if reported.is_empty() {
+        return false;
+    }
+
+    destination.name == reported
+        || destination.push_to.as_deref() == Some(reported)
+        || destination.attic_cache_name.as_deref() == Some(reported)
+}
+
+async fn validated_reported_cache_destination(
+    state: &CFState,
+    request: &CompleteJobRequest,
+    builder_id: Uuid,
+    job_id: Uuid,
+) -> Result<Option<crate::models::cache_destination::CacheDestination>, StatusCode> {
+    if !request.cache_pushed {
+        return Ok(None);
+    }
+
+    let Some(reported) = request
+        .cache_reference
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        tracing::warn!(
+            builder_id = %builder_id,
+            job_id = %job_id,
+            "builder reported cache_pushed without cache_reference"
+        );
+        return Err(StatusCode::CONFLICT);
+    };
+
+    let destinations =
+        crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    builder_id = %builder_id,
+                    job_id = %job_id,
+                    error = %e,
+                    "failed to load cache destinations while validating builder cache push"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+    let Some(destination) = destinations
+        .iter()
+        .find(|destination| cache_reference_matches_destination(reported, destination))
+    else {
+        tracing::warn!(
+            builder_id = %builder_id,
+            job_id = %job_id,
+            reported_cache = reported,
+            "builder reported cache push to a cache that does not match any active server cache destination"
+        );
+        return Err(StatusCode::CONFLICT);
+    };
+
+    Ok(Some(destination.clone()))
+}
+
+async fn verify_store_path_available_from_cache(
+    destination: &crate::models::cache_destination::CacheDestination,
+    store_path: &str,
+    derivation_id: i32,
+    job_id: Uuid,
+) -> Result<(), StatusCode> {
+    let Some(cache_url) = destination
+        .push_to
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        tracing::warn!(
+            derivation_id,
+            job_id = %job_id,
+            cache_destination = %destination.name,
+            "cannot verify builder cache push because destination has no push_to/substituter URL"
+        );
+        return Err(StatusCode::CONFLICT);
+    };
+
+    let mut command = Command::new("nix");
+    command.args(["path-info", "--store", cache_url, store_path]);
+
+    if let Some(public_key) = destination
+        .attic_public_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        command.env(
+            "NIX_CONFIG",
+            format!("extra-substituters = {cache_url}\nextra-trusted-public-keys = {public_key}\n"),
+        );
+    }
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), command.output())
+        .await
+        .map_err(|_| {
+            tracing::warn!(
+                derivation_id,
+                job_id = %job_id,
+                cache_destination = %destination.name,
+                cache_url,
+                store_path,
+                "timed out verifying builder cache push"
+            );
+            StatusCode::CONFLICT
+        })?
+        .map_err(|e| {
+            tracing::warn!(
+                derivation_id,
+                job_id = %job_id,
+                cache_destination = %destination.name,
+                cache_url,
+                store_path,
+                error = %e,
+                "failed to run cache availability probe"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !output.status.success() {
+        tracing::warn!(
+            derivation_id,
+            job_id = %job_id,
+            cache_destination = %destination.name,
+            cache_url,
+            store_path,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "builder reported cache_pushed, but server cache probe could not find store path"
+        );
+        return Err(StatusCode::CONFLICT);
+    }
+
+    Ok(())
+}
+
+async fn record_builder_confirmed_cache_push(
+    state: &CFState,
+    derivation_id: i32,
+    job_id: Uuid,
+    cache_destination: &crate::models::cache_destination::CacheDestination,
+) -> Result<(), StatusCode> {
+    let derivation = crate::queries::derivations::get_derivation_by_id(&state.pool, derivation_id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                derivation_id,
+                job_id = %job_id,
+                error = %e,
+                "failed to load derivation while recording builder-confirmed cache push"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let Some(store_path) = derivation
+        .store_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        tracing::warn!(
+            derivation_id,
+            job_id = %job_id,
+            "builder reported cache_pushed but derivation has no persisted store_path"
+        );
+        return Err(StatusCode::CONFLICT);
+    };
+
+    verify_store_path_available_from_cache(cache_destination, store_path, derivation_id, job_id)
+        .await?;
+
+    let cache_job_id = crate::queries::cache_push::create_cache_push_job(
+        &state.pool,
+        derivation_id,
+        store_path,
+        Some(cache_destination.name.as_str()),
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!(
+            derivation_id,
+            job_id = %job_id,
+            error = %e,
+            "failed to create/reuse cache push job for builder-confirmed cache push"
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    crate::queries::cache_push::mark_cache_push_completed(&state.pool, cache_job_id, None, None)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                derivation_id,
+                job_id = %job_id,
+                cache_job_id,
+                error = %e,
+                "failed to mark builder-confirmed cache push completed"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(())
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/complete - Mark job as complete
@@ -1940,10 +2335,17 @@ pub async fn complete_job(
 
     // Output path is optional for backwards compatibility but expected from API builders.
     let request: CompleteJobRequest = if body.is_empty() {
-        CompleteJobRequest { output_path: None }
+        CompleteJobRequest {
+            output_path: None,
+            cache_pushed: false,
+            cache_reference: None,
+        }
     } else {
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?
     };
+
+    let reported_cache_destination =
+        validated_reported_cache_destination(&state, &request, builder_id, job_id).await?;
 
     // Perform atomic completion (job + derivation update in one transaction).
     // Idempotent: if the job is already 'success' with matching builder+session,
@@ -1967,10 +2369,25 @@ pub async fn complete_job(
         StatusCode::CONFLICT
     })?;
 
-    // Best-effort cache-push queueing only for new completions.
-    // Idempotent retries use the originally persisted store path and must not
-    // queue a new push from a potentially different request path.
-    if is_new {
+    if request.cache_pushed {
+        let Some(cache_destination) = reported_cache_destination.as_ref() else {
+            tracing::warn!(
+                builder_id = %builder_id,
+                job_id = %job_id,
+                "builder reported cache_pushed but no validated cache destination is available"
+            );
+            return Err(StatusCode::CONFLICT);
+        };
+        record_builder_confirmed_cache_push(
+            &state,
+            completed_job.derivation_id,
+            job_id,
+            cache_destination,
+        )
+        .await?;
+    } else if is_new {
+        // Old builder compatibility: builders that do not report builder-side cache
+        // push still create a pending server-side cache-push row on first completion.
         if let Some(ref store_path) = request.output_path {
             let cache_destination =
                 crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
@@ -2701,6 +3118,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::BuildStreamMessage;
+    use super::builder_https_verified_by_trusted_proxy;
     use super::builder_id_for_resolved_builder;
     use super::canonical_signature_payload;
     use super::chunk_derivation_archive_paths;
@@ -3189,5 +3607,84 @@ mod tests {
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body, "Failed to create builder");
+    }
+
+    // ── builder_https_verified_by_trusted_proxy tests ──────────────────────
+
+    fn make_headers_with(key: &str, value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::HeaderName::from_bytes(key.as_bytes()).unwrap(),
+            axum::http::header::HeaderValue::from_str(value).unwrap(),
+        );
+        h
+    }
+
+    fn server_config_with_trust(trust: bool) -> crate::config::ServerConfig {
+        let mut cfg = crate::config::ServerConfig::default();
+        cfg.trust_forwarded_builder_https = trust;
+        cfg
+    }
+
+    #[test]
+    fn credential_check_blocked_when_flag_false_even_with_https_header() {
+        // A builder could spoof X-Forwarded-Proto: https over plain HTTP.
+        // The flag is false (default) so the check must return false regardless.
+        let cfg = server_config_with_trust(false);
+        let headers = make_headers_with("x-forwarded-proto", "https");
+        assert!(
+            !builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            "must not trust forwarded headers when flag is off"
+        );
+    }
+
+    #[test]
+    fn credential_check_blocked_when_flag_true_but_no_header() {
+        let cfg = server_config_with_trust(true);
+        let headers = HeaderMap::new();
+        assert!(
+            !builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            "must not pass when flag is on but no forwarded-proto header present"
+        );
+    }
+
+    #[test]
+    fn credential_check_blocked_when_flag_true_but_header_says_http() {
+        let cfg = server_config_with_trust(true);
+        let headers = make_headers_with("x-forwarded-proto", "http");
+        assert!(
+            !builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            "must not pass when forwarded-proto says http"
+        );
+    }
+
+    #[test]
+    fn credential_check_passes_when_flag_true_and_x_forwarded_proto_https() {
+        let cfg = server_config_with_trust(true);
+        let headers = make_headers_with("x-forwarded-proto", "https");
+        assert!(
+            builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            "must pass when flag is on and x-forwarded-proto asserts https"
+        );
+    }
+
+    #[test]
+    fn credential_check_passes_when_flag_true_and_forwarded_proto_https() {
+        let cfg = server_config_with_trust(true);
+        let headers = make_headers_with("forwarded", "for=1.2.3.4;proto=https");
+        assert!(
+            builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            "must pass when flag is on and Forwarded field asserts proto=https"
+        );
+    }
+
+    #[test]
+    fn credential_check_passes_when_flag_true_and_x_forwarded_ssl_on() {
+        let cfg = server_config_with_trust(true);
+        let headers = make_headers_with("x-forwarded-ssl", "on");
+        assert!(
+            builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            "must pass when flag is on and x-forwarded-ssl: on"
+        );
     }
 }

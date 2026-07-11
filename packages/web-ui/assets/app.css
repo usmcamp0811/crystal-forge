@@ -1576,6 +1576,24 @@ body {
 .sd-timeline {
   max-height: 320px;
   overflow-y: auto;
+  position: relative;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    black calc(100% - 32px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    black calc(100% - 32px),
+    transparent 100%
+  );
+  transition: -webkit-mask-image 0.2s ease;
+  transition: mask-image 0.2s ease;
+}
+
+.sd-timeline:hover {
+  -webkit-mask-image: none;
+  mask-image: none;
 }
 
 /* Deploy tab */
@@ -3854,20 +3872,44 @@ tr.kbd-focused > td {
 .timeline {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
+  position: relative;
+}
+
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 16px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--cf-timeline-line, #4b5563);
+  opacity: 0.3;
+  pointer-events: none;
 }
 
 .tl-item {
   display: flex;
-  gap: 12px;
+  gap: 14px;
   align-items: flex-start;
+  padding: 4px 8px;
+  margin: -4px -8px;
+  border-radius: 6px;
+  transition: background 0.12s ease;
+  position: relative;
+}
+
+.tl-item:hover {
+  background: var(--cf-hover-bg);
 }
 
 .tl-dot {
-  width: 10px;
-  height: 10px;
+  position: relative;
+  z-index: 1;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
-  margin-top: 5px;
+  margin-top: 4px;
   background: var(--status-color, var(--cf-gray-dot));
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--status-color, var(--cf-gray-dot)) 22%, transparent);
   flex-shrink: 0;
@@ -3881,14 +3923,47 @@ tr.kbd-focused > td {
 .tl-title {
   font-size: 13px;
   color: var(--cf-text-primary);
-  font-weight: 500;
+  font-weight: 600;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  line-height: 1.4;
+}
+
+.tl-title svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+
+.tl-title span {
+  min-width: 0;
 }
 
 .tl-meta {
   font-size: 11px;
   color: var(--cf-text-muted);
   font-family: var(--font-mono);
-  margin-top: 2px;
+  margin-top: 3px;
+  letter-spacing: -0.01em;
+}
+
+.tl-sub {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--cf-text-muted);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  opacity: 0.85;
+}
+
+.tl-empty {
+  font-size: 12px;
+  color: var(--cf-text-muted);
+  padding: 16px 0 16px 26px;
+  font-style: italic;
+  line-height: 1.5;
 }
 
 /* Heartbeat spinner */
@@ -4878,3 +4953,40 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
 .seg-tz {
   min-width: 90px;
 }
+
+/* Deployment progress banner (ported from docs/design/CrystalForge/styles.css) */
+
+.deploy-pending {
+  margin: 14px 0 0;
+  border: 1px solid color-mix(in oklab, var(--cf-brand-purple) 40%, var(--cf-card-border));
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--cf-brand-purple) 7%, var(--cf-card-bg));
+  overflow: hidden;
+}
+.deploy-pending.done { border-color: color-mix(in oklab, #34d399 45%, var(--cf-card-border)); background: color-mix(in oklab, #34d399 8%, var(--cf-card-bg)); }
+.deploy-pending.failed { border-color: color-mix(in oklab, #f87171 45%, var(--cf-card-border)); background: color-mix(in oklab, #f87171 8%, var(--cf-card-bg)); }
+.deploy-pending.rollback:not(.done) { border-color: color-mix(in oklab, #fbbf24 45%, var(--cf-card-border)); background: color-mix(in oklab, #fbbf24 8%, var(--cf-card-bg)); }
+.deploy-pending.rollback:not(.done) .deploy-pending-icon,
+.deploy-pending.rollback:not(.done) .deploy-pending-commit { color: #d97706; }
+.deploy-pending.rollback:not(.done) .deploy-pending-commit { background: color-mix(in oklab, #fbbf24 16%, transparent); }
+.deploy-pending.rollback:not(.done) .deploy-step.current .deploy-step-dot { border-color: #d97706; }
+.deploy-pending.rollback:not(.done) .deploy-step-pulse { background: #d97706; }
+.deploy-pending-main { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.deploy-pending-icon { flex-shrink: 0; display: grid; place-items: center; color: var(--cf-brand-purple); }
+.deploy-pending.done .deploy-pending-icon { color: #34d399; }
+.deploy-pending.failed .deploy-pending-icon { color: #f87171; }
+.deploy-pending-title { font-size: 13.5px; font-weight: 700; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.deploy-pending-commit { font-size: 11.5px; font-weight: 600; color: var(--cf-brand-purple); padding: 1px 6px; border-radius: 5px; background: color-mix(in oklab, var(--cf-brand-purple) 14%, transparent); }
+.deploy-pending-sub { font-size: 12px; color: var(--cf-text-secondary); margin-top: 2px; overflow-wrap: anywhere; }
+.deploy-steps { display: flex; align-items: flex-start; padding: 2px 14px 12px; gap: 0; }
+.deploy-step { display: flex; flex-direction: column; align-items: center; gap: 6px; flex: 1; min-width: 0; position: relative; }
+.deploy-step-dot { width: 18px; height: 18px; border-radius: 50%; flex-shrink: 0; z-index: 1; border: 1.5px solid var(--cf-divider); display: grid; place-items: center; color: #fff; background: var(--cf-card-bg); }
+.deploy-step.past .deploy-step-dot { background: #34d399; border-color: #34d399; }
+.deploy-step.current .deploy-step-dot { border-color: var(--cf-brand-purple); }
+.deploy-step-pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--cf-brand-purple); animation: live-dur-pulse 1.1s ease-in-out infinite; }
+.deploy-step-label { font-size: 10.5px; font-weight: 600; color: var(--cf-text-muted); text-align: center; line-height: 1.2; max-width: 100%; }
+.deploy-step.past .deploy-step-label, .deploy-step.current .deploy-step-label { color: var(--cf-text-primary); }
+.deploy-step-bar { position: absolute; top: 8px; left: 50%; width: 100%; height: 2px; background: var(--cf-divider); z-index: 0; }
+.deploy-step.past .deploy-step-bar { background: #34d399; }
+.deploy-pending-spinner { width: 16px; height: 16px; border-radius: 999px; border: 2px solid color-mix(in oklab, currentColor 30%, transparent); border-top-color: currentColor; animation: cf-spin 0.8s linear infinite; display: inline-block; }
+@keyframes cf-spin { to { transform: rotate(360deg); } }

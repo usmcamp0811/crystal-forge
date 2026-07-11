@@ -122,8 +122,12 @@ impl Derivation {
             && effective_args.first().map(|s| s.as_str()) == Some("push")
         {
             let endpoint = std::env::var("ATTIC_SERVER_URL")
+                .ok()
+                .or_else(|| attic_server_url_from_cache_config(cache_config))
                 .context("ATTIC_SERVER_URL not set (e.g. http://atticCache:8080)")?;
             let token = std::env::var("ATTIC_TOKEN")
+                .ok()
+                .or_else(|| cache_config.attic_token.clone())
                 .context("ATTIC_TOKEN not set (provide a token with push permission)")?;
             let remote = std::env::var("ATTIC_REMOTE_NAME").unwrap_or_else(|_| "local".to_string());
 

@@ -4,6 +4,39 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+const FETCH_SYSTEM_GENERATIONS_SQL: &str = r#"
+WITH generation_rows AS (
+  SELECT
+    ss.generation,
+    MIN(ss.timestamp) AS first_seen_at,
+    (ARRAY_AGG(ss.store_path ORDER BY ss.timestamp ASC) FILTER (
+      WHERE ss.store_path IS NOT NULL AND BTRIM(ss.store_path) <> ''
+    ))[1] AS store_path
+  FROM system_states ss
+  JOIN systems s ON s.hostname = ss.hostname
+  WHERE s.id = $1
+    AND ss.generation IS NOT NULL
+  GROUP BY ss.generation
+)
+SELECT
+    gr.generation,
+    gr.store_path,
+    commit_link.commit_hash,
+    gr.first_seen_at AS timestamp
+FROM generation_rows gr
+LEFT JOIN LATERAL (
+  SELECT c.git_commit_hash AS commit_hash
+  FROM derivations d
+  JOIN commits c ON c.id = d.commit_id
+  WHERE gr.store_path IS NOT NULL
+    AND gr.store_path = COALESCE(d.store_path, d.expected_store_path)
+    AND d.derivation_type = 'nixos'
+  ORDER BY d.id DESC
+  LIMIT 1
+) commit_link ON TRUE
+ORDER BY gr.generation DESC
+"#;
+
 /// Insert a full system state row.
 ///
 /// Accepts any Postgres executor so callers can run it against a pool or
@@ -165,33 +198,10 @@ pub async fn fetch_system_generations(
     pool: &PgPool,
     system_id: Uuid,
 ) -> Result<Vec<SystemGenerationRow>> {
-    let rows = sqlx::query_as::<_, SystemGenerationRow>(
-        r#"
-        SELECT DISTINCT ON (ss.generation)
-            ss.generation,
-            ss.store_path,
-            commit_link.commit_hash,
-            ss.timestamp
-        FROM system_states ss
-        JOIN systems s ON s.hostname = ss.hostname
-        LEFT JOIN LATERAL (
-          SELECT c.git_commit_hash AS commit_hash
-          FROM derivations d
-          JOIN commits c ON c.id = d.commit_id
-          WHERE ss.store_path IS NOT NULL
-            AND ss.store_path = COALESCE(d.store_path, d.expected_store_path)
-            AND d.derivation_type = 'nixos'
-          ORDER BY d.id DESC
-          LIMIT 1
-        ) commit_link ON TRUE
-        WHERE s.id = $1
-          AND ss.generation IS NOT NULL
-        ORDER BY ss.generation DESC, ss.timestamp DESC
-        "#,
-    )
-    .bind(system_id)
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query_as::<_, SystemGenerationRow>(FETCH_SYSTEM_GENERATIONS_SQL)
+        .bind(system_id)
+        .fetch_all(pool)
+        .await?;
     Ok(rows)
 }
 
@@ -224,7 +234,7 @@ pub async fn find_generation_store_path_last_seen(
 
 #[cfg(test)]
 mod tests {
-    use super::{fetch_system_generations, insert_system_state};
+    use super::{FETCH_SYSTEM_GENERATIONS_SQL, fetch_system_generations, insert_system_state};
 
     use crate::handlers::agent_request::deserialize_system_state_versioned;
     use crate::models::public_key::PublicKey;
@@ -248,6 +258,22 @@ mod tests {
         PgPool::connect(&db_url)
             .await
             .expect("failed to connect to DATABASE_URL")
+    }
+
+    #[test]
+    fn generation_history_uses_first_observed_timestamp_not_latest_heartbeat() {
+        assert!(
+            FETCH_SYSTEM_GENERATIONS_SQL.contains("MIN(ss.timestamp) AS first_seen_at"),
+            "generation timestamps must use first observation so heartbeat refreshes do not look like new generations"
+        );
+        assert!(
+            !FETCH_SYSTEM_GENERATIONS_SQL.contains("DISTINCT ON (ss.generation)"),
+            "DISTINCT ON with timestamp DESC regresses to latest heartbeat per generation"
+        );
+        assert!(
+            !FETCH_SYSTEM_GENERATIONS_SQL.contains("ss.generation DESC, ss.timestamp DESC"),
+            "generation query must not order per-generation selection by latest timestamp"
+        );
     }
 
     #[tokio::test]

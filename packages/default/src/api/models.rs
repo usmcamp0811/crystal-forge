@@ -1462,6 +1462,25 @@ pub struct VerifyGenerationClosureResponse {
     pub last_seen_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemDeploymentProgress {
+    pub id: uuid::Uuid,
+    pub stage: String,
+    pub kind: String,
+    pub target_store_path: String,
+    pub target_commit: Option<String>,
+    pub target_generation: Option<i64>,
+    pub source: String,
+    pub issued_at: DateTime<Utc>,
+    pub delivered_at: Option<DateTime<Utc>>,
+    pub applying_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub failed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub failure_message: Option<String>,
+}
+
 /// A single system state transition for timeline/history views.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemHistoryEntry {

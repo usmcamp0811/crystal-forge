@@ -1503,6 +1503,30 @@ pub struct VerifyGenerationClosureResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemDeploymentProgress {
+    pub id: Uuid,
+    pub stage: String,
+    pub kind: String,
+    pub target_store_path: String,
+    #[serde(default)]
+    pub target_commit: Option<String>,
+    #[serde(default)]
+    pub target_generation: Option<i64>,
+    pub source: String,
+    pub issued_at: DateTime<Utc>,
+    #[serde(default)]
+    pub delivered_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub applying_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub failed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub failure_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemHistoryEntry {
     #[serde(default)]
     pub id: Option<Uuid>,

@@ -6,7 +6,7 @@
 //! - CVEs: Expandable vulnerability list
 //! - Logs: Recent deployment logs
 
-use chrono::{Duration, Local, Utc};
+use chrono::{Local, Utc};
 use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
@@ -16,22 +16,20 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api::client::{
-    ApiClientError, fetch_compliance_system_evidence, fetch_cve_scan_status,
-    fetch_hardening_scan_status, fetch_system_compliance_bundles,
+    ApiClientError, fetch_compliance_system_evidence, fetch_system_compliance_bundles,
     fetch_system_cve_scan_eligibility, fetch_system_cves, fetch_system_hardening,
     fetch_system_hardening_justifications, fetch_system_hardening_scan_eligibility,
-    request_system_generation_rollback, request_system_rollback, request_system_sync,
-    save_system_hardening_justification, trigger_system_cve_scan, trigger_system_hardening_scan,
+    get_system_deployment_progress, request_system_generation_rollback, request_system_rollback,
+    request_system_sync, save_system_hardening_justification,
     verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
-    BuildStatus, CommitInfo, ComplianceEvidenceResponse, ComplianceSystemRollup,
-    CveScanEligibilityResponse, CveSummary, DeploymentLogEntry, DeploymentStatus,
-    HardeningJustificationResponse, HardeningScanEligibilityResponse,
-    HardeningServiceResultResponse, HealthStatus, LogLevel, PipelineStage,
+    BuildStatus, CommitInfo, ComplianceEvidenceResponse, CveScanEligibilityResponse,
+    DeploymentLogEntry, DeploymentStatus, HardeningJustificationResponse,
+    HardeningScanEligibilityResponse, HardeningServiceResultResponse, HealthStatus, LogLevel,
     SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
-    SystemComplianceBundle, SystemDetail, SystemGeneration, SystemHardwareInfo, SystemHistoryEntry,
-    SystemNetworkInfo, SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
+    SystemComplianceBundle, SystemDeploymentProgress, SystemDetail, SystemGeneration,
+    SystemHistoryEntry, SystemRollbackGenerationRequest, SystemRollbackRequest,
     SystemVulnerability, VerifyGenerationClosureRequest,
 };
 use crate::components::compliance::EvidenceDrawer;
@@ -42,9 +40,7 @@ use crate::components::layout::Card;
 use crate::components::modals::{RollbackConfirmDialog, SyncConfirmDialog};
 use crate::components::notifications::Toast;
 use crate::components::system::{
-    AgentCard, BooleanRow, EditSystemModal, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab,
-    NetworkCard, SecurityCard, StatusBadge, SystemInfoCard, deployment_state_label,
-    environment_style, format_uptime,
+    EditSystemModal, PendingDeployBanner, deployment_state_label, environment_style, format_uptime,
 };
 use crate::routes::Route;
 use crate::state::{app_state::AppState, auth};
@@ -168,6 +164,75 @@ fn normalize_tag(raw: &str) -> String {
         .to_lowercase()
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ActivityRow {
+    title: String,
+    sub: Option<String>,
+    color: &'static str,
+    icon: IconName,
+    timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+fn activity_row_from_history(entry: &SystemHistoryEntry) -> ActivityRow {
+    let event_kind = entry.event_kind.as_str();
+    let outcome = entry.outcome.as_str();
+    let title = match (event_kind, outcome) {
+        ("cf_deployment", "started") => "Deployment started".to_string(),
+        ("cf_deployment", "failed") => "Deploy failed".to_string(),
+        ("cf_deployment", _) => entry
+            .generation
+            .map(|generation| format!("Deployed #{generation}"))
+            .unwrap_or_else(|| "Deployed".to_string()),
+        ("local_rebuild", _) => {
+            if entry.reconciled {
+                "Local rebuild (reconciled)".to_string()
+            } else {
+                "Local rebuild (out of band)".to_string()
+            }
+        }
+        ("restart", _) => "System restarted".to_string(),
+        ("agent_restart", _) => "Agent restarted".to_string(),
+        _ => entry
+            .title
+            .clone()
+            .unwrap_or_else(|| entry.change_reason.clone()),
+    };
+    let sub = entry
+        .commit_hash
+        .clone()
+        .or_else(|| entry.store_path.clone())
+        .or_else(|| entry.title.clone());
+    let (color, icon) = match (event_kind, outcome, entry.reconciled) {
+        ("cf_deployment", "failed", _) => ("#f87171", IconName::X),
+        ("cf_deployment", "started", _) => ("#60a5fa", IconName::Deploy),
+        ("cf_deployment", _, _) => ("#a78bfa", IconName::Deploy),
+        ("local_rebuild", _, true) => ("#60a5fa", IconName::Edit),
+        ("local_rebuild", _, false) => ("#fbbf24", IconName::Warn),
+        ("restart", _, _) | ("agent_restart", _, _) => ("#60a5fa", IconName::Power),
+        _ => ("#9ca3af", IconName::History),
+    };
+
+    ActivityRow {
+        title,
+        sub,
+        color,
+        icon,
+        timestamp: entry.occurred_at.unwrap_or(entry.timestamp),
+    }
+}
+
+
+fn format_short_duration(seconds: f64) -> String {
+    let value = seconds.abs().round() as i64;
+    if value < 60 {
+        format!("{}s", value)
+    } else if value < 3600 {
+        format!("{}m {}s", value / 60, value % 60)
+    } else {
+        format!("{}h {}m", value / 3600, (value % 3600) / 60)
+    }
+}
+
 fn reachability_label(reachability: &str) -> &'static str {
     if is_pull_reachability(reachability) {
         "Agent pull-only"
@@ -224,6 +289,7 @@ pub fn SystemDetailView(id: String) -> Element {
 
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
+    let mut deploy_action_notice: Signal<Option<(String, bool)>> = use_signal(|| None);
 
     // Live clock tick for relative timers/heartbeat countdowns while page is open.
     let mut now_tick = use_signal(Utc::now);
@@ -281,8 +347,61 @@ pub fn SystemDetailView(id: String) -> Element {
         }
     });
 
+    let mut deployment_progress_poll_tick = use_signal(|| 0_u64);
+    let id_for_deployment_progress = id.clone();
+    let deployment_progress_tick_for_resource = deployment_progress_poll_tick.clone();
+    let deployment_progress_resource = use_resource(move || {
+        let _ = deployment_progress_tick_for_resource();
+        let id = id_for_deployment_progress.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return None::<SystemDeploymentProgress>;
+            };
+
+            get_system_deployment_progress(&system_id)
+                .await
+                .ok()
+                .flatten()
+        }
+    });
+
+    use_future(move || async move {
+        loop {
+            #[cfg(target_arch = "wasm32")]
+            {
+                gloo_timers::future::TimeoutFuture::new(4000).await;
+                deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            break;
+        }
+    });
+
+    // History polling tick — only active during a deployment so Recent Activity and the
+    // History tab pick up deployment-started/succeeded/failed events as they happen.
+    // Declared `let mut` so the use_future move closure can call .set().
+    let mut history_poll_tick = use_signal(|| 0_u64);
+    {
+        let dep_resource = deployment_progress_resource.clone();
+        let mut tick = history_poll_tick.clone();
+        use_future(move || async move {
+            loop {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    gloo_timers::future::TimeoutFuture::new(4000).await;
+                    if dep_resource.read_unchecked().is_some() {
+                        tick.set(tick() + 1);
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                break;
+            }
+        });
+    }
+
     let id_for_history = id.clone();
     let history_resource = use_resource(move || {
+        let _ = history_poll_tick();
         let id = id_for_history.clone();
         async move {
             let Ok(system_id) = Uuid::parse_str(&id) else {
@@ -474,6 +593,10 @@ pub fn SystemDetailView(id: String) -> Element {
         .read_unchecked()
         .clone()
         .unwrap_or_default();
+    let deployment_progress = deployment_progress_resource
+        .read_unchecked()
+        .clone()
+        .flatten();
     let history_commit_history = map_history_entries_to_commit_history(&history_entries);
     let deploy_commit_history = commits_resource
         .read_unchecked()
@@ -752,11 +875,16 @@ pub fn SystemDetailView(id: String) -> Element {
                 let cve_total = system.cve_counts.total();
                 let cve_critical = system.cve_counts.critical;
                 let cve_high = system.cve_counts.high;
+                let deploy_stage = deployment_progress.as_ref().map(|p| p.stage.clone());
+                let deploy_started_at_ms = deployment_progress
+                    .as_ref()
+                    .map(|p| p.issued_at.timestamp_millis() as f64);
 
                 rsx! {
                     div {
                         class: "sd-metric-strip",
-                        // Heartbeat
+                        // Heartbeat — during a deploy the spinner turns purple and
+                        // shows per-stage countdown text instead of a separate widget.
                         div {
                             class: "sd-metric",
                             div { class: "sd-metric-label", "Heartbeat" }
@@ -766,6 +894,8 @@ pub fn SystemDetailView(id: String) -> Element {
                                     interval_sec: heartbeat_interval_sec,
                                     next_in_sec: heartbeat_next_in_sec,
                                     size: 36,
+                                    deploy_stage,
+                                    deploy_started_at_ms,
                                 }
                             }
                         }
@@ -806,6 +936,20 @@ pub fn SystemDetailView(id: String) -> Element {
                             div { class: "sd-metric-sub", "env: {env_str}" }
                         }
                     }
+                }
+            }
+
+            if let Some(progress) = deployment_progress.clone() {
+                PendingDeployBanner {
+                    progress,
+                    hostname: system.hostname.clone(),
+                    heartbeat_interval_secs: system.effective_heartbeat_interval_secs as i64,
+                    heartbeat_next_in_secs: system.last_seen.map(|dt| {
+                        system.effective_heartbeat_interval_secs as f64
+                            - now.signed_duration_since(dt).num_seconds() as f64
+                    }),
+                    on_dismiss: move |_| deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1),
+                    on_view_logs: move |_| active_tab.set(Tab::Logs),
                 }
             }
 
@@ -863,7 +1007,9 @@ pub fn SystemDetailView(id: String) -> Element {
                             system: system.clone(),
                             now: now,
                             current_commit: overview_current_commit.clone(),
+                            history_entries: effective_history_entries.clone(),
                             on_open_cves: move |_| active_tab.set(Tab::Cves),
+                            on_view_history: move |_| active_tab.set(Tab::History),
                         }
                     },
                     Tab::Deploy => rsx! {
@@ -873,24 +1019,42 @@ pub fn SystemDetailView(id: String) -> Element {
                             generations: generations_result.generations.clone(),
                             current_generation: generations_result.current_generation,
                             allow_mutations: can_mutate,
+                            deploy_notice: deploy_action_notice.read().clone(),
+                            on_clear_deploy_notice: move |_| deploy_action_notice.set(None),
                             on_deploy_commit: {
                                 let system_id = system.id;
                                 let hostname = system.hostname.clone();
                                 let toast_message = toast_message.clone();
+                                let mut deploy_action_notice = deploy_action_notice.clone();
                                 move |commit_sha: String| {
                                     let hostname = hostname.clone();
                                     let toast_message = toast_message.clone();
+                                    let mut deploy_action_notice = deploy_action_notice.clone();
+                                    deploy_action_notice.set(Some((
+                                        format!(
+                                            "Requesting deployment of {} to {}…",
+                                            hostname,
+                                            commit_sha.chars().take(7).collect::<String>()
+                                        ),
+                                        true,
+                                    )));
                                     spawn(async move {
-                                        let message = match deploy_system_via_api(system_id, commit_sha.clone()).await {
-                                            Ok(response) if !response.trim().is_empty() => response,
-                                            Ok(_) => format!(
-                                                "Requested deployment of {} to {}",
-                                                hostname,
-                                                commit_sha.chars().take(7).collect::<String>()
+                                        let (message, success) = match deploy_system_via_api(system_id, commit_sha.clone()).await {
+                                            Ok(response) if !response.trim().is_empty() => (response, true),
+                                            Ok(_) => (
+                                                format!(
+                                                    "Requested deployment of {} to {}",
+                                                    hostname,
+                                                    commit_sha.chars().take(7).collect::<String>()
+                                                ),
+                                                true,
                                             ),
-                                            Err(error) => format!("Deploy request failed for {}: {}", hostname, error),
+                                            Err(error) => (
+                                                format!("Deploy request failed for {}: {}", hostname, error),
+                                                false,
+                                            ),
                                         };
-                                        let success = !message.to_ascii_lowercase().contains("failed");
+                                        deploy_action_notice.set(Some((message.clone(), success)));
                                         let _ = dispatch_sync_notification(message, success, toast_message).await;
                                     });
                                 }
@@ -899,11 +1063,17 @@ pub fn SystemDetailView(id: String) -> Element {
                                 let system_id = system.id;
                                 let hostname = system.hostname.clone();
                                 let toast_message = toast_message.clone();
+                                let mut deploy_action_notice = deploy_action_notice.clone();
                                 move |store_path: String| {
                                     let hostname = hostname.clone();
                                     let toast_message = toast_message.clone();
+                                    let mut deploy_action_notice = deploy_action_notice.clone();
+                                    deploy_action_notice.set(Some((
+                                        format!("Requesting generation rollback for {}…", hostname),
+                                        true,
+                                    )));
                                     spawn(async move {
-                                        let message = match request_system_generation_rollback(
+                                        let (message, success) = match request_system_generation_rollback(
                                             &system_id,
                                             &SystemRollbackGenerationRequest {
                                                 store_path: store_path.clone(),
@@ -911,14 +1081,22 @@ pub fn SystemDetailView(id: String) -> Element {
                                         )
                                         .await
                                         {
-                                            Ok(response) if !response.message.trim().is_empty() => response.message,
-                                            Ok(_) => format!("Requested generation rollback for {}", hostname),
-                                            Err(error) => format!(
-                                                "Generation rollback request failed for {}: {}",
-                                                hostname, error
+                                            Ok(response) if !response.message.trim().is_empty() => {
+                                                (response.message, true)
+                                            }
+                                            Ok(_) => (
+                                                format!("Requested generation rollback for {}", hostname),
+                                                true,
+                                            ),
+                                            Err(error) => (
+                                                format!(
+                                                    "Generation rollback request failed for {}: {}",
+                                                    hostname, error
+                                                ),
+                                                false,
                                             ),
                                         };
-                                        let success = !message.to_ascii_lowercase().contains("failed");
+                                        deploy_action_notice.set(Some((message.clone(), success)));
                                         let _ = dispatch_sync_notification(message, success, toast_message).await;
                                     });
                                 }
@@ -1076,6 +1254,7 @@ pub fn SystemDetailView(id: String) -> Element {
         if *show_generation_rollback_modal.read() {
             GenerationRollbackModal {
                 hostname: system.hostname.clone(),
+                environment: system.environment.clone(),
                 generations: generations_result.generations.clone(),
                 current_generation: generations_result.current_generation,
                 on_close: move |_| show_generation_rollback_modal.set(false),
@@ -1104,6 +1283,10 @@ pub fn SystemDetailView(id: String) -> Element {
                                 ),
                             };
                             let success = !message.to_ascii_lowercase().contains("failed");
+                            if success {
+                                active_tab.set(Tab::Overview);
+                                deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1);
+                            }
                             let _ = dispatch_sync_notification(message, success, toast_message).await;
                         });
                     }
@@ -1469,6 +1652,7 @@ fn ComplianceTab(system: SystemDetail) -> Element {
 #[component]
 fn GenerationRollbackModal(
     hostname: String,
+    environment: Option<String>,
     generations: Vec<SystemGeneration>,
     current_generation: Option<i32>,
     on_close: EventHandler<()>,
@@ -1498,6 +1682,14 @@ fn GenerationRollbackModal(
             .cloned()
     });
     let selected_store_path = selected.as_ref().and_then(|item| item.store_path.clone());
+    let environment_name = environment.unwrap_or_else(|| "unknown".to_string());
+    let is_production = matches!(
+        environment_name.to_ascii_lowercase().as_str(),
+        "prod" | "production"
+    );
+    let mut confirm_text = use_signal(String::new);
+    let confirm_enabled =
+        selected_store_path.is_some() && (!is_production || *confirm_text.read() == hostname);
 
     rsx! {
         div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
@@ -1514,7 +1706,7 @@ fn GenerationRollbackModal(
                 div { class: "modal-body", style: "overflow-y:auto;",
                     div { class: "sd-callout sd-callout-warn", style: "margin-bottom:14px;",
                         Icon { name: IconName::Warn, size: 13 }
-                        div { style: "font-size:12px;", "Rollback switches the host to an existing generation. Heartbeat may pause briefly during activation." }
+                        div { style: "font-size:12px;", "Rolling back bypasses the current deployment policy and gate policies. Use only when the current generation is broken." }
                     }
 
                     if rollback_candidates.is_empty() {
@@ -1554,12 +1746,24 @@ fn GenerationRollbackModal(
                             }
                         }
 
-                        if let Some(selected) = selected {
+                        if let Some(selected) = selected.as_ref() {
                             dl { class: "kv-grid", style: "margin-top:16px;",
                                 dt { "Target" } dd { class: "mono", "{hostname}" }
                                 dt { "To" } dd { class: "mono", "gen #{selected.generation}" }
                                 dt { "Store path" }
                                 dd { class: "mono", style: "font-size:11px;white-space:normal;word-break:break-all;", "{selected.store_path.clone().unwrap_or_default()}" }
+                            }
+                        }
+
+                        if is_production {
+                            div { class: "field", style: "margin-top:16px;",
+                                label { "Type the hostname to confirm on production" }
+                                input {
+                                    class: "input mono focus-ring",
+                                    placeholder: "{hostname}",
+                                    value: "{confirm_text}",
+                                    oninput: move |e| confirm_text.set(e.value()),
+                                }
                             }
                         }
                     }
@@ -1569,14 +1773,18 @@ fn GenerationRollbackModal(
                     button { class: "btn btn-ghost focus-ring", onclick: move |_| on_close.call(()), "Cancel" }
                     button {
                         class: "btn btn-primary focus-ring",
-                        disabled: selected_store_path.is_none(),
+                        disabled: !confirm_enabled,
                         onclick: move |_| {
                             if let Some(store_path) = selected_store_path.clone() {
                                 on_confirm.call(store_path);
                             }
                         },
                         Icon { name: IconName::Rollback, size: 13 }
-                        " Switch generation"
+                        if let Some(selected) = selected.as_ref() {
+                            " Roll back to gen #{selected.generation}"
+                        } else {
+                            " Roll back"
+                        }
                     }
                 }
             }
@@ -1756,7 +1964,9 @@ fn OverviewTab(
     system: SystemDetail,
     now: chrono::DateTime<chrono::Utc>,
     current_commit: Option<SystemCommitHistory>,
+    history_entries: Vec<SystemHistoryEntry>,
     on_open_cves: EventHandler<()>,
+    on_view_history: EventHandler<()>,
 ) -> Element {
     let environment = system
         .environment
@@ -1883,26 +2093,11 @@ fn OverviewTab(
         }
     });
 
-    let mut recent_activity: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = vec![
-        (
-            "System record updated".to_string(),
-            "#34d399".to_string(),
-            system.updated_at,
-        ),
-        (
-            "System registered".to_string(),
-            "#a78bfa".to_string(),
-            system.created_at,
-        ),
-    ];
-    if let Some(last_seen_at) = system.last_seen {
-        recent_activity.push((
-            "Heartbeat received".to_string(),
-            "#60a5fa".to_string(),
-            last_seen_at,
-        ));
-    }
-    recent_activity.sort_by(|a, b| b.2.cmp(&a.2));
+    let recent_activity = history_entries
+        .iter()
+        .take(9)
+        .map(activity_row_from_history)
+        .collect::<Vec<_>>();
 
     rsx! {
         div {
@@ -2074,18 +2269,32 @@ fn OverviewTab(
                 div {
                     class: "sd-card-head",
                     h2 { "Recent activity" }
-                    span { class: "sd-card-meta", "last 24h" }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        onclick: move |_| on_view_history.call(()),
+                        "View all"
+                    }
                 }
                 div {
                     class: "timeline sd-timeline",
-                    for (title, color, at) in recent_activity.iter().take(5) {
+                    if recent_activity.is_empty() {
+                        div { class: "text-sm", style: "color:var(--cf-text-muted);", "No recorded events yet" }
+                    }
+                    for activity in recent_activity.iter() {
                         div {
                             class: "tl-item",
-                            span { class: "tl-dot", style: "--status-color: {color};" }
+                            span { class: "tl-dot", style: "--status-color: {activity.color};" }
                             div {
                                 class: "tl-body",
-                                div { class: "tl-title", "{title}" }
-                                div { class: "tl-meta", "{relative_time(*at)}" }
+                                div {
+                                    class: "tl-title",
+                                    span { style: "color: {activity.color}; flex-shrink: 0; line-height: 0;", Icon { name: activity.icon, size: 12 } }
+                                    span { "{activity.title}" }
+                                }
+                                if let Some(sub) = activity.sub.as_ref() {
+                                    div { class: "tl-sub mono", title: "{sub}", "{sub}" }
+                                }
+                                div { class: "tl-meta", "{relative_time(activity.timestamp)}" }
                             }
                         }
                     }
@@ -2196,6 +2405,8 @@ fn DeployTab(
     generations: Vec<SystemGeneration>,
     current_generation: Option<i32>,
     allow_mutations: bool,
+    deploy_notice: Option<(String, bool)>,
+    on_clear_deploy_notice: EventHandler<()>,
     on_deploy_commit: EventHandler<String>,
     on_deploy_generation: EventHandler<String>,
 ) -> Element {
@@ -2292,6 +2503,7 @@ fn DeployTab(
                                 mode.set("commit".to_string());
                                 show_diff.set(false);
                                 verify_notice.set(None);
+                                on_clear_deploy_notice.call(());
                             },
                             svg {
                                 class: "w-3 h-3",
@@ -2309,6 +2521,7 @@ fn DeployTab(
                                 mode.set("generation".to_string());
                                 show_diff.set(false);
                                 verify_notice.set(None);
+                                on_clear_deploy_notice.call(());
                             },
                             svg {
                                 class: "w-3 h-3",
@@ -2366,6 +2579,7 @@ fn DeployTab(
                                         onclick: move |_| {
                                             selected_commit.set(commit_hash_for_select.clone());
                                             verify_notice.set(None);
+                                            on_clear_deploy_notice.call(());
                                         },
                                         span {
                                             class: "mono sd-commit-sha",
@@ -2436,6 +2650,7 @@ fn DeployTab(
                                         onclick: move |_| {
                                             selected_generation.set(Some(gen_num));
                                             verify_notice.set(None);
+                                            on_clear_deploy_notice.call(());
                                         },
                                         span { class: "mono sd-commit-sha sd-generation-number", "{gen_label}" }
                                         span { class: "sd-commit-msg", "generation rollback" }
@@ -2544,15 +2759,7 @@ fn DeployTab(
 
                             div {
                                 class: "sd-callout sd-callout-info",
-                                svg {
-                                    class: "w-3 h-3",
-                                    style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
-                                    fill: "none",
-                                    stroke: "currentColor",
-                                    stroke_width: "2",
-                                    view_box: "0 0 24 24",
-                                    path { d: "M5 13l4 4L19 7" }
-                                }
+                                span { style: "color: #60a5fa; flex-shrink: 0;", Icon { name: IconName::Check, size: 13 } }
                                 div {
                                     "Policy check "
                                     strong { class: "mono", "{policy_for_callout}" }
@@ -2601,30 +2808,30 @@ fn DeployTab(
                                     class: "btn btn-primary focus-ring",
                                     disabled: !allow_mutations || !can_rollback,
                                     onclick: move |_| on_deploy_generation.call(store_path_for_deploy.clone()),
-                                    svg {
-                                        class: "w-3.5 h-3.5",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        view_box: "0 0 24 24",
-                                        path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
-                                    }
+                                    Icon { name: IconName::Rollback, size: 13 }
                                     "{deploy_label}"
+                                }
+                            }
+
+                            if let Some((message, is_success)) = deploy_notice.as_ref() {
+                                div {
+                                    class: if *is_success { "sd-callout sd-callout-info" } else { "sd-callout sd-callout-danger" },
+                                    span {
+                                        style: if *is_success { "color: #60a5fa; flex-shrink: 0;" } else { "color: #f87171; flex-shrink: 0;" },
+                                        if *is_success {
+                                            Icon { name: IconName::Check, size: 13 }
+                                        } else {
+                                            Icon { name: IconName::Warn, size: 13 }
+                                        }
+                                    }
+                                    div { "{message}" }
                                 }
                             }
 
                             if let Some(note) = verify_notice() {
                                 div {
                                     class: "sd-callout sd-callout-info",
-                                    svg {
-                                        class: "w-3 h-3",
-                                        style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        view_box: "0 0 24 24",
-                                        path { d: "M13 16h-1v-4h-1m1-4h.01M12 22a10 10 0 100-20 10 10 0 000 20z" }
-                                    }
+                                    span { style: "color: #60a5fa; flex-shrink: 0;", Icon { name: IconName::Check, size: 13 } }
                                     div { "{note}" }
                                 }
                             }
@@ -2679,15 +2886,7 @@ fn DeployTab(
 
                             div {
                                 class: "sd-callout sd-callout-info",
-                                svg {
-                                    class: "w-3 h-3",
-                                    style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
-                                    fill: "none",
-                                    stroke: "currentColor",
-                                    stroke_width: "2",
-                                    view_box: "0 0 24 24",
-                                    path { d: "M5 13l4 4L19 7" }
-                                }
+                                span { style: "color: #60a5fa; flex-shrink: 0;", Icon { name: IconName::Check, size: 13 } }
                                 div {
                                     "Policy check "
                                     strong { class: "mono", "{policy_for_callout}" }
@@ -2705,15 +2904,23 @@ fn DeployTab(
                                     class: "btn btn-primary focus-ring",
                                     disabled: !allow_mutations,
                                     onclick: move |_| on_deploy_commit.call(commit_sha_for_deploy.clone()),
-                                    svg {
-                                        class: "w-3.5 h-3.5",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        view_box: "0 0 24 24",
-                                        path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
-                                    }
+                                    Icon { name: IconName::Deploy, size: 13 }
                                     "{deploy_label}"
+                                }
+                            }
+
+                            if let Some((message, is_success)) = deploy_notice.as_ref() {
+                                div {
+                                    class: if *is_success { "sd-callout sd-callout-info" } else { "sd-callout sd-callout-danger" },
+                                    span {
+                                        style: if *is_success { "color: #60a5fa; flex-shrink: 0;" } else { "color: #f87171; flex-shrink: 0;" },
+                                        if *is_success {
+                                            Icon { name: IconName::Check, size: 13 }
+                                        } else {
+                                            Icon { name: IconName::Warn, size: 13 }
+                                        }
+                                    }
+                                    div { "{message}" }
                                 }
                             }
                         }

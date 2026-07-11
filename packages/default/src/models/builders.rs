@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
+use crate::config::{CacheConfig, CacheType};
 use crate::models::public_key::PublicKey;
 
 /// Builder status enum
@@ -274,6 +275,7 @@ mod tests {
         );
         assert_eq!(payload.source_input_delivery, SourceInputDeliveryMode::None);
         assert_eq!(payload.expected_drv_path, None);
+        assert!(payload.cache_push.is_none());
     }
 
     #[test]
@@ -305,6 +307,7 @@ mod tests {
                 pure_eval: true,
                 lockfile_mutation_allowed: false,
             }),
+            cache_push: None,
         };
 
         let value = serde_json::to_value(payload).expect("payload should serialize");
@@ -402,6 +405,107 @@ pub struct BuildJobDerivation {
     /// Server-recorded evaluator fingerprint for audit/debugging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evaluator: Option<EvaluatorFingerprint>,
+    /// Server-selected cache destination for builder-side output pushes. Current
+    /// servers always include this field; it remains optional so newer builders
+    /// can still communicate with older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_push: Option<BuilderCachePushConfig>,
+}
+
+/// Cache-push settings selected by the server for a remote builder job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuilderCachePushConfig {
+    #[serde(default)]
+    pub cache_type: CacheType,
+    pub push_to: Option<String>,
+    #[serde(default)]
+    pub push_after_build: bool,
+    pub signing_key: Option<String>,
+    pub compression: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_profile: Option<String>,
+    pub s3_access_key_id: Option<String>,
+    pub s3_secret_access_key: Option<String>,
+    pub s3_session_token: Option<String>,
+    pub s3_endpoint_url: Option<String>,
+    pub attic_token: Option<String>,
+    pub attic_cache_name: Option<String>,
+    #[serde(default)]
+    pub attic_ignore_upstream_cache_filter: bool,
+    #[serde(default)]
+    pub attic_jobs: u32,
+    #[serde(default)]
+    pub max_retries: u32,
+    #[serde(default)]
+    pub retry_delay_seconds: u64,
+    #[serde(default = "CacheConfig::default_push_timeout_seconds")]
+    pub push_timeout_seconds: u64,
+    #[serde(default)]
+    pub force_repush: bool,
+    #[serde(default)]
+    pub require_sigs: bool,
+}
+
+impl BuilderCachePushConfig {
+    pub fn disabled() -> Self {
+        Self {
+            cache_type: CacheType::Nix,
+            push_to: None,
+            push_after_build: false,
+            signing_key: None,
+            compression: None,
+            s3_region: None,
+            s3_profile: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_session_token: None,
+            s3_endpoint_url: None,
+            attic_token: None,
+            attic_cache_name: None,
+            attic_ignore_upstream_cache_filter: true,
+            attic_jobs: 5,
+            max_retries: 3,
+            retry_delay_seconds: 5,
+            push_timeout_seconds: CacheConfig::default_push_timeout_seconds(),
+            force_repush: false,
+            require_sigs: true,
+        }
+    }
+
+    pub fn to_cache_config(&self, local_fallback: &CacheConfig) -> CacheConfig {
+        CacheConfig {
+            cache_type: self.cache_type.clone(),
+            push_to: self.push_to.clone(),
+            push_after_build: self.push_after_build,
+            signing_key: self
+                .signing_key
+                .clone()
+                .or_else(|| local_fallback.signing_key.clone()),
+            compression: self.compression.clone(),
+            push_filter: None,
+            parallel_uploads: local_fallback.parallel_uploads,
+            s3_region: self.s3_region.clone(),
+            s3_profile: self.s3_profile.clone(),
+            s3_access_key_id: self.s3_access_key_id.clone(),
+            s3_secret_access_key: self.s3_secret_access_key.clone(),
+            s3_session_token: self.s3_session_token.clone(),
+            s3_endpoint_url: self.s3_endpoint_url.clone(),
+            attic_token: self.attic_token.clone(),
+            attic_cache_name: self.attic_cache_name.clone(),
+            attic_ignore_upstream_cache_filter: self.attic_ignore_upstream_cache_filter,
+            attic_jobs: if self.attic_jobs == 0 {
+                local_fallback.attic_jobs
+            } else {
+                self.attic_jobs
+            },
+            max_retries: self.max_retries,
+            retry_delay_seconds: self.retry_delay_seconds,
+            poll_interval: local_fallback.poll_interval,
+            push_timeout_seconds: self.push_timeout_seconds,
+            force_repush: self.force_repush,
+            require_sigs: self.require_sigs,
+        }
+    }
 }
 
 /// Signed request body for POST /api/v1/builders/:id/next-job.
