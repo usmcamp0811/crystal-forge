@@ -221,13 +221,6 @@ fn activity_row_from_history(entry: &SystemHistoryEntry) -> ActivityRow {
     }
 }
 
-fn heartbeat_wait_label(next_in_sec: f64) -> String {
-    if next_in_sec < 0.0 {
-        format!("{} late", format_short_duration(next_in_sec.abs()))
-    } else {
-        format!("next in {}", format_short_duration(next_in_sec))
-    }
-}
 
 fn format_short_duration(seconds: f64) -> String {
     let value = seconds.abs().round() as i64;
@@ -882,41 +875,27 @@ pub fn SystemDetailView(id: String) -> Element {
                 let cve_total = system.cve_counts.total();
                 let cve_critical = system.cve_counts.critical;
                 let cve_high = system.cve_counts.high;
-                let deployment_progress_for_metrics = deployment_progress.clone();
+                let deploy_stage = deployment_progress.as_ref().map(|p| p.stage.clone());
+                let deploy_started_at_ms = deployment_progress
+                    .as_ref()
+                    .map(|p| p.issued_at.timestamp_millis() as f64);
 
                 rsx! {
                     div {
                         class: "sd-metric-strip",
-                        // Heartbeat
+                        // Heartbeat — during a deploy the spinner turns purple and
+                        // shows per-stage countdown text instead of a separate widget.
                         div {
                             class: "sd-metric",
                             div { class: "sd-metric-label", "Heartbeat" }
                             div {
                                 class: "sd-metric-val",
-                                if let Some(progress) = deployment_progress_for_metrics.as_ref() {
-                                    div { class: "hb-waiting", title: "Waiting for deployment progress",
-                                        if progress.stage == "activated" {
-                                            Icon { name: IconName::Check, size: 18 }
-                                            span { class: "hb-waiting-txt", style: "color:#34d399;", "activated" }
-                                        } else {
-                                            span { class: "deploy-pending-spinner", "aria-hidden": "true" }
-                                            span { class: "hb-waiting-txt",
-                                                match progress.stage.as_str() {
-                                                    "queued" => format!("awaiting agent · {}", heartbeat_wait_label(heartbeat_next_in_sec)),
-                                                    "picked_up" => "picked up".to_string(),
-                                                    "applying" => "applying".to_string(),
-                                                    "failed" => "failed".to_string(),
-                                                    _ => "deploying".to_string(),
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    crate::components::HeartbeatSpinner {
-                                        interval_sec: heartbeat_interval_sec,
-                                        next_in_sec: heartbeat_next_in_sec,
-                                        size: 36,
-                                    }
+                                crate::components::HeartbeatSpinner {
+                                    interval_sec: heartbeat_interval_sec,
+                                    next_in_sec: heartbeat_next_in_sec,
+                                    size: 36,
+                                    deploy_stage,
+                                    deploy_started_at_ms,
                                 }
                             }
                         }
