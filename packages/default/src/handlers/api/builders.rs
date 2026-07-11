@@ -2326,9 +2326,11 @@ pub async fn download_job_derivation_archive(
     .map(|chunk| chunk.to_vec())
     .collect();
 
-    // Stream chunks as they are generated rather than buffering the whole closure
-    // in server RAM. Large NixOS closures can be multi-GiB; buffering them would
-    // exhaust available memory and cause OOM on the server.
+    // True process-stdout streaming: spawn each nix-store --export with
+    // Stdio::piped(), wrap stdout in a ReaderStream, and forward bytes
+    // directly into the HTTP response channel without ever materialising
+    // output.stdout as a Vec<u8>.  This means the per-chunk memory overhead
+    // is bounded by the HTTP buffer size, not the exported chunk size.
     let chunk_count = archive_chunks.len();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
     let job_id_copy = job_id;
@@ -2337,10 +2339,15 @@ pub async fn download_job_derivation_archive(
 
     tokio::spawn(async move {
         for (chunk_index, archive_chunk) in archive_chunks.iter().enumerate() {
-            let mut cmd = Command::new("nix-store");
-            cmd.arg("--export").args(archive_chunk);
-            let output = match cmd.output().await {
-                Ok(o) => o,
+            // Spawn with Stdio::piped() so stdout is a stream, not a buffer.
+            let mut child = match Command::new("nix-store")
+                .arg("--export")
+                .args(archive_chunk)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => c,
                 Err(e) => {
                     tracing::error!(
                         job_id = %job_id_copy,
@@ -2353,28 +2360,69 @@ pub async fn download_job_derivation_archive(
                     return;
                 }
             };
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                tracing::error!(
-                    job_id = %job_id_copy,
-                    drv_path = %drv_path_owned,
-                    path_count,
-                    chunk_index,
-                    chunk_count,
-                    stderr = %stderr,
-                    "nix-store --export chunk failed"
-                );
-                let _ = tx
-                    .send(Err(std::io::Error::other(format!(
-                        "nix-store --export failed: {stderr}"
-                    ))))
-                    .await;
-                return;
+
+            // Stream stdout bytes into the channel as they arrive.
+            if let Some(stdout) = child.stdout.take() {
+                let mut reader = ReaderStream::new(stdout);
+                loop {
+                    use futures::StreamExt;
+                    match reader.next().await {
+                        Some(Ok(chunk)) if !chunk.is_empty() => {
+                            if tx.send(Ok(chunk)).await.is_err() {
+                                tracing::debug!(
+                                    job_id = %job_id_copy,
+                                    "derivation archive stream cancelled by client"
+                                );
+                                let _ = child.kill().await;
+                                return;
+                            }
+                        }
+                        Some(Ok(_)) => {} // empty chunk, skip
+                        Some(Err(e)) => {
+                            tracing::error!(
+                                job_id = %job_id_copy,
+                                drv_path = %drv_path_owned,
+                                chunk_index,
+                                "error reading nix-store --export stdout: {e}"
+                            );
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
+                        None => break, // stdout closed
+                    }
+                }
             }
-            if tx.send(Ok(bytes::Bytes::from(output.stdout))).await.is_err() {
-                // Receiver dropped (client disconnected).
-                tracing::debug!(job_id = %job_id_copy, "derivation archive stream cancelled by client");
-                return;
+
+            // Wait for exit status and check stderr.
+            let exit = child.wait_with_output().await;
+            match exit {
+                Ok(out) if out.status.success() => {}
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                    tracing::error!(
+                        job_id = %job_id_copy,
+                        drv_path = %drv_path_owned,
+                        path_count,
+                        chunk_index,
+                        chunk_count,
+                        stderr = %stderr,
+                        "nix-store --export chunk failed"
+                    );
+                    let _ = tx
+                        .send(Err(std::io::Error::other(format!(
+                            "nix-store --export failed: {stderr}"
+                        ))))
+                        .await;
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        job_id = %job_id_copy,
+                        "failed to wait for nix-store --export: {e}"
+                    );
+                    let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    return;
+                }
             }
         }
         tracing::debug!(

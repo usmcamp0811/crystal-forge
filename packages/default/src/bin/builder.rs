@@ -753,14 +753,30 @@ async fn ensure_source_worktree(
 /// [`ensure_mirror_has_commit`] — the caller is responsible for ensuring the
 /// mirror already contains the authorized commit (e.g. by extracting a
 /// server-provided archive). Used for `ServerBundledArchive` delivery.
+///
+/// `mirror_path` must be the job-scoped bare mirror directory
+/// (`mirror_root/server-bundled/<job_id>/<mirror_id>.git`). The worktree is
+/// placed at `worktree_root/<mirror_id>/<commit>/<job_id>` so each job has
+/// an isolated worktree that does not race with other concurrent jobs.
 async fn ensure_source_worktree_from_mirror(
     source: &VerifiedSourceIdentity,
-    mirror_root: &Path,
+    mirror_path: &Path,
     worktree_root: &Path,
     job_id: uuid::Uuid,
 ) -> Result<PathBuf, PreBuildFailure> {
-    let (mirror_path, worktree_path) =
-        source_workspace_paths_for_job(source, mirror_root, worktree_root, Some(job_id))?;
+    // Derive the worktree path — job-scoped under <worktree_root>/<mirror_id>/<commit>/<job_id>.
+    let mirror_id = source
+        .mirror_id
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: "ServerBundledArchive delivery is missing mirror_id for worktree path".to_string(),
+        })?;
+    let worktree_path = worktree_root
+        .join(mirror_id)
+        .join(&source.commit_hash)
+        .join(job_id.to_string());
 
     if worktree_path.exists() {
         info!("🌳 Reusing source worktree {}", worktree_path.display());
@@ -866,6 +882,11 @@ async fn verify_worktree_head(
 struct CleanupSourceWorktree {
     mirror_path: PathBuf,
     worktree_path: PathBuf,
+    /// For ServerBundledArchive jobs: the job-scoped mirror *directory*
+    /// (`mirror_root/server-bundled/<job_id>/`) to remove after the worktree
+    /// is detached.  `None` for LocalGitWorktree jobs where the mirror is
+    /// shared across jobs.
+    job_mirror_dir: Option<PathBuf>,
 }
 
 fn cleanup_candidate_worktree(
@@ -874,58 +895,108 @@ fn cleanup_candidate_worktree(
     worktree_root: &Path,
     job_id: uuid::Uuid,
 ) -> Option<CleanupSourceWorktree> {
-    if payload.execution_strategy != RemoteBuildExecutionStrategy::SourceReEvaluateVerified
-        || payload.source_input_delivery != SourceInputDeliveryMode::LocalGitWorktree
-    {
+    if payload.execution_strategy != RemoteBuildExecutionStrategy::SourceReEvaluateVerified {
         return None;
     }
 
     let source = payload.source.as_ref()?;
-    let (mirror_path, worktree_path) =
-        source_workspace_paths_for_job(source, mirror_root, worktree_root, Some(job_id)).ok()?;
-    if worktree_path.starts_with(worktree_root) {
-        Some(CleanupSourceWorktree {
-            mirror_path,
-            worktree_path,
-        })
-    } else {
-        None
+
+    match payload.source_input_delivery {
+        SourceInputDeliveryMode::LocalGitWorktree => {
+            let (mirror_path, worktree_path) =
+                source_workspace_paths_for_job(source, mirror_root, worktree_root, Some(job_id))
+                    .ok()?;
+            if worktree_path.starts_with(worktree_root) {
+                Some(CleanupSourceWorktree {
+                    mirror_path,
+                    worktree_path,
+                    job_mirror_dir: None,
+                })
+            } else {
+                None
+            }
+        }
+        SourceInputDeliveryMode::ServerBundledArchive => {
+            // Job-scoped mirror: mirror_root/server-bundled/<job_id>/<mirror_id>.git
+            let mirror_id = source.mirror_id.as_deref().filter(|v| !v.is_empty())?;
+            let job_mirror_dir = mirror_root
+                .join("server-bundled")
+                .join(job_id.to_string());
+            let mirror_path = job_mirror_dir.join(format!("{mirror_id}.git"));
+            // Worktree is shared-layout: worktree_root/<mirror_id>/<commit>/<job_id>
+            let worktree_path = worktree_root
+                .join(mirror_id)
+                .join(&source.commit_hash)
+                .join(job_id.to_string());
+            if worktree_path.starts_with(worktree_root) {
+                Some(CleanupSourceWorktree {
+                    mirror_path,
+                    worktree_path,
+                    job_mirror_dir: Some(job_mirror_dir),
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
 async fn cleanup_source_worktree(cleanup: &CleanupSourceWorktree) {
     let path = cleanup.worktree_path.as_path();
-    if !path.exists() {
-        return;
+
+    if path.exists() {
+        let status = tokio::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(&cleanup.mirror_path)
+            .arg("worktree")
+            .arg("remove")
+            .arg("--force")
+            .arg(path)
+            .status()
+            .await;
+
+        match status {
+            Ok(status) if status.success() => {
+                info!("🧹 Removed source worktree {}", path.display());
+            }
+            Ok(status) => {
+                warn!(
+                    "source worktree cleanup command exited with status {} for {}",
+                    status,
+                    path.display()
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "failed to run source worktree cleanup for {}: {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
     }
 
-    let status = tokio::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(&cleanup.mirror_path)
-        .arg("worktree")
-        .arg("remove")
-        .arg("--force")
-        .arg(path)
-        .status()
-        .await;
-
-    match status {
-        Ok(status) if status.success() => {
-            info!("🧹 Removed source worktree {}", path.display());
-        }
-        Ok(status) => {
-            warn!(
-                "source worktree cleanup command exited with status {} for {}",
-                status,
-                path.display()
-            );
-        }
-        Err(e) => {
-            warn!(
-                "failed to run source worktree cleanup for {}: {}",
-                path.display(),
-                e
-            );
+    // For ServerBundledArchive jobs, also remove the job-scoped mirror directory.
+    // This dir (mirror_root/server-bundled/<job_id>/) was created exclusively for
+    // this job so it is safe to delete in full after the worktree is gone.
+    if let Some(ref job_mirror_dir) = cleanup.job_mirror_dir {
+        if job_mirror_dir.exists() {
+            match tokio::fs::remove_dir_all(job_mirror_dir).await {
+                Ok(()) => {
+                    info!(
+                        "🧹 Removed job-scoped source mirror dir {}",
+                        job_mirror_dir.display()
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "failed to remove job-scoped source mirror dir {}: {}",
+                        job_mirror_dir.display(),
+                        e
+                    );
+                }
+            }
         }
     }
 }
@@ -973,7 +1044,7 @@ async fn evaluate_verified_source_drv(
             )
         })?;
 
-        // Determine the mirror path where the archive should be extracted.
+        // Determine the mirror_id for path construction.
         let mirror_id = source
             .mirror_id
             .as_deref()
@@ -981,7 +1052,14 @@ async fn evaluate_verified_source_drv(
             .ok_or_else(|| {
                 source_err("ServerBundledArchive delivery is missing mirror_id".to_string())
             })?;
-        let mirror_path = mirror_root.join(format!("{mirror_id}.git"));
+
+        // Job-scoped mirror path: each job extracts into its own directory so
+        // concurrent jobs for the same repo never race on the same bare mirror.
+        // Layout: mirror_root/server-bundled/<job_id>/<mirror_id>.git
+        let job_mirror_dir = mirror_root
+            .join("server-bundled")
+            .join(job_id.to_string());
+        let mirror_path = job_mirror_dir.join(format!("{mirror_id}.git"));
 
         // Stream archive to a temp file, verifying SHA-256 incrementally.
         // This avoids buffering the entire archive in RAM.
@@ -990,27 +1068,25 @@ async fn evaluate_verified_source_drv(
             .stream_source_archive_to_tempfile(
                 job_id,
                 source.archive_sha256.as_deref(),
-                mirror_root,
+                &job_mirror_dir,
             )
             .await
             .map_err(|e| source_err(format!("failed to stream source archive: {e}")))?;
 
-        // Extract the archive to the mirror root.
-        if let Some(parent) = mirror_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                source_err(format!(
-                    "failed to create mirror parent {}: {e}",
-                    parent.display()
-                ))
-            })?;
-        }
+        // Create the job-scoped mirror directory for extraction.
+        tokio::fs::create_dir_all(&job_mirror_dir).await.map_err(|e| {
+            source_err(format!(
+                "failed to create job mirror directory {}: {e}",
+                job_mirror_dir.display()
+            ))
+        })?;
 
         let output = tokio::process::Command::new("tar")
             .kill_on_drop(true)
             .arg("-xzf")
             .arg(&tmp_archive)
             .arg("-C")
-            .arg(mirror_root)
+            .arg(&job_mirror_dir)
             .output()
             .await
             .map_err(|e| source_err(format!("failed to spawn tar extraction: {e}")))?;
@@ -1020,17 +1096,20 @@ async fn evaluate_verified_source_drv(
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            // Clean up the job mirror dir on failure to avoid stale state.
+            let _ = tokio::fs::remove_dir_all(&job_mirror_dir).await;
             return Err(source_err(format!("tar extraction failed: {stderr}")));
         }
 
         info!(
-            "✅ Source archive extracted to mirror at {}",
+            "✅ Source archive extracted to job-scoped mirror at {}",
             mirror_path.display()
         );
 
-        // Now create a worktree from the extracted mirror, skipping
-        // ensure_mirror_has_commit since the archive already contains the commit.
-        ensure_source_worktree_from_mirror(source, mirror_root, worktree_root, job_id)
+        // Create a worktree from the job-scoped extracted mirror.
+        // ensure_source_worktree_from_mirror takes the mirror_path directly;
+        // the worktree is placed at worktree_root/<mirror_id>/<commit>/<job_id>.
+        ensure_source_worktree_from_mirror(source, &mirror_path, worktree_root, job_id)
             .await?
             .to_string_lossy()
             .to_string()
@@ -2233,12 +2312,94 @@ mod tests {
 
     #[test]
     fn path_materialization_failure_phase_serializes_correctly() {
-        // Ensure the PathMaterialization phase value is stable — builder.rs uses
-        // it when reporting ensure_derivation_available failures to the server.
         use crystal_forge::models::builders::BuildFailurePhase;
         assert_eq!(
             BuildFailurePhase::PathMaterialization.to_string(),
             "path_materialization"
+        );
+    }
+
+    #[test]
+    fn server_bundled_archive_cleanup_is_job_scoped_with_mirror_dir() {
+        // ServerBundledArchive cleanup must include the job-scoped mirror dir
+        // so it is removed after the job completes/fails.
+        let job_id = uuid::Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+            .expect("uuid should parse");
+        let payload = crystal_forge::models::builders::BuildJobDerivation {
+            id: 1,
+            derivation_name: "host".to_string(),
+            derivation_type: "nixos".to_string(),
+            derivation_path: None,
+            store_path: None,
+            execution_strategy: crystal_forge::models::builders::RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            source: Some(source(Some("/api/v1/builders/x/jobs/y/source-archive"))),
+            source_input_delivery: SourceInputDeliveryMode::ServerBundledArchive,
+            expected_drv_path: Some("/nix/store/server-host.drv".to_string()),
+            evaluator: None,
+            cache_push: None,
+        };
+
+        let cleanup = cleanup_candidate_worktree(
+            &payload,
+            std::path::Path::new("/mirrors"),
+            std::path::Path::new("/worktrees"),
+            job_id,
+        )
+        .expect("ServerBundledArchive job under configured root should be cleaned");
+
+        // Job-scoped mirror path
+        assert_eq!(
+            cleanup.mirror_path,
+            std::path::PathBuf::from(
+                "/mirrors/server-bundled/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/repo-test.git"
+            )
+        );
+        // Worktree is still job-scoped under the standard worktree root
+        assert_eq!(
+            cleanup.worktree_path,
+            std::path::PathBuf::from(
+                "/worktrees/repo-test/0123456789abcdef/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            )
+        );
+        // job_mirror_dir is set and points at the job-scoped subdirectory
+        let job_mirror_dir = cleanup.job_mirror_dir.expect("job_mirror_dir must be Some for ServerBundledArchive");
+        assert_eq!(
+            job_mirror_dir,
+            std::path::PathBuf::from(
+                "/mirrors/server-bundled/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            )
+        );
+    }
+
+    #[test]
+    fn local_git_worktree_cleanup_has_no_job_mirror_dir() {
+        // LocalGitWorktree shares the mirror across jobs so job_mirror_dir must be None.
+        let job_id = uuid::Uuid::new_v4();
+        let payload = crystal_forge::models::builders::BuildJobDerivation {
+            id: 1,
+            derivation_name: "host".to_string(),
+            derivation_type: "nixos".to_string(),
+            derivation_path: None,
+            store_path: None,
+            execution_strategy: crystal_forge::models::builders::RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            source: Some(source(None)),
+            source_input_delivery: SourceInputDeliveryMode::LocalGitWorktree,
+            expected_drv_path: None,
+            evaluator: None,
+            cache_push: None,
+        };
+
+        let cleanup = cleanup_candidate_worktree(
+            &payload,
+            std::path::Path::new("/mirrors"),
+            std::path::Path::new("/worktrees"),
+            job_id,
+        )
+        .expect("LocalGitWorktree job should be cleaned");
+
+        assert!(
+            cleanup.job_mirror_dir.is_none(),
+            "LocalGitWorktree must not set job_mirror_dir"
         );
     }
 }
