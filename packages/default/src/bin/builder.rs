@@ -1728,12 +1728,31 @@ async fn execute_build_job(
     }
 }
 
+/// Check whether the full `.drv` requisite closure is locally valid.
+///
+/// Uses `nix-store --check-validity --recursive` so a partially imported
+/// closure (e.g. from a mid-stream crash on a previous attempt) is not
+/// mistaken for a usable one.  A partial import leaves the top-level `.drv`
+/// file on disk but some of its requisites missing; a plain `Path::exists()`
+/// check would incorrectly skip re-import and then fail later inside
+/// `nix-store --realise`.
+async fn drv_closure_available_locally(drv_path: &str) -> anyhow::Result<bool> {
+    let output = tokio::process::Command::new("nix-store")
+        .arg("--check-validity")
+        .arg("--recursive")
+        .arg(drv_path)
+        .output()
+        .await?;
+
+    Ok(output.status.success())
+}
+
 async fn ensure_derivation_available(
     client: &BuilderApiClient,
     job_id: uuid::Uuid,
     drv_path: &str,
 ) -> anyhow::Result<()> {
-    if Path::new(drv_path).exists() {
+    if drv_closure_available_locally(drv_path).await? {
         return Ok(());
     }
 
@@ -1742,11 +1761,21 @@ async fn ensure_derivation_available(
     // closure in memory.  No Attic or binary cache configuration is required on
     // the builder for this step.
     info!(
-        "📥 Derivation {} missing locally; streaming .drv closure archive from server",
+        "📥 Derivation {} not fully available locally; streaming .drv closure archive from server",
         drv_path
     );
     client.stream_derivation_archive_to_import(job_id, drv_path).await?;
-    info!("✅ .drv closure imported for {}", drv_path);
+
+    // Verify the full closure is now valid — not just that the top-level .drv
+    // file exists.  If the import was truncated or partially applied the next
+    // step (nix-store --realise) would fail with a cryptic missing-path error
+    // rather than the explicit path_materialization failure we want.
+    if !drv_closure_available_locally(drv_path).await? {
+        anyhow::bail!(
+            "nix-store --import completed but derivation closure is still incomplete: {drv_path}"
+        );
+    }
+    info!("✅ .drv closure fully imported and valid for {}", drv_path);
 
     // Fire-and-forget: ask the server to publish the closure to the binary cache
     // in the background so future builds (or other builders) can pull it via
@@ -2402,5 +2431,29 @@ mod tests {
             cleanup.job_mirror_dir.is_none(),
             "LocalGitWorktree must not set job_mirror_dir"
         );
+    }
+
+    // ── drv_closure_available_locally tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn drv_closure_available_locally_returns_false_for_nonexistent_path() {
+        // A path that does not exist in the Nix store must not be considered valid.
+        let result = super::drv_closure_available_locally(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nonexistent.drv",
+        )
+        .await
+        .expect("nix-store --check-validity should not error even for missing paths");
+        assert!(!result, "nonexistent path must not be reported as locally valid");
+    }
+
+    #[tokio::test]
+    async fn drv_closure_available_locally_returns_false_for_non_nix_path() {
+        // A path outside /nix/store must not be considered valid — guards against
+        // accidental path confusion that could allow a partially-imported closure
+        // to be skipped.
+        let result = super::drv_closure_available_locally("/tmp/definitely-not-a-nix-path.drv")
+            .await
+            .expect("nix-store --check-validity should not error for arbitrary paths");
+        assert!(!result, "non-nix path must not be reported as locally valid");
     }
 }
