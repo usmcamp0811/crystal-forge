@@ -3700,6 +3700,7 @@ struct MockFlakeItem {
     latest_message: String,
     latest_author: String,
     last_sync_at: String,
+    last_sync_at_raw: Option<DateTime<Utc>>,
     environment: String,
     error_msg: Option<String>,
     total_commits: i32,
@@ -3732,6 +3733,7 @@ fn map_registry_flake_to_view(item: &FlakeRegistryItem) -> MockFlakeItem {
         latest_message: "No commits yet".to_string(),
         latest_author: "—".to_string(),
         last_sync_at: last_sync_display,
+        last_sync_at_raw: item.last_sync_at,
         // The current registry API does not expose the environments spanned by a flake.
         // Render this as an explicit unsupported/pending value instead of fabricating one.
         environment: String::new(),
@@ -3950,6 +3952,7 @@ fn mock_flakes_data() -> Vec<MockFlakeItem> {
             latest_message: "feat: Add monitoring dashboards".to_string(),
             latest_author: "jdoe".to_string(),
             last_sync_at: "2m ago".to_string(),
+            last_sync_at_raw: None,
             environment: "production".to_string(),
             error_msg: None,
             total_commits: 156,
@@ -3967,6 +3970,7 @@ fn mock_flakes_data() -> Vec<MockFlakeItem> {
             latest_message: "fix: Update container versions".to_string(),
             latest_author: "asmith".to_string(),
             last_sync_at: "5m ago".to_string(),
+            last_sync_at_raw: None,
             environment: "staging".to_string(),
             error_msg: None,
             total_commits: 89,
@@ -3984,6 +3988,7 @@ fn mock_flakes_data() -> Vec<MockFlakeItem> {
             latest_message: "refactor: Optimize network config".to_string(),
             latest_author: "mlee".to_string(),
             last_sync_at: "1h ago".to_string(),
+            last_sync_at_raw: None,
             environment: "edge".to_string(),
             error_msg: Some("Failed to fetch: connection timeout".to_string()),
             total_commits: 234,
@@ -4957,6 +4962,7 @@ fn FlakeTrayNew(
                             FlakeSyncErrorBanner {
                                 repo_url,
                                 last_sync_error: error_msg,
+                                last_sync_at: flake.last_sync_at_raw,
                                 latest_commit,
                                 on_retry: move |_| on_sync.call(flake_id),
                             }

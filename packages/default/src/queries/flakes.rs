@@ -173,9 +173,21 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
             f.branch,
             f.build_scope,
             COUNT(s.id)::bigint AS system_count,
-            f.sync_status,
+            CASE
+                WHEN f.sync_status = 'syncing'
+                 AND f.last_sync_at IS NOT NULL
+                 AND f.last_sync_at < now() - interval '30 minutes'
+                THEN 'error'
+                ELSE f.sync_status
+            END AS sync_status,
             f.last_sync_at,
-            f.last_sync_error
+            CASE
+                WHEN f.sync_status = 'syncing'
+                 AND f.last_sync_at IS NOT NULL
+                 AND f.last_sync_at < now() - interval '30 minutes'
+                THEN COALESCE(f.last_sync_error, 'Sync appears stale — previous sync attempt did not finish')
+                ELSE f.last_sync_error
+            END AS last_sync_error
         FROM flakes f
         LEFT JOIN systems s ON s.flake_id = f.id
         WHERE f.deleted_at IS NULL

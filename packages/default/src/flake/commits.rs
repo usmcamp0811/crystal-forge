@@ -10,6 +10,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use tokio::time::{Duration, sleep, timeout};
 use tracing::{debug, info, warn, error};
+use url::Url;
 
 const GIT_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -318,7 +319,7 @@ pub async fn sync_flake_recorded(
 ) -> Result<usize> {
     // Mark syncing (best-effort — failure is logged but does not block the sync)
     if let Err(e) = sqlx::query(
-        "UPDATE flakes SET sync_status = 'syncing' WHERE id = $1 AND deleted_at IS NULL",
+        "UPDATE flakes SET sync_status = 'syncing', last_sync_at = now(), last_sync_error = NULL WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(flake_id)
     .execute(pool)
@@ -343,13 +344,7 @@ pub async fn sync_flake_recorded(
             }
         }
         Err(sync_err) => {
-            // Truncate error text to 4000 chars to avoid pathological messages
-            let error_text = sync_err.to_string();
-            let truncated = if error_text.len() > 4000 {
-                format!("{}…", &error_text[..3997])
-            } else {
-                error_text
-            };
+            let truncated = sanitize_and_truncate_sync_error(repo_url, &sync_err.to_string(), 4000);
             if let Err(e) = sqlx::query(
                 "UPDATE flakes SET sync_status = 'error', last_sync_at = now(), last_sync_error = $2 \
                  WHERE id = $1 AND deleted_at IS NULL",
@@ -365,6 +360,92 @@ pub async fn sync_flake_recorded(
     }
 
     result
+}
+
+fn sanitize_and_truncate_sync_error(repo_url: &str, raw: &str, max_chars: usize) -> String {
+    let sanitized_repo = redact_url_credentials(repo_url);
+    let replaced_repo = raw.replace(repo_url, &sanitized_repo);
+    let redacted = redact_sensitive_tokens(&replaced_repo);
+    truncate_error_text(&redacted, max_chars)
+}
+
+fn truncate_error_text(input: &str, max_chars: usize) -> String {
+    let mut chars = input.chars();
+    let mut out = String::new();
+    for _ in 0..max_chars {
+        if let Some(ch) = chars.next() {
+            out.push(ch);
+        } else {
+            return out;
+        }
+    }
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
+}
+
+fn redact_sensitive_tokens(input: &str) -> String {
+    let mut out = String::new();
+    let mut idx = 0;
+    while idx < input.len() {
+        let remaining = &input[idx..];
+        if remaining.starts_with("Authorization:") {
+            out.push_str("Authorization: [REDACTED]");
+            if let Some(pos) = remaining.find('\n') {
+                idx += pos;
+            } else {
+                break;
+            }
+            continue;
+        }
+        if remaining.starts_with("http://") || remaining.starts_with("https://") {
+            let end = remaining
+                .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | ')' | ']' | '>'))
+                .unwrap_or(remaining.len());
+            let candidate = &remaining[..end];
+            out.push_str(&redact_url_credentials(candidate));
+            idx += end;
+            continue;
+        }
+        if remaining.starts_with("GIT_ASKPASS=") {
+            out.push_str("GIT_ASKPASS=[REDACTED]");
+            if let Some(pos) = remaining.find(char::is_whitespace) {
+                idx += pos;
+            } else {
+                break;
+            }
+            continue;
+        }
+        if remaining.starts_with("NETRC=") || remaining.starts_with("NETRC_FILE=") {
+            let key = if remaining.starts_with("NETRC_FILE=") { "NETRC_FILE" } else { "NETRC" };
+            out.push_str(key);
+            out.push_str("=[REDACTED]");
+            if let Some(pos) = remaining.find(char::is_whitespace) {
+                idx += pos;
+            } else {
+                break;
+            }
+            continue;
+        }
+        let ch = remaining.chars().next().unwrap();
+        out.push(ch);
+        idx += ch.len_utf8();
+    }
+    out
+}
+
+fn redact_url_credentials(input: &str) -> String {
+    let Ok(mut url) = Url::parse(input) else {
+        return input.to_string();
+    };
+    let has_auth = !url.username().is_empty() || url.password().is_some();
+    if !has_auth {
+        return input.to_string();
+    }
+    let _ = url.set_username("REDACTED");
+    let _ = url.set_password(None);
+    url.to_string()
 }
 
 async fn sync_commits_for_repo_inner(
