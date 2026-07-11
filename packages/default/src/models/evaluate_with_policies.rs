@@ -19,7 +19,7 @@ static CLOSURE_COUNT_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BuildConfig, ServerConfig};
-use crate::derivations::utils::count_closure_packages;
+use crate::derivations::utils::{build_flake_reference, count_closure_packages};
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
@@ -284,12 +284,16 @@ pub async fn evaluate_with_nix_eval_jobs(
 
     debug!("📝 Nix expression:\n{}", nix_expr);
 
-    // Run nix-eval-jobs with --meta flag to get policy results
+    // Run nix-eval-jobs with --meta flag to get policy results.
+    // --impure is required because the Nix expression uses builtins.getFlake with a
+    // remote git+ssh ref (e.g. git+git@github.com:...?rev=<hash>), which is only
+    // permitted in impure evaluation mode.
     let mut cmd = Command::new("nix-eval-jobs");
     cmd.args([
         "--expr",
         &nix_expr,
-        "--meta", // CRITICAL: Include meta so we get policies in output!
+        "--impure", // Required: builtins.getFlake with remote git refs needs impure mode
+        "--meta",   // CRITICAL: Include meta so we get policies in output!
         "--workers",
         &server_config.eval_workers.to_string(),
         "--max-memory-size",
@@ -1341,19 +1345,6 @@ pub async fn evaluate_with_mock_eval_jobs(
     }
 
     Ok((results, checks))
-}
-
-fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
-    if repo_url.starts_with("git+") {
-        if repo_url.contains("?rev=") {
-            repo_url.to_string()
-        } else {
-            format!("{}?rev={}", repo_url, commit_hash)
-        }
-    } else {
-        let separator = if repo_url.contains('?') { "&" } else { "?" };
-        format!("git+{}{separator}rev={}", repo_url, commit_hash)
-    }
 }
 
 fn build_agent_target(repo_url: &str, commit_hash: &str, system_name: &str) -> String {

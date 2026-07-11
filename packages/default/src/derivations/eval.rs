@@ -240,7 +240,9 @@ pub async fn is_cf_agent_enabled(flake_target: &str, build_config: &BuildConfig)
     );
 
     let mut cmd = Command::new("nix");
-    cmd.args(["eval", "--json", "--expr", &eval_expr]);
+    // --impure is required: builtins.getFlake with a remote git+ssh ref (e.g.
+    // git+git@github.com:...?rev=<hash>) is only permitted in impure evaluation mode.
+    cmd.args(["eval", "--json", "--impure", "--expr", &eval_expr]);
     build_config.apply_to_command(&mut cmd);
 
     match cmd.output().await {
