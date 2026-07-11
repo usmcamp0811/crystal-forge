@@ -2361,7 +2361,32 @@ pub async fn download_job_derivation_archive(
                 }
             };
 
-            // Stream stdout bytes into the channel as they arrive.
+            // Drain stderr concurrently with stdout so that a child that writes
+            // enough stderr doesn't fill the OS pipe buffer and block, which
+            // would stall stdout and deadlock the whole stream.
+            // Keep only the last 64 KiB so a noisy process cannot OOM the server.
+            const STDERR_TAIL_BYTES: usize = 64 * 1024;
+            let stderr_pipe = child.stderr.take();
+            let stderr_task: tokio::task::JoinHandle<String> = tokio::spawn(async move {
+                let mut buf: Vec<u8> = Vec::new();
+                if let Some(mut pipe) = stderr_pipe {
+                    use tokio::io::AsyncReadExt;
+                    let mut tmp = [0u8; 8192];
+                    while let Ok(n) = pipe.read(&mut tmp).await {
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if buf.len() > STDERR_TAIL_BYTES {
+                            let drain = buf.len() - STDERR_TAIL_BYTES;
+                            buf.drain(..drain);
+                        }
+                    }
+                }
+                String::from_utf8_lossy(&buf).into_owned()
+            });
+
+            // Stream stdout bytes into the response channel as they arrive.
             if let Some(stdout) = child.stdout.take() {
                 let mut reader = ReaderStream::new(stdout);
                 loop {
@@ -2388,17 +2413,17 @@ pub async fn download_job_derivation_archive(
                             let _ = tx.send(Err(e)).await;
                             return;
                         }
-                        None => break, // stdout closed
+                        None => break, // stdout EOF
                     }
                 }
             }
 
-            // Wait for exit status and check stderr.
-            let exit = child.wait_with_output().await;
-            match exit {
-                Ok(out) if out.status.success() => {}
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            // Wait for exit status; stderr is already drained by the task above.
+            let stderr = stderr_task.await.unwrap_or_default();
+            let status = child.wait().await;
+            match status {
+                Ok(s) if s.success() => {}
+                Ok(_) => {
                     tracing::error!(
                         job_id = %job_id_copy,
                         drv_path = %drv_path_owned,
