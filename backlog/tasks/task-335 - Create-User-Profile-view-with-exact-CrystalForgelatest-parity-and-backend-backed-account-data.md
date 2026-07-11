@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-05-31 16:02'
-updated_date: '2026-07-08 07:22'
+updated_date: '2026-06-25 21:58'
 labels:
   - design-parity
   - user-profile
@@ -140,6 +140,4 @@ Medium: this introduces a new routed UI surface and may require profile/account 
 
 <!-- SECTION:NOTES:BEGIN -->
 Approved implementation plan recorded; coding may begin in dedicated worktree.
-
-Archived during 2026-07-08 backlog grooming: no merge into dev found for TASK-335; owner declared the m-19 parity push OBE. Profile view drift vs the updated (Jul 7) design example is covered by the new visual-drift audit task.
 <!-- SECTION:NOTES:END -->

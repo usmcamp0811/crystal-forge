@@ -3,11 +3,11 @@ id: TASK-334
 title: >-
   Build full Compliance view (frontend + backend) faithful to CrystalForgelatest
   design
-status: Done
+status: Review
 assignee:
   - opencode-agent
 created_date: '2026-05-31 16:02'
-updated_date: '2026-07-08 07:22'
+updated_date: '2026-06-22 01:44'
 labels:
   - design-parity
   - compliance
@@ -174,6 +174,4 @@ MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/285 | Verifi
 - 2026-06-22: Fixed E0507 "cannot move out of value" — shared `all_bundles_ref` via `Rc` to fix multiple `FnMut` closure capture. Updated integration-test.js step 29c for new export modal layout. Committed 9f20b152, pushed to MR !285.
 
 - 2026-06-22: Fixed ExportModal header layout (icon + heading on separate lines) — added display:flex to h2. Fixed download button: read signals inside onclick closure instead of capturing stale snapshots at render time. Replaced cursor:not-allowed + opacity disabled style with muted border/text/bg for less confusing disabled state. Committed 64a18777, pushed to MR !285.
-
-Closed during 2026-07-08 backlog grooming: branch merged into dev (8aad9573). Remaining drift vs the updated design example is superseded by the new visual-drift audit task.
 <!-- SECTION:NOTES:END -->

@@ -1,10 +1,10 @@
 ---
 id: TASK-342.2
 title: 'Dashboard: widget grid layout + widget visuals parity'
-status: Done
+status: Review
 assignee: []
 created_date: '2026-06-10 13:30'
-updated_date: '2026-07-08 07:22'
+updated_date: '2026-06-11 21:05'
 labels:
   - design-parity
   - dashboard
@@ -93,6 +93,4 @@ Verification passed: `node --check checks/web-ui/tests/integration-test.js`, `ni
 Screenshot captured from passing `web-ui` check step: `06z3-dashboard-widget-visuals-parity.png`.
 
 Audit notes: dashboard grid CSS, widget headers, fleet-health layout, and loading spinner treatment were already parity-aligned in the current codebase; the remaining gaps addressed here were the Build Summary and CVE Summary widget internals plus populated-dashboard screenshot coverage.
-
-Closed during 2026-07-08 backlog grooming: branch merged into dev (2c5669ca). Remaining drift vs the updated design example is superseded by the new visual-drift audit task.
 <!-- SECTION:NOTES:END -->
