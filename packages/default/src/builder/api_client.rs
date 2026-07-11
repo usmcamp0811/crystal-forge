@@ -13,6 +13,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use tokio::io::AsyncWriteExt;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
@@ -634,6 +635,92 @@ impl BuilderApiClient {
             .bytes()
             .await
             .context("Failed to read derivation archive response")
+    }
+
+    /// Stream the derivation archive directly into `nix-store --import` without
+    /// buffering the entire closure in memory.
+    ///
+    /// This avoids the multi-GiB RAM spike that occurs when large NixOS closures
+    /// are downloaded as a single blob before being imported.
+    pub async fn stream_derivation_archive_to_import(
+        &self,
+        job_id: uuid::Uuid,
+        drv_path: &str,
+    ) -> Result<()> {
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/derivation-archive",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let body = Vec::new();
+        let (builder_id, signature, timestamp) = self.sign_request("GET", &path, &body);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .timeout(DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT)
+            .send()
+            .await
+            .context("Failed to request derivation archive for streaming import")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!(
+                "Derivation archive stream request failed with status {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        // Spawn nix-store --import and pipe the HTTP response stream to its stdin.
+        let mut child = tokio::process::Command::new("nix-store")
+            .arg("--import")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to spawn nix-store --import")?;
+
+        let mut stdin = child.stdin.take().context("Failed to get nix-store --import stdin")?;
+
+        // Stream response body chunks into nix-store --import stdin.
+        let mut byte_stream = response.bytes_stream();
+        use futures::StreamExt;
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk = chunk.context("Error reading derivation archive chunk from server")?;
+            stdin
+                .write_all(&chunk)
+                .await
+                .context("Failed to write derivation archive chunk to nix-store --import")?;
+        }
+        // Close stdin so nix-store knows the stream is done.
+        drop(stdin);
+
+        let output = child
+            .wait_with_output()
+            .await
+            .context("Failed to wait for nix-store --import")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("nix-store --import failed: {stderr}");
+        }
+
+        if !std::path::Path::new(drv_path).exists() {
+            anyhow::bail!(
+                "nix-store --import succeeded but derivation path is still missing: {drv_path}"
+            );
+        }
+
+        Ok(())
     }
 
     /// Download the source archive (tar.gz of the bare mirror) for a job using

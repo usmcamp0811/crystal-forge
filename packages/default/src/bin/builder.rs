@@ -12,7 +12,7 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 /// - `PRE_BUILD_EVALUATION`: nix eval phase
 const PRE_BUILD_SOURCE_FETCH: u8 = 0;
 const PRE_BUILD_EVALUATION: u8 = 1;
-use tokio::io::AsyncWriteExt;
+
 use tokio::signal;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -1696,36 +1696,14 @@ async fn ensure_derivation_available(
     }
 
     info!(
-        "📥 Derivation {} missing locally; downloading archive from server",
+        "📥 Derivation {} missing locally; streaming archive from server into nix-store --import",
         drv_path
     );
-    let archive = client.download_derivation_archive(job_id).await?;
+    // Stream the archive directly into nix-store --import stdin to avoid
+    // buffering the full closure (potentially multi-GiB) in memory.
+    client.stream_derivation_archive_to_import(job_id, drv_path).await?;
 
-    let mut child = tokio::process::Command::new("nix-store")
-        .arg("--import")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to spawn nix-store --import: {e}"))?;
-
-    let Some(mut stdin) = child.stdin.take() else {
-        anyhow::bail!("failed to open stdin for nix-store --import");
-    };
-    stdin.write_all(&archive).await?;
-    drop(stdin);
-
-    let output = child.wait_with_output().await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("nix-store --import failed: {stderr}");
-    }
-
-    if !Path::new(drv_path).exists() {
-        anyhow::bail!("import completed but derivation path is still missing: {drv_path}");
-    }
-
-    info!("✅ Imported derivation archive for {}", drv_path);
+    info!("✅ Streamed derivation archive into nix-store for {}", drv_path);
     Ok(())
 }
 

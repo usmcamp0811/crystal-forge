@@ -21,6 +21,7 @@ use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::process::Command;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::handlers::agent_request::CFState;
@@ -390,10 +391,14 @@ fn server_mirror_path(archive_root: &std::path::Path, repo_url: &str) -> std::pa
 /// Clones the repo bare if the mirror does not exist, or fetches if the commit
 /// is not present. Mirrors the builder's `ensure_mirror_has_commit` logic but
 /// runs server-side so the server can serve archive tarballs to remote builders.
+///
+/// `creds` is the optional per-flake credential environment (SSH key / netrc).
+/// When `None`, the git commands run without credential injection (public repos only).
 async fn ensure_server_mirror_has_commit(
     mirror_path: &std::path::Path,
     repo_url: &str,
     commit_hash: &str,
+    creds: Option<&crate::flake::credentials::FlakeCredentialEnv>,
 ) -> Result<(), StatusCode> {
     let source_err = |msg: String| {
         tracing::error!("server source mirror error: {msg}");
@@ -415,12 +420,14 @@ async fn ensure_server_mirror_has_commit(
 
         let _ = tokio::fs::remove_dir_all(&temp_mirror).await;
 
-        let output = tokio::process::Command::new("git")
-            .kill_on_drop(true)
-            .arg("clone")
-            .arg("--bare")
-            .arg(repo_url)
-            .arg(&temp_mirror)
+        let mut clone_cmd = tokio::process::Command::new("git");
+        clone_cmd.kill_on_drop(true);
+        clone_cmd.arg("clone").arg("--bare").arg(repo_url).arg(&temp_mirror);
+        if let Some(c) = creds {
+            c.apply_to_git_command(&mut clone_cmd);
+        }
+
+        let output = clone_cmd
             .output()
             .await
             .map_err(|e| source_err(format!("failed to spawn git clone --bare: {e}")))?;
@@ -468,14 +475,18 @@ async fn ensure_server_mirror_has_commit(
         mirror_path.display()
     );
 
-    let output = tokio::process::Command::new("git")
-        .kill_on_drop(true)
-        .arg("--git-dir")
-        .arg(mirror_path)
-        .arg("fetch")
-        .arg("--prune")
+    let mut fetch_cmd = tokio::process::Command::new("git");
+    fetch_cmd.kill_on_drop(true);
+    fetch_cmd
+        .arg("--git-dir").arg(mirror_path)
+        .arg("fetch").arg("--prune")
         .arg(repo_url)
-        .arg("+refs/*:refs/*")
+        .arg("+refs/*:refs/*");
+    if let Some(c) = creds {
+        c.apply_to_git_command(&mut fetch_cmd);
+    }
+
+    let output = fetch_cmd
         .output()
         .await
         .map_err(|e| source_err(format!("failed to spawn git fetch: {e}")))?;
@@ -1902,10 +1913,43 @@ pub async fn get_next_job(
                 .join(&source_mut.commit_hash)
                 .with_extension("tar.gz");
 
+            // Load per-flake credentials so the server-side mirror clone/fetch
+            // can authenticate against private repositories.
+            let flake_creds = if let Some(commit_id) = derivation.commit_id {
+                match crate::queries::commits::get_commit_by_id(&state.pool, commit_id).await {
+                    Ok(commit) => {
+                        crate::flake::credentials::FlakeCredentialEnv::load(
+                            &state.pool,
+                            commit.flake_id,
+                        )
+                        .await
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(
+                                job_id = %job.id,
+                                flake_id = commit.flake_id,
+                                "failed to load flake credentials for server mirror: {e}"
+                            );
+                            None
+                        })
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            job_id = %job.id,
+                            commit_id,
+                            "failed to load commit for credential lookup: {e}"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             if ensure_server_mirror_has_commit(
                 &mirror_path,
                 &source_mut.repo_url,
                 &source_mut.commit_hash,
+                flake_creds.as_ref(),
             )
             .await
             .is_err()
@@ -2240,50 +2284,79 @@ pub async fn download_job_derivation_archive(
         "exporting derivation requisites archive"
     );
 
-    let archive_chunks =
-        chunk_derivation_archive_paths(&archive_paths, NIX_STORE_EXPORT_ARG_BYTES_LIMIT);
-    let mut archive = Vec::new();
+    // Convert borrowed slices into owned vecs so the tokio::spawn closure is 'static.
+    let archive_chunks: Vec<Vec<String>> = chunk_derivation_archive_paths(
+        &archive_paths,
+        NIX_STORE_EXPORT_ARG_BYTES_LIMIT,
+    )
+    .into_iter()
+    .map(|chunk| chunk.to_vec())
+    .collect();
 
-    for (chunk_index, archive_chunk) in archive_chunks.iter().enumerate() {
-        let output = Command::new("nix-store")
-            .arg("--export")
-            .args(*archive_chunk)
-            .output()
-            .await
-            .map_err(|e| {
+    // Stream chunks as they are generated rather than buffering the whole closure
+    // in server RAM. Large NixOS closures can be multi-GiB; buffering them would
+    // exhaust available memory and cause OOM on the server.
+    let chunk_count = archive_chunks.len();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
+    let job_id_copy = job_id;
+    let drv_path_owned = drv_path.to_string();
+    let path_count = archive_paths.len();
+
+    tokio::spawn(async move {
+        for (chunk_index, archive_chunk) in archive_chunks.iter().enumerate() {
+            let mut cmd = Command::new("nix-store");
+            cmd.arg("--export").args(archive_chunk);
+            let output = match cmd.output().await {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::error!(
+                        job_id = %job_id_copy,
+                        drv_path = %drv_path_owned,
+                        chunk_index,
+                        chunk_count,
+                        "failed to spawn nix-store --export: {e}"
+                    );
+                    let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    return;
+                }
+            };
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                 tracing::error!(
-                    job_id = %job_id,
-                    drv_path,
+                    job_id = %job_id_copy,
+                    drv_path = %drv_path_owned,
+                    path_count,
                     chunk_index,
-                    chunk_count = archive_chunks.len(),
-                    chunk_path_count = archive_chunk.len(),
-                    "failed to run nix-store --export chunk: {e}"
+                    chunk_count,
+                    stderr = %stderr,
+                    "nix-store --export chunk failed"
                 );
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::error!(
-                job_id = %job_id,
-                drv_path,
-                path_count = archive_paths.len(),
-                chunk_index,
-                chunk_count = archive_chunks.len(),
-                chunk_path_count = archive_chunk.len(),
-                stderr = %stderr,
-                "nix-store --export chunk failed"
-            );
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                let _ = tx
+                    .send(Err(std::io::Error::other(format!(
+                        "nix-store --export failed: {stderr}"
+                    ))))
+                    .await;
+                return;
+            }
+            if tx.send(Ok(bytes::Bytes::from(output.stdout))).await.is_err() {
+                // Receiver dropped (client disconnected).
+                tracing::debug!(job_id = %job_id_copy, "derivation archive stream cancelled by client");
+                return;
+            }
         }
+        tracing::debug!(
+            job_id = %job_id_copy,
+            drv_path = %drv_path_owned,
+            chunk_count,
+            "derivation archive streaming complete"
+        );
+    });
 
-        archive.extend_from_slice(&output.stdout);
-    }
-
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/x-nix-archive")
-        .body(Body::from(archive))
+        .body(Body::from_stream(stream))
         .map_err(|e| {
             tracing::error!(job_id = %job_id, "failed to build derivation archive response: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -2359,23 +2432,29 @@ pub async fn download_job_source_archive(
         .join(&commit.git_commit_hash)
         .with_extension("tar.gz");
 
-    let data = tokio::fs::read(&archive_path).await.map_err(|e| {
+    // Stream the archive file rather than reading it fully into RAM.
+    let file = tokio::fs::File::open(&archive_path).await.map_err(|e| {
         tracing::error!(
             job_id = %job_id,
             archive_path = %archive_path.display(),
-            "failed to read source archive: {e}"
+            "failed to open source archive for streaming: {e}"
         );
         StatusCode::NOT_FOUND
     })?;
+    let file_size = file.metadata().await.ok().map(|m| m.len());
+    let stream = ReaderStream::new(file);
 
-    Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/gzip")
         .header(
             "Content-Disposition",
             format!("attachment; filename=\"{}.tar.gz\"", mirror_id),
-        )
-        .body(Body::from(data))
+        );
+    if let Some(size) = file_size {
+        builder = builder.header("Content-Length", size.to_string());
+    }
+    builder.body(Body::from_stream(stream))
         .map_err(|e| {
             tracing::error!(job_id = %job_id, "failed to build source archive response: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
