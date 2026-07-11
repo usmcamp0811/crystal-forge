@@ -1,14 +1,18 @@
 # Multi-Builder API Documentation
 
+> **See also:** [`builder-security-architecture.md`](./builder-security-architecture.md) for the
+> complete security architecture, trust boundary diagrams, threat model, and per-strategy
+> firewall rules.
+
 ## Overview
 
-The Multi-Builder API enables distributed builder deployments with centralized management through the Crystal Forge server. Builders authenticate via Ed25519 signatures and communicate exclusively through REST API endpoints.
+The Multi-Builder API enables distributed builder deployments with centralized management through the Crystal Forge server. Builders authenticate via Ed25519 signatures and communicate exclusively through REST API endpoints. Builders never access the database directly and never hold repository credentials.
 
 ## Remote Build Execution Strategies
 
 Crystal Forge remote builders use explicit execution strategies. The scheduler must not silently fall back between strategies; a builder only receives jobs for strategies it is configured to support.
 
-`server_derivation` remains the default strategy. `source_re_evaluate_verified` is explicit opt-in until source archive/scoped credential delivery is available for private flakes.
+`server_derivation` remains the default strategy. `source_re_evaluate_verified` with `server_bundled_archive` delivery is available for network-isolated or GovCloud builders that must not contact Git remotes directly.
 
 Default builder configuration:
 
@@ -30,7 +34,18 @@ remote_build_execution_strategy = "source_re_evaluate_verified"
 supported_execution_strategies = ["server_derivation", "source_re_evaluate_verified"]
 ```
 
-The builder self-manages its local mirror: if the bare mirror is missing it is created with `git clone --bare` from the repository URL, and if the authorized commit is not present the mirror is fetched. A fresh builder therefore does not require a pre-seeded mirror, but it does need read access to the repository URL. Colocated server/builder deployments may still share the same mirror root to avoid duplicate clones. Per-job worktrees are created below the configured worktree root and cleaned independently.
+**Source delivery modes for `source_re_evaluate_verified`** are configured server-side via `source_delivery_mode`:
+
+- **`local_git_worktree`** (default): Builder manages its own bare mirror. On first use it clones with `git clone --bare` from the repository URL; if the authorized commit is absent it fetches. The builder needs read access to the repository URL and credentials for private repos. Colocated server/builder deployments may share the same mirror root.
+
+- **`server_bundled_archive`**: Server packages the top-level flake repository as a `tar.gz` (from its own server-side bare mirror) and serves it via an authenticated API endpoint. The builder downloads, verifies SHA-256 incrementally while streaming to disk, extracts to a **job-scoped** directory, and evaluates without contacting the Git remote. Each job gets an isolated mirror directory so concurrent builds for the same repo do not interfere. Use this for air-gapped or GovCloud builders. Note: only the top-level repo is bundled; locked flake inputs not in the builder's Nix store or substituters may still require network during `nix eval`.
+
+Job-scoped mirror layout for `server_bundled_archive`:
+
+```
+<source_mirror_root>/server-bundled/<job_id>/<mirror_id>.git   ← deleted after build
+<source_worktree_root>/<mirror_id>/<commit_hash>/<job_id>/     ← deleted after build
+```
 
 ### `server_derivation`
 
@@ -706,28 +721,54 @@ Default: Keep all metrics (no auto-pruning yet)
 
 ## Security
 
+> For the complete trust model, threat analysis, data-in-transit classification,
+> and per-strategy firewall rules, see
+> [`builder-security-architecture.md`](./builder-security-architecture.md).
+
 ### Authentication
 
-- **Ed25519 signatures**: Industry-standard, secure, stateless
-- **No sessions/tokens**: Each request independently authenticated
+- **Ed25519 signatures**: Per-request, stateless, replay-protected (±5 min timestamp window)
+- **Session scoping**: `X-Builder-Session-ID` scopes job operations to the current process lifetime; job ownership is double-checked on every API call
 - **Public key storage**: Stored in database, used for signature verification
 
 ### Authorization
 
 - **Admin endpoints**: Require authenticated user with admin role
 - **Builder endpoints**: Require valid builder signature (active status)
-- **Job ownership**: Builders can only operate on jobs assigned to them
+- **Job ownership**: Builders can only operate on jobs they hold in `building` state with a matching session ID
+
+### Network Boundaries
+
+Builders only need outbound access to:
+1. The Crystal Forge server (HTTPS, typically 443)
+2. Configured Nix binary cache substituters (HTTPS)
+
+Builders never need access to:
+- The PostgreSQL database
+- Git remotes (when `server_bundled_archive` delivery is configured)
+- Other builder hosts
+- Managed NixOS hosts (agents and builders are completely separate)
+
+### What Builders Never Hold
+
+- Database credentials
+- Git repository SSH keys or netrc tokens (server holds these)
+- OIDC client secrets
+- Nix cache push credentials (server pushes; builder only pulls)
+- Deployment authorization or keys for managed hosts
 
 ### Key Management
 
 **Builder Private Keys**:
-- Store securely with restricted file permissions (chmod 600)
-- Never commit to version control
-- Rotate periodically for security
+- Auto-generated by `cf-keygen` on first start at `/var/lib/crystal-forge/builder-api.key`
+- File permissions: 600, owned by the `crystal-forge` service user
+- Never committed to version control
+- Rotate by generating a new keypair and updating via `PUT /api/v1/builders/:id/public-key`
 
 **Public Keys**:
-- Stored in database (can be updated via API)
-- Validated on builder registration
+- Stored in database (updatable via API)
+- Used only to verify Ed25519 request signatures
+- Registering a new public key immediately invalidates requests signed with the old key
 
 ## Troubleshooting
 
