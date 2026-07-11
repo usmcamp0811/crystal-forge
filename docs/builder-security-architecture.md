@@ -53,42 +53,48 @@ Everything else — evaluation, policy enforcement, secret management, deploymen
 
 ## 2. System Components and Trust Levels
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                            TRUST BOUNDARY OVERVIEW                              │
-│                                                                                 │
-│  ┌──────────────────────────────────┐                                           │
-│  │   HIGH TRUST (Server Enclave)    │                                           │
-│  │                                  │                                           │
-│  │  ┌──────────────┐  ┌──────────┐  │                                           │
-│  │  │   CF Server  │  │ Postgres │  │  • Holds all secrets                     │
-│  │  │   (Rust)     │──│   DB     │  │  • Authoritative evaluator               │
-│  │  │              │  │          │  │  • Controls job queue                    │
-│  │  └──────────────┘  └──────────┘  │  • Stores flake credentials              │
-│  │         │                        │  • Issues no-reuse session tokens        │
-│  └─────────│──────────────────────-─┘                                           │
-│            │  HTTPS / Ed25519-signed API                                        │
-│            │  (one-way: builders poll server)                                   │
-│  ┌─────────┴──────────────────────────────┐                                     │
-│  │  REDUCED TRUST (Builder Host)          │                                     │
-│  │                                        │  • No DB credentials               │
-│  │  ┌────────────────────────────────┐    │  • No Git credentials              │
-│  │  │  CF Builder Binary (Rust)      │    │  • No deployment secrets           │
-│  │  │                                │    │  • Nix build sandbox enforced      │
-│  │  │  • Polls CF server for jobs    │    │  • Holds only its own private key  │
-│  │  │  • Downloads source archives   │    │                                    │
-│  │  │  • Runs nix-store --realise    │    │                                    │
-│  │  │  • Pushes built outputs        │    │                                    │
-│  │  └────────────────────────────────┘    │                                    │
-│  └────────────────────────────────────────┘                                     │
-│                                                                                 │
-│  ┌──────────────────────────────────────────────────────────┐                  │
-│  │  MONITORED ENDPOINTS (Managed NixOS Hosts)               │                  │
-│  │                                                          │                  │
-│  │  CF Agent: reports state, receives deployment targets    │                  │
-│  │  (agents never talk to builders)                         │                  │
-│  └──────────────────────────────────────────────────────────┘                  │
-└─────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph ROOT["Trust Boundary Overview"]
+        direction TB
+
+        subgraph HIGH["HIGH TRUST (Server Enclave)"]
+            direction LR
+            CF["CF Server (Rust)"]
+            PG[("Postgres DB")]
+            CF --- PG
+
+            HIGH_NOTE1["• Holds all secrets
+• Authoritative evaluator
+• Controls job queue
+• Stores flake credentials
+• Issues no-reuse session tokens"]
+        end
+
+        subgraph REDUCED["REDUCED TRUST (Builder Host)"]
+            B["CF Builder Binary (Rust)"]
+
+            REDUCED_NOTE1["• No DB credentials
+• No Git credentials
+• No deployment secrets
+• Nix build sandbox enforced
+• Holds only its own private key"]
+
+            B_DETAIL["• Polls CF server for jobs
+• Downloads source archives
+• Runs nix-store --realise
+• Pushes built outputs"]
+        end
+
+        subgraph MONITORED["MONITORED ENDPOINTS (Managed NixOS Hosts)"]
+            A["CF Agent"]
+            A_NOTE["reports state, receives deployment targets
+(agents never talk to builders)"]
+        end
+
+        CF -.->|"HTTPS / Ed25519-signed API
+(one-way: builders poll server)"| B
+    end
 ```
 
 ---
@@ -149,273 +155,154 @@ Everything else — evaluation, policy enforcement, secret management, deploymen
 
 ### 4.1 Builder Job Lifecycle — Complete Network Picture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                    BUILDER JOB LIFECYCLE — NETWORK FLOWS                        │
-└─────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant Builder as Builder Host
+    participant Server as CF Server
+    participant GitCache as Git Remote / Cache
 
-Builder Host                           CF Server                     Git Remote / Cache
-─────────────                          ─────────                     ─────────────────
-    │                                      │
-    │  1. POST /builders/:id/heartbeat     │
-    │  Ed25519-signed, CPU/RAM metrics     │
-    │─────────────────────────────────────>│
-    │  200 OK (heartbeat_interval_secs)    │
-    │<─────────────────────────────────────│
-    │                                      │
-    │  2. POST /builders/:id/next-job      │
-    │  Ed25519-signed, strategy list       │
-    │─────────────────────────────────────>│
-    │                                      │ (DB: atomic job claim, FOR UPDATE SKIP LOCKED)
-    │                                      │
-    │  [IF ServerBundledArchive mode]      │
-    │                                      │──────────────────────────────────────>│
-    │                                      │  git clone --bare / git fetch         │
-    │                                      │  (server uses stored SSH key or netrc)│
-    │                                      │<──────────────────────────────────────│
-    │                                      │
-    │                                      │ (server: tar czf archive, sha256sum)
-    │                                      │ archive saved to:
-    │                                      │ source_archive_root/archives/jobs/<job_id>.tar.gz
-    │                                      │
-    │  200 OK — Job Manifest               │
-    │  {job_id, drv_path, source_identity, │
-    │   archive_url, archive_sha256,        │
-    │   expected_drv_path}                 │
-    │<─────────────────────────────────────│
-    │                                      │
-    │  3. GET /builders/:id/jobs/:jid/     │
-    │     source-archive                   │
-    │  Ed25519-signed                      │
-    │─────────────────────────────────────>│
-    │  200 OK — streaming tar.gz           │ (server streams from file, ReaderStream)
-    │  (no full archive in server RAM)     │
-    │<─────────────────────────────────────│
-    │                                      │
-    │  [Builder: verify SHA-256,           │
-    │   extract to job-scoped mirror,      │
-    │   git worktree add]                  │
-    │                                      │
-    │  4. POST /builders/:id/jobs/:jid/    │
-    │     publish-derivation-closure       │
-    │  Ed25519-signed                      │
-    │─────────────────────────────────────>│
-    │                                      │──────────────────────────────────────>│
-    │                                      │  nix copy --to <cache>               │
-    │                                      │  (server pushes .drv closure to cache)│
-    │                                      │<──────────────────────────────────────│
-    │  200 OK                              │
-    │<─────────────────────────────────────│
-    │                                      │
-    │  [Builder: nix-store --realise]     ─ ─ ─ ─ ─ ─ ─ ─ ─>│ (pull from subst.)
-    │  (pulls .drv closure from cache      │                   │
-    │   OR server streams via             │                   │
-    │   derivation-archive endpoint)       │                   │
-    │<─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│
-    │                                      │
-    │  [nix build runs inside Nix sandbox] │
-    │                                      │
-    │  5. WS /api/v1/build-jobs/:jid/logs/ │
-    │     stream (real-time log + metrics) │
-    │─────────────────────────────────────>│ (WebSocket, falls back to HTTP POST)
-    │  streaming build output              │
-    │                                      │
-    │  6. POST /builders/:id/jobs/:jid/    │
-    │     complete                         │
-    │  {output_path, cache_pushed: true,   │
-    │   cache_reference}                   │
-    │─────────────────────────────────────>│
-    │                                      │ (DB: verify cache_reference against
-    │                                      │  known destinations, create cache_push row)
-    │  200 OK                              │
-    │<─────────────────────────────────────│
+    Builder->>Server: 1. POST /builders/:id/heartbeat<br/>Ed25519-signed, CPU/RAM metrics
+    Server-->>Builder: 200 OK (heartbeat_interval_secs)
+
+    Builder->>Server: 2. POST /builders/:id/next-job<br/>Ed25519-signed, strategy list
+    Note over Server: DB: atomic job claim<br/>FOR UPDATE SKIP LOCKED
+
+    alt ServerBundledArchive mode
+        Server->>GitCache: git clone --bare / git fetch<br/>(server uses stored SSH key or netrc)
+        GitCache-->>Server: 
+        Note over Server: server: tar czf archive, sha256sum<br/>save to source_archive_root/archives/&lt;job_id&gt;.tar.gz
+    end
+
+    Server-->>Builder: 200 OK — Job Manifest<br/>{job_id, drv_path, source_identity,<br/>archive_url, archive_sha256, expected_drv_path}
+
+    Builder->>Server: 3. GET /builders/:id/jobs/:jid/source-archive<br/>Ed25519-signed
+    Server-->>Builder: 200 OK — streaming tar.gz<br/>(ReaderStream, no full archive in server RAM)
+
+    Note over Builder: verify SHA-256<br/>extract to job-scoped mirror<br/>git worktree add
+
+    Builder->>Server: 4. POST /builders/:id/jobs/:jid/publish-derivation-closure<br/>Ed25519-signed
+    Server->>GitCache: nix copy --to &lt;cache&gt;<br/>(server pushes .drv closure to cache)
+    GitCache-->>Server: 
+    Server-->>Builder: 200 OK
+
+    Note over Builder,GitCache: Builder: nix-store --realise<br/>(pulls .drv closure from cache or server<br/>via derivation-archive endpoint)
+
+    Builder->>Server: 5. WS /api/v1/build-jobs/:jid/logs/stream<br/>(real-time log + metrics)
+    Note over Builder,Server: WebSocket, falls back to HTTP POST
+    Server-->>Builder: streaming build output
+
+    Builder->>Server: 6. POST /builders/:id/jobs/:jid/complete<br/>{output_path, cache_pushed, cache_reference}
+    Note over Server: DB: verify cache_reference<br/>against known destinations<br/>create cache_push row
+    Server-->>Builder: 200 OK
 ```
 
 ### 4.2 ServerDerivation Strategy (No Source Access on Builder)
 
+```mermaid
+sequenceDiagram
+    participant S as CF Server
+    participant B as Builder Host
+
+    Note over S: 1. Evaluate flake (server-side):<br/>nix eval --impure ...<br/>#nixosConfigurations.host.system.build.toplevel.drvPath
+
+    S->>B: 2. Job manifest<br/>{drv_path, execution_strategy, source_input_delivery}
+
+    Note over B: 3. Check: is /nix/store/xxx fully valid?<br/>(nix-store --check-validity)
+
+    alt Already valid
+        Note over B: Skip to step 6
+    else Delta materialization (preferred)
+        B->>S: 3a. GET /derivation-manifest
+        Note over S: computes nix-store --query --requisites<br/>from persisted drv_path<br/>returns sorted, deduped path list
+        S-->>B: {job_id, drv_path, paths: [...]}
+
+        Note over B: 3b. Check local validity of each manifest path<br/>(chunked 256/batch, per-path fallback)
+
+        B->>S: 3c. POST /derivation-archive {paths: [missing...]}
+        Note over S: validates each path ∈ authorized manifest<br/>403 if any outside,<br/>400 if malformed,<br/>204 if empty
+        S-->>B: streaming nix-store --export<br/>for exactly the validated subset
+        Note over B: pipe → nix-store --import
+    else Fallback (delta unsupported)
+        Note over S: Server too old for delta (404/405)
+        B->>S: GET /derivation-archive (full closure)
+        S-->>B: streaming nix-store --export<br/>of full recursive closure
+        Note over B: pipe → nix-store --import
+    end
+
+    Note over B: 4. Verify full recursive closure<br/>nix-store --check-validity<br/>If incomplete → path_materialization
+
+    Note over S,B: 5. Background (fire-and-forget, non-blocking):<br/>POST /publish-derivation-closure<br/>server runs attic push to cache<br/>(next builder skips step 3)
+
+    Note over B: 6. nix-store --realise /nix/store/xxx.drv<br/>(pulls build INPUTS from substituters/cache)
+
+    B->>S: 7. POST .../complete<br/>{output_path, cache_pushed}
 ```
-┌───────────────────────────────────────────────────────────────────────────┐
-│         ServerDerivation — Builder Has No Source Access                   │
-│         Uses delta-aware derivation materialization by default            │
-└───────────────────────────────────────────────────────────────────────────┘
 
-CF Server                                       Builder Host
-─────────                                       ────────────
-│                                                     │
-│ 1. Evaluate flake (server-side):                    │
-│    nix eval --impure \                              │
-│      "git+ssh://...?rev=<hash>" \                   │
-│      #nixosConfigurations.host.system.build.toplevel.drvPath
-│                                                     │
-│ 2. Job manifest sent to builder:                    │
-│    { drv_path: "/nix/store/xxx.drv",               │
-│      execution_strategy: server_derivation,         │
-│      source_input_delivery: none }                  │─────>│
-│                                                     │
-│ 3. Builder checks: does /nix/store/xxx.drv exist?   │
-│    (recursive closure — nix-store --check-validity) │
-│                                                     │
-│    IF YES → skip to step 6                          │
-│                                                     │
-│    IF NO  → PREFERRED: two-step delta transport     │
-│                                                     │
-│    3a. GET /derivation-manifest                     │
-│        server computes nix-store --query            │
-│          --requisites <persisted_drv_path>           │
-│        returns sorted, deduplicated path manifest   │
-│                                                     │
-│    3b. Builder checks local validity of EACH        │
-│        manifest path (chunked 256/batch with        │
-│        per-path fallback within failed chunks)       │
-│                                                     │
-│    3c. POST /derivation-archive                     │
-│        { "paths": ["missing1", "missing2", ...] }   │
-│        server validates:                            │
-│          • all paths ∈ authorized manifest (403)    │
-│          • all paths are valid store paths (400)    │
-│          • empty request → 204 No Content           │
-│        then streams nix-store --export              │
-│          for exactly the validated subset           │
-│        builder pipes → nix-store --import           │
-│        (no full closure in RAM on either side)      │
-│                                                     │
-│    FALLBACK (server too old for delta):             │
-│    GET /derivation-archive (full closure)           │
-│    Server streams full nix-store --export           │
-│      of the recursive closure                       │
-│    Builder pipes → nix-store --import               │
-│                                                     │
-│ 4. Builder verifies full recursive closure          │
-│    is now valid via nix-store --check-validity      │
-│    If still incomplete → path_materialization fail  │
-│                                                     │
-│ 5. Background (fire-and-forget, non-blocking):      │
-│    POST /publish-derivation-closure                 │
-│    server runs attic push to cache                  │
-│    (next builder for same drv skips step 3)         │
-│                                                     │
-│ 6. Builder runs: nix-store --realise                │
-│    /nix/store/xxx.drv                               │
-│    (pulls build INPUTS from substituters/cache)     │
-│                                                     │
-│ 7. Builder reports output_path + cache_pushed       │
-│                                                ─────>│
-└─────────────────────────────────────────────────────────────┘
+**Security property of the delta protocol:**
+- The server NEVER exports a path just because the builder asked. The server computes the authorized manifest from its own persisted drv_path and enforces requested ⊆ manifest.
+- The builder NEVER sends its store inventory. It only names paths from the manifest the server just gave it.
+- A builder requesting a path outside the manifest is a **403 FORBIDDEN** (logged with builder and job IDs; path list is NOT logged).
+- A builder requesting a non-store path is a **400 BAD REQUEST**.
 
-SECURITY PROPERTY OF THE DELTA PROTOCOL:
-  • The server NEVER exports a path just because the builder asked.
-    The server computes the authorized manifest from its own persisted
-    drv_path and enforces requested ⊆ manifest.
-  • The builder NEVER sends its store inventory. It only names paths
-    from the manifest the server just gave it.
-  • A builder requesting a path outside the manifest is a 403 FORBIDDEN
-    (logged with builder and job IDs; path list is NOT logged).
-  • A builder requesting a non-store path is a 400 BAD REQUEST.
+**Fallback policy:**
+- **404/405** from the delta endpoint = `Unsupported` → transparent fallback to the full closure archive GET. The builder never gets stuck waiting for a server that doesn't speak delta.
+- **403**, drv path mismatch, malformed response, or import failure = `Fatal` → hard error. Never silently retried as full archive.
+- The fallback distinction is encoded in the `DeltaError` enum at the client level, not an ad-hoc string check.
 
-FALLBACK POLICY:
-  • 404/405 from the delta endpoint = "Unsupported" → transparent
-    fallback to the full closure archive GET.  The builder never gets
-    stuck waiting for a server that doesn't speak delta.
-  • 403, drv path mismatch, malformed response, or import failure =
-    "Fatal" → hard error.  Never silently retried as full archive.
-  • The fallback distinction is encoded in the DeltaError enum at
-    the client level, not an ad-hoc string check.
+**What the builder can access in this mode:**
+- ✅ CF server API (HTTPS) — for drv manifest, drv archive, and job lifecycle
+- ✅ Nix binary caches (HTTPS) — for build INPUTS during `nix-store --realise`
+- ❌ Git remotes
+- ❌ Database
+- ❌ Deployment credentials
+- ❌ Other builders
 
-WHAT THE BUILDER CAN ACCESS IN THIS MODE:
-  ✅ CF server API (HTTPS) — for drv manifest, drv archive, and job lifecycle
-  ✅ Nix binary caches (HTTPS) — for build INPUTS during nix-store --realise
-  ❌ Git remotes
-  ❌ Database
-  ❌ Deployment credentials
-  ❌ Other builders
-
-NOTE: No Attic/S3 cache is required for the builder to START a build in this
-mode. The .drv closure (or the delta subset) arrives directly from the CF
-server via streaming export. Attic is used in the background to warm the
-cache for subsequent builds. The build INPUTS (nixpkgs, dependencies) still
-come from Nix substituters.
+**Note:** No Attic/S3 cache is required for the builder to START a build in this mode. The .drv closure (or the delta subset) arrives directly from the CF server via streaming export. Attic is used in the background to warm the cache for subsequent builds. The build INPUTS (nixpkgs, dependencies) still come from Nix substituters.
 
 ### 4.3 SourceReEvaluateVerified + ServerBundledArchive Strategy
 
-```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│  SourceReEvaluateVerified + ServerBundledArchive                                 │
-│  Use when: air-gapped builders, GovCloud, builders with no Git remote access     │
-└──────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant Git as Git Remote
+    participant S as CF Server
+    participant B as Builder Host
 
-Git Remote ──> CF Server ──────────────────────────────────────> Builder Host
-               (server only)                                      (no Git access)
-                   │                                                    │
-                   │ clone/fetch top-level repo                         │
-                   │ (using stored SSH key from DB)                     │
-                   │                                                    │
-                   │ generate tar.gz of bare mirror                     │
-                   │ sha256sum                                           │
-                   │ save to archives/jobs/<job_id>.tar.gz              │
-                   │                                                    │
-                   │ ─── job manifest (job_id, archive_url, sha256) ──>│
-                   │                                                    │
-                   │ <── GET /source-archive (auth'd, streaming) ───── │
-                   │ ─── streaming tar.gz ─────────────────────────── >│
-                   │                                                    │
-                   │                                         verify sha256
-                   │                                         extract to:
-                   │                                  mirrors/server-bundled/
-                   │                                    <job_id>/<mirror_id>.git
-                   │                                         git worktree add
-                   │                                         nix eval (local)
-                   │                                         compare .drvPath
-                   │                                         nix-store --realise
-                   │                                         report complete
-                   │ <── POST /complete (output_path, cache_pushed) ── │
-                   │                                                    │
+    Git-->>S: clone/fetch top-level repo<br/>(server uses stored SSH key from DB)
+    Note over S: generate tar.gz of bare mirror<br/>sha256sum<br/>save to archives/jobs/&lt;job_id&gt;.tar.gz
+    S->>B: job manifest (job_id, archive_url, sha256)
+    B->>S: GET /source-archive (authenticated, streaming)
+    S-->>B: streaming tar.gz
 
-WHAT IS BUNDLED:     Top-level flake repository only
-WHAT IS NOT BUNDLED: Locked flake inputs (nixpkgs, etc.)
-IMPLICATION:         Builder needs substituter access for flake inputs
-                     OR inputs must already be in builder's /nix/store
-                     Private flake inputs (not nixpkgs) must be:
-                       - publicly accessible, OR
-                       - pre-seeded in the Nix store/cache, OR
-                       - handled by a future full-input-closure mode
+    Note over B: verify sha256<br/>extract to mirrors/server-bundled/<br/>&lt;job_id&gt;/&lt;mirror_id&gt;.git<br/>git worktree add<br/>nix eval (local)<br/>compare .drvPath<br/>nix-store --realise
+    B-->>S: POST /complete<br/>{output_path, cache_pushed}
 ```
+
+**What is bundled:** Top-level flake repository only
+**What is NOT bundled:** Locked flake inputs (nixpkgs, etc.)
+**Implication:** Builder needs substituter access for flake inputs OR inputs must already be in builder's `/nix/store`. Private flake inputs (not nixpkgs) must be: publicly accessible, pre-seeded in the Nix store/cache, or handled by a future full-input-closure mode.
 
 ### 4.4 SourceReEvaluateVerified + LocalGitWorktree Strategy
 
+```mermaid
+sequenceDiagram
+    participant Git as Git Remote
+    participant S as CF Server
+    participant B as Builder Host
+
+    S->>B: job manifest (repo_url, commit_hash, expected_drv_path)
+    Note over B: git clone --bare &lt;repo_url&gt;<br/>(only if mirror doesn't exist)<br/>git fetch +refs/*:refs/*<br/>git worktree add --detach &lt;commit&gt;<br/>nix eval (local worktree)<br/>compare .drvPath to expected<br/>nix-store --realise
+    B-->>S: report complete
 ```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│  SourceReEvaluateVerified + LocalGitWorktree                                     │
-│  Use when: builder is colocated with or has direct access to the Git remote      │
-│  NOTE: Builder needs read access to the repository URL                           │
-└──────────────────────────────────────────────────────────────────────────────────┘
 
-Git Remote ──────────────────────────────────────────> Builder Host
-(builder clones directly — needs network path to repo)      │
-                                                            │
-CF Server ──> job manifest (repo_url, commit_hash, ──────> │
-              expected_drv_path)                            │
-                                                            │
-                                               git clone --bare <repo_url>
-                                               (only if mirror doesn't exist)
-                                               git fetch +refs/*:refs/*
-                                               git worktree add --detach <commit>
-                                               nix eval (local worktree)
-                                               compare .drvPath to expected
-                                               nix-store --realise
-                                               report complete
+**What the builder can access in this mode:**
+- ✅ CF server API (HTTPS)
+- ✅ Git remote (builder needs network + credentials for the repo URL)
+- ✅ Nix binary caches
+- ❌ Database
+- ❌ Deployment credentials
+- ❌ Repositories NOT listed in the job manifest
 
-WHAT THE BUILDER CAN ACCESS IN THIS MODE:
-  ✅ CF server API (HTTPS)
-  ✅ Git remote (builder needs network + credentials for the repo URL)
-  ✅ Nix binary caches
-  ❌ Database
-  ❌ Deployment credentials
-  ❌ Repositories NOT listed in the job manifest
-
-NETWORK RULE IMPLICATION:
-  Builders in this mode need outbound TCP/22 or TCP/443 to the Git remote.
-  For GovCloud or classified networks, prefer ServerBundledArchive instead.
-```
+**Network rule implication:** Builders in this mode need outbound TCP/22 or TCP/443 to the Git remote. For GovCloud or classified networks, prefer ServerBundledArchive instead.
 
 ---
 
@@ -465,93 +352,53 @@ The builder private key authorizes exactly:
 
 ## 6. Data in Transit — What Crosses the Wire
 
-```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│              DATA CLASSIFICATION BY FLOW                                         │
-├─────────────────────┬───────────────────────────────────────────────────────────┤
-│  Flow               │  Data / Classification                                    │
-├─────────────────────┼───────────────────────────────────────────────────────────┤
-│  Builder → Server   │  Ed25519 signature (public key material, not secret)      │
-│  (all requests)     │  Builder ID (UUID, not secret)                            │
-│                     │  Session ID (process-lifetime, not a credential)          │
-│                     │  Timestamp                                                │
-│                     │  Request body (job poll: strategy list;                   │
-│                     │    complete: store path, cache reference)                  │
-├─────────────────────┼───────────────────────────────────────────────────────────┤
-│  Builder → Server   │  Build log text (stdout/stderr of nix build)             │
-│  (log streaming)    │  CPU/RAM metrics                                          │
-│                     │  WebSocket or HTTP POST                                   │
-├─────────────────────┼───────────────────────────────────────────────────────────┤
-│  Server → Builder   │  Job manifest: job_id, derivation name, drv_path,        │
-│  (next-job resp)    │    execution strategy, source identity (repo URL,         │
-│                     │    commit hash, mirror_id), archive_url (relative path),  │
-│                     │    archive_sha256, expected_drv_path                      │
-│                     │  NOTE: No repository credentials. No DB passwords.        │
-│                     │  NOTE: archive_url is a CF server path, not a Git URL.   │
-├─────────────────────┼───────────────────────────────────────────────────────────┤
-│  Server → Builder   │  Binary tar.gz of bare Git mirror (top-level repo only)  │
-│  (source-archive)   │  Streamed per-job; per-chunk RAM on server is bounded    │
-│                     │  Builder verifies sha256 before unpacking                 │
-├─────────────────────┼───────────────────────────────────────────────────────────┤
-│  Server → Builder   │  nix-store export binary format (.drv + input closure)   │
-│  (drv manifest)     │  GET /derivation-manifest — JSON list of store paths     │
-│                     │    (sorted, deduplicated requisite closure of the job's   │
-│                     │     persisted drv_path).  Server-computed, not builder-   │
-│                     │    supplied.  Used as authorization baseline for delta.   │
-├─────────────────────┼───────────────────────────────────────────────────────────┤
-│  Server → Builder   │  nix-store export binary format (full OR delta subset)   │
-│  (drv archive)      │  PREFERRED: POST /derivation-archive with JSON           │
-│                     │    { "paths": [missing...] } — server validates each     │
-│                     │    requested path against the authorized manifest;        │
-│                     │    403 if any path is NOT in the manifest.  Streams       │
-│                     │    nix-store --export for exactly the validated subset.   │
-│                     │  FALLBACK: GET /derivation-archive — streams full         │
-│                     │    recursive closure (for servers that do not support     │
-│                     │    the delta protocol).  Both paths are streamed per      │
-│                     │  argv chunk; no full-closure server buffer.               │
-├─────────────────────┼───────────────────────────────────────────────────────────┤
-│  Server → Git       │  SSH private key (from DB, used by server only)          │
-│  (mirror clone)     │  Applied via GIT_SSH_COMMAND env var to git process      │
-│                     │  Never leaves server; never sent to builder               │
-├─────────────────────┼───────────────────────────────────────────────────────────┤
-│  Server → Cache     │  nix copy --to <attic/S3 endpoint>                       │
-│  (push)             │  Attic token / AWS credentials (server-held)             │
-│                     │  Called when builder reports publish-derivation-closure   │
-│                     │  OR during server-side cache push worker                  │
-├─────────────────────┼───────────────────────────────────────────────────────────┤
-│  Builder → Cache    │  Standard Nix substituter pulls (narinfo / .nar)         │
-│  (substituter pull) │  Cache URL + optional auth token (configured on builder) │
-│                     │  Builder only pulls paths listed in job manifest          │
-└─────────────────────┴───────────────────────────────────────────────────────────┘
-```
+| Flow | Data / Classification |
+|---|---|
+| **Builder → Server** *(all requests)* | Ed25519 signature (public key material, not secret), Builder ID (UUID, not secret), Session ID (process-lifetime, not a credential), Timestamp, Request body (job poll: strategy list; complete: store path, cache reference) |
+| **Builder → Server** *(log streaming)* | Build log text (stdout/stderr of nix build), CPU/RAM metrics, WebSocket or HTTP POST |
+| **Server → Builder** *(next-job response)* | Job manifest: job_id, derivation name, drv_path, execution strategy, source identity (repo URL, commit hash, mirror_id), archive_url (relative path), archive_sha256, expected_drv_path. **NOTE:** No repository credentials. No DB passwords. archive_url is a CF server path, not a Git URL. |
+| **Server → Builder** *(source-archive)* | Binary tar.gz of bare Git mirror (top-level repo only). Streamed per-job; per-chunk RAM on server is bounded. Builder verifies sha256 before unpacking. |
+| **Server → Builder** *(drv manifest)* | `GET /derivation-manifest` — JSON list of store paths (sorted, deduplicated requisite closure of the job's persisted drv_path). Server-computed, not builder-supplied. Used as authorization baseline for delta. |
+| **Server → Builder** *(drv archive)* | nix-store export binary format (full OR delta subset). **PREFERRED:** `POST /derivation-archive` with JSON `{"paths": [missing...]}` — server validates each requested path against the authorized manifest; 403 if any path is NOT in the manifest. Streams nix-store --export for exactly the validated subset. **FALLBACK:** `GET /derivation-archive` — streams full recursive closure (for servers that do not support the delta protocol). Both paths are streamed per argv chunk; no full-closure server buffer. |
+| **Server → Git** *(mirror clone)* | SSH private key (from DB, used by server only). Applied via `GIT_SSH_COMMAND` env var to git process. Never leaves server; never sent to builder. |
+| **Server → Cache** *(push)* | `nix copy --to <attic/S3 endpoint>`. Attic token / AWS credentials (server-held). Called when builder reports publish-derivation-closure OR during server-side cache push worker. |
+| **Builder → Cache** *(substituter pull)* | Standard Nix substituter pulls (narinfo / .nar). Cache URL + optional auth token (configured on builder). Builder only pulls paths listed in job manifest. |
 
 ---
 
 ## 7. Filesystem Layout on the Builder Host
 
-```
-/var/lib/crystal-forge/
-├── builder-api.key              # Ed25519 private key (mode 600, owned by cf user)
-├── builder-api.pub              # Corresponding public key (registered with server)
-│
-├── flake-mirrors/               # Bare Git mirrors (LocalGitWorktree mode only)
-│   └── <mirror_id>.git/         # Shared across jobs for same repo
-│       └── (bare git repo)
-│
-├── flake-mirrors/
-│   └── server-bundled/          # Job-scoped mirrors (ServerBundledArchive mode)
-│       └── <job_id>/            # Created per job, deleted on job cleanup
-│           └── <mirror_id>.git/ # Extracted from server-provided tar.gz
-│               └── (bare git repo)
-│
-├── flake-worktrees/             # Per-job git worktrees (both modes)
-│   └── <mirror_id>/
-│       └── <commit_hash>/
-│           └── <job_id>/        # Detached worktree, deleted on job cleanup
-│               └── (nix flake source tree)
-│
-└── source-archives/             # Temp location during ServerBundledArchive download
-    └── source-archive-<job_id>.tar.gz.tmp   # Written then extracted, deleted
+```mermaid
+graph LR
+    ROOT["/var/lib/crystal-forge/"]
+    
+    ROOT --> KEY["builder-api.key"]
+    KEY_NOTE["Ed25519 private key (mode 600, owned by cf user)"]
+    
+    ROOT --> PUB["builder-api.pub"]
+    PUB_NOTE["Corresponding public key (registered with server)"]
+    
+    ROOT --> MIRRORS["flake-mirrors/ <br/>(LocalGitWorktree mode only)"]
+    MIRRORS --> MID["&lt;mirror_id&gt;.git/ <br/>Shared across jobs for same repo"]
+    MID --> BARE1["(bare git repo)"]
+    
+    ROOT --> BUNDLED["flake-mirrors/server-bundled/ <br/>(ServerBundledArchive mode)"]
+    BUNDLED --> JID["&lt;job_id&gt;/ <br/>Created per job, deleted on job cleanup"]
+    JID --> MID2["&lt;mirror_id&gt;.git/ <br/>Extracted from server-provided tar.gz"]
+    MID2 --> BARE2["(bare git repo)"]
+    
+    ROOT --> WT["flake-worktrees/ <br/>Per-job git worktrees (both modes)"]
+    WT --> MID3["&lt;mirror_id&gt;/"]
+    MID3 --> CHASH["&lt;commit_hash&gt;/"]
+    CHASH --> JID2["&lt;job_id&gt;/ <br/>Detached worktree, deleted on job cleanup"]
+    JID2 --> SRC["(nix flake source tree)"]
+    
+    ROOT --> ARCHIVES["source-archives/ <br/>Temp location during ServerBundledArchive download"]
+    ARCHIVES --> TMP["source-archive-&lt;job_id&gt;.tar.gz.tmp <br/>Written then extracted, deleted"]
+
+    style ROOT fill:#f0f0f0,stroke:#333
+    style KEY fill:#e8e8ff,stroke:#333
+    style PUB fill:#e8e8ff,stroke:#333
 ```
 
 **Cleanup guarantees:**
@@ -730,50 +577,33 @@ supported_execution_strategies = ["server_derivation"]
 
 ## 12. Key Management Lifecycle
 
-```
-                     BUILDER KEY LIFECYCLE
-                     
-Admin                    CF Server                Builder Host
-─────                    ─────────                ────────────
-│                            │                         │
-│  1. POST /api/v1/builders  │                         │
-│  (create builder record)   │                         │
-│ ──────────────────────────>│                         │
-│  201 + {builder_id}        │                         │
-│<───────────────────────────│                         │
-│                            │                         │
-│  (out of band: provision   │                         │
-│   builder host)            │                         │
-│                            │                         │
-│                            │  2. cf-keygen runs on first start
-│                            │     generates Ed25519 keypair
-│                            │ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─>│
-│                            │                         │  /var/lib/crystal-forge/
-│                            │                         │  builder-api.key (mode 600)
-│                            │                         │  builder-api.pub
-│                            │                         │
-│                            │  3. Builder reports pub key at stdout
-│                            │ <─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│
-│                            │                         │
-│  4. Admin copies pub key   │                         │
-│  PUT /api/v1/builders/:id/ │                         │
-│     public-key             │                         │
-│ ──────────────────────────>│                         │
-│                            │                         │
-│                            │  5. POST /resolve-id    │
-│                            │<────────────────────────│ (bootstrap: derive UUID)
-│                            │  POST /session          │
-│                            │<────────────────────────│
-│                            │  {builder_session_id}   │
-│                            │─────────────────────────>│
-│                            │                         │
-│                            │    [normal operation]   │
+```mermaid
+sequenceDiagram
+    participant Admin
+    participant S as CF Server
+    participant B as Builder Host
 
-KEY ROTATION:
-  PUT /api/v1/builders/:id/public-key with new public key
-  Old sessions automatically invalidated on next heartbeat verification
-  Builder private key replaced on host (service restart required)
+    Admin->>S: 1. POST /api/v1/builders<br/>(create builder record)
+    S-->>Admin: 201 + {builder_id}
+
+    Note over Admin,S: (out of band: provision builder host)
+
+    S-->>B: 2. cf-keygen runs on first start<br/>generates Ed25519 keypair
+    S-->>B: (dashed: out-of-band)
+    Note right of B: /var/lib/crystal-forge/<br/>builder-api.key (mode 600)<br/>builder-api.pub
+
+    B-->>S: 3. Builder reports pub key at stdout<br/>(dashed: out-of-band)
+
+    Admin->>S: 4. PUT /api/v1/builders/:id/public-key
+
+    B->>S: 5. POST /resolve-id<br/>(bootstrap: derive UUID)
+    B->>S: POST /session
+    S-->>B: {builder_session_id}
+
+    Note over Admin,B: [normal operation]
 ```
+
+**Key rotation:** `PUT /api/v1/builders/:id/public-key` with new public key. Old sessions automatically invalidated on next heartbeat verification. Builder private key replaced on host (service restart required).
 
 ---
 
