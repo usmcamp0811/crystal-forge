@@ -25,18 +25,15 @@ This is the most reliable path because:
 - The builder never needs Git credentials or direct Git remote access.
 - `.drv` materialization is zero-delay: the builder evaluates from local source, so it produces the `.drv` itself rather than waiting for the server to push it somewhere.
 
-**`server_derivation` works but has a slower startup path.** When the `.drv` is not already in the builder's Nix store, the builder must import the full `.drv` closure archive streamed from the server before the build can start. This is reliable (fixed in this release to stream directly, no Attic dependency), but it transfers more data upfront than the source-evaluation path for NixOS systems. Use `server_derivation` when:
-- You trust the server's evaluation completely and do not need the builder-side re-evaluation cross-check.
-- The builder cannot run `nix eval` (unusual constraint).
-- You prefer simplicity over the verified-source guarantee.
+**`server_derivation`** is appropriate when you trust the server's evaluation completely and do not need the builder-side re-evaluation check, or when the builder cannot run `nix eval`. When the `.drv` is not already in the builder's Nix store, the builder streams the `.drv` closure directly from the CF server (no Attic dependency); the server pushes to cache in the background. Build inputs are pulled from configured Nix substituters.
 
 **Summary table:**
 
-| Strategy | Builder needs Git? | Builder needs Attic? | Build-plan integrity check | Best for |
+| Strategy | Builder needs Git? | Builder needs Attic before build? | Build-plan integrity check | Best for |
 |---|---|---|---|---|
-| `source_re_evaluate_verified` + `server_bundled_archive` | No | No (uses own nix eval) | ✅ `derivation_mismatch` | Recommended default |
+| `source_re_evaluate_verified` + `server_bundled_archive` | No | No | ✅ `derivation_mismatch` | Recommended default |
 | `source_re_evaluate_verified` + `local_git_worktree` | Yes | No | ✅ `derivation_mismatch` | Colocated / internal |
-| `server_derivation` | No | No (streams from CF) | ❌ Server-trusted only | Simple / legacy |
+| `server_derivation` | No | No | ❌ Server-trusted only | Simplest path |
 
 ---
 

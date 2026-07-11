@@ -1737,19 +1737,10 @@ async fn ensure_derivation_available(
         return Ok(());
     }
 
-    // Primary path: stream the .drv closure archive directly from the server into
-    // nix-store --import.  This is reliable and non-blocking on the server side
-    // because the server exports nix-store chunks via piped stdout.
-    //
-    // Background: the previous approach called publish_derivation_closure first,
-    // which made the server run `attic push` of the full .drv closure (potentially
-    // thousands of paths) synchronously before returning.  This caused jobs to
-    // stall for minutes waiting on Attic before the build could start, and if
-    // Attic was unavailable the builder would only discover the problem at
-    // nix-store --realise time with a confusing error.
-    //
-    // The streaming archive path is the unconditionally reliable happy path for
-    // server_derivation.  It requires no Attic configuration on the builder.
+    // Stream the .drv closure archive from the server directly into nix-store --import.
+    // The server exports chunks via piped stdout so neither side buffers the full
+    // closure in memory.  No Attic or binary cache configuration is required on
+    // the builder for this step.
     info!(
         "📥 Derivation {} missing locally; streaming .drv closure archive from server",
         drv_path

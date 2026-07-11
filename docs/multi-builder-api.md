@@ -40,9 +40,7 @@ This is the most reliable and fastest startup path because:
 
 `server_derivation` is simpler and appropriate when you trust the server's evaluation completely and do not need the builder-side re-evaluation check. It is also the only option if the builder cannot run `nix eval` for some reason.
 
-**Materialization path (updated):** When the `.drv` is not already in the builder's local Nix store, the builder streams the `.drv` closure archive directly from the CF server into `nix-store --import` — no Attic or binary cache required. In the background, the server pushes the closure to the configured cache so future builds (or other builders) can pull via normal Nix substituters.
-
-**Previous bug (fixed):** Earlier versions called `publish_derivation_closure` synchronously before returning to the builder, which ran `attic push` of the full `.drv` closure (potentially thousands of paths) before the builder could start. This caused builders to stall for minutes on large NixOS closures. The fix: stream the archive first (no Attic dependency), kick off the cache push in the background.
+**Materialization:** When the `.drv` is not already in the builder's local Nix store, the builder streams the `.drv` closure archive directly from the CF server into `nix-store --import` — no Attic or binary cache required. In the background, the server pushes the closure to the configured cache so future builds can pull via normal Nix substituters.
 
 **Source delivery modes for `source_re_evaluate_verified`** are configured server-side via `source_delivery_mode`:
 
@@ -59,9 +57,7 @@ Job-scoped mirror layout for `server_bundled_archive`:
 
 ### `server_derivation`
 
-`server_derivation` keeps evaluation fully server-authoritative. The server evaluates the flake, records the authoritative `.drv` path, and sends that derivation identity to the API-only builder. The builder materializes the `.drv` (see above), runs `nix-store --realise`, and reports logs, progress, and completion. Builders do not access Postgres directly.
-
-Materialization failures are reported as `path_materialization` phase failures and do not leave jobs stuck in `building`. Build input closure (nixpkgs, dependencies) is pulled from configured Nix substituters during `nix-store --realise`.
+The server evaluates the flake, records the authoritative `.drv` path, and sends that derivation identity to the builder. The builder streams the `.drv` closure from the server, imports it locally, then runs `nix-store --realise`. Build inputs (nixpkgs, dependencies) are pulled from configured Nix substituters. Materialization failures are reported as `path_materialization` failures. Builders do not access Postgres directly.
 
 ### `source_re_evaluate_verified`
 
