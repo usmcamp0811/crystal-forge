@@ -1,7 +1,7 @@
 ---
 id: TASK-390
 title: 'Remote builders: complete end-to-end fix (source delivery + drv transport + materialization)'
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-07-10 00:00'
 updated_date: '2026-07-10 00:00'
@@ -59,7 +59,7 @@ attempt failure phase so jobs terminate cleanly instead of staying stuck.
 ## Implementation Notes
 
 LOCK: opencode on dev in ~/code/crystal-forge/TASK-390-remote-builders-complete
-MR: pending
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/297
 
 ## Notes
 
