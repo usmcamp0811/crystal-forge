@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use gloo_timers::future::TimeoutFuture;
 
-use crate::alerts::acknowledge;
+use crate::alerts::{acknowledge, should_flash};
 
 use crate::api::{
     client::{
@@ -60,6 +60,7 @@ fn EvaluationsPage() -> Element {
     let mut history_page = use_signal(|| 1_i64);
     let mut history_status_filter = use_signal(|| String::from("all"));
     let mut history_flake_filter = use_signal(|| String::from("all"));
+    let mut history_auto_selected = use_signal(|| false);
 
     let history_resource = use_resource(move || async move {
         let _ = refresh();
@@ -113,6 +114,21 @@ fn EvaluationsPage() -> Element {
         }
     });
 
+    // Auto-select all history items on first successful data load.
+    use_effect(move || {
+        let already = *history_auto_selected.read();
+        if !already {
+            if let Some(Ok(page_data)) = &*history_resource.read() {
+                let ids: std::collections::HashSet<i32> =
+                    page_data.items.iter().map(|item| item.commit_id).collect();
+                if !ids.is_empty() {
+                    history_selected_ids.set(ids);
+                    history_auto_selected.set(true);
+                }
+            }
+        }
+    });
+
     let active_items = queue_items
         .read()
         .iter()
@@ -160,6 +176,19 @@ fn EvaluationsPage() -> Element {
     } else {
         "Compare selected evaluations"
     };
+
+    // Attention flash for history rows: flash on first page load when there are failed items.
+    let has_failed_history = history_resource
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|page| {
+            page.items
+                .iter()
+                .any(|item| item.evaluation_status == "failed")
+        })
+        .unwrap_or(false);
+    let flash_evals = should_flash("evals", has_failed_history);
 
     rsx! {
             div {
@@ -458,6 +487,7 @@ fn EvaluationsPage() -> Element {
                             history_selected_ids: history_selected_ids,
                             drawer_target: drawer_target,
                             focused_index: focused_index,
+                            flash_evals: flash_evals,
                         }
                     }
                 }
@@ -806,6 +836,7 @@ fn EvalHistory(
     mut history_selected_ids: Signal<std::collections::HashSet<i32>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
     focused_index: Signal<Option<usize>>,
+    flash_evals: bool,
 ) -> Element {
     let history_snapshot = history_resource.read();
 
@@ -923,10 +954,18 @@ fn EvalHistory(
                                     let ev_for_row = ev.clone();
                                     let is_focused = focused_index() == Some(row_i);
 
+                                    let is_failed = ev.evaluation_status == "failed";
+                                    let row_class = match (is_focused, is_failed && flash_evals) {
+                                        (true, true) => "kbd-focused attention-flash",
+                                        (true, false) => "kbd-focused",
+                                        (false, true) => "attention-flash",
+                                        (false, false) => "",
+                                    };
+
                                     rsx! {
                                         tr {
                                             key: "{commit_id}",
-                                            class: if is_focused { "kbd-focused" } else { "" },
+                                            class: "{row_class}",
                                             style: "cursor: pointer;",
                                             onclick: move |_| drawer_target.set(Some(EvalDrawerTarget::History(ev_for_row.clone()))),
                                             td {

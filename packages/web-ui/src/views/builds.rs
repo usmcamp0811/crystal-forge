@@ -3,7 +3,7 @@
 use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
-use crate::alerts::acknowledge;
+use crate::alerts::{acknowledge, should_flash};
 
 use crate::api::{
     self,
@@ -445,6 +445,7 @@ pub fn BuildsView() -> Element {
         .iter()
         .filter(|item| item.status == BuildStatus::Failed)
         .count();
+    let flash_builds = should_flash("builds", completed_failed_count > 0);
     completed_rows.sort_by(|left, right| {
         let left_key = left.completed_at.unwrap_or_else(Utc::now);
         let right_key = right.completed_at.unwrap_or_else(Utc::now);

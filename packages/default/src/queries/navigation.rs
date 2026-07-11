@@ -55,25 +55,23 @@ pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> 
     .fetch_one(pool)
     .await?;
 
-    // ── Builds: failed derivations in the last 24h ────────────────────────────
+    // ── Builds: failed build jobs (matches /build-jobs/recent semantics) ─────
     let builds_failed_24h: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*)::bigint
-        FROM derivations
+        FROM build_jobs
         WHERE status = 'failed'
-          AND updated_at >= now() - interval '24 hours'
         "#,
     )
     .fetch_one(pool)
     .await?;
 
-    // ── Evals: failed commit evaluations in the last 24h ─────────────────────
+    // ── Evals: failed commit evaluations (matches list_eval_history semantics) ─
     let evals_failed_24h: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*)::bigint
         FROM commits
         WHERE evaluation_status = 'failed'
-          AND updated_at >= now() - interval '24 hours'
         "#,
     )
     .fetch_one(pool)

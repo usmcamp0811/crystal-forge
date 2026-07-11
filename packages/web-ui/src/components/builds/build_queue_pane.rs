@@ -32,6 +32,9 @@ fn queue_drag_reorder_actions(
 #[component]
 pub fn BuildQueuePane(
     builds: Vec<BuildItem>,
+    /// When true, failed rows receive the attention-flash CSS class (one-shot).
+    #[props(default)]
+    flash_failed: bool,
     selected_id: Signal<Option<i32>>,
     flash_failed: bool,
     can_requeue: bool,
