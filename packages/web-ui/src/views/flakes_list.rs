@@ -18,7 +18,9 @@ use wasm_bindgen::prelude::Closure;
 use web_sys::console;
 use web_sys::{Node, window};
 
-use crate::alerts::{acknowledge, should_flash};
+use crate::alerts::{
+    acknowledge, attention_row_class, dismiss_attention_item, set_attention_count, should_flash,
+};
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
     delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_environments,
@@ -3001,6 +3003,9 @@ pub fn FlakesListViewNew() -> Element {
     use_effect(move || {
         acknowledge("flakes");
     });
+    use_effect(move || {
+        set_attention_count("flakes", error_count as i64);
+    });
 
     let selected_flake_value = selected_flake.read().clone();
     let selected_flake_for_timeline = selected_flake.clone();
@@ -4357,14 +4362,14 @@ fn FlakeTableNew(
                         {
                             let is_selected = selected_id == Some(flake.id);
                             let is_error = flake.status == "error";
-                            let row_class = match (is_selected, is_error, is_error && flash_errors) {
-                                (true, true, true) => "selected attention-row attention-flash",
-                                (true, true, false) => "selected attention-row",
-                                (true, false, _) => "selected",
-                                (false, true, true) => "attention-row attention-flash",
-                                (false, true, false) => "attention-row",
-                                (false, false, _) => "",
-                            };
+                            let flake_key = flake.id.to_string();
+                            let row_class = attention_row_class(
+                                if is_selected { "selected" } else { "" },
+                                "flakes",
+                                &flake_key,
+                                is_error,
+                                is_error && flash_errors,
+                            );
                             let flake_for_select = flake.clone();
                             let flake_id_for_sync = flake.id;
                             let flake_id_for_edit = flake.id;
@@ -4374,7 +4379,12 @@ fn FlakeTableNew(
                                     key: "{flake.id}",
                                     class: "{row_class}",
                                     style: "cursor: pointer;",
-                                    onclick: move |_| on_select.call(flake_for_select.clone()),
+                                    onclick: move |_| {
+                                        if is_error {
+                                            dismiss_attention_item("flakes", &flake_key);
+                                        }
+                                        on_select.call(flake_for_select.clone());
+                                    },
 
                                     // Flake name and description
                                     td {
@@ -4547,11 +4557,14 @@ fn FlakeCardsNew(
                     } else {
                         ""
                     };
-                    let card_class = match (is_error, is_error && flash_errors) {
-                        (true, true) => "sys-card compact attention-row attention-flash",
-                        (true, false) => "sys-card compact attention-row",
-                        (false, _) => "sys-card compact",
-                    };
+                    let flake_key = flake.id.to_string();
+                    let card_class = attention_row_class(
+                        "sys-card compact",
+                        "flakes",
+                        &flake_key,
+                        is_error,
+                        is_error && flash_errors,
+                    );
 
                     rsx! {
                         div {
@@ -4559,6 +4572,9 @@ fn FlakeCardsNew(
                             class: "{card_class}",
                             style: "{border_style}",
                             onclick: move |_| {
+                                if is_error {
+                                    dismiss_attention_item("flakes", &flake_key);
+                                }
                                 on_select.call(flake_for_select.clone());
                             },
 

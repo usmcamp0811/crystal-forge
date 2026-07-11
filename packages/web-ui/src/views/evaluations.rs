@@ -4,7 +4,9 @@ use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use gloo_timers::future::TimeoutFuture;
 
-use crate::alerts::{acknowledge, should_flash};
+use crate::alerts::{
+    acknowledge, attention_row_class, dismiss_attention_item, set_attention_count, should_flash,
+};
 
 use crate::api::{
     client::{
@@ -178,17 +180,23 @@ fn EvaluationsPage() -> Element {
     };
 
     // Attention flash for history rows: flash on first page load when there are failed items.
-    let has_failed_history = history_resource
+    let history_failed_count = history_resource
         .read()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .map(|page| {
             page.items
                 .iter()
-                .any(|item| item.evaluation_status == "failed")
+                .filter(|item| item.evaluation_status == "failed")
+                .count() as i64
         })
-        .unwrap_or(false);
+        .unwrap_or(0);
+    let has_failed_history = history_failed_count > 0;
     let flash_evals = should_flash("evals", has_failed_history);
+    let evals_attention_count = failed_count.max(history_failed_count);
+    use_effect(move || {
+        set_attention_count("evals", evals_attention_count);
+    });
 
     rsx! {
             div {
@@ -848,7 +856,7 @@ fn EvalHistory(
 
                 div {
                     class: "seg",
-                    for (label, value) in [("all", ""), ("complete", "complete"), ("failed", "failed"), ("cancelled", "cancelled")] {
+                    for (label, value) in [("all", "all"), ("complete", "complete"), ("failed", "failed"), ("cancelled", "cancelled")] {
                         {
                             let value_str = value.to_string();
                             let is_active = history_status_filter() == value;
@@ -955,19 +963,26 @@ fn EvalHistory(
                                     let is_focused = focused_index() == Some(row_i);
 
                                     let is_failed = ev.evaluation_status == "failed";
-                                    let row_class = match (is_focused, is_failed && flash_evals) {
-                                        (true, true) => "kbd-focused attention-flash",
-                                        (true, false) => "kbd-focused",
-                                        (false, true) => "attention-flash",
-                                        (false, false) => "",
-                                    };
+                                    let eval_key = commit_id.to_string();
+                                    let row_class = attention_row_class(
+                                        if is_focused { "kbd-focused" } else { "" },
+                                        "evals",
+                                        &eval_key,
+                                        is_failed,
+                                        is_failed && flash_evals,
+                                    );
 
                                     rsx! {
                                         tr {
                                             key: "{commit_id}",
                                             class: "{row_class}",
                                             style: "cursor: pointer;",
-                                            onclick: move |_| drawer_target.set(Some(EvalDrawerTarget::History(ev_for_row.clone()))),
+                                            onclick: move |_| {
+                                                if is_failed {
+                                                    dismiss_attention_item("evals", &eval_key);
+                                                }
+                                                drawer_target.set(Some(EvalDrawerTarget::History(ev_for_row.clone())));
+                                            },
                                             td {
                                                 onclick: move |evt| {
                                                     evt.stop_propagation();

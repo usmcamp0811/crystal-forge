@@ -5,6 +5,8 @@
 
 use dioxus::prelude::*;
 
+use crate::alerts::{attention_row_class, dismiss_attention_item};
+
 use super::helpers::{BuildAction, BuildItem, BuildStatus, extract_system_name, short_commit};
 
 fn queue_drag_reorder_actions(
@@ -107,9 +109,15 @@ pub fn BuildQueuePane(
                             if is_selected { row_class.push_str(" selected"); }
                             if is_checked  { row_class.push_str(" row-checked"); }
                             if can_cancel  { row_class.push_str(" selectable"); }
-                            if flash_failed && matches!(build.status, BuildStatus::Failed) {
-                                row_class.push_str(" attention-flash");
-                            }
+                            let is_failed = build.status == BuildStatus::Failed;
+                            let build_key = build.id.to_string();
+                            let mut row_class = attention_row_class(
+                                &row_class,
+                                "builds",
+                                &build_key,
+                                is_failed,
+                                is_failed && flash_failed,
+                            );
                             let dragged_queue_pos = dragged_id
                                 .read()
                                 .and_then(|id| queued_ids.iter().position(|queued_id| *queued_id == id));
@@ -195,6 +203,9 @@ pub fn BuildQueuePane(
                                             && !evt.modifiers().shift()
                                         {
                                             selected_ids.set(Vec::new());
+                                        }
+                                        if is_failed {
+                                            dismiss_attention_item("builds", &build_key);
                                         }
                                         selected_id.set(Some(build.id));
                                     },
