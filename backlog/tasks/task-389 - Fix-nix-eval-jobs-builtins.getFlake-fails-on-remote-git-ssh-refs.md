@@ -29,8 +29,10 @@ local paths. Remote git refs are only accepted in **impure** mode.
 The same pattern also appears in `is_cf_agent_enabled()` which calls `nix eval --expr`.
 
 **Affected locations:**
-- `packages/default/src/models/evaluate_with_policies.rs` – `nix-eval-jobs` invocation
-- `packages/default/src/derivations/eval.rs` – `is_cf_agent_enabled()` uses same pattern
+- `packages/default/src/models/evaluate_with_policies.rs` – `nix-eval-jobs` invocation; removed private `build_flake_reference`
+- `packages/default/src/derivations/eval.rs` – `is_cf_agent_enabled()` `nix eval` call
+- `packages/default/src/derivations/utils.rs` – added `normalize_flake_git_url`; updated `build_flake_reference`
+- `packages/default/src/flake/commits.rs` – removed private `build_flake_reference`, now imports shared one
 
 ## Goal
 
@@ -38,16 +40,20 @@ Evaluation succeeds for remote `git+git@github.com:...` flake refs.
 
 ## Non-Goals
 
-- Changing the expression structure or flake-ref format
-- Refactoring `build_nix_eval_expression` logic
+- Changing the expression structure or `build_nix_eval_expression` logic
+- Changing the `build_flake_uri_with_ref` function (different code path)
 - Any other evaluation changes
 
 ## Acceptance Criteria
 
 - [x] `nix-eval-jobs` invocation in `evaluate_with_policies.rs` includes `--impure`
 - [x] `nix eval` invocation in `eval.rs` `is_cf_agent_enabled()` includes `--impure`
-- [x] `cargo test` passes (21 deployment_policies tests + 8 derivations tests)
-- [x] `cargo clippy` — no new issues introduced (pre-existing baseline unchanged)
+- [x] `normalize_flake_git_url` converts scp-style `git@host:path` → `git+ssh://git@host/path`
+- [x] `build_flake_reference` normalizes all URL styles (scp, ssh://, https://, github: shorthand)
+- [x] Private `build_flake_reference` copies consolidated into shared public function
+- [x] 14 unit tests for URL normalization and flake reference building pass
+- [x] 21 deployment_policies tests pass
+- [x] No regressions in existing test suites
 
 ## Verification Plan
 
