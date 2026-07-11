@@ -5172,6 +5172,19 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
   position: relative;
   z-index: 1;
 }
+.attention-row {
+  background: color-mix(in oklab, var(--cf-red, #ef4444) 7%, transparent);
+  box-shadow: inset 3px 0 0 0 color-mix(in oklab, var(--cf-red, #ef4444) 70%, transparent);
+}
+tr.attention-row > td {
+  background: color-mix(in oklab, var(--cf-red, #ef4444) 7%, transparent);
+}
+tr.attention-row > td:first-child {
+  box-shadow: inset 3px 0 0 0 color-mix(in oklab, var(--cf-red, #ef4444) 70%, transparent);
+}
+.sys-card.attention-row {
+  border-color: color-mix(in oklab, var(--cf-red, #ef4444) 42%, var(--cf-card-border));
+}
 tr.attention-flash {
   animation-name: attention-flash-row;
 }

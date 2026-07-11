@@ -35,8 +35,7 @@ fn relative_time_short(dt: &DateTime<Utc>) -> String {
 pub fn FlakeSyncErrorBanner(
     repo_url: String,
     last_sync_error: String,
-    #[props(default)]
-    last_sync_at: Option<DateTime<Utc>>,
+    #[props(default)] last_sync_at: Option<DateTime<Utc>>,
     /// Latest known commit SHA (last good commit).
     #[props(default)]
     latest_commit: Option<String>,
@@ -48,7 +47,10 @@ pub fn FlakeSyncErrorBanner(
         .map(relative_time_short)
         .unwrap_or_default();
 
-    let error_pre = format!("$ nix flake metadata {}\nerror: {}", repo_url, last_sync_error);
+    let error_pre = format!(
+        "$ nix flake metadata {}\nerror: {}",
+        repo_url, last_sync_error
+    );
 
     rsx! {
         div {
@@ -58,10 +60,13 @@ pub fn FlakeSyncErrorBanner(
             div {
                 class: "fl-sync-error-head",
                 svg {
-                    class: "w-3.5 h-3.5",
+                    width: "14",
+                    height: "14",
                     fill: "none",
                     stroke: "currentColor",
                     stroke_width: "2",
+                    stroke_linecap: "round",
+                    stroke_linejoin: "round",
                     view_box: "0 0 24 24",
                     path { d: "M12 3l10 18H2L12 3z" }
                     path { d: "M12 10v5M12 18h.01" }
@@ -73,10 +78,13 @@ pub fn FlakeSyncErrorBanner(
                     class: "btn btn-ghost focus-ring xs",
                     onclick: move |_| on_retry.call(()),
                     svg {
-                        class: "w-3 h-3",
+                        width: "11",
+                        height: "11",
                         fill: "none",
                         stroke: "currentColor",
                         stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
                         view_box: "0 0 24 24",
                         path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
                     }

@@ -18,6 +18,7 @@ use wasm_bindgen::prelude::Closure;
 use web_sys::console;
 use web_sys::{Node, window};
 
+use crate::alerts::{acknowledge, should_flash};
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
     delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_environments,
@@ -31,7 +32,6 @@ use crate::api::models::{
     EnvironmentSummary, FlakeCommitSystemPath, FlakeRegistryItem, FlakeTimeline, SystemsListParams,
     TestFlakeCredentialRequest, UpdateFlakeRequest,
 };
-use crate::alerts::{acknowledge, should_flash};
 use crate::components::flake::FlakeSyncErrorBanner;
 use crate::components::layout::Card;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
@@ -3369,7 +3369,7 @@ pub fn FlakesListViewNew() -> Element {
                         } } }
                     } else {
                         let all_flakes_for_edit = all_flakes.clone();
-                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), flash_errors: flash_flakes, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
                                 let result = request_sync_flake(flake_id).await;
@@ -4357,11 +4357,13 @@ fn FlakeTableNew(
                         {
                             let is_selected = selected_id == Some(flake.id);
                             let is_error = flake.status == "error";
-                            let row_class = match (is_selected, is_error && flash_errors) {
-                                (true, true)   => "selected attention-flash",
-                                (true, false)  => "selected",
-                                (false, true)  => "attention-flash",
-                                (false, false) => "",
+                            let row_class = match (is_selected, is_error, is_error && flash_errors) {
+                                (true, true, true) => "selected attention-row attention-flash",
+                                (true, true, false) => "selected attention-row",
+                                (true, false, _) => "selected",
+                                (false, true, true) => "attention-row attention-flash",
+                                (false, true, false) => "attention-row",
+                                (false, false, _) => "",
                             };
                             let flake_for_select = flake.clone();
                             let flake_id_for_sync = flake.id;
@@ -4516,6 +4518,9 @@ fn FlakeCardsNew(
     selected_id: Option<i32>,
     is_admin: bool,
     #[props(default)] env_colors: Vec<EnvironmentSummary>,
+    /// When true, error cards receive the attention-flash CSS class (one-shot on first visit).
+    #[props(default)]
+    flash_errors: bool,
     on_select: EventHandler<MockFlakeItem>,
     on_sync: EventHandler<i32>,
     on_edit: EventHandler<i32>,
@@ -4526,6 +4531,7 @@ fn FlakeCardsNew(
             for flake in flakes {
                 {
                     let is_selected = selected_id == Some(flake.id);
+                    let is_error = flake.status == "error";
                     let flake_for_select = flake.clone();
                     let flake_id_for_sync = flake.id;
                     let flake_id_for_edit = flake.id;
@@ -4541,11 +4547,16 @@ fn FlakeCardsNew(
                     } else {
                         ""
                     };
+                    let card_class = match (is_error, is_error && flash_errors) {
+                        (true, true) => "sys-card compact attention-row attention-flash",
+                        (true, false) => "sys-card compact attention-row",
+                        (false, _) => "sys-card compact",
+                    };
 
                     rsx! {
                         div {
                             key: "{flake.id}",
-                            class: "sys-card compact",
+                            class: "{card_class}",
                             style: "{border_style}",
                             onclick: move |_| {
                                 on_select.call(flake_for_select.clone());
