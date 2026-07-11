@@ -723,12 +723,21 @@ impl BuilderApiClient {
         Ok(())
     }
 
-    /// Download the source archive (tar.gz of the bare mirror) for a job using
-    /// ServerBundledArchive delivery.
+    /// Stream the source archive (tar.gz of the bare mirror) for a job using
+    /// ServerBundledArchive delivery directly to a temp file, verifying the
+    /// SHA-256 incrementally without buffering the whole archive in RAM.
     ///
-    /// Returns the raw archive bytes. The caller is responsible for extracting
-    /// the archive to the appropriate mirror path and verifying its SHA-256.
-    pub async fn download_source_archive(&self, job_id: uuid::Uuid) -> Result<bytes::Bytes> {
+    /// Returns the path of the downloaded temp file. Callers are responsible
+    /// for extracting it and removing it afterwards.
+    pub async fn stream_source_archive_to_tempfile(
+        &self,
+        job_id: uuid::Uuid,
+        expected_sha256: Option<&str>,
+        dest_dir: &std::path::Path,
+    ) -> Result<std::path::PathBuf> {
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncWriteExt;
+
         let path = format!(
             "/api/v1/builders/{}/jobs/{}/source-archive",
             self.builder_id, job_id
@@ -762,10 +771,41 @@ impl BuilderApiClient {
             );
         }
 
-        response
-            .bytes()
+        // Stream to a temp file, computing SHA-256 on the fly.
+        tokio::fs::create_dir_all(dest_dir)
             .await
-            .context("Failed to read source archive response")
+            .context("Failed to create source archive temp directory")?;
+        let tmp_path = dest_dir.join(format!("source-archive-{job_id}.tar.gz.tmp"));
+        let mut file = tokio::fs::File::create(&tmp_path)
+            .await
+            .context("Failed to create source archive temp file")?;
+
+        let mut hasher = Sha256::new();
+        let mut byte_stream = response.bytes_stream();
+        use futures::StreamExt;
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk = chunk.context("Error reading source archive chunk from server")?;
+            hasher.update(&chunk);
+            file.write_all(&chunk)
+                .await
+                .context("Failed to write source archive chunk to temp file")?;
+        }
+        file.flush().await.context("Failed to flush source archive temp file")?;
+        drop(file);
+
+        // Verify SHA-256 if the server provided one.
+        if let Some(expected) = expected_sha256 {
+            let actual = format!("{:x}", hasher.finalize());
+            if actual != expected {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                anyhow::bail!(
+                    "source archive SHA-256 mismatch: expected {expected}, got {actual}"
+                );
+            }
+            info!("✅ Source archive SHA-256 verified: {}", actual);
+        }
+
+        Ok(tmp_path)
     }
 
     /// Ask the server to publish the job's derivation closure to the configured

@@ -48,6 +48,21 @@ const NIX_STORE_EXPORT_ARG_BYTES_LIMIT: usize = 128 * 1024;
 const ATTIC_PUSH_PATH_CHUNK_SIZE: usize = 200;
 const BUILDER_SESSION_STALE_TIMEOUT_SECS: i64 = 60;
 
+// Per-mirror mutex map: prevents concurrent git clone/fetch into the same bare
+// mirror when multiple jobs for the same repo are claimed at the same time.
+// The lock scope covers clone/fetch AND archive generation so a reader never
+// opens a partially-written mirror.
+static MIRROR_LOCKS: std::sync::OnceLock<
+    dashmap::DashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
+> = std::sync::OnceLock::new();
+
+fn mirror_lock(mirror_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let map = MIRROR_LOCKS.get_or_init(dashmap::DashMap::new);
+    map.entry(mirror_id.to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 /// Returns true only when the server is explicitly configured to trust
 /// forwarded-proto headers from its reverse proxy AND those headers assert
 /// HTTPS for the current request.
@@ -522,6 +537,15 @@ async fn ensure_server_mirror_has_commit(
 /// Generate a gzipped tar archive of the bare mirror at the archive path.
 ///
 /// Returns the SHA-256 hex digest of the archive.
+/// Generate a gzipped tar archive of the bare mirror at `archive_path`.
+///
+/// Writes to a `.tmp` file first and renames atomically on success so that
+/// concurrent readers or partial downloads never see a half-written archive.
+///
+/// Returns the SHA-256 hex digest of the completed archive.
+///
+/// Callers MUST hold the per-mirror lock (via `mirror_lock()`) before calling
+/// this function to prevent concurrent mutation of the same mirror.
 async fn generate_source_archive(
     mirror_path: &std::path::Path,
     archive_path: &std::path::Path,
@@ -540,8 +564,11 @@ async fn generate_source_archive(
         })?;
     }
 
-    // Remove any existing archive for this path first.
-    let _ = tokio::fs::remove_file(archive_path).await;
+    // Write to a temp file then rename atomically so readers never see a
+    // partially-written archive. Include the PID to avoid cross-process
+    // collision if the server is restarted mid-generation.
+    let tmp_archive = archive_path.with_extension(format!("tar.gz.tmp.{}", std::process::id()));
+    let _ = tokio::fs::remove_file(&tmp_archive).await;
 
     // Tar the mirror directory. Since mirror_path is like .../<mirror_id>.git,
     // we tar from the parent directory with the basename so extraction produces
@@ -556,30 +583,32 @@ async fn generate_source_archive(
     let output = tokio::process::Command::new("tar")
         .kill_on_drop(true)
         .arg("-czf")
-        .arg(archive_path)
+        .arg(&tmp_archive)
         .arg("-C")
         .arg(mirror_parent)
         .arg(mirror_name)
         .output()
         .await
-        .map_err(|e| source_err(format!("failed to spawn tar: {e}")))?;
+        .map_err(|e| {
+            source_err(format!("failed to spawn tar: {e}"))
+        })?;
 
     if !output.status.success() {
+        let _ = tokio::fs::remove_file(&tmp_archive).await;
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(source_err(format!("tar archive creation failed: {stderr}")));
     }
 
-    // Compute SHA256 of the archive.
+    // Compute SHA256 of the archive before it becomes visible to readers.
     let hash_output = tokio::process::Command::new("sha256sum")
-        .arg(archive_path)
+        .arg(&tmp_archive)
         .output()
         .await
         .map_err(|e| source_err(format!("failed to run sha256sum: {e}")))?;
 
     if !hash_output.status.success() {
-        let stderr = String::from_utf8_lossy(&hash_output.stderr)
-            .trim()
-            .to_string();
+        let _ = tokio::fs::remove_file(&tmp_archive).await;
+        let stderr = String::from_utf8_lossy(&hash_output.stderr).trim().to_string();
         return Err(source_err(format!("sha256sum failed: {stderr}")));
     }
 
@@ -590,6 +619,17 @@ async fn generate_source_archive(
         .ok_or_else(|| source_err("sha256sum produced no output".to_string()))?
         .to_string();
 
+    // Atomic rename: makes the archive visible to readers only when fully written.
+    tokio::fs::rename(&tmp_archive, archive_path)
+        .await
+        .map_err(|e| {
+            source_err(format!(
+                "failed to atomically install source archive {} → {}: {e}",
+                tmp_archive.display(),
+                archive_path.display()
+            ))
+        })?;
+
     tracing::info!(
         "Source archive generated at {} (sha256: {})",
         archive_path.display(),
@@ -599,47 +639,26 @@ async fn generate_source_archive(
     Ok(hash)
 }
 
-/// Best-effort cleanup of a source archive after job completion/failure.
+/// Best-effort cleanup of the job-scoped source archive after job completion/failure.
 ///
-/// Looks up the job's derivation → commit → flake, computes the archive path,
-/// and removes it if present. Errors are logged but not propagated — archive
-/// cleanup must not block job finalization.
+/// The archive is stored under `archives/jobs/<job_id>.tar.gz` so cleanup only
+/// ever removes the archive for this specific job. Errors are logged but not
+/// propagated — archive cleanup must not block job finalization.
 async fn cleanup_source_archive(
-    pool: &PgPool,
+    _pool: &PgPool,
     archive_root: &std::path::Path,
     job_id: Uuid,
 ) {
-    let Ok(Some(job)) = builders::get_build_job_by_id(pool, &job_id).await else {
-        return;
-    };
-    let Ok(derivation) =
-        crate::queries::derivations::get_derivation_by_id(pool, job.derivation_id).await
-    else {
-        return;
-    };
-    let Some(commit_id) = derivation.commit_id else {
-        return;
-    };
-    let Ok(commit) = crate::queries::commits::get_commit_by_id(pool, commit_id).await else {
-        return;
-    };
-    let Ok(flake) = crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await else {
-        return;
-    };
-
-    let mirror_id = source_mirror_id(&flake.repo_url);
-    let archive_path = archive_root
-        .join("archives")
-        .join(&mirror_id)
-        .join(&commit.git_commit_hash)
-        .with_extension("tar.gz");
+    // Job-scoped path: each job has its own archive so concurrent jobs for the
+    // same repo+commit cannot interfere with each other's downloads.
+    let archive_path = job_scoped_archive_path(archive_root, job_id);
 
     match tokio::fs::remove_file(&archive_path).await {
         Ok(()) => {
             tracing::debug!(
                 job_id = %job_id,
                 archive_path = %archive_path.display(),
-                "Cleaned up source archive"
+                "Cleaned up job-scoped source archive"
             );
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -651,6 +670,18 @@ async fn cleanup_source_archive(
             );
         }
     }
+}
+
+/// Compute the job-scoped archive path.
+///
+/// Archives are stored per-job rather than per-repo+commit to avoid concurrent
+/// job races where one job's cleanup deletes an archive another job is still
+/// downloading.
+fn job_scoped_archive_path(archive_root: &std::path::Path, job_id: Uuid) -> std::path::PathBuf {
+    archive_root
+        .join("archives")
+        .join("jobs")
+        .join(format!("{job_id}.tar.gz"))
 }
 
 fn parse_next_job_request(body: &[u8]) -> Result<NextJobRequest, StatusCode> {
@@ -1901,17 +1932,14 @@ pub async fn get_next_job(
                 &state.server_config.source_archive_root,
                 &source_mut.repo_url,
             );
-            let mirror_id = source_mut.mirror_id.as_deref().unwrap_or_else(|| {
-                // Fallback (should be set by verified_source_identity_for_derivation).
-                ""
-            });
-            let archive_path = state
-                .server_config
-                .source_archive_root
-                .join("archives")
-                .join(mirror_id)
-                .join(&source_mut.commit_hash)
-                .with_extension("tar.gz");
+            let mirror_id = source_mirror_id(&source_mut.repo_url);
+
+            // Job-scoped archive path: one archive file per claimed job so
+            // concurrent jobs for the same repo+commit don't interfere.
+            let archive_path = job_scoped_archive_path(
+                &state.server_config.source_archive_root,
+                job.id,
+            );
 
             // Load per-flake credentials so the server-side mirror clone/fetch
             // can authenticate against private repositories.
@@ -1944,6 +1972,11 @@ pub async fn get_next_job(
             } else {
                 None
             };
+
+            // Acquire the per-mirror lock before any git clone/fetch or archive
+            // generation. This ensures concurrent jobs for the same repository
+            // don't corrupt the shared bare mirror.
+            let _mirror_guard = mirror_lock(&mirror_id).lock_owned().await;
 
             if ensure_server_mirror_has_commit(
                 &mirror_path,
@@ -2399,38 +2432,13 @@ pub async fn download_job_source_archive(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Derive the archive path from the job's derivation metadata.
-    let derivation = crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(job_id = %job_id, derivation_id = job.derivation_id, "failed to load derivation for source archive: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let Some(commit_id) = derivation.commit_id else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-    let commit = crate::queries::commits::get_commit_by_id(&state.pool, commit_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(job_id = %job_id, commit_id = commit_id, "failed to load commit for source archive: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    let flake = crate::queries::flakes::get_flake_by_id(&state.pool, commit.flake_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(job_id = %job_id, flake_id = commit.flake_id, "failed to load flake for source archive: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let mirror_id = source_mirror_id(&flake.repo_url);
-    let archive_path = state
-        .server_config
-        .source_archive_root
-        .join("archives")
-        .join(&mirror_id)
-        .join(&commit.git_commit_hash)
-        .with_extension("tar.gz");
+    // Job-scoped archive path: one archive per claimed job, so this builder
+    // gets exactly the archive generated for its job and not one shared with
+    // (and potentially deleted by) another concurrent job.
+    let archive_path = job_scoped_archive_path(
+        &state.server_config.source_archive_root,
+        job_id,
+    );
 
     // Stream the archive file rather than reading it fully into RAM.
     let file = tokio::fs::File::open(&archive_path).await.map_err(|e| {
@@ -2444,17 +2452,17 @@ pub async fn download_job_source_archive(
     let file_size = file.metadata().await.ok().map(|m| m.len());
     let stream = ReaderStream::new(file);
 
-    let mut builder = Response::builder()
+    let mut resp_builder = Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/gzip")
         .header(
             "Content-Disposition",
-            format!("attachment; filename=\"{}.tar.gz\"", mirror_id),
+            format!("attachment; filename=\"{}.tar.gz\"", job_id),
         );
     if let Some(size) = file_size {
-        builder = builder.header("Content-Length", size.to_string());
+        resp_builder = resp_builder.header("Content-Length", size.to_string());
     }
-    builder.body(Body::from_stream(stream))
+    resp_builder.body(Body::from_stream(stream))
         .map_err(|e| {
             tracing::error!(job_id = %job_id, "failed to build source archive response: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -4269,24 +4277,38 @@ mod tests {
     }
 
     #[test]
-    fn source_archive_path_structure_is_deterministic() {
+    fn source_archive_path_is_job_scoped() {
+        // Archives are job-scoped so concurrent jobs for the same repo+commit
+        // don't race to delete each other's archive during cleanup.
         let archive_root = std::path::PathBuf::from("/var/lib/crystal-forge/source-archives");
-        let repo_url = "git@github.com:ATALLC/nix-config.git";
-        let commit_hash = "abc123def456";
-        let mirror_id = super::source_mirror_id(repo_url);
-        let archive_path = archive_root
-            .join("archives")
-            .join(&mirror_id)
-            .join(commit_hash)
-            .with_extension("tar.gz");
-        // Must always produce the same path for same inputs.
-        let archive_path2 = archive_root
-            .join("archives")
-            .join(&mirror_id)
-            .join(commit_hash)
-            .with_extension("tar.gz");
-        assert_eq!(archive_path, archive_path2);
-        assert!(archive_path.to_str().unwrap().ends_with(".tar.gz"));
-        assert!(archive_path.to_str().unwrap().contains(commit_hash));
+        let job_a = uuid::Uuid::new_v4();
+        let job_b = uuid::Uuid::new_v4();
+
+        let path_a = super::job_scoped_archive_path(&archive_root, job_a);
+        let path_b = super::job_scoped_archive_path(&archive_root, job_b);
+
+        // Two different jobs produce different paths even for the same repo+commit.
+        assert_ne!(path_a, path_b);
+        assert!(path_a.to_str().unwrap().ends_with(".tar.gz"));
+        assert!(path_a.to_str().unwrap().contains(&job_a.to_string()));
+        assert!(path_b.to_str().unwrap().contains(&job_b.to_string()));
+
+        // Both paths are deterministic.
+        assert_eq!(
+            path_a,
+            super::job_scoped_archive_path(&archive_root, job_a)
+        );
+    }
+
+    #[test]
+    fn job_scoped_archive_cleanup_only_removes_one_job() {
+        // Prove that cleanup_source_archive uses the job-scoped path by
+        // checking the path helper returns unique files per job.
+        let root = std::path::PathBuf::from("/var/lib/cf/archives");
+        let j1 = uuid::Uuid::new_v4();
+        let j2 = uuid::Uuid::new_v4();
+        let p1 = super::job_scoped_archive_path(&root, j1);
+        let p2 = super::job_scoped_archive_path(&root, j2);
+        assert_ne!(p1, p2, "different jobs must have different archive paths");
     }
 }

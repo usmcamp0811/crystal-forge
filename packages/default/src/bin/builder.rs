@@ -983,29 +983,19 @@ async fn evaluate_verified_source_drv(
             })?;
         let mirror_path = mirror_root.join(format!("{mirror_id}.git"));
 
-        // Download archive.
-        info!("📦 Downloading source archive for job {}...", job_id);
-        let archive_bytes = client
-            .download_source_archive(job_id)
+        // Stream archive to a temp file, verifying SHA-256 incrementally.
+        // This avoids buffering the entire archive in RAM.
+        info!("📦 Streaming source archive for job {} to temp file...", job_id);
+        let tmp_archive = client
+            .stream_source_archive_to_tempfile(
+                job_id,
+                source.archive_sha256.as_deref(),
+                mirror_root,
+            )
             .await
-            .map_err(|e| source_err(format!("failed to download source archive: {e}")))?;
+            .map_err(|e| source_err(format!("failed to stream source archive: {e}")))?;
 
-        // Optional SHA-256 verification.
-        if let Some(ref expected_sha256) = source.archive_sha256 {
-            let actual_sha256 = {
-                use sha2::{Digest, Sha256};
-                let digest = Sha256::digest(&archive_bytes);
-                format!("{:x}", digest)
-            };
-            if &actual_sha256 != expected_sha256 {
-                return Err(source_err(format!(
-                    "source archive sha256 mismatch: expected {expected_sha256}, got {actual_sha256}"
-                )));
-            }
-            info!("✅ Source archive SHA-256 verified: {}", actual_sha256);
-        }
-
-        // Extract the archive to the mirror path.
+        // Extract the archive to the mirror root.
         if let Some(parent) = mirror_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 source_err(format!(
@@ -1014,12 +1004,6 @@ async fn evaluate_verified_source_drv(
                 ))
             })?;
         }
-
-        // Write archive to a temp file, then extract with tar.
-        let tmp_archive = mirror_path.with_extension("git.tgz");
-        tokio::fs::write(&tmp_archive, &archive_bytes)
-            .await
-            .map_err(|e| source_err(format!("failed to write source archive: {e}")))?;
 
         let output = tokio::process::Command::new("tar")
             .kill_on_drop(true)
@@ -1031,7 +1015,7 @@ async fn evaluate_verified_source_drv(
             .await
             .map_err(|e| source_err(format!("failed to spawn tar extraction: {e}")))?;
 
-        // Clean up the temp archive file.
+        // Clean up the temp archive file regardless of extraction success.
         let _ = tokio::fs::remove_file(&tmp_archive).await;
 
         if !output.status.success() {
