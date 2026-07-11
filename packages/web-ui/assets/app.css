@@ -5179,47 +5179,82 @@ tr.attention-flash {
   .attention-flash, tr.attention-flash { animation: none; }
 }
 
+@keyframes attention-flash-tab {
+  0%, 100% { box-shadow: inset 0 -2px 0 0 transparent; }
+  50% { box-shadow: inset 0 -2px 0 0 var(--cf-red, #ef4444); }
+}
+
+@keyframes attention-badge-pulse {
+  0%, 100% {
+    background: color-mix(in oklab, var(--cf-red, #ef4444) 16%, transparent);
+    color: var(--cf-red, #ef4444);
+  }
+  50% {
+    background: var(--cf-red, #ef4444);
+    color: #fff;
+  }
+}
+
+.sd-tab.attention-flash-tab {
+  animation: attention-flash-tab 1.2s ease-in-out infinite;
+}
+
+.sd-tab.attention-flash-tab .sd-tab-badge {
+  animation: attention-badge-pulse 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sd-tab.attention-flash-tab,
+  .sd-tab.attention-flash-tab .sd-tab-badge { animation: none; }
+  .sd-tab.attention-flash-tab .sd-tab-badge {
+    background: color-mix(in oklab, var(--cf-red, #ef4444) 16%, transparent);
+    color: var(--cf-red, #ef4444);
+  }
+}
+
 /* ─── Flake sync-error banner (TASK-385) ─── */
 .fl-sync-error {
   flex-shrink: 0;
-  margin: 12px 16px 0;
-  border: 1px solid color-mix(in oklab, var(--cf-red, #ef4444) 40%, var(--cf-card-border));
-  border-radius: 10px;
+  margin: 8px 12px 0;
+  border: 1px solid color-mix(in oklab, var(--cf-red, #ef4444) 34%, var(--cf-card-border));
+  border-radius: 8px;
   background: color-mix(in oklab, var(--cf-red, #ef4444) 8%, var(--cf-card-bg));
   overflow: hidden;
 }
 .fl-sync-error-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 9px 12px;
-  font-size: 13px;
+  gap: 6px;
+  padding: 7px 10px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--cf-red, #ef4444);
 }
 .fl-sync-error-head svg { flex-shrink: 0; }
 .fl-sync-error-when {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 400;
   color: var(--cf-text-muted);
   font-family: var(--font-mono);
 }
 .fl-sync-error-msg {
   margin: 0;
-  padding: 10px 12px;
+  padding: 8px 10px;
   background: #0a0f1c;
   color: #fca5a5;
-  font-size: 11.5px;
-  line-height: 1.6;
+  font-size: 10.5px;
+  line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
+  max-height: 8.5rem;
+  overflow: auto;
   border-top: 1px solid color-mix(in oklab, var(--cf-red, #ef4444) 22%, transparent);
 }
 .fl-sync-error-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px;
-  padding: 8px 12px;
-  font-size: 11px;
+  gap: 12px;
+  padding: 7px 10px;
+  font-size: 10px;
   border-top: 1px solid color-mix(in oklab, var(--cf-red, #ef4444) 18%, transparent);
 }

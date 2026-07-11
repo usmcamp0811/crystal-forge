@@ -355,6 +355,8 @@ fn EvaluationsPage() -> Element {
                         button {
                             class: if active_tab() == EvaluationsTab::History {
                                 "sd-tab focus-ring active"
+                            } else if failed_count > 0 {
+                                "sd-tab focus-ring attention-flash-tab"
                             } else {
                                 "sd-tab focus-ring"
                             },
@@ -365,6 +367,9 @@ fn EvaluationsPage() -> Element {
                                 acknowledge("evals");
                             },
                             "History"
+                            if failed_count > 0 {
+                                span { class: "sd-tab-badge", "{failed_count}" }
+                            }
                         }
                     }
 

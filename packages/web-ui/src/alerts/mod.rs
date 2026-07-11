@@ -56,20 +56,13 @@ pub fn should_flash(view_key: &str, has_attention: bool) -> bool {
 
 /// Returns `true` when the badge for a view should be shown.
 ///
-/// A badge is visible when:
-/// - `count > 0`, AND
-/// - the badge is NOT an attention (red) badge that has been acknowledged.
+/// Current product behavior keeps badges visible while the underlying
+/// condition exists, even after the corresponding view has been opened.
+/// The separate `acknowledged`/`flashed` state is still used to gate the
+/// first-visit in-view highlight pulse.
 pub fn badge_visible(view_key: &str, count: i64, attention: bool) -> bool {
-    if count <= 0 {
-        return false;
-    }
-    if attention {
-        let state = ALERT_STATE.read();
-        !state.acknowledged.contains(view_key)
-    } else {
-        // Informational (gray) badges are always visible when count > 0
-        true
-    }
+    let _ = (view_key, attention);
+    count > 0
 }
 
 #[cfg(test)]
@@ -88,10 +81,10 @@ mod tests {
     }
 
     #[test]
-    fn badge_visible_attention_badge_hidden_after_ack() {
+    fn badge_visible_attention_badge_still_shown_after_ack() {
         let mut state = fresh_state();
         state.acknowledged.insert("flakes".to_string());
-        assert!(!badge_visible_with_state(&state, "flakes", 3, true));
+        assert!(badge_visible_with_state(&state, "flakes", 3, true));
     }
 
     #[test]
@@ -131,11 +124,8 @@ mod tests {
         if count <= 0 {
             return false;
         }
-        if attention {
-            !state.acknowledged.contains(view_key)
-        } else {
-            true
-        }
+        let _ = (state, view_key, attention);
+        true
     }
 
     fn should_flash_with_state(

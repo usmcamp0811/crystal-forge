@@ -440,6 +440,11 @@ pub fn BuildsView() -> Element {
             CompletedStatusFilter::Cancelled => item.status == BuildStatus::Cancelled,
         }
     });
+    let completed_failed_count = build_history
+        .read()
+        .iter()
+        .filter(|item| item.status == BuildStatus::Failed)
+        .count();
     completed_rows.sort_by(|left, right| {
         let left_key = left.completed_at.unwrap_or_else(Utc::now);
         let right_key = right.completed_at.unwrap_or_else(Utc::now);
@@ -578,6 +583,7 @@ pub fn BuildsView() -> Element {
                             (true, false) => "sd-tab focus-ring active",
                             (false, true) => "sd-tab focus-ring attention-flash-tab",
                             (false, false) => "sd-tab focus-ring",
+                        }
                         },
                         onclick: move |_| {
                             let prev = active_view();
@@ -598,8 +604,10 @@ pub fn BuildsView() -> Element {
                             // Acknowledge the "builds" sidebar badge only when this tab is opened (TASK-385).
                             acknowledge("builds");
                         },
-                        "Completed "
-                        span { class: "sd-tab-badge", "{build_history.read().len()}" }
+                        "Completed ({build_history.read().len()})"
+                        if completed_failed_count > 0 {
+                            span { class: "sd-tab-badge", "{completed_failed_count}" }
+                        }
                     }
                     // JSX: {selectableIds.length > 0 && <MultiSelectHint />}
                     // selectableIds = cancellable builds on Active, filteredList on Completed.

@@ -1,6 +1,6 @@
 //! Flakes list view with table/card toggle.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
 use dioxus::prelude::*;
@@ -2844,6 +2844,7 @@ pub fn FlakesListViewNew() -> Element {
         credential_ssh_username: String::new(),
     });
     let mut rewrite_prompt = use_signal(|| None::<(i32, String, String)>);
+    let mut dismissed_rewrite_conflicts = use_signal(HashSet::<String>::new);
 
     let flakes_resource = use_resource(move || {
         let _nonce = *reload_nonce.read();
@@ -3311,7 +3312,12 @@ pub fn FlakesListViewNew() -> Element {
                                         if let Some((id, detail)) =
                                             extract_history_rewrite_conflict(&err, Some(flake_id))
                                         {
-                                            rewrite_prompt.set(Some((id, format!("flake #{id}"), detail)));
+                                            maybe_set_rewrite_prompt(
+                                                &mut rewrite_prompt,
+                                                &dismissed_rewrite_conflicts,
+                                                id,
+                                                detail,
+                                            );
                                             action_notice.set(Some("Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string()));
                                         } else {
                                             action_notice.set(Some(format!("Sync failed: {err}")));
@@ -3377,7 +3383,12 @@ pub fn FlakesListViewNew() -> Element {
                                         if let Some((id, detail)) =
                                             extract_history_rewrite_conflict(&err, Some(flake_id))
                                         {
-                                            rewrite_prompt.set(Some((id, format!("flake #{id}"), detail)));
+                                            maybe_set_rewrite_prompt(
+                                                &mut rewrite_prompt,
+                                                &dismissed_rewrite_conflicts,
+                                                id,
+                                                detail,
+                                            );
                                             action_notice.set(Some("Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string()));
                                         } else {
                                             action_notice.set(Some(format!("Sync failed: {err}")));
@@ -3534,7 +3545,12 @@ pub fn FlakesListViewNew() -> Element {
                                             if let Some((id, detail)) =
                                                 extract_history_rewrite_conflict(&err, Some(flake_id))
                                             {
-                                                rewrite_prompt.set(Some((id, format!("flake #{id}"), detail)));
+                                                maybe_set_rewrite_prompt(
+                                                    &mut rewrite_prompt,
+                                                    &dismissed_rewrite_conflicts,
+                                                    id,
+                                                    detail,
+                                                );
                                                 action_notice.set(Some("Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string()));
                                             } else {
                                                 action_notice
@@ -3545,7 +3561,12 @@ pub fn FlakesListViewNew() -> Element {
                                 });
                             },
                             on_history_rewrite_conflict: move |(flake_id, detail)| {
-                                rewrite_prompt.set(Some((flake_id, format!("flake #{flake_id}"), detail)));
+                                maybe_set_rewrite_prompt(
+                                    &mut rewrite_prompt,
+                                    &dismissed_rewrite_conflicts,
+                                    flake_id,
+                                    detail,
+                                );
                                 action_notice.set(Some("Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string()));
                             },
                             on_close: move |_| selected_flake.set(None)
@@ -3555,35 +3576,54 @@ pub fn FlakesListViewNew() -> Element {
             }
 
             if let Some((flake_id, flake_name, detail)) = rewrite_prompt.read().clone() {
-                HistoryRewriteDialog {
-                    flake_name,
-                    detail,
-                    on_cancel: move |_| rewrite_prompt.set(None),
-                    on_accept: move |_| {
-                        let mut rewrite_prompt = rewrite_prompt.clone();
-                        let mut action_notice = action_notice.clone();
-                        let mut reload_nonce = reload_nonce.clone();
-                        spawn(async move {
-                            match accept_flake_history_rewrite(flake_id).await {
-                                Ok(response) => {
-                                    rewrite_prompt.set(None);
-                                    match request_sync_flake(flake_id).await {
-                                        Ok(_) => {
-                                            action_notice.set(Some(response.message));
-                                            let next = *reload_nonce.read() + 1;
-                                            reload_nonce.set(next);
+                {
+                    let detail_for_cancel = detail.clone();
+                    let detail_for_accept = detail.clone();
+                    rsx! {
+                        HistoryRewriteDialog {
+                            flake_name,
+                            detail,
+                            on_cancel: move |_| {
+                                dismissed_rewrite_conflicts.with_mut(|set| {
+                                    set.insert(rewrite_conflict_key(flake_id, &detail_for_cancel));
+                                });
+                                rewrite_prompt.set(None)
+                            },
+                            on_accept: move |_| {
+                                let mut rewrite_prompt = rewrite_prompt.clone();
+                                let mut action_notice = action_notice.clone();
+                                let mut reload_nonce = reload_nonce.clone();
+                                let mut dismissed_rewrite_conflicts = dismissed_rewrite_conflicts.clone();
+                                let conflict_key = rewrite_conflict_key(flake_id, &detail_for_accept);
+                                spawn(async move {
+                                    match accept_flake_history_rewrite(flake_id).await {
+                                        Ok(response) => {
+                                            dismissed_rewrite_conflicts.with_mut(|set| {
+                                                set.remove(&conflict_key);
+                                            });
+                                            rewrite_prompt.set(None);
+                                            match request_sync_flake(flake_id).await {
+                                                Ok(_) => {
+                                                    action_notice.set(Some(response.message));
+                                                    let next = *reload_nonce.read() + 1;
+                                                    reload_nonce.set(next);
+                                                }
+                                                Err(err) => {
+                                                    action_notice.set(Some(format!(
+                                                        "History rewrite accepted, but sync failed: {err}"
+                                                    )));
+                                                }
+                                            }
                                         }
                                         Err(err) => {
                                             action_notice.set(Some(format!(
-                                                "History rewrite accepted, but sync failed: {err}"
+                                                "Failed to accept rewrite: {err}"
                                             )));
                                         }
                                     }
-                                }
-                                Err(err) => action_notice
-                                    .set(Some(format!("Failed to accept rewrite: {err}"))),
+                                });
                             }
-                        });
+                        }
                     }
                 }
             }
@@ -3756,6 +3796,23 @@ fn relative_time_label(ts: DateTime<Utc>) -> String {
     } else {
         format!("{}w ago", (delta.num_days() / 7).max(1))
     }
+}
+
+fn rewrite_conflict_key(flake_id: i32, detail: &str) -> String {
+    format!("{flake_id}:{detail}")
+}
+
+fn maybe_set_rewrite_prompt(
+    rewrite_prompt: &mut Signal<Option<(i32, String, String)>>,
+    dismissed_rewrite_conflicts: &Signal<HashSet<String>>,
+    flake_id: i32,
+    detail: String,
+) {
+    let key = rewrite_conflict_key(flake_id, &detail);
+    if dismissed_rewrite_conflicts.read().contains(&key) {
+        return;
+    }
+    rewrite_prompt.set(Some((flake_id, format!("flake #{flake_id}"), detail)));
 }
 
 fn build_status_token(status: Option<ApiBuildStatus>) -> Option<String> {
