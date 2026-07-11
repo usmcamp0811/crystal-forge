@@ -284,12 +284,16 @@ pub async fn evaluate_with_nix_eval_jobs(
 
     debug!("📝 Nix expression:\n{}", nix_expr);
 
-    // Run nix-eval-jobs with --meta flag to get policy results
+    // Run nix-eval-jobs with --meta flag to get policy results.
+    // --impure is required because the Nix expression uses builtins.getFlake with a
+    // remote git+ssh ref (e.g. git+git@github.com:...?rev=<hash>), which is only
+    // permitted in impure evaluation mode.
     let mut cmd = Command::new("nix-eval-jobs");
     cmd.args([
         "--expr",
         &nix_expr,
-        "--meta", // CRITICAL: Include meta so we get policies in output!
+        "--impure", // Required: builtins.getFlake with remote git refs needs impure mode
+        "--meta",   // CRITICAL: Include meta so we get policies in output!
         "--workers",
         &server_config.eval_workers.to_string(),
         "--max-memory-size",
