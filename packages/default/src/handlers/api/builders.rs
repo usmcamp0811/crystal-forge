@@ -378,6 +378,270 @@ fn source_mirror_id(repo_url: &str) -> String {
     format!("repo-{short}")
 }
 
+/// Compute the path for the server's cached bare mirror of a repo.
+fn server_mirror_path(archive_root: &std::path::Path, repo_url: &str) -> std::path::PathBuf {
+    archive_root
+        .join("mirrors")
+        .join(format!("{}.git", source_mirror_id(repo_url)))
+}
+
+/// Ensure the server's bare mirror for `repo_url` contains `commit_hash`.
+///
+/// Clones the repo bare if the mirror does not exist, or fetches if the commit
+/// is not present. Mirrors the builder's `ensure_mirror_has_commit` logic but
+/// runs server-side so the server can serve archive tarballs to remote builders.
+async fn ensure_server_mirror_has_commit(
+    mirror_path: &std::path::Path,
+    repo_url: &str,
+    commit_hash: &str,
+) -> Result<(), StatusCode> {
+    let source_err = |msg: String| {
+        tracing::error!("server source mirror error: {msg}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+
+    if !mirror_path.exists() {
+        let temp_suffix = format!(".tmp-{}-{}", std::process::id(), uuid::Uuid::new_v4());
+        let temp_mirror = mirror_path.with_extension(temp_suffix);
+
+        if let Some(parent) = mirror_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                source_err(format!(
+                    "failed to create mirror parent {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+
+        let _ = tokio::fs::remove_dir_all(&temp_mirror).await;
+
+        let output = tokio::process::Command::new("git")
+            .kill_on_drop(true)
+            .arg("clone")
+            .arg("--bare")
+            .arg(repo_url)
+            .arg(&temp_mirror)
+            .output()
+            .await
+            .map_err(|e| source_err(format!("failed to spawn git clone --bare: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(source_err(format!(
+                "git clone --bare failed for {repo_url}: {stderr}"
+            )));
+        }
+
+        tokio::fs::rename(&temp_mirror, mirror_path)
+            .await
+            .map_err(|e| {
+                source_err(format!(
+                    "failed to install cloned source mirror {} -> {}: {e}",
+                    temp_mirror.display(),
+                    mirror_path.display()
+                ))
+            })?;
+
+        tracing::info!("Server source mirror cloned at {}", mirror_path.display());
+    }
+
+    // Check if commit is already present.
+    let has_commit = tokio::process::Command::new("git")
+        .kill_on_drop(true)
+        .arg("--git-dir")
+        .arg(mirror_path)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{commit_hash}^{{commit}}"))
+        .output()
+        .await
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+
+    if has_commit {
+        return Ok(());
+    }
+
+    tracing::info!(
+        "Fetching authorized commit {} into server source mirror {}",
+        commit_hash,
+        mirror_path.display()
+    );
+
+    let output = tokio::process::Command::new("git")
+        .kill_on_drop(true)
+        .arg("--git-dir")
+        .arg(mirror_path)
+        .arg("fetch")
+        .arg("--prune")
+        .arg(repo_url)
+        .arg("+refs/*:refs/*")
+        .output()
+        .await
+        .map_err(|e| source_err(format!("failed to spawn git fetch: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(source_err(format!(
+            "git fetch failed for {repo_url}: {stderr}"
+        )));
+    }
+
+    let has_commit_after = tokio::process::Command::new("git")
+        .kill_on_drop(true)
+        .arg("--git-dir")
+        .arg(mirror_path)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{commit_hash}^{{commit}}"))
+        .output()
+        .await
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+
+    if has_commit_after {
+        Ok(())
+    } else {
+        Err(source_err(format!(
+            "commit {commit_hash} not found in server mirror for {repo_url} after fetch"
+        )))
+    }
+}
+
+/// Generate a gzipped tar archive of the bare mirror at the archive path.
+///
+/// Returns the SHA-256 hex digest of the archive.
+async fn generate_source_archive(
+    mirror_path: &std::path::Path,
+    archive_path: &std::path::Path,
+) -> Result<String, StatusCode> {
+    let source_err = |msg: String| {
+        tracing::error!("source archive generation error: {msg}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+
+    if let Some(parent) = archive_path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            source_err(format!(
+                "failed to create archive parent {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    // Remove any existing archive for this path first.
+    let _ = tokio::fs::remove_file(archive_path).await;
+
+    // Tar the mirror directory. Since mirror_path is like .../<mirror_id>.git,
+    // we tar from the parent directory with the basename so extraction produces
+    // the correct directory layout.
+    let mirror_parent = mirror_path
+        .parent()
+        .ok_or_else(|| source_err("mirror path has no parent".to_string()))?;
+    let mirror_name = mirror_path
+        .file_name()
+        .ok_or_else(|| source_err("mirror path has no file name".to_string()))?;
+
+    let output = tokio::process::Command::new("tar")
+        .kill_on_drop(true)
+        .arg("-czf")
+        .arg(archive_path)
+        .arg("-C")
+        .arg(mirror_parent)
+        .arg(mirror_name)
+        .output()
+        .await
+        .map_err(|e| source_err(format!("failed to spawn tar: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(source_err(format!("tar archive creation failed: {stderr}")));
+    }
+
+    // Compute SHA256 of the archive.
+    let hash_output = tokio::process::Command::new("sha256sum")
+        .arg(archive_path)
+        .output()
+        .await
+        .map_err(|e| source_err(format!("failed to run sha256sum: {e}")))?;
+
+    if !hash_output.status.success() {
+        let stderr = String::from_utf8_lossy(&hash_output.stderr)
+            .trim()
+            .to_string();
+        return Err(source_err(format!("sha256sum failed: {stderr}")));
+    }
+
+    let stdout = String::from_utf8_lossy(&hash_output.stdout);
+    let hash = stdout
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| source_err("sha256sum produced no output".to_string()))?
+        .to_string();
+
+    tracing::info!(
+        "Source archive generated at {} (sha256: {})",
+        archive_path.display(),
+        hash
+    );
+
+    Ok(hash)
+}
+
+/// Best-effort cleanup of a source archive after job completion/failure.
+///
+/// Looks up the job's derivation → commit → flake, computes the archive path,
+/// and removes it if present. Errors are logged but not propagated — archive
+/// cleanup must not block job finalization.
+async fn cleanup_source_archive(
+    pool: &PgPool,
+    archive_root: &std::path::Path,
+    job_id: Uuid,
+) {
+    let Ok(Some(job)) = builders::get_build_job_by_id(pool, &job_id).await else {
+        return;
+    };
+    let Ok(derivation) =
+        crate::queries::derivations::get_derivation_by_id(pool, job.derivation_id).await
+    else {
+        return;
+    };
+    let Some(commit_id) = derivation.commit_id else {
+        return;
+    };
+    let Ok(commit) = crate::queries::commits::get_commit_by_id(pool, commit_id).await else {
+        return;
+    };
+    let Ok(flake) = crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await else {
+        return;
+    };
+
+    let mirror_id = source_mirror_id(&flake.repo_url);
+    let archive_path = archive_root
+        .join("archives")
+        .join(&mirror_id)
+        .join(&commit.git_commit_hash)
+        .with_extension("tar.gz");
+
+    match tokio::fs::remove_file(&archive_path).await {
+        Ok(()) => {
+            tracing::debug!(
+                job_id = %job_id,
+                archive_path = %archive_path.display(),
+                "Cleaned up source archive"
+            );
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::warn!(
+                job_id = %job_id,
+                archive_path = %archive_path.display(),
+                "Failed to clean up source archive: {e}"
+            );
+        }
+    }
+}
+
 fn parse_next_job_request(body: &[u8]) -> Result<NextJobRequest, StatusCode> {
     if body.is_empty() {
         return Ok(legacy_next_job_request());
@@ -1591,7 +1855,7 @@ pub async fn get_next_job(
             }
         };
 
-    let source = match verified_source_identity_for_derivation(&state.pool, &derivation).await {
+    let mut source = match verified_source_identity_for_derivation(&state.pool, &derivation).await {
         Ok(source) => source,
         Err(e) => {
             tracing::error!(
@@ -1615,9 +1879,77 @@ pub async fn get_next_job(
     let source_input_delivery = match execution_strategy {
         RemoteBuildExecutionStrategy::ServerDerivation => SourceInputDeliveryMode::None,
         RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
-            SourceInputDeliveryMode::LocalGitWorktree
+            state.server_config.source_delivery_mode
         }
     };
+
+    // If ServerBundledArchive is selected, generate the source archive now.
+    if source_input_delivery == SourceInputDeliveryMode::ServerBundledArchive {
+        if let Some(ref mut source_mut) = source {
+            let mirror_path = server_mirror_path(
+                &state.server_config.source_archive_root,
+                &source_mut.repo_url,
+            );
+            let mirror_id = source_mut.mirror_id.as_deref().unwrap_or_else(|| {
+                // Fallback (should be set by verified_source_identity_for_derivation).
+                ""
+            });
+            let archive_path = state
+                .server_config
+                .source_archive_root
+                .join("archives")
+                .join(mirror_id)
+                .join(&source_mut.commit_hash)
+                .with_extension("tar.gz");
+
+            if ensure_server_mirror_has_commit(
+                &mirror_path,
+                &source_mut.repo_url,
+                &source_mut.commit_hash,
+            )
+            .await
+            .is_err()
+            {
+                requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+                    .await
+                    .ok();
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+
+            match generate_source_archive(&mirror_path, &archive_path).await {
+                Ok(sha256) => {
+                    source_mut.archive_url = Some(format!(
+                        "/api/v1/builders/{}/jobs/{}/source-archive",
+                        builder_id, job.id
+                    ));
+                    source_mut.archive_sha256 = Some(sha256);
+                }
+                Err(status) => {
+                    requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+                        .await
+                        .ok();
+                    return Err(status);
+                }
+            }
+        } else {
+            // Source is None but delivery is ServerBundledArchive — bail.
+            tracing::error!(
+                job_id = %job.id,
+                derivation_id = derivation.id,
+                "ServerBundledArchive selected but source identity is missing; requeueing"
+            );
+            requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        job_id = %job.id,
+                        "failed to requeue job after source identity assembly error: {e}"
+                    );
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
 
     if execution_strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
         && (source.is_none() || expected_drv_path.is_none())
@@ -1954,6 +2286,98 @@ pub async fn download_job_derivation_archive(
         .body(Body::from(archive))
         .map_err(|e| {
             tracing::error!(job_id = %job_id, "failed to build derivation archive response: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+/// GET /api/v1/builders/:id/jobs/:job_id/source-archive
+///
+/// Streams a gzipped tar archive of the bare Git mirror for the job's source
+/// repository, containing the authorized commit. Remote API builders in
+/// ServerBundledArchive mode download this archive instead of cloning the repo
+/// directly.
+pub async fn download_job_source_archive(
+    State(state): State<CFState>,
+    Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    let path = format!(
+        "/api/v1/builders/{}/jobs/{}/source-archive",
+        builder_id, job_id
+    );
+    let verified = authenticate_builder_request(&headers, body, "GET", &path, &state.pool).await?;
+
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, "failed to load build job for source archive: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id)
+        || job.status != "building"
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Derive the archive path from the job's derivation metadata.
+    let derivation = crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, derivation_id = job.derivation_id, "failed to load derivation for source archive: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let Some(commit_id) = derivation.commit_id else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let commit = crate::queries::commits::get_commit_by_id(&state.pool, commit_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, commit_id = commit_id, "failed to load commit for source archive: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let flake = crate::queries::flakes::get_flake_by_id(&state.pool, commit.flake_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, flake_id = commit.flake_id, "failed to load flake for source archive: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let mirror_id = source_mirror_id(&flake.repo_url);
+    let archive_path = state
+        .server_config
+        .source_archive_root
+        .join("archives")
+        .join(&mirror_id)
+        .join(&commit.git_commit_hash)
+        .with_extension("tar.gz");
+
+    let data = tokio::fs::read(&archive_path).await.map_err(|e| {
+        tracing::error!(
+            job_id = %job_id,
+            archive_path = %archive_path.display(),
+            "failed to read source archive: {e}"
+        );
+        StatusCode::NOT_FOUND
+    })?;
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/gzip")
+        .header(
+            "Content-Disposition",
+            format!("attachment; filename=\"{}.tar.gz\"", mirror_id),
+        )
+        .body(Body::from(data))
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, "failed to build source archive response: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })
 }
@@ -2415,6 +2839,14 @@ pub async fn complete_job(
 
     cleanup_build_log_channel(&state, job_id).await;
 
+    // Best-effort source archive cleanup (for ServerBundledArchive jobs).
+    if state.server_config.source_delivery_mode
+        == SourceInputDeliveryMode::ServerBundledArchive
+    {
+        cleanup_source_archive(&state.pool, &state.server_config.source_archive_root, job_id)
+            .await;
+    }
+
     Ok(StatusCode::OK)
 }
 
@@ -2523,6 +2955,15 @@ pub async fn fail_job(
         }
 
         cleanup_build_log_channel(&state, job_id).await;
+
+        // Best-effort source archive cleanup (for ServerBundledArchive jobs).
+        if state.server_config.source_delivery_mode
+            == SourceInputDeliveryMode::ServerBundledArchive
+        {
+            cleanup_source_archive(&state.pool, &state.server_config.source_archive_root, job_id)
+                .await;
+        }
+
         Ok(StatusCode::ACCEPTED) // Job permanently failed
     }
 }
@@ -3628,8 +4069,6 @@ mod tests {
 
     #[test]
     fn credential_check_blocked_when_flag_false_even_with_https_header() {
-        // A builder could spoof X-Forwarded-Proto: https over plain HTTP.
-        // The flag is false (default) so the check must return false regardless.
         let cfg = server_config_with_trust(false);
         let headers = make_headers_with("x-forwarded-proto", "https");
         assert!(
@@ -3685,6 +4124,34 @@ mod tests {
         assert!(
             builder_https_verified_by_trusted_proxy(&cfg, &headers),
             "must pass when flag is on and x-forwarded-ssl: on"
+        );
+    }
+
+    // ── ServerBundledArchive / source mirror tests ─────────────────────────
+
+    #[test]
+    fn source_mirror_id_is_deterministic() {
+        let id1 = super::source_mirror_id("https://github.com/example/repo.git");
+        let id2 = super::source_mirror_id("https://github.com/example/repo.git");
+        assert_eq!(id1, id2);
+        assert!(id1.starts_with("repo-"));
+    }
+
+    #[test]
+    fn source_mirror_id_varies_by_url() {
+        let id1 = super::source_mirror_id("https://github.com/example/repo-a.git");
+        let id2 = super::source_mirror_id("https://github.com/example/repo-b.git");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn server_mirror_path_contains_mirror_id() {
+        let archive_root = std::path::PathBuf::from("/var/lib/crystal-forge/source-archives");
+        let path = super::server_mirror_path(&archive_root, "https://github.com/example/repo.git");
+        let mirror_id = super::source_mirror_id("https://github.com/example/repo.git");
+        assert_eq!(
+            path,
+            archive_root.join("mirrors").join(format!("{mirror_id}.git"))
         );
     }
 }

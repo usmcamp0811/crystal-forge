@@ -636,6 +636,51 @@ impl BuilderApiClient {
             .context("Failed to read derivation archive response")
     }
 
+    /// Download the source archive (tar.gz of the bare mirror) for a job using
+    /// ServerBundledArchive delivery.
+    ///
+    /// Returns the raw archive bytes. The caller is responsible for extracting
+    /// the archive to the appropriate mirror path and verifying its SHA-256.
+    pub async fn download_source_archive(&self, job_id: uuid::Uuid) -> Result<bytes::Bytes> {
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/source-archive",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let body = Vec::new();
+        let (builder_id, signature, timestamp) = self.sign_request("GET", &path, &body);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .timeout(DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT)
+            .send()
+            .await
+            .context("Failed to request source archive")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!(
+                "Download source archive failed with status {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        response
+            .bytes()
+            .await
+            .context("Failed to read source archive response")
+    }
+
     /// Ask the server to publish the job's derivation closure to the configured
     /// binary cache so the builder can fetch it through normal Nix substituters.
     pub async fn publish_derivation_closure(&self, job_id: uuid::Uuid) -> Result<()> {

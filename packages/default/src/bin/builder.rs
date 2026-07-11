@@ -747,6 +747,74 @@ async fn ensure_source_worktree(
     Ok(worktree_path)
 }
 
+/// Create a detached source worktree from an already-populated mirror.
+///
+/// Unlike [`ensure_source_worktree`], this does NOT call
+/// [`ensure_mirror_has_commit`] — the caller is responsible for ensuring the
+/// mirror already contains the authorized commit (e.g. by extracting a
+/// server-provided archive). Used for `ServerBundledArchive` delivery.
+async fn ensure_source_worktree_from_mirror(
+    source: &VerifiedSourceIdentity,
+    mirror_root: &Path,
+    worktree_root: &Path,
+    job_id: uuid::Uuid,
+) -> Result<PathBuf, PreBuildFailure> {
+    let (mirror_path, worktree_path) =
+        source_workspace_paths_for_job(source, mirror_root, worktree_root, Some(job_id))?;
+
+    if worktree_path.exists() {
+        info!("🌳 Reusing source worktree {}", worktree_path.display());
+        verify_worktree_head(&worktree_path, &source.commit_hash).await?;
+        return Ok(worktree_path);
+    }
+
+    info!(
+        "🌳 Creating detached source worktree {} at commit {} (from pre-populated mirror)",
+        worktree_path.display(),
+        source.commit_hash
+    );
+
+    if let Some(parent) = worktree_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| PreBuildFailure {
+                phase: BuildFailurePhase::SourceFetch,
+                message: format!(
+                    "failed to create source worktree parent {}: {e}",
+                    parent.display()
+                ),
+            })?;
+    }
+
+    let output = tokio::process::Command::new("git")
+        .kill_on_drop(true)
+        .arg("--git-dir")
+        .arg(&mirror_path)
+        .arg("worktree")
+        .arg("add")
+        .arg("--detach")
+        .arg(&worktree_path)
+        .arg(&source.commit_hash)
+        .output()
+        .await
+        .map_err(|e| PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: format!("failed to spawn git worktree add: {e}"),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: format!("git worktree add failed: {stderr}"),
+        });
+    }
+
+    verify_worktree_head(&worktree_path, &source.commit_hash).await?;
+    info!("✅ Source worktree ready at {}", worktree_path.display());
+    Ok(worktree_path)
+}
+
 async fn verify_worktree_head(
     worktree_path: &Path,
     expected_commit: &str,
@@ -889,8 +957,100 @@ async fn evaluate_verified_source_drv(
     worktree_root: &Path,
     job_id: uuid::Uuid,
     pre_build_phase: &AtomicU8,
+    client: Option<&crystal_forge::builder::api_client::BuilderApiClient>,
 ) -> Result<String, PreBuildFailure> {
-    let source_ref = if delivery == SourceInputDeliveryMode::LocalGitWorktree {
+    let source_ref = if delivery == SourceInputDeliveryMode::ServerBundledArchive {
+        // ServerBundledArchive: download the source archive from the server API,
+        // extract it to the mirror path, then create a worktree from the mirror.
+        let source_err = |msg: String| PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: msg,
+        };
+
+        let client = client.ok_or_else(|| {
+            source_err(
+                "ServerBundledArchive requires an API client for archive download".to_string(),
+            )
+        })?;
+
+        // Determine the mirror path where the archive should be extracted.
+        let mirror_id = source
+            .mirror_id
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                source_err("ServerBundledArchive delivery is missing mirror_id".to_string())
+            })?;
+        let mirror_path = mirror_root.join(format!("{mirror_id}.git"));
+
+        // Download archive.
+        info!("📦 Downloading source archive for job {}...", job_id);
+        let archive_bytes = client
+            .download_source_archive(job_id)
+            .await
+            .map_err(|e| source_err(format!("failed to download source archive: {e}")))?;
+
+        // Optional SHA-256 verification.
+        if let Some(ref expected_sha256) = source.archive_sha256 {
+            let actual_sha256 = {
+                use sha2::{Digest, Sha256};
+                let digest = Sha256::digest(&archive_bytes);
+                format!("{:x}", digest)
+            };
+            if &actual_sha256 != expected_sha256 {
+                return Err(source_err(format!(
+                    "source archive sha256 mismatch: expected {expected_sha256}, got {actual_sha256}"
+                )));
+            }
+            info!("✅ Source archive SHA-256 verified: {}", actual_sha256);
+        }
+
+        // Extract the archive to the mirror path.
+        if let Some(parent) = mirror_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                source_err(format!(
+                    "failed to create mirror parent {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+
+        // Write archive to a temp file, then extract with tar.
+        let tmp_archive = mirror_path.with_extension("git.tgz");
+        tokio::fs::write(&tmp_archive, &archive_bytes)
+            .await
+            .map_err(|e| source_err(format!("failed to write source archive: {e}")))?;
+
+        let output = tokio::process::Command::new("tar")
+            .kill_on_drop(true)
+            .arg("-xzf")
+            .arg(&tmp_archive)
+            .arg("-C")
+            .arg(mirror_root)
+            .output()
+            .await
+            .map_err(|e| source_err(format!("failed to spawn tar extraction: {e}")))?;
+
+        // Clean up the temp archive file.
+        let _ = tokio::fs::remove_file(&tmp_archive).await;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(source_err(format!("tar extraction failed: {stderr}")));
+        }
+
+        info!(
+            "✅ Source archive extracted to mirror at {}",
+            mirror_path.display()
+        );
+
+        // Now create a worktree from the extracted mirror, skipping
+        // ensure_mirror_has_commit since the archive already contains the commit.
+        ensure_source_worktree_from_mirror(source, mirror_root, worktree_root, job_id)
+            .await?
+            .to_string_lossy()
+            .to_string()
+    } else if delivery == SourceInputDeliveryMode::LocalGitWorktree {
         ensure_source_worktree(source, mirror_root, worktree_root, job_id)
             .await?
             .to_string_lossy()
@@ -939,6 +1099,7 @@ async fn verify_source_build_plan(
     worktree_root: &Path,
     job_id: uuid::Uuid,
     pre_build_phase: &AtomicU8,
+    client: Option<&crystal_forge::builder::api_client::BuilderApiClient>,
 ) -> Result<String, PreBuildFailure> {
     let expected = expected_drv_path(payload)?.to_string();
     let source = payload.source.as_ref().ok_or_else(|| PreBuildFailure {
@@ -952,6 +1113,7 @@ async fn verify_source_build_plan(
         worktree_root,
         job_id,
         pre_build_phase,
+        client,
     )
     .await?;
     verify_drv_identity(&expected, &actual)?;
@@ -1011,6 +1173,7 @@ async fn execute_build_job(
                 source_worktree_root,
                 job_id,
                 &pre_build_phase,
+                Some(&client),
             );
             wait_for_pre_build_verification(verification_future, build_timeout, &pre_build_phase, || {
                 let client = client.clone();

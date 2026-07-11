@@ -1,5 +1,6 @@
-use crate::models::builders::RemoteBuildExecutionStrategy;
+use crate::models::builders::{RemoteBuildExecutionStrategy, SourceInputDeliveryMode};
 use serde::Deserialize;
+use std::path::PathBuf;
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -132,6 +133,21 @@ pub struct ServerConfig {
     /// Default: 600 (10 minutes).
     #[serde(default = "default_heartbeat_interval_secs")]
     pub heartbeat_interval_secs: u64,
+
+    /// Root directory for caching bare Git mirrors used to generate source
+    /// archives for ServerBundledArchive delivery mode.
+    /// Default: /var/lib/crystal-forge/source-archives
+    #[serde(default = "default_source_archive_root")]
+    pub source_archive_root: PathBuf,
+
+    /// Default source/input delivery mode for verified source re-evaluation.
+    /// - `local_git_worktree` (default): builder clones/fetches the repo directly
+    ///   and creates a local worktree.
+    /// - `server_bundled_archive`: server generates a tar archive of its bare
+    ///   mirror and serves it via an authenticated API endpoint. Builders do not
+    ///   need direct Git remote access.
+    #[serde(default = "default_source_delivery_mode")]
+    pub source_delivery_mode: SourceInputDeliveryMode,
 }
 
 fn default_remote_build_execution_strategy() -> RemoteBuildExecutionStrategy {
@@ -140,6 +156,14 @@ fn default_remote_build_execution_strategy() -> RemoteBuildExecutionStrategy {
 
 fn default_heartbeat_interval_secs() -> u64 {
     600 // 10 minutes — matches the agent's compiled-in fallback
+}
+
+fn default_source_archive_root() -> PathBuf {
+    PathBuf::from("/var/lib/crystal-forge/source-archives")
+}
+
+fn default_source_delivery_mode() -> SourceInputDeliveryMode {
+    SourceInputDeliveryMode::LocalGitWorktree
 }
 
 // Default value functions for serde
@@ -199,6 +223,8 @@ impl Default for ServerConfig {
             trust_forwarded_builder_https: false,
             remote_build_execution_strategy: default_remote_build_execution_strategy(),
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
+            source_archive_root: default_source_archive_root(),
+            source_delivery_mode: default_source_delivery_mode(),
         }
     }
 }
@@ -271,7 +297,7 @@ impl ServerConfig {
             );
         }
 
-        // P2-5: Validate heartbeat interval is within acceptable range
+        // Validate heartbeat interval is within acceptable range
         const MIN_HEARTBEAT_INTERVAL_SECS: u64 = 15;
         const MAX_HEARTBEAT_INTERVAL_SECS: u64 = 900;
         if self.heartbeat_interval_secs < MIN_HEARTBEAT_INTERVAL_SECS
@@ -335,6 +361,24 @@ mod tests {
         assert!(
             !cfg.trust_forwarded_builder_https,
             "credential delivery must be opt-in, not opt-out"
+        );
+    }
+
+    #[test]
+    fn source_archive_root_defaults_to_expected_path() {
+        let cfg = ServerConfig::default();
+        assert_eq!(
+            cfg.source_archive_root,
+            PathBuf::from("/var/lib/crystal-forge/source-archives")
+        );
+    }
+
+    #[test]
+    fn source_delivery_mode_defaults_to_local_git_worktree() {
+        let cfg = ServerConfig::default();
+        assert_eq!(
+            cfg.source_delivery_mode,
+            SourceInputDeliveryMode::LocalGitWorktree
         );
     }
 }
