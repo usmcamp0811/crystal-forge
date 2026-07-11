@@ -102,6 +102,21 @@ pub struct ServerConfig {
     #[serde(default)]
     pub allow_private_cache_test_targets: bool,
 
+    /// Allow credential-bearing builder cache-push config to be delivered when
+    /// the request arrives via a reverse proxy that sets X-Forwarded-Proto /
+    /// Forwarded headers asserting HTTPS.
+    ///
+    /// **Only enable this when your deployment proxy unconditionally strips and
+    /// re-sets these headers itself.** A builder that can reach the server
+    /// directly over plaintext HTTP could otherwise spoof the header and
+    /// receive real cache credentials.
+    ///
+    /// When false (the default), credential-bearing cache-push config is never
+    /// sent to builders — the server returns 426 Upgrade Required regardless of
+    /// any forwarded-proto header.
+    #[serde(default)]
+    pub trust_forwarded_builder_https: bool,
+
     /// Default remote build execution strategy for API builders.
     /// Defaults to `server_derivation`; set to `source_re_evaluate_verified`
     /// only for builders explicitly configured with source access/capability.
@@ -181,6 +196,7 @@ impl Default for ServerConfig {
             failed_build_log_retention_days: default_failed_build_log_retention_days(),
             commit_cache_retention_days: default_commit_cache_retention_days(),
             allow_private_cache_test_targets: false,
+            trust_forwarded_builder_https: false,
             remote_build_execution_strategy: default_remote_build_execution_strategy(),
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
         }
@@ -311,5 +327,14 @@ mod tests {
         cfg.auth_mode = "local".to_string();
         cfg.validate()
             .expect("mock mode should be allowed in local auth mode");
+    }
+
+    #[test]
+    fn trust_forwarded_builder_https_defaults_false() {
+        let cfg = ServerConfig::default();
+        assert!(
+            !cfg.trust_forwarded_builder_https,
+            "credential delivery must be opt-in, not opt-out"
+        );
     }
 }

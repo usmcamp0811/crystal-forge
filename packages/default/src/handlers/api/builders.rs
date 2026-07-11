@@ -47,39 +47,62 @@ const NIX_STORE_EXPORT_ARG_BYTES_LIMIT: usize = 128 * 1024;
 const ATTIC_PUSH_PATH_CHUNK_SIZE: usize = 200;
 const BUILDER_SESSION_STALE_TIMEOUT_SECS: i64 = 60;
 
-fn forwarded_header_has_https(value: &str) -> bool {
+/// Returns true only when the server is explicitly configured to trust
+/// forwarded-proto headers from its reverse proxy AND those headers assert
+/// HTTPS for the current request.
+///
+/// The two-layer check prevents a builder from spoofing the header over a
+/// direct plaintext connection:
+///   1. `trust_forwarded_builder_https` must be `true` in `[server]` config —
+///      the operator opts in by confirming their proxy strips/rewrites these
+///      headers before forwarding.
+///   2. At least one of the standard forwarded-proto headers in the request
+///      must assert "https".
+///
+/// When `trust_forwarded_builder_https` is `false` (the default) this always
+/// returns `false`, so credential-bearing cache config is never sent.
+fn builder_https_verified_by_trusted_proxy(
+    server_config: &crate::config::ServerConfig,
+    headers: &HeaderMap,
+) -> bool {
+    if !server_config.trust_forwarded_builder_https {
+        return false;
+    }
+    forwarded_header_asserts_https(headers)
+}
+
+fn forwarded_header_asserts_https(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("https"))
+        || headers
+            .get("forwarded")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| forwarded_field_has_https(v))
+        || headers
+            .get("x-forwarded-ssl")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("on"))
+        || headers
+            .get("x-url-scheme")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("https"))
+}
+
+fn forwarded_field_has_https(value: &str) -> bool {
     value
         .split(',')
         .flat_map(|part| part.split(';'))
         .map(str::trim)
         .any(|part| {
-            let Some((name, value)) = part.split_once('=') else {
+            let Some((name, val)) = part.split_once('=') else {
                 return false;
             };
-
             name.eq_ignore_ascii_case("proto")
-                && value.trim_matches('"').eq_ignore_ascii_case("https")
+                && val.trim_matches('"').eq_ignore_ascii_case("https")
         })
-}
-
-fn builder_request_uses_https(headers: &HeaderMap) -> bool {
-    headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("https"))
-        || headers
-            .get("forwarded")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(forwarded_header_has_https)
-        || headers
-            .get("x-forwarded-ssl")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.eq_ignore_ascii_case("on"))
-        || headers
-            .get("x-url-scheme")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.eq_ignore_ascii_case("https"))
 }
 
 fn cache_push_config_contains_credentials(config: &BuilderCachePushConfig) -> bool {
@@ -1643,20 +1666,22 @@ pub async fn get_next_job(
     if cache_push
         .as_ref()
         .is_some_and(cache_push_config_contains_credentials)
-        && !builder_request_uses_https(&headers)
+        && !builder_https_verified_by_trusted_proxy(&state.server_config, &headers)
     {
         tracing::error!(
             job_id = %job.id,
             derivation_id = derivation.id,
             builder_id = %builder_id,
-            "refusing to send cache push credentials to builder over non-HTTPS transport"
+            trust_forwarded = state.server_config.trust_forwarded_builder_https,
+            "refusing to send cache push credentials: server.trust_forwarded_builder_https \
+             is false or forwarded-proto header does not assert HTTPS"
         );
         requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
             .await
             .map_err(|e| {
                 tracing::error!(
                     job_id = %job.id,
-                    "failed to requeue job after insecure builder credential transport rejection: {e}"
+                    "failed to requeue job after builder credential transport rejection: {e}"
                 );
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
@@ -3093,6 +3118,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::BuildStreamMessage;
+    use super::builder_https_verified_by_trusted_proxy;
     use super::builder_id_for_resolved_builder;
     use super::canonical_signature_payload;
     use super::chunk_derivation_archive_paths;
@@ -3581,5 +3607,84 @@ mod tests {
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body, "Failed to create builder");
+    }
+
+    // ── builder_https_verified_by_trusted_proxy tests ──────────────────────
+
+    fn make_headers_with(key: &str, value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::HeaderName::from_bytes(key.as_bytes()).unwrap(),
+            axum::http::header::HeaderValue::from_str(value).unwrap(),
+        );
+        h
+    }
+
+    fn server_config_with_trust(trust: bool) -> crate::config::ServerConfig {
+        let mut cfg = crate::config::ServerConfig::default();
+        cfg.trust_forwarded_builder_https = trust;
+        cfg
+    }
+
+    #[test]
+    fn credential_check_blocked_when_flag_false_even_with_https_header() {
+        // A builder could spoof X-Forwarded-Proto: https over plain HTTP.
+        // The flag is false (default) so the check must return false regardless.
+        let cfg = server_config_with_trust(false);
+        let headers = make_headers_with("x-forwarded-proto", "https");
+        assert!(
+            !builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            "must not trust forwarded headers when flag is off"
+        );
+    }
+
+    #[test]
+    fn credential_check_blocked_when_flag_true_but_no_header() {
+        let cfg = server_config_with_trust(true);
+        let headers = HeaderMap::new();
+        assert!(
+            !builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            "must not pass when flag is on but no forwarded-proto header present"
+        );
+    }
+
+    #[test]
+    fn credential_check_blocked_when_flag_true_but_header_says_http() {
+        let cfg = server_config_with_trust(true);
+        let headers = make_headers_with("x-forwarded-proto", "http");
+        assert!(
+            !builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            "must not pass when forwarded-proto says http"
+        );
+    }
+
+    #[test]
+    fn credential_check_passes_when_flag_true_and_x_forwarded_proto_https() {
+        let cfg = server_config_with_trust(true);
+        let headers = make_headers_with("x-forwarded-proto", "https");
+        assert!(
+            builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            "must pass when flag is on and x-forwarded-proto asserts https"
+        );
+    }
+
+    #[test]
+    fn credential_check_passes_when_flag_true_and_forwarded_proto_https() {
+        let cfg = server_config_with_trust(true);
+        let headers = make_headers_with("forwarded", "for=1.2.3.4;proto=https");
+        assert!(
+            builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            "must pass when flag is on and Forwarded field asserts proto=https"
+        );
+    }
+
+    #[test]
+    fn credential_check_passes_when_flag_true_and_x_forwarded_ssl_on() {
+        let cfg = server_config_with_trust(true);
+        let headers = make_headers_with("x-forwarded-ssl", "on");
+        assert!(
+            builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            "must pass when flag is on and x-forwarded-ssl: on"
+        );
     }
 }
