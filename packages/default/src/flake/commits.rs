@@ -1,4 +1,5 @@
 use crate::config;
+use crate::derivations::utils::build_flake_reference;
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
 use crate::queries::commits::{
@@ -1020,19 +1021,6 @@ async fn load_commit_nixos_configurations(
     names.sort();
     names.dedup();
     Ok(names)
-}
-
-fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
-    if repo_url.starts_with("git+") {
-        if repo_url.contains("?rev=") {
-            repo_url.to_string()
-        } else {
-            format!("{}?rev={}", repo_url, commit_hash)
-        }
-    } else {
-        let separator = if repo_url.contains('?') { "&" } else { "?" };
-        format!("git+{}{separator}rev={}", repo_url, commit_hash)
-    }
 }
 
 async fn load_commit_changed_files(
