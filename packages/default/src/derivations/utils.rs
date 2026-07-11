@@ -296,17 +296,73 @@ pub fn apply_cache_env(scoped: &mut Command) {
 // Flake reference building helpers
 // ============================================================================
 
+/// Normalize a Git repository URL into a proper Nix flake reference URL.
+///
+/// Nix's `builtins.getFlake` only accepts properly-formed flake references.
+/// SCP-style SSH URLs like `git@github.com:org/repo.git` are not valid flake
+/// references — they must be converted to `git+ssh://git@github.com/org/repo.git`.
+///
+/// This function handles:
+/// - SCP-style `user@host:path`   → `git+ssh://user@host/path`
+/// - `ssh://user@host/path`       → `git+ssh://user@host/path`
+/// - `https://host/path`          → `git+https://host/path` (pass through)
+/// - Already has `git+`           → pass through unchanged
+/// - `github:owner/repo`          → `git+github:owner/repo` (Nix shorthand, pass through)
+/// - Bare `host:path`             → `git+ssh://git@host/path`
+pub fn normalize_flake_git_url(repo_url: &str) -> String {
+    // Already has git+ prefix — Nix will handle it directly.
+    if repo_url.starts_with("git+") {
+        return repo_url.to_string();
+    }
+
+    // github:/gitlab:/sourcehut: shorthands or other scheme:// URLs — just add git+
+    if repo_url.contains("://") && !repo_url.starts_with("ssh://") {
+        return format!("git+{repo_url}");
+    }
+
+    // SCP-style: git@host:path
+    // Convert to proper git+ssh://git@host/path form.
+    if let Some(rest) = repo_url.strip_prefix("git@") {
+        if let Some((host, path)) = rest.split_once(':') {
+            return format!("git+ssh://git@{host}/{path}");
+        }
+        // No colon, e.g. just "git@host/path" — prefix with git+ssh://
+        return format!("git+ssh://{repo_url}");
+    }
+
+    // ssh:// scheme (without git@ prefix, e.g. ssh://git@host/path)
+    if repo_url.starts_with("ssh://") {
+        return format!("git+{repo_url}");
+    }
+
+    // http:// or https://
+    if repo_url.starts_with("http://") || repo_url.starts_with("https://") {
+        return format!("git+{repo_url}");
+    }
+
+    // Bare host:path  (no user@ prefix, but looks like scp-style).
+    // Only match when the host contains a '.' to distinguish from
+    // Nix shorthands like github:owner/repo, gitlab:owner/repo, etc.
+    if let Some((host, path)) = repo_url.split_once(':') {
+        if host.contains('.') && !host.contains('/') && !path.contains("//") {
+            return format!("git+ssh://git@{host}/{path}");
+        }
+    }
+
+    // Fallback: just prefix with git+
+    format!("git+{repo_url}")
+}
+
 /// Build the base flake reference (git+url?rev=hash)
 pub fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
-    if repo_url.starts_with("git+") {
-        if repo_url.contains("?rev=") {
-            repo_url.to_string()
-        } else {
-            format!("{}?rev={}", repo_url, commit_hash)
-        }
+    // First normalize the URL so it's a valid Nix flake ref
+    let normalized = normalize_flake_git_url(repo_url);
+
+    if normalized.contains("?rev=") {
+        normalized
     } else {
-        let separator = if repo_url.contains('?') { "&" } else { "?" };
-        format!("git+{}{separator}rev={}", repo_url, commit_hash)
+        let separator = if normalized.contains('?') { "&" } else { "?" };
+        format!("{normalized}{separator}rev={commit_hash}")
     }
 }
 
@@ -592,4 +648,134 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
     }
 
     Ok((total, cached))
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_scp_ssh_url_no_dot_git() {
+        // git@host:path without .git
+        assert_eq!(
+            normalize_flake_git_url("git@github.com:ATALLC/nix-config"),
+            "git+ssh://git@github.com/ATALLC/nix-config"
+        );
+    }
+
+    #[test]
+    fn test_normalize_scp_ssh_url_with_dot_git() {
+        // git@host:path.git
+        assert_eq!(
+            normalize_flake_git_url("git@github.com:ATALLC/nix-config.git"),
+            "git+ssh://git@github.com/ATALLC/nix-config.git"
+        );
+    }
+
+    #[test]
+    fn test_normalize_shorthand_github() {
+        // github: shorthand (Nix native)
+        assert_eq!(
+            normalize_flake_git_url("github:nixos/nixpkgs"),
+            "git+github:nixos/nixpkgs"
+        );
+    }
+
+    #[test]
+    fn test_normalize_https_url_without_dot_git() {
+        assert_eq!(
+            normalize_flake_git_url("https://github.com/nixos/nixpkgs"),
+            "git+https://github.com/nixos/nixpkgs"
+        );
+    }
+
+    #[test]
+    fn test_normalize_https_url_with_dot_git() {
+        assert_eq!(
+            normalize_flake_git_url("https://github.com/nixos/nixpkgs.git"),
+            "git+https://github.com/nixos/nixpkgs.git"
+        );
+    }
+
+    #[test]
+    fn test_normalize_ssh_scheme_url() {
+        assert_eq!(
+            normalize_flake_git_url("ssh://git@github.com/nixos/nixpkgs"),
+            "git+ssh://git@github.com/nixos/nixpkgs"
+        );
+    }
+
+    #[test]
+    fn test_normalize_already_has_git_plus() {
+        assert_eq!(
+            normalize_flake_git_url("git+https://github.com/nixos/nixpkgs"),
+            "git+https://github.com/nixos/nixpkgs"
+        );
+    }
+
+    #[test]
+    fn test_normalize_already_has_git_plus_ssh() {
+        assert_eq!(
+            normalize_flake_git_url("git+ssh://git@github.com/nixos/nixpkgs"),
+            "git+ssh://git@github.com/nixos/nixpkgs"
+        );
+    }
+
+    #[test]
+    fn test_normalize_bare_host_colon_path() {
+        // Bare host:path without git@ prefix
+        assert_eq!(
+            normalize_flake_git_url("github.com:ATALLC/nix-config"),
+            "git+ssh://git@github.com/ATALLC/nix-config"
+        );
+    }
+
+    #[test]
+    fn test_normalize_scp_url_with_query() {
+        assert_eq!(
+            normalize_flake_git_url("git@github.com:ATALLC/nix-config?ref=main"),
+            "git+ssh://git@github.com/ATALLC/nix-config?ref=main"
+        );
+    }
+
+    #[test]
+    fn test_build_flake_reference_scp_url() {
+        let result = build_flake_reference("git@github.com:ATALLC/nix-config.git", "abc123");
+        assert_eq!(
+            result,
+            "git+ssh://git@github.com/ATALLC/nix-config.git?rev=abc123"
+        );
+    }
+
+    #[test]
+    fn test_build_flake_reference_https_url() {
+        let result = build_flake_reference("https://github.com/ATALLC/nix-config", "abc123");
+        assert_eq!(
+            result,
+            "git+https://github.com/ATALLC/nix-config?rev=abc123"
+        );
+    }
+
+    #[test]
+    fn test_build_flake_reference_already_git_plus() {
+        let result = build_flake_reference(
+            "git+https://github.com/ATALLC/nix-config?rev=def456",
+            "abc123",
+        );
+        // Already has ?rev= so it's returned as-is
+        assert_eq!(
+            result,
+            "git+https://github.com/ATALLC/nix-config?rev=def456"
+        );
+    }
+
+    #[test]
+    fn test_build_flake_reference_shorthand() {
+        let result = build_flake_reference("github:nixos/nixpkgs", "abc123");
+        assert_eq!(result, "git+github:nixos/nixpkgs?rev=abc123");
+    }
 }
