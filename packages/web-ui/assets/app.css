@@ -2121,8 +2121,26 @@ html[data-theme="light"] .sd-nix {
   font-variant-numeric: tabular-nums;
 }
 
+.nav-item .nav-count.nav-count-alert {
+  background: color-mix(in oklab, var(--cf-red) 16%, transparent);
+  color: var(--cf-red);
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 10.5px;
+}
+
 .nav-item.active .nav-count {
   color: var(--cf-text-secondary);
+}
+
+.nav-item.active .nav-count.nav-count-alert {
+  color: #fff;
 }
 
 .nav-item-placeholder {
@@ -2142,9 +2160,19 @@ html[data-theme="light"] .sd-nix {
   margin: 2px 8px;
 }
 
-.sidebar.rail .nav-item .nav-label,
-.sidebar.rail .nav-item .nav-count {
+.sidebar.rail .nav-item .nav-label {
   display: none;
+}
+
+.sidebar.rail .nav-item .nav-count {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  margin-left: 0;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  font-size: 10px;
 }
 
 .sidebar.rail .nav-section-label {
