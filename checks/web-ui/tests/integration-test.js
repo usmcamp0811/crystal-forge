@@ -3244,6 +3244,41 @@ const steps = [
     },
   },
   {
+    name: "12d2-systems-side-panel-deployment-progress",
+    description: "Systems side panel shows live deployment progress and real recent activity",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2200);
+      await page
+        .getByPlaceholder("Filter by hostname, commit, or flake…")
+        .first()
+        .fill("atlas-03");
+      await page.waitForTimeout(600);
+      await page.getByRole("button", { name: "Cards" }).first().click();
+      await page.waitForTimeout(600);
+      const systemCard = page.locator(".sys-card").filter({ hasText: "atlas-03" }).first();
+      await assertVisible(systemCard, "Expected atlas-03 card to be visible", 15000);
+      await systemCard.click({ force: true, position: { x: 24, y: 24 } });
+      const panel = page.locator("[data-testid='systems-side-panel']").first();
+      await assertVisible(panel, "Expected systems side panel to open for atlas-03", 15000);
+      await assertVisible(
+        panel.getByText(/Deployment in progress/i).first(),
+        "Expected deployment progress banner in systems side panel",
+        15000,
+      );
+      await assertVisible(
+        panel.getByText(/Applying/i).first(),
+        "Expected applying stage to be visible in systems side panel",
+        15000,
+      );
+      await assertVisible(
+        panel.getByText(/Deployment started/i).first(),
+        "Expected real deployment-started activity in systems side panel",
+        15000,
+      );
+    },
+  },
+  {
     name: "12e-systems-edit-modal",
     description: "Systems edit modal for existing systems",
     action: async (page) => {

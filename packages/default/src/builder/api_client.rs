@@ -707,10 +707,17 @@ impl BuilderApiClient {
     }
 
     /// Complete a job successfully
-    pub async fn complete_job(&self, job_id: uuid::Uuid, output_path: &str) -> Result<()> {
+    pub async fn complete_job(
+        &self,
+        job_id: uuid::Uuid,
+        output_path: &str,
+        cache_reference: Option<&str>,
+    ) -> Result<()> {
         #[derive(Serialize)]
         struct CompleteRequest {
             output_path: String,
+            cache_pushed: bool,
+            cache_reference: Option<String>,
         }
 
         let path = format!(
@@ -720,6 +727,8 @@ impl BuilderApiClient {
         let url = format!("{}{}", self.server_url, path);
         let request = CompleteRequest {
             output_path: output_path.to_string(),
+            cache_pushed: cache_reference.is_some(),
+            cache_reference: cache_reference.map(ToString::to_string),
         };
         let body = serde_json::to_vec(&request)?;
         let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);

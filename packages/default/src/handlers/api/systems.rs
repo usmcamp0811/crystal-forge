@@ -13,11 +13,12 @@ use crate::api::models::{
     ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse,
     CveScanStatusResponse, CveScanTriggerResponse, CveSummary, DeploySystemRequest,
     DeploymentStatus, FieldUpdate, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
-    SystemAgentEvent, SystemCommitsResponse, SystemDetail, SystemGeneration,
-    SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
-    SystemNetworkInfo, SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
-    SystemSummary, SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest,
-    UpdateSystemRequest, VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
+    SystemAgentEvent, SystemCommitsResponse, SystemDeploymentProgress, SystemDetail,
+    SystemGeneration, SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry,
+    SystemMutationResponse, SystemNetworkInfo, SystemRollbackGenerationRequest,
+    SystemRollbackRequest, SystemSecurityInfo, SystemSummary, SystemVulnerability,
+    SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
 };
 use crate::auth::models::Role;
 use crate::handlers::agent_request::CFState;
@@ -25,18 +26,23 @@ use crate::handlers::api::rbac::{
     authenticated_user_roles, extract_request_origin, require_viewer_or_above,
 };
 use crate::models::auth_identity::AuthRole;
+use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
-use crate::queries::system_events::list_system_event_history_rows;
+use crate::queries::derivations::reset_derivation_for_rebuild;
+use crate::queries::system_events::{
+    deployment_progress_kind, deployment_progress_stage, get_system_deployment_progress_row,
+    list_system_event_history_rows,
+};
 use crate::queries::system_states::{
     fetch_system_generations, find_generation_store_path_last_seen,
 };
 use crate::queries::systems::{
     FqdnUpdate, HeartbeatIntervalUpdate, SystemAccessRow, SystemDetailRow, SystemListRow,
     commit_belongs_to_system_flake, deactivate_system, find_system_access_row,
-    get_system_detail_by_id, get_user_environment_membership_ids, list_recent_commits_for_system,
-    list_system_access_rows, list_system_agent_event_rows, list_system_history_rows,
-    touch_system_updated_at, update_public_key, update_system_desired_target,
-    update_system_metadata,
+    find_system_deployment_derivation, get_system_detail_by_id,
+    get_user_environment_membership_ids, list_recent_commits_for_system, list_system_access_rows,
+    list_system_agent_event_rows, list_system_history_rows, touch_system_updated_at,
+    update_public_key, update_system_desired_target_with_source, update_system_metadata,
 };
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
 use crate::services::systems::SystemsListContext;
@@ -975,10 +981,17 @@ pub async fn rollback_system(
         return not_found();
     }
 
-    if update_system_desired_target(&pool, system_id, target_commit)
-        .await
-        .is_err()
+    if let Err(error) = update_system_desired_target_with_source(
+        &pool,
+        system_id,
+        target_commit,
+        "manual_rollback_commit",
+    )
+    .await
     {
+        if is_uncached_deployment_target_error(&error) {
+            return deployment_target_unavailable(&error.to_string());
+        }
         return internal_error("Failed to request rollback");
     }
 
@@ -1044,9 +1057,14 @@ pub async fn rollback_system_generation(
         return not_found();
     }
 
-    if update_system_desired_target(&pool, system_id, store_path)
-        .await
-        .is_err()
+    if update_system_desired_target_with_source(
+        &pool,
+        system_id,
+        store_path,
+        "manual_rollback_generation",
+    )
+    .await
+    .is_err()
     {
         return internal_error("Failed to request generation rollback");
     }
@@ -1395,6 +1413,155 @@ fn bad_request(message: &str) -> axum::response::Response {
         .into_response()
 }
 
+fn deployment_target_unavailable(message: &str) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "deployment_target_unavailable".to_string(),
+            message: message.to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn is_uncached_deployment_target_error(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .contains("No cached NixOS store path is available")
+}
+
+async fn queue_deployment_target_prerequisite(
+    state: &CFState,
+    system_id: Uuid,
+    target: &str,
+) -> String {
+    let row = match find_system_deployment_derivation(&state.pool, system_id, target).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return format!(
+                "No deployable NixOS derivation was found for target {target}. Re-run evaluation for this commit, then try deploy again."
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                system_id = %system_id,
+                target,
+                error = %error,
+                "failed to inspect undeployable target derivation"
+            );
+            return format!(
+                "No cached NixOS store path is available for deployment target {target}. Failed to inspect build/cache prerequisites."
+            );
+        }
+    };
+
+    if row.has_completed_cache_push {
+        return format!(
+            "Deployment target {target} has a completed cache push but did not resolve to a deployable store path. Refresh commit metadata and try again."
+        );
+    }
+
+    if let Some(store_path) = row
+        .store_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if row.has_permanent_cache_failure {
+            return format!(
+                "Deployment target {target} is built as {store_path}, but its cache push has permanently failed. Retry or fix the cache push job before deploying."
+            );
+        }
+
+        if row.has_active_cache_push {
+            return format!(
+                "Deployment target {target} is built as {store_path}, but it is not yet available from cache. A cache push job is pending or running; try deploy again after it completes."
+            );
+        }
+
+        if row.has_active_build_job {
+            return format!(
+                "Deployment target {target} is built as {store_path}, but no completed cache push exists. A rebuild is already queued or running so a builder can push it to cache; try deploy again after it completes."
+            );
+        }
+
+        if let Err(error) = reset_derivation_for_rebuild(&state.pool, row.id).await {
+            tracing::warn!(
+                derivation_id = row.id,
+                target,
+                error = %error,
+                "failed to reset built-but-uncached deployment target for rebuild"
+            );
+            return format!(
+                "Deployment target {target} is built as {store_path}, but no completed cache push exists. The server could not queue a rebuild for builder-side cache push; check the build queue."
+            );
+        }
+
+        match enqueue_build_job_for_derivation(&state.pool, row.id).await {
+            Ok(true) => {
+                state.queue_notifier.notify_build_queue();
+                return format!(
+                    "Deployment target {target} is built as {store_path}, but no completed cache push exists. Queued a rebuild so the builder can push it to cache; try deploy again after build and cache push complete."
+                );
+            }
+            Ok(false) => {
+                return format!(
+                    "Deployment target {target} is built as {store_path}, but no completed cache push exists. A rebuild could not be queued because a build job already exists or the target is no longer buildable; check the build queue."
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    derivation_id = row.id,
+                    target,
+                    error = %error,
+                    "failed to queue rebuild for built-but-uncached deployment target"
+                );
+                return format!(
+                    "Deployment target {target} is built as {store_path}, but no completed cache push exists. Queueing a rebuild for builder-side cache push failed; check the build queue."
+                );
+            }
+        }
+    }
+
+    if row.has_active_build_job {
+        return format!(
+            "Deployment target {target} is not built yet. A build job is already queued or running; try deploy again after build and cache push complete."
+        );
+    }
+
+    if row.is_buildable() {
+        match enqueue_build_job_for_derivation(&state.pool, row.id).await {
+            Ok(true) => {
+                state.queue_notifier.notify_build_queue();
+                return format!(
+                    "Deployment target {target} is not built yet. Queued a build job; try deploy again after build and cache push complete."
+                );
+            }
+            Ok(false) => {
+                return format!(
+                    "Deployment target {target} is not built yet. A build job already exists or the target is no longer buildable; check the build queue."
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    derivation_id = row.id,
+                    target,
+                    error = %error,
+                    "failed to queue build for undeployable target"
+                );
+                return format!(
+                    "Deployment target {target} is not built yet, and queuing a build job failed. Check the build queue before deploying."
+                );
+            }
+        }
+    }
+
+    format!(
+        "Deployment target {target} is not deployable yet. It must finish evaluation, build successfully, and be pushed to cache before deploy."
+    )
+}
+
 fn not_found() -> axum::response::Response {
     (
         StatusCode::NOT_FOUND,
@@ -1469,6 +1636,7 @@ fn validate_target_commit(value: &str) -> Result<(), String> {
 }
 
 pub async fn deploy_system(
+    State(state): State<CFState>,
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
@@ -1522,10 +1690,14 @@ pub async fn deploy_system(
     }
 
     // Set the desired_target to trigger deployment
-    if update_system_desired_target(&pool, system_id, commit_sha)
-        .await
-        .is_err()
+    if let Err(error) =
+        update_system_desired_target_with_source(&pool, system_id, commit_sha, "manual_deploy")
+            .await
     {
+        if is_uncached_deployment_target_error(&error) {
+            let message = queue_deployment_target_prerequisite(&state, system_id, commit_sha).await;
+            return deployment_target_unavailable(&message);
+        }
         return internal_error("Failed to request deployment");
     }
 
@@ -1856,6 +2028,71 @@ pub async fn verify_generation_closure(
     (StatusCode::OK, Json(response)).into_response()
 }
 
+pub async fn get_system_deployment_status(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    let progress_row = match get_system_deployment_progress_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return StatusCode::NO_CONTENT.into_response(),
+        Err(_) => return internal_error("Failed to load deployment status"),
+    };
+
+    let Some(stage) = deployment_progress_stage(
+        &progress_row.status,
+        progress_row.expires_at,
+        progress_row.delivered_at,
+        progress_row.applying_at,
+        chrono::Utc::now(),
+    ) else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+
+    (
+        StatusCode::OK,
+        Json(SystemDeploymentProgress {
+            id: progress_row.id,
+            stage: stage.to_string(),
+            kind: deployment_progress_kind(&progress_row.source).to_string(),
+            target_store_path: progress_row.target_store_path,
+            target_commit: progress_row.target_commit,
+            target_generation: progress_row.target_generation,
+            source: progress_row.source,
+            issued_at: progress_row.issued_at,
+            delivered_at: progress_row.delivered_at,
+            applying_at: progress_row.applying_at,
+            completed_at: progress_row.completed_at,
+            failed_at: progress_row.failed_at,
+            failure_message: progress_row.failure_message,
+        }),
+    )
+        .into_response()
+}
+
 /// Classify a history row into `(event_kind, actor)`.
 ///
 /// `cf_deployment` = deploy driven through Crystal Forge; `config_change` =
@@ -1891,6 +2128,7 @@ fn classify_history_event(
 
 fn event_history_kind(event_type: &str) -> (&'static str, &'static str, &'static str) {
     match event_type {
+        "cf_deployment_started" => ("cf_deployment", "crystal-forge", "started"),
         "cf_deployment_succeeded" => ("cf_deployment", "crystal-forge", "succeeded"),
         "cf_deployment_failed" => ("cf_deployment", "crystal-forge", "failed"),
         "local_rebuild_detected" => ("local_rebuild", "on-host", "recorded"),
@@ -1902,6 +2140,7 @@ fn event_history_kind(event_type: &str) -> (&'static str, &'static str, &'static
 
 fn event_history_title(event_type: &str) -> &'static str {
     match event_type {
+        "cf_deployment_started" => "Deployment started",
         "cf_deployment_succeeded" => "Deployed through Crystal Forge",
         "cf_deployment_failed" => "Deploy failed to activate",
         "local_rebuild_detected" => "nixos-rebuild switch on host",
@@ -2616,11 +2855,11 @@ mod tests {
 
     #[tokio::test]
     async fn deploy_system_requires_authenticated_role() {
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
-            .expect("lazy pool should construct");
+        let state = test_cf_state();
+        let pool = state.pool.clone();
 
         let response = deploy_system(
+            State(state),
             State(pool),
             HeaderMap::new(),
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
@@ -2632,6 +2871,33 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn deploy_target_prerequisite_distinguishes_built_and_buildable_rows() {
+        let built = crate::queries::systems::SystemDeploymentDerivationRow {
+            id: 1,
+            store_path: Some("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system".to_string()),
+            status_id: 10,
+            has_completed_cache_push: false,
+            has_active_cache_push: false,
+            has_permanent_cache_failure: false,
+            has_active_build_job: false,
+        };
+        assert!(built.has_store_path());
+        assert!(!built.is_buildable());
+
+        let buildable = crate::queries::systems::SystemDeploymentDerivationRow {
+            id: 2,
+            store_path: None,
+            status_id: 5,
+            has_completed_cache_push: false,
+            has_active_cache_push: false,
+            has_permanent_cache_failure: false,
+            has_active_build_job: false,
+        };
+        assert!(!buildable.has_store_path());
+        assert!(buildable.is_buildable());
     }
 
     #[tokio::test]

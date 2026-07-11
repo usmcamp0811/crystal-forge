@@ -5,7 +5,8 @@ use gloo_storage::{LocalStorage, Storage};
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
-    DeploymentStatus, HealthStatus, SystemDetail, SystemSummary, SystemsListParams,
+    DeploymentStatus, HealthStatus, SystemDetail, SystemHistoryEntry, SystemSummary,
+    SystemsListParams,
 };
 use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::filters::ViewMode;
@@ -17,7 +18,7 @@ use crate::components::modals::{
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::system::{
-    DeploySystemModal, EditSystemModal, SystemCardV2, deployment_state_label,
+    DeploySystemModal, EditSystemModal, PendingDeployBanner, SystemCardV2, deployment_state_label,
 };
 use crate::components::systems_stat_strip::SystemsStatStrip;
 use crate::components::tables::SystemsTable;
@@ -31,8 +32,9 @@ use crate::state::auth;
 use crate::systems::adapter::{
     create_system_via_api, deactivate_system_via_api, deploy_system_via_api, fallback_flake_names,
     fetch_system_commits_via_api, load_flake_context_with_fallback, load_flake_names_with_fallback,
-    load_system_detail_with_fallback, load_systems_with_fallback, update_system_public_key_via_api,
-    update_system_via_api,
+    load_system_deployment_progress_with_fallback, load_system_detail_with_fallback,
+    load_system_history_with_fallback, load_systems_with_fallback,
+    update_system_public_key_via_api, update_system_via_api,
 };
 use crate::theme;
 
@@ -69,6 +71,63 @@ fn load_density() -> bool {
         .flatten()
         .map(|v| v == "compact")
         .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ActivityRow {
+    title: String,
+    sub: Option<String>,
+    color: &'static str,
+    icon: IconName,
+    timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+fn activity_row_from_history(entry: &SystemHistoryEntry) -> ActivityRow {
+    let event_kind = entry.event_kind.as_str();
+    let outcome = entry.outcome.as_str();
+    let title = match (event_kind, outcome) {
+        ("cf_deployment", "started") => "Deployment started".to_string(),
+        ("cf_deployment", "failed") => "Deploy failed".to_string(),
+        ("cf_deployment", _) => entry
+            .generation
+            .map(|generation| format!("Deployed #{generation}"))
+            .unwrap_or_else(|| "Deployed".to_string()),
+        ("local_rebuild", _) => {
+            if entry.reconciled {
+                "Local rebuild (reconciled)".to_string()
+            } else {
+                "Local rebuild (out of band)".to_string()
+            }
+        }
+        ("restart", _) => "System restarted".to_string(),
+        ("agent_restart", _) => "Agent restarted".to_string(),
+        _ => entry
+            .title
+            .clone()
+            .unwrap_or_else(|| entry.change_reason.clone()),
+    };
+    let sub = entry
+        .commit_hash
+        .clone()
+        .or_else(|| entry.store_path.clone())
+        .or_else(|| entry.title.clone());
+    let (color, icon) = match (event_kind, outcome, entry.reconciled) {
+        ("cf_deployment", "failed", _) => ("#f87171", IconName::X),
+        ("cf_deployment", "started", _) => ("#60a5fa", IconName::Deploy),
+        ("cf_deployment", _, _) => ("#a78bfa", IconName::Deploy),
+        ("local_rebuild", _, true) => ("#60a5fa", IconName::Edit),
+        ("local_rebuild", _, false) => ("#fbbf24", IconName::Warn),
+        ("restart", _, _) | ("agent_restart", _, _) => ("#60a5fa", IconName::Power),
+        _ => ("#9ca3af", IconName::History),
+    };
+
+    ActivityRow {
+        title,
+        sub,
+        color,
+        icon,
+        timestamp: entry.occurred_at.unwrap_or(entry.timestamp),
+    }
 }
 
 /// Systems list with toggles and filters.
@@ -1067,6 +1126,46 @@ fn SystemPreviewPanel(
 
     let now = now_tick();
 
+    let mut deployment_progress_poll_tick = use_signal(|| 0_u64);
+    let deployment_progress_resource = use_resource({
+        let system_id = detail.id;
+        move || async move {
+            let _ = deployment_progress_poll_tick();
+            load_system_deployment_progress_with_fallback(system_id).await
+        }
+    });
+    use_future({
+        let mut deployment_progress_poll_tick = deployment_progress_poll_tick.clone();
+        move || async move {
+            loop {
+                gloo_timers::future::TimeoutFuture::new(4_000).await;
+                deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1);
+            }
+        }
+    });
+
+    let history_resource = use_resource({
+        let system_id = detail.id;
+        move || async move { load_system_history_with_fallback(system_id).await }
+    });
+
+    let deployment_progress = deployment_progress_resource
+        .read_unchecked()
+        .as_ref()
+        .and_then(|result| result.progress.clone());
+    let recent_activity_rows = history_resource
+        .read_unchecked()
+        .as_ref()
+        .map(|result| {
+            result
+                .entries
+                .iter()
+                .take(5)
+                .map(activity_row_from_history)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
     let status_color = match detail.health_status {
         HealthStatus::Healthy => "#34d399",
         HealthStatus::Warning => "#fbbf24",
@@ -1081,10 +1180,19 @@ fn SystemPreviewPanel(
             heartbeat_interval_sec as f64 - now.signed_duration_since(dt).num_seconds() as f64
         })
         .unwrap_or(0.0);
-    let last_heartbeat = detail
-        .last_seen
-        .map(|dt| format_relative_time_from(now, dt))
-        .unwrap_or_else(|| "Never".to_string());
+    let last_heartbeat = if let Some(progress) = deployment_progress.as_ref() {
+        let action = if progress.kind == "rollback" {
+            "Rollback"
+        } else {
+            "Deployment"
+        };
+        format!("{action} {}", progress.stage.replace('_', " "))
+    } else {
+        detail
+            .last_seen
+            .map(|dt| format_relative_time_from(now, dt))
+            .unwrap_or_else(|| "Never".to_string())
+    };
 
     let (env_fg, env_bg, env_border) = env_colors_for_badge(
         detail.environment.as_deref().unwrap_or("unknown"),
@@ -1134,27 +1242,6 @@ fn SystemPreviewPanel(
         | DeploymentStatus::NoCommitsAvailable
         | DeploymentStatus::Unknown => ChipVariant::Unknown,
     };
-
-    let mut timeline = vec![
-        (
-            "System record updated".to_string(),
-            "#34d399".to_string(),
-            detail.updated_at,
-        ),
-        (
-            "System registered".to_string(),
-            "#a78bfa".to_string(),
-            detail.created_at,
-        ),
-    ];
-    if let Some(last_seen_at) = detail.last_seen {
-        timeline.push((
-            "Heartbeat received".to_string(),
-            "#60a5fa".to_string(),
-            last_seen_at,
-        ));
-    }
-    timeline.sort_by(|a, b| b.2.cmp(&a.2));
 
     rsx! {
         div {
@@ -1207,6 +1294,19 @@ fn SystemPreviewPanel(
 
             div {
                 class: "panel-body",
+                if let Some(progress) = deployment_progress.clone() {
+                    section {
+                        class: "panel-section",
+                        PendingDeployBanner {
+                            progress,
+                            hostname: detail.hostname.clone(),
+                            heartbeat_interval_secs: detail.effective_heartbeat_interval_secs as i64,
+                            heartbeat_next_in_secs: Some(heartbeat_next_in_sec),
+                            on_dismiss: move |_| deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1),
+                            on_view_logs: move |_| on_open_detail.call(()),
+                        }
+                    }
+                }
                 section {
                     class: "panel-section",
                     div {
@@ -1304,14 +1404,21 @@ fn SystemPreviewPanel(
                     h3 { "Recent activity" }
                     div {
                         class: "timeline",
-                        for (title, color, at) in timeline {
-                            div {
-                                class: "tl-item",
-                                span { class: "tl-dot", style: "--status-color: {color};" }
+                        if recent_activity_rows.is_empty() {
+                            div { class: "tl-empty", "No deployment activity recorded yet." }
+                        } else {
+                            for row in recent_activity_rows {
                                 div {
-                                    class: "tl-body",
-                                    div { class: "tl-title", "{title}" }
-                                    div { class: "tl-meta", "{format_relative_time_from(now, at)}" }
+                                    class: "tl-item",
+                                    span { class: "tl-dot", style: "--status-color: {row.color};" }
+                                    div {
+                                        class: "tl-body",
+                                        div { class: "tl-title", span { style: "color: {row.color}; flex-shrink: 0; line-height: 0;", Icon { name: row.icon, size: 12 } } span { "{row.title}" } }
+                                        if let Some(sub) = row.sub {
+                                            div { class: "tl-sub mono", title: "{sub}", "{sub}" }
+                                        }
+                                        div { class: "tl-meta", "{format_relative_time_from(now, row.timestamp)}" }
+                                    }
                                 }
                             }
                         }

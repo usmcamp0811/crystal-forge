@@ -55,19 +55,22 @@ function useDeployStages(pendingDeploy, onClear) {
   React.useEffect(() => {
     if (!pendingDeploy) { setStage(null); return; }
     setStage("queued");
-    const t1 = setTimeout(() => setStage("picked-up"), 4200);
-    const t2 = setTimeout(() => setStage("applying"), 6400);
-    const t3 = setTimeout(() => setStage("activated"), 9800);
-    const t4 = setTimeout(() => onClear?.(), 13500);
+    // Pull-based agent: it only checks in on its own heartbeat cadence, so there's
+    // almost always a real wait here — never assume it's listening right away.
+    const t1 = setTimeout(() => setStage("picked-up"), 15000);
+    const t2 = setTimeout(() => setStage("applying"), 17200);
+    const t3 = setTimeout(() => setStage("activated"), 20600);
+    const t4 = setTimeout(() => onClear?.(), 24300);
     return () => { [t1,t2,t3,t4].forEach(clearTimeout); };
   }, [pendingDeploy?.at]);
   return stage;
 }
 
-function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, onOpenCommit, pendingDeploy, onStartPending, onClearPending }) {
-  const [tab, setTab] = React.useState("overview");
+function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, onOpenCommit, pendingDeploy, onStartPending, onClearPending, initialTab }) {
+  const [tab, setTab] = React.useState(initialTab || "overview");
   const [editSystem, setEditSystem] = React.useState(false);
   const deployStage = useDeployStages(pendingDeploy, onClearPending);
+  React.useEffect(() => { setTab(initialTab || "overview"); }, [sys.id, initialTab]);
   const [logsJump, setLogsJump] = React.useState(null);
   const [rollbackTarget, setRollbackTarget] = React.useState(null);
   const [rollbackConfirm, setRollbackConfirm] = React.useState(false);
@@ -104,7 +107,7 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
             <button className="btn btn-ghost focus-ring" onClick={() => setRollbackOpen(true)}><Icon name="rollback" size={14} /> Rollback</button>
             <button className="btn btn-ghost focus-ring" onClick={() => setSshOpen(true)}><Icon name="terminal" size={14} /> SSH</button>
             <button className="btn btn-ghost focus-ring" onClick={() => onEdit?.(sys)}><Icon name="gear" size={14} /> Edit</button>
-            <button className="btn btn-primary focus-ring" onClick={() => onDeploy(sys)}>
+            <button className="btn btn-primary focus-ring" onClick={() => setTab("deploy")}>
               <Icon name="deploy" size={14} /> Deploy
             </button>
           </div>
@@ -115,15 +118,7 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
           <div className="sd-metric">
             <div className="sd-metric-label">Heartbeat</div>
             <div className="sd-metric-val">
-              {deployStage
-                ? <div className="hb-waiting" title="Waiting for the agent to check in">
-                    {deployStage === "queued"
-                      ? <><Spinner size={18} /><span className="hb-waiting-txt">awaiting agent</span></>
-                      : deployStage === "activated"
-                        ? <><Icon name="check" size={18} style={{ color:"#34d399" }} /><span className="hb-waiting-txt" style={{ color:"#34d399" }}>activated</span></>
-                        : <><Spinner size={18} /><span className="hb-waiting-txt">{deployStage === "picked-up" ? "picked up" : "applying"}</span></>}
-                  </div>
-                : <HeartbeatSpinner intervalSec={sys.heartbeatIntervalSec} nextInSec={sys.heartbeatNextInSec} size={36} />}
+              <HeartbeatSpinner intervalSec={sys.heartbeatIntervalSec} nextInSec={sys.heartbeatNextInSec} size={36} deployStage={deployStage} deployStartedAt={pendingDeploy?.at}/>
             </div>
           </div>
           <div className="sd-metric">
@@ -150,13 +145,13 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
           </div>
         </div>
 
-        {deployStage && (
+        {deployStage && pendingDeploy && (
           <PendingDeployBanner
             stage={deployStage}
             stages={DEPLOY_STAGES}
-            commit={pendingDeploy.commit}
-            kind={pendingDeploy.kind}
-            gen={pendingDeploy.gen}
+            commit={pendingDeploy?.commit}
+            kind={pendingDeploy?.kind}
+            gen={pendingDeploy?.gen}
             sys={sys}
             onDismiss={onClearPending}
             onViewLogs={() => setTab("logs")}

@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 const RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL: &str = r#"
-SELECT COALESCE(d.store_path, d.expected_store_path) AS store_path
+SELECT d.store_path AS store_path
 FROM systems s
 JOIN commits c ON c.flake_id = s.flake_id
 JOIN derivations d ON d.commit_id = c.id
@@ -16,8 +16,55 @@ WHERE s.id = $1
   AND LOWER(c.git_commit_hash) = LOWER($2)
   AND d.derivation_type = 'nixos'
   AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
-  AND COALESCE(d.store_path, d.expected_store_path) IS NOT NULL
-  AND BTRIM(COALESCE(d.store_path, d.expected_store_path)) <> ''
+  AND d.store_path IS NOT NULL
+  AND BTRIM(d.store_path) <> ''
+  AND EXISTS (
+      SELECT 1
+      FROM cache_push_jobs cpj
+      WHERE cpj.derivation_id = d.id
+        AND cpj.status = 'completed'
+  )
+ORDER BY d.id DESC
+LIMIT 1
+"#;
+
+const FIND_SYSTEM_DEPLOYMENT_DERIVATION_SQL: &str = r#"
+SELECT
+    d.id,
+    d.store_path,
+    d.status_id,
+    EXISTS (
+        SELECT 1
+        FROM cache_push_jobs cpj
+        WHERE cpj.derivation_id = d.id
+          AND cpj.status = 'completed'
+    ) AS has_completed_cache_push,
+    EXISTS (
+        SELECT 1
+        FROM cache_push_jobs cpj
+        WHERE cpj.derivation_id = d.id
+          AND cpj.status IN ('pending', 'in_progress')
+    ) AS has_active_cache_push,
+    EXISTS (
+        SELECT 1
+        FROM cache_push_jobs cpj
+        WHERE cpj.derivation_id = d.id
+          AND cpj.status = 'failed'
+          AND cpj.attempts >= 5
+    ) AS has_permanent_cache_failure,
+    EXISTS (
+        SELECT 1
+        FROM build_jobs bj
+        WHERE bj.derivation_id = d.id
+          AND bj.status IN ('queued', 'building', 'cancelling')
+    ) AS has_active_build_job
+FROM systems s
+JOIN commits c ON c.flake_id = s.flake_id
+JOIN derivations d ON d.commit_id = c.id
+WHERE s.id = $1
+  AND LOWER(c.git_commit_hash) = LOWER($2)
+  AND d.derivation_type = 'nixos'
+  AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
 ORDER BY d.id DESC
 LIMIT 1
 "#;
@@ -323,6 +370,7 @@ pub async fn get_desired_target_by_hostname(
 
 #[derive(Debug, sqlx::FromRow)]
 struct AgentDesiredTargetRow {
+    id: Uuid,
     deployment_policy: String,
     desired_target: Option<String>,
     desired_target_set_at: Option<DateTime<Utc>>,
@@ -333,10 +381,28 @@ const MANUAL_DESIRED_TARGET_MAX_AGE_MINUTES: i64 = 30;
 const CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL: &str = r#"
 UPDATE systems
 SET desired_target = NULL, desired_target_set_at = NULL, updated_at = NOW()
-WHERE hostname = $1
-  AND deployment_policy = 'manual'
+WHERE id = $1
   AND desired_target IS NOT DISTINCT FROM $2
   AND desired_target_set_at IS NOT DISTINCT FROM $3
+"#;
+
+const EXPIRE_STALE_MANUAL_PENDING_DEPLOYMENT_SQL: &str = r#"
+UPDATE pending_system_deployments
+SET status = 'expired', completed_at = NOW()
+WHERE system_id = $1
+  AND target_store_path = $2
+  AND status = 'pending'
+  AND source LIKE 'manual_%'
+"#;
+
+const LATEST_MANUAL_PENDING_DEPLOYMENT_STATUS_SQL: &str = r#"
+SELECT status
+FROM pending_system_deployments
+WHERE system_id = $1
+  AND target_store_path = $2
+  AND source LIKE 'manual_%'
+ORDER BY issued_at DESC, id DESC
+LIMIT 1
 "#;
 
 fn should_send_desired_target_to_agent(
@@ -365,7 +431,7 @@ pub async fn get_agent_desired_target_by_hostname(
     hostname: &str,
 ) -> Result<Option<String>> {
     let row = sqlx::query_as::<_, AgentDesiredTargetRow>(
-        "SELECT deployment_policy, desired_target, desired_target_set_at FROM systems WHERE hostname = $1",
+        "SELECT id, deployment_policy, desired_target, desired_target_set_at FROM systems WHERE hostname = $1",
     )
     .bind(hostname)
     .fetch_optional(pool)
@@ -376,6 +442,19 @@ pub async fn get_agent_desired_target_by_hostname(
     };
 
     let now = Utc::now();
+    if matches!(row.deployment_policy.as_str(), "manual" | "pinned")
+        && manual_target_has_terminal_pending_deployment(
+            pool,
+            row.id,
+            row.desired_target.as_deref(),
+        )
+        .await?
+    {
+        clear_manual_desired_target(pool, row.id, &row.desired_target, row.desired_target_set_at)
+            .await?;
+        return Ok(None);
+    }
+
     if should_send_desired_target_to_agent(
         &row.deployment_policy,
         row.desired_target.as_deref(),
@@ -386,15 +465,55 @@ pub async fn get_agent_desired_target_by_hostname(
     }
 
     if row.deployment_policy == "manual" && row.desired_target.is_some() {
-        sqlx::query(CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL)
-            .bind(hostname)
-            .bind(&row.desired_target)
-            .bind(row.desired_target_set_at)
-            .execute(pool)
+        clear_manual_desired_target(pool, row.id, &row.desired_target, row.desired_target_set_at)
             .await?;
+
+        if let Some(target) = row.desired_target.as_deref() {
+            sqlx::query(EXPIRE_STALE_MANUAL_PENDING_DEPLOYMENT_SQL)
+                .bind(row.id)
+                .bind(target)
+                .execute(pool)
+                .await?;
+        }
     }
 
     Ok(None)
+}
+
+async fn manual_target_has_terminal_pending_deployment(
+    pool: &PgPool,
+    system_id: Uuid,
+    desired_target: Option<&str>,
+) -> Result<bool> {
+    let Some(target) = desired_target else {
+        return Ok(false);
+    };
+
+    let status = sqlx::query_scalar::<_, String>(LATEST_MANUAL_PENDING_DEPLOYMENT_STATUS_SQL)
+        .bind(system_id)
+        .bind(target)
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(matches!(
+        status.as_deref(),
+        Some("failed" | "superseded" | "expired")
+    ))
+}
+
+async fn clear_manual_desired_target(
+    pool: &PgPool,
+    system_id: Uuid,
+    desired_target: &Option<String>,
+    desired_target_set_at: Option<DateTime<Utc>>,
+) -> Result<()> {
+    sqlx::query(CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL)
+        .bind(system_id)
+        .bind(desired_target)
+        .bind(desired_target_set_at)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Fetch the per-system heartbeat interval from the systems table.
@@ -594,11 +713,20 @@ pub async fn update_system_desired_target(
     system_id: Uuid,
     target: &str,
 ) -> Result<()> {
+    update_system_desired_target_with_source(pool, system_id, target, "api_desired_target").await
+}
+
+pub async fn update_system_desired_target_with_source(
+    pool: &PgPool,
+    system_id: Uuid,
+    target: &str,
+    source: &str,
+) -> Result<()> {
     let desired_target = resolve_system_deployment_target(pool, system_id, target)
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "No NixOS store path is available for deployment target {target} on system {system_id}"
+                "No cached NixOS store path is available for deployment target {target} on system {system_id}"
             )
         })?;
 
@@ -614,13 +742,8 @@ pub async fn update_system_desired_target(
     .execute(&mut *tx)
     .await?;
 
-    set_pending_deployment_target_tx(
-        &mut tx,
-        system_id,
-        Some(desired_target.as_str()),
-        "api_desired_target",
-    )
-    .await?;
+    set_pending_deployment_target_tx(&mut tx, system_id, Some(desired_target.as_str()), source)
+        .await?;
 
     tx.commit().await?;
     Ok(())
@@ -732,6 +855,8 @@ pub async fn list_system_agent_event_rows(
         )
         SELECT *
         FROM (
+            -- Agent state transitions (startup, config_change, cf_deployment only;
+            -- state_delta is reclassified heartbeat telemetry, not shown in logs)
             SELECT
                 ss.timestamp,
                 CASE
@@ -742,15 +867,41 @@ pub async fn list_system_agent_event_rows(
                 END AS level,
                 'state_change'::text AS event_type,
                 CONCAT(
-                    'agent reported ', COALESCE(ss.change_reason, 'state_delta'),
+                    CASE ss.change_reason
+                        WHEN 'startup' THEN 'Agent started'
+                        WHEN 'config_change' THEN 'Configuration changed'
+                        WHEN 'cf_deployment' THEN 'Deployment state recorded'
+                        ELSE CONCAT('agent reported ', COALESCE(ss.change_reason, 'state_delta'))
+                    END,
                     COALESCE(CONCAT(' (', ss.store_path, ')'), '')
                 ) AS message,
                 (ss.change_reason = 'cf_deployment') AS deployment_related
             FROM target t
             JOIN system_states ss ON ss.hostname = t.hostname
+            WHERE ss.change_reason IS DISTINCT FROM 'state_delta'
 
             UNION ALL
 
+            -- Deployment lifecycle events from the event system
+            SELECT
+                se.occurred_at AS timestamp,
+                'info'::text AS level,
+                se.event_type,
+                CASE se.event_type
+                    WHEN 'cf_deployment_started'  THEN 'Deployment started — applying new configuration'
+                    WHEN 'cf_deployment_succeeded' THEN 'Deployment activated successfully'
+                    WHEN 'cf_deployment_failed'    THEN 'Deployment failed to activate'
+                    ELSE se.event_type
+                END AS message,
+                true AS deployment_related
+            FROM target t
+            JOIN systems s ON s.hostname = t.hostname
+            JOIN system_events se ON se.system_id = s.id
+            WHERE se.event_type IN ('cf_deployment_started', 'cf_deployment_succeeded', 'cf_deployment_failed')
+
+            UNION ALL
+
+            -- Heartbeats
             SELECT
                 ah.timestamp,
                 'debug'::text AS level,
@@ -814,6 +965,48 @@ pub async fn resolve_system_deployment_target(
         .await?;
 
     Ok(store_path)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SystemDeploymentDerivationRow {
+    pub id: i32,
+    pub store_path: Option<String>,
+    pub status_id: i32,
+    pub has_completed_cache_push: bool,
+    pub has_active_cache_push: bool,
+    pub has_permanent_cache_failure: bool,
+    pub has_active_build_job: bool,
+}
+
+impl SystemDeploymentDerivationRow {
+    pub fn has_store_path(&self) -> bool {
+        self.store_path
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    }
+
+    pub fn is_buildable(&self) -> bool {
+        self.status_id == 5
+    }
+}
+
+pub async fn find_system_deployment_derivation(
+    pool: &PgPool,
+    system_id: Uuid,
+    target: &str,
+) -> Result<Option<SystemDeploymentDerivationRow>> {
+    if target.starts_with("/nix/store/") {
+        return Ok(None);
+    }
+
+    let row =
+        sqlx::query_as::<_, SystemDeploymentDerivationRow>(FIND_SYSTEM_DEPLOYMENT_DERIVATION_SQL)
+            .bind(system_id)
+            .bind(target)
+            .fetch_optional(pool)
+            .await?;
+
+    Ok(row)
 }
 
 pub async fn get_user_environment_membership_ids(
@@ -1880,9 +2073,14 @@ mod tests {
 
     #[test]
     fn deployment_target_resolution_uses_nixos_store_path_for_commit() {
+        assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("SELECT d.store_path AS store_path"));
         assert!(
-            RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL
-                .contains("COALESCE(d.store_path, d.expected_store_path)")
+            !RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("expected_store_path"),
+            "deployment target resolution must not send predicted paths to agents"
+        );
+        assert!(
+            RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("cpj.status = 'completed'"),
+            "deployment target resolution must require cache availability before agents pull"
         );
         assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("d.derivation_type = 'nixos'"));
         assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains(
@@ -2033,6 +2231,7 @@ mod tests {
 
     #[test]
     fn stale_manual_target_clear_is_guarded_against_concurrent_replacement() {
+        assert!(CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL.contains("WHERE id = $1"));
         assert!(
             CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL
                 .contains("desired_target IS NOT DISTINCT FROM $2")
@@ -2041,6 +2240,20 @@ mod tests {
             CLEAR_STALE_MANUAL_DESIRED_TARGET_SQL
                 .contains("desired_target_set_at IS NOT DISTINCT FROM $3")
         );
+    }
+
+    #[test]
+    fn stale_manual_pending_deployments_expire_with_stale_manual_target() {
+        assert!(EXPIRE_STALE_MANUAL_PENDING_DEPLOYMENT_SQL.contains("status = 'expired'"));
+        assert!(EXPIRE_STALE_MANUAL_PENDING_DEPLOYMENT_SQL.contains("status = 'pending'"));
+        assert!(EXPIRE_STALE_MANUAL_PENDING_DEPLOYMENT_SQL.contains("source LIKE 'manual_%'"));
+    }
+
+    #[test]
+    fn manual_terminal_pending_deployments_suppress_agent_target() {
+        assert!(LATEST_MANUAL_PENDING_DEPLOYMENT_STATUS_SQL.contains("target_store_path = $2"));
+        assert!(LATEST_MANUAL_PENDING_DEPLOYMENT_STATUS_SQL.contains("source LIKE 'manual_%'"));
+        assert!(LATEST_MANUAL_PENDING_DEPLOYMENT_STATUS_SQL.contains("ORDER BY issued_at DESC"));
     }
 
     #[test]

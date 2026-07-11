@@ -18,15 +18,15 @@ use uuid::Uuid;
 use crate::api::client::{
     ApiClientError, create_system, deactivate_system, deploy_system, fetch_flake_timelines,
     fetch_flakes, fetch_system, fetch_system_agent_events, fetch_system_commits,
-    fetch_system_generations, fetch_system_history, fetch_systems, update_system,
-    update_system_public_key,
+    fetch_system_generations, fetch_system_history, fetch_systems, get_system_deployment_progress,
+    update_system, update_system_public_key,
 };
 use crate::api::models::{
-    CommitInfo, CreateSystemRequest, CveSummary, DeploySystemRequest, DeploymentStatus,
-    FlakeRegistryItem, HealthStatus, PaginatedResponse, PipelineStage, SystemAgentEvent,
-    SystemCommitsResponse, SystemDetail, SystemGeneration, SystemGenerationsResponse,
-    SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemSecurityInfo, SystemSummary,
-    SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    CreateSystemRequest, CveSummary, DeploySystemRequest, DeploymentStatus, FlakeRegistryItem,
+    HealthStatus, PaginatedResponse, PipelineStage, SystemAgentEvent, SystemCommitsResponse,
+    SystemDeploymentProgress, SystemDetail, SystemGeneration, SystemHardwareInfo,
+    SystemHistoryEntry, SystemNetworkInfo, SystemSecurityInfo, SystemSummary, SystemsListParams,
+    UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -91,6 +91,13 @@ pub struct SystemAgentEventsLoadResult {
 pub struct SystemGenerationsLoadResult {
     pub generations: Vec<SystemGeneration>,
     pub current_generation: Option<i32>,
+    pub notice: Option<String>,
+    pub redirect_to_login: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SystemDeploymentProgressLoadResult {
+    pub progress: Option<SystemDeploymentProgress>,
     pub notice: Option<String>,
     pub redirect_to_login: bool,
 }
@@ -336,6 +343,28 @@ pub async fn load_system_history_with_fallback(system_id: Uuid) -> SystemHistory
         Err(error) => SystemHistoryLoadResult {
             entries: vec![],
             notice: Some(format!("History API unavailable: {error}")),
+            redirect_to_login: false,
+        },
+    }
+}
+
+pub async fn load_system_deployment_progress_with_fallback(
+    system_id: Uuid,
+) -> SystemDeploymentProgressLoadResult {
+    match get_system_deployment_progress(&system_id).await {
+        Ok(progress) => SystemDeploymentProgressLoadResult {
+            progress,
+            notice: None,
+            redirect_to_login: false,
+        },
+        Err(error) if should_redirect_to_login(&error) => SystemDeploymentProgressLoadResult {
+            progress: None,
+            notice: None,
+            redirect_to_login: true,
+        },
+        Err(error) => SystemDeploymentProgressLoadResult {
+            progress: None,
+            notice: Some(format!("Deployment status API unavailable: {error}")),
             redirect_to_login: false,
         },
     }

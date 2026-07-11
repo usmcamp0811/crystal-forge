@@ -139,6 +139,44 @@ pub fn apply_cache_config_env_to_command(cmd: &mut Command, cache: &CacheConfig)
         cmd.env("AWS_ENDPOINT_URL", v);
         cmd.env("AWS_ENDPOINT_URL_S3", v);
     }
+    if let Some(ref v) = cache.attic_token {
+        cmd.env("ATTIC_TOKEN", v);
+    }
+    if let Some(v) = attic_server_url_from_cache_config(cache) {
+        cmd.env("ATTIC_SERVER_URL", v);
+    }
+}
+
+pub fn attic_server_url_from_cache_config(cache: &CacheConfig) -> Option<String> {
+    let raw = cache.push_to.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = raw.strip_prefix("attic://") {
+        let host = rest.split('/').next()?.trim();
+        if host.is_empty() {
+            return None;
+        }
+        return Some(format!("https://{host}"));
+    }
+
+    if !(raw.starts_with("http://") || raw.starts_with("https://")) {
+        return None;
+    }
+
+    let Some(cache_name) = cache
+        .attic_cache_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Some(raw.trim_end_matches('/').to_string());
+    };
+
+    let trimmed = raw.trim_end_matches('/');
+    let suffix = format!("/{cache_name}");
+    Some(trimmed.strip_suffix(&suffix).unwrap_or(trimmed).to_string())
 }
 
 pub fn apply_cache_config_env_for_scope(scoped: &mut Command, cache: &CacheConfig) {

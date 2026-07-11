@@ -589,6 +589,26 @@ pub async fn fetch_system_history(
     fetch_json(&url).await
 }
 
+pub async fn get_system_deployment_progress(
+    id: &uuid::Uuid,
+) -> Result<Option<crate::api::models::SystemDeploymentProgress>, ApiClientError> {
+    let url = format!("{}/systems/{}/deployment-status", base_url(), id);
+    let (status, body) = send_request("GET", &url, None).await?;
+    if status == 204 {
+        return Ok(None);
+    }
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: decode_api_error_message(&body),
+        });
+    }
+
+    serde_json::from_str(&body)
+        .map(Some)
+        .map_err(|error| ApiClientError::Deserialize(error.to_string()))
+}
+
 pub async fn fetch_system_agent_events(
     id: &uuid::Uuid,
 ) -> Result<Vec<crate::api::models::SystemAgentEvent>, ApiClientError> {
@@ -1591,7 +1611,7 @@ async fn send_request_with_csrf(
 
     let window = web_sys::window().expect("no global window");
 
-    let mut opts = web_sys::RequestInit::new();
+    let opts = web_sys::RequestInit::new();
     opts.set_method(method);
     let _ = js_sys::Reflect::set(
         opts.as_ref(),
@@ -1618,13 +1638,7 @@ async fn send_request_with_csrf(
     }
 
     // Extract CSRF token from cookie and add to header
-    if let Some(document) = window.document() {
-        // Use js_sys to call document.cookie
-        let document_obj = js_sys::Object::from(
-            js_sys::Reflect::get(&document, &JsValue::from_str("document"))
-                .unwrap_or(JsValue::NULL),
-        );
-
+    if window.document().is_some() {
         // Simpler: just get the cookie string directly from the global document
         let cookie_js = js_sys::eval("document.cookie").unwrap_or(JsValue::NULL);
         if let Some(cookie_str) = cookie_js.as_string() {
@@ -1748,7 +1762,7 @@ async fn send_request(
 
     let window = web_sys::window().expect("no global window");
 
-    let mut opts = web_sys::RequestInit::new();
+    let opts = web_sys::RequestInit::new();
     opts.set_method(method);
     if method.eq_ignore_ascii_case("GET") {
         let _ = js_sys::Reflect::set(

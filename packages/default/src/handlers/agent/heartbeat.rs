@@ -11,6 +11,7 @@ use crate::queries::systems::{
 };
 use crate::queries::{
     agent_heartbeat::insert_agent_heartbeat,
+    system_events::mark_pending_deployment_delivered,
     system_events::{lock_observed_system_state_by_hostname_tx, record_report_events_tx},
     system_states::insert_system_state,
 };
@@ -319,6 +320,19 @@ pub async fn log(
                 None // Continue with None if query fails
             }
         };
+
+    if let Some(target) = desired_target.as_deref() {
+        if let Err(error) =
+            mark_pending_deployment_delivered(&pool, agent_request.system.id, target).await
+        {
+            warn!(
+                hostname = %agent_request.system.hostname,
+                target = %target,
+                ?error,
+                "Failed to mark pending deployment delivered; continuing heartbeat"
+            );
+        }
+    }
 
     let runtime_caches =
         load_runtime_caches_for_agent(&pool, agent_request.system.environment_id).await;
