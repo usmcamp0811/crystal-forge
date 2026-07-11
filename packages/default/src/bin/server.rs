@@ -514,7 +514,12 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/api/v1/builders/:id/jobs/:job_id/derivation-archive",
-            get(builders::download_job_derivation_archive),
+            get(builders::download_job_derivation_archive)
+                .post(builders::download_job_derivation_archive_delta),
+        )
+        .route(
+            "/api/v1/builders/:id/jobs/:job_id/derivation-manifest",
+            get(builders::get_job_derivation_manifest),
         )
         .route(
             "/api/v1/builders/:id/jobs/:job_id/source-archive",

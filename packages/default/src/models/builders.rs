@@ -634,6 +634,31 @@ pub struct NextJobResponse {
     pub derivation: BuildJobDerivation,
 }
 
+/// Response for GET /api/v1/builders/:id/jobs/:job_id/derivation-manifest.
+///
+/// The authorized requisite path manifest for a job's server-evaluated `.drv`.
+/// The builder compares this list against its local store validity to compute
+/// the missing set, then requests only those paths via the delta archive
+/// endpoint. The server is the sole authority for this list — it is computed
+/// from persisted job state, never from builder-supplied input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DerivationManifestResponse {
+    pub job_id: Uuid,
+    pub drv_path: String,
+    /// Sorted, deduplicated requisite store paths for `drv_path`.
+    pub paths: Vec<String>,
+}
+
+/// Request body for POST /api/v1/builders/:id/jobs/:job_id/derivation-archive.
+///
+/// The builder lists the store paths (a subset of the job's authorized
+/// manifest) it is missing locally. The server validates set membership and
+/// streams `nix-store --export` for exactly those paths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DerivationArchiveRequest {
+    pub paths: Vec<String>,
+}
+
 /// Build progress report sent by API builders (HTTP fallback for the WS frame).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildProgressRequest {

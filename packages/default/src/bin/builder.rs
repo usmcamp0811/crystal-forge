@@ -771,7 +771,8 @@ async fn ensure_source_worktree_from_mirror(
         .filter(|v| !v.is_empty())
         .ok_or_else(|| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
-            message: "ServerBundledArchive delivery is missing mirror_id for worktree path".to_string(),
+            message: "ServerBundledArchive delivery is missing mirror_id for worktree path"
+                .to_string(),
         })?;
     let worktree_path = worktree_root
         .join(mirror_id)
@@ -919,9 +920,7 @@ fn cleanup_candidate_worktree(
         SourceInputDeliveryMode::ServerBundledArchive => {
             // Job-scoped mirror: mirror_root/server-bundled/<job_id>/<mirror_id>.git
             let mirror_id = source.mirror_id.as_deref().filter(|v| !v.is_empty())?;
-            let job_mirror_dir = mirror_root
-                .join("server-bundled")
-                .join(job_id.to_string());
+            let job_mirror_dir = mirror_root.join("server-bundled").join(job_id.to_string());
             let mirror_path = job_mirror_dir.join(format!("{mirror_id}.git"));
             // Worktree is shared-layout: worktree_root/<mirror_id>/<commit>/<job_id>
             let worktree_path = worktree_root
@@ -1056,14 +1055,15 @@ async fn evaluate_verified_source_drv(
         // Job-scoped mirror path: each job extracts into its own directory so
         // concurrent jobs for the same repo never race on the same bare mirror.
         // Layout: mirror_root/server-bundled/<job_id>/<mirror_id>.git
-        let job_mirror_dir = mirror_root
-            .join("server-bundled")
-            .join(job_id.to_string());
+        let job_mirror_dir = mirror_root.join("server-bundled").join(job_id.to_string());
         let mirror_path = job_mirror_dir.join(format!("{mirror_id}.git"));
 
         // Stream archive to a temp file, verifying SHA-256 incrementally.
         // This avoids buffering the entire archive in RAM.
-        info!("📦 Streaming source archive for job {} to temp file...", job_id);
+        info!(
+            "📦 Streaming source archive for job {} to temp file...",
+            job_id
+        );
         let tmp_archive = client
             .stream_source_archive_to_tempfile(
                 job_id,
@@ -1074,12 +1074,14 @@ async fn evaluate_verified_source_drv(
             .map_err(|e| source_err(format!("failed to stream source archive: {e}")))?;
 
         // Create the job-scoped mirror directory for extraction.
-        tokio::fs::create_dir_all(&job_mirror_dir).await.map_err(|e| {
-            source_err(format!(
-                "failed to create job mirror directory {}: {e}",
-                job_mirror_dir.display()
-            ))
-        })?;
+        tokio::fs::create_dir_all(&job_mirror_dir)
+            .await
+            .map_err(|e| {
+                source_err(format!(
+                    "failed to create job mirror directory {}: {e}",
+                    job_mirror_dir.display()
+                ))
+            })?;
 
         let output = tokio::process::Command::new("tar")
             .kill_on_drop(true)
@@ -1747,35 +1749,127 @@ async fn drv_closure_available_locally(drv_path: &str) -> anyhow::Result<bool> {
     Ok(output.status.success())
 }
 
+/// Compute which of the manifest paths are NOT valid in the local Nix store.
+///
+/// Chunked to avoid one process per path. `nix-store --check-validity` exits
+/// nonzero if ANY path in the batch is invalid, so failed chunks fall back to
+/// per-path checks to find the exact missing set.
+async fn missing_store_paths_batched(paths: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut missing = Vec::new();
+
+    for chunk in paths.chunks(256) {
+        let output = tokio::process::Command::new("nix-store")
+            .arg("--check-validity")
+            .args(chunk)
+            .output()
+            .await?;
+
+        if output.status.success() {
+            continue;
+        }
+
+        for path in chunk {
+            let single = tokio::process::Command::new("nix-store")
+                .arg("--check-validity")
+                .arg(path)
+                .output()
+                .await?;
+
+            if !single.status.success() {
+                missing.push(path.clone());
+            }
+        }
+    }
+
+    Ok(missing)
+}
+
+/// Delta materialization: fetch the authorized manifest, compute the locally
+/// missing subset, and request only those paths from the server.
+async fn materialize_derivation_delta(
+    client: &BuilderApiClient,
+    job_id: uuid::Uuid,
+    expected_drv_path: &str,
+) -> std::result::Result<(), crystal_forge::builder::api_client::DeltaError> {
+    use crystal_forge::builder::api_client::DeltaError;
+
+    let manifest = client.get_derivation_manifest(job_id).await?;
+
+    if manifest.drv_path != expected_drv_path {
+        return Err(DeltaError::Fatal(anyhow::anyhow!(
+            "server manifest drv path mismatch: expected {expected_drv_path}, got {}",
+            manifest.drv_path
+        )));
+    }
+
+    let missing = missing_store_paths_batched(&manifest.paths)
+        .await
+        .map_err(DeltaError::Fatal)?;
+
+    if missing.is_empty() {
+        info!(
+            "✅ All {} manifest paths already valid locally; no transfer needed",
+            manifest.paths.len()
+        );
+        return Ok(());
+    }
+
+    info!(
+        "📥 Delta materialization: {} of {} manifest paths missing locally; requesting only those",
+        missing.len(),
+        manifest.paths.len()
+    );
+
+    client
+        .stream_derivation_delta_archive_to_import(job_id, &missing)
+        .await
+}
+
 async fn ensure_derivation_available(
     client: &BuilderApiClient,
     job_id: uuid::Uuid,
     drv_path: &str,
 ) -> anyhow::Result<()> {
+    use crystal_forge::builder::api_client::DeltaError;
+
     if drv_closure_available_locally(drv_path).await? {
         return Ok(());
     }
 
-    // Stream the .drv closure archive from the server directly into nix-store --import.
-    // The server exports chunks via piped stdout so neither side buffers the full
-    // closure in memory.  No Attic or binary cache configuration is required on
-    // the builder for this step.
-    info!(
-        "📥 Derivation {} not fully available locally; streaming .drv closure archive from server",
-        drv_path
-    );
-    client.stream_derivation_archive_to_import(job_id, drv_path).await?;
+    // Preferred: delta materialization — request only the manifest paths that
+    // are missing locally. Falls back to the full closure archive ONLY when
+    // the server does not support the delta endpoints (404/405). Security or
+    // validation failures (403, drv mismatch, malformed responses) are hard
+    // errors and are never masked by the fallback.
+    match materialize_derivation_delta(client, job_id, drv_path).await {
+        Ok(()) => {}
+        Err(DeltaError::Unsupported(reason)) => {
+            info!(
+                "ℹ️  Server does not support delta transport ({}); using full closure archive",
+                reason
+            );
+            client
+                .stream_derivation_archive_to_import(job_id, drv_path)
+                .await?;
+        }
+        Err(DeltaError::Fatal(err)) => {
+            return Err(err.context("delta derivation materialization failed"));
+        }
+    }
 
-    // Verify the full closure is now valid — not just that the top-level .drv
-    // file exists.  If the import was truncated or partially applied the next
-    // step (nix-store --realise) would fail with a cryptic missing-path error
-    // rather than the explicit path_materialization failure we want.
+    // Verify the full recursive closure is now valid — not just that the
+    // top-level .drv file exists. A truncated or partial import must surface
+    // here as a path_materialization failure, not later inside
+    // nix-store --realise as a confusing build error.
     if !drv_closure_available_locally(drv_path).await? {
         anyhow::bail!(
             "nix-store --import completed but derivation closure is still incomplete: {drv_path}"
         );
     }
-    info!("✅ .drv closure fully imported and valid for {}", drv_path);
+    info!(
+        "✅ .drv closure fully materialized and valid for {}",
+        drv_path
+    );
 
     // Fire-and-forget: ask the server to publish the closure to the binary cache
     // in the background so future builds (or other builders) can pull it via
@@ -2392,7 +2486,9 @@ mod tests {
             )
         );
         // job_mirror_dir is set and points at the job-scoped subdirectory
-        let job_mirror_dir = cleanup.job_mirror_dir.expect("job_mirror_dir must be Some for ServerBundledArchive");
+        let job_mirror_dir = cleanup
+            .job_mirror_dir
+            .expect("job_mirror_dir must be Some for ServerBundledArchive");
         assert_eq!(
             job_mirror_dir,
             std::path::PathBuf::from(
@@ -2443,7 +2539,10 @@ mod tests {
         )
         .await
         .expect("nix-store --check-validity should not error even for missing paths");
-        assert!(!result, "nonexistent path must not be reported as locally valid");
+        assert!(
+            !result,
+            "nonexistent path must not be reported as locally valid"
+        );
     }
 
     #[tokio::test]
@@ -2454,6 +2553,35 @@ mod tests {
         let result = super::drv_closure_available_locally("/tmp/definitely-not-a-nix-path.drv")
             .await
             .expect("nix-store --check-validity should not error for arbitrary paths");
-        assert!(!result, "non-nix path must not be reported as locally valid");
+        assert!(
+            !result,
+            "non-nix path must not be reported as locally valid"
+        );
+    }
+
+    // ── delta materialization: missing path computation ─────────────────────
+
+    #[tokio::test]
+    async fn missing_store_paths_batched_reports_all_nonexistent_paths() {
+        // All fake paths are invalid, so the missing set must equal the input.
+        let paths = vec![
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-fake-one.drv".to_string(),
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-fake-two".to_string(),
+        ];
+        let missing = super::missing_store_paths_batched(&paths)
+            .await
+            .expect("batched validity check should not error");
+        assert_eq!(
+            missing, paths,
+            "all nonexistent paths must be reported missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_store_paths_batched_empty_input_is_empty_output() {
+        let missing = super::missing_store_paths_batched(&[])
+            .await
+            .expect("empty input should not error");
+        assert!(missing.is_empty());
     }
 }
