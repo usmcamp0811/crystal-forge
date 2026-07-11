@@ -6,6 +6,40 @@
 
 ---
 
+## 0. Recommended Default Strategy
+
+**Use `source_re_evaluate_verified` + `server_bundled_archive` for any new remote builder deployment.**
+
+```toml
+[server]
+remote_build_execution_strategy = "source_re_evaluate_verified"
+source_delivery_mode             = "server_bundled_archive"
+
+[builder]
+supported_execution_strategies = ["source_re_evaluate_verified"]
+```
+
+This is the most reliable path because:
+- The builder evaluates the flake locally from a server-provided archive, so there is no dependency on an Attic/S3 binary cache being configured before the build can start.
+- The builder compares its locally evaluated `.drvPath` against the server's expected value before building — this gives a cryptographic build-plan integrity check (`derivation_mismatch` hard failure).
+- The builder never needs Git credentials or direct Git remote access.
+- `.drv` materialization is zero-delay: the builder evaluates from local source, so it produces the `.drv` itself rather than waiting for the server to push it somewhere.
+
+**`server_derivation` works but has a slower startup path.** When the `.drv` is not already in the builder's Nix store, the builder must import the full `.drv` closure archive streamed from the server before the build can start. This is reliable (fixed in this release to stream directly, no Attic dependency), but it transfers more data upfront than the source-evaluation path for NixOS systems. Use `server_derivation` when:
+- You trust the server's evaluation completely and do not need the builder-side re-evaluation cross-check.
+- The builder cannot run `nix eval` (unusual constraint).
+- You prefer simplicity over the verified-source guarantee.
+
+**Summary table:**
+
+| Strategy | Builder needs Git? | Builder needs Attic? | Build-plan integrity check | Best for |
+|---|---|---|---|---|
+| `source_re_evaluate_verified` + `server_bundled_archive` | No | No (uses own nix eval) | ✅ `derivation_mismatch` | Recommended default |
+| `source_re_evaluate_verified` + `local_git_worktree` | Yes | No | ✅ `derivation_mismatch` | Colocated / internal |
+| `server_derivation` | No | No (streams from CF) | ❌ Server-trusted only | Simple / legacy |
+
+---
+
 ## 1. Purpose and Scope
 
 This document defines every network boundary, data flow, credential exposure, and trust boundary that exists between the Crystal Forge server, its remote builders, and external systems. It answers the questions a network or security engineer needs to approve or deny network access rules for builder hosts.
@@ -200,7 +234,7 @@ Builder Host                           CF Server                     Git Remote 
     │<─────────────────────────────────────│
 ```
 
-### 4.2 ServerDerivation Strategy (Default — No Source Access on Builder)
+### 4.2 ServerDerivation Strategy (No Source Access on Builder)
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -220,27 +254,39 @@ CF Server                                       Builder Host
 │      execution_strategy: server_derivation,         │
 │      source_input_delivery: none }                  │─────>│
 │                                                     │
-│ 3. Builder materializes the .drv:                   │
-│    Option A: server publishes closure to cache       │
-│              builder pulls via substituter          │
-│    Option B: server streams nix-store --export      │
-│              builder pipes to nix-store --import    │
-│    (no Git access, no source code on builder)       │
+│ 3. Builder checks: does /nix/store/xxx.drv exist?   │
 │                                                     │
-│ 4. Builder runs: nix-store --realise /nix/store/xxx.drv
+│    IF YES → skip to step 5                          │
+│    IF NO  → GET derivation-archive (authenticated)  │
+│             server streams nix-store --export chunks│
+│             via piped stdout (no RAM buffer)         │
+│             builder pipes stdin → nix-store --import│
+│             (no Attic dependency, no cache required) │
 │                                                     │
-│ 5. Builder reports output_path + cache_pushed       │
+│ 4. Background (fire-and-forget, non-blocking):      │
+│    POST /publish-derivation-closure                 │
+│    server runs attic push to cache                  │
+│    (next builder for same drv skips step 3)         │
+│                                                     │
+│ 5. Builder runs: nix-store --realise /nix/store/xxx.drv
+│    (pulls build INPUTS from substituters/cache)     │
+│                                                     │
+│ 6. Builder reports output_path + cache_pushed       │
 │                                                ─────>│
 └─────────────────────────────────────────────────────────────┘
 
 WHAT THE BUILDER CAN ACCESS IN THIS MODE:
-  ✅ CF server API (HTTPS)
-  ✅ Nix binary caches (HTTPS, configured substituters)
+  ✅ CF server API (HTTPS) — for drv archive and job lifecycle
+  ✅ Nix binary caches (HTTPS) — for build INPUTS during nix-store --realise
   ❌ Git remotes
   ❌ Database
   ❌ Deployment credentials
   ❌ Other builders
-```
+
+NOTE: No Attic/S3 cache is required for the builder to START a build in this
+mode. The .drv closure arrives directly from the CF server via streaming archive.
+Attic is used in the background to warm the cache for subsequent builds.
+The build INPUTS (nixpkgs, dependencies) still come from Nix substituters.
 
 ### 4.3 SourceReEvaluateVerified + ServerBundledArchive Strategy
 

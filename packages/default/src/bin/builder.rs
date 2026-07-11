@@ -1737,36 +1737,46 @@ async fn ensure_derivation_available(
         return Ok(());
     }
 
+    // Primary path: stream the .drv closure archive directly from the server into
+    // nix-store --import.  This is reliable and non-blocking on the server side
+    // because the server exports nix-store chunks via piped stdout.
+    //
+    // Background: the previous approach called publish_derivation_closure first,
+    // which made the server run `attic push` of the full .drv closure (potentially
+    // thousands of paths) synchronously before returning.  This caused jobs to
+    // stall for minutes waiting on Attic before the build could start, and if
+    // Attic was unavailable the builder would only discover the problem at
+    // nix-store --realise time with a confusing error.
+    //
+    // The streaming archive path is the unconditionally reliable happy path for
+    // server_derivation.  It requires no Attic configuration on the builder.
     info!(
-        "📤 Derivation {} missing locally; asking server to publish closure to cache",
+        "📥 Derivation {} missing locally; streaming .drv closure archive from server",
         drv_path
     );
-
-    match client.publish_derivation_closure(job_id).await {
-        Ok(()) => {
-            info!(
-                "✅ Server published derivation closure for {}; continuing with Nix substituters",
-                drv_path
-            );
-            return Ok(());
-        }
-        Err(e) => {
-            warn!(
-                "⚠️  Server cache publish unavailable for {}; falling back to archive download: {}",
-                drv_path, e
-            );
-        }
-    }
-
-    info!(
-        "📥 Derivation {} missing locally; streaming archive from server into nix-store --import",
-        drv_path
-    );
-    // Stream the archive directly into nix-store --import stdin to avoid
-    // buffering the full closure (potentially multi-GiB) in memory.
     client.stream_derivation_archive_to_import(job_id, drv_path).await?;
+    info!("✅ .drv closure imported for {}", drv_path);
 
-    info!("✅ Streamed derivation archive into nix-store for {}", drv_path);
+    // Fire-and-forget: ask the server to publish the closure to the binary cache
+    // in the background so future builds (or other builders) can pull it via
+    // normal Nix substituters.  Failures here are non-fatal — the build will
+    // proceed with the already-imported .drv and outputs will be pushed post-build
+    // through the normal cache_push job path.
+    let client_bg = client.clone();
+    let job_id_bg = job_id;
+    tokio::spawn(async move {
+        match client_bg.publish_derivation_closure(job_id_bg).await {
+            Ok(()) => info!(
+                "✅ Background: server published .drv closure to cache for job {}",
+                job_id_bg
+            ),
+            Err(e) => warn!(
+                "⚠️  Background cache publish for job {} skipped or failed (non-fatal): {}",
+                job_id_bg, e
+            ),
+        }
+    });
+
     Ok(())
 }
 

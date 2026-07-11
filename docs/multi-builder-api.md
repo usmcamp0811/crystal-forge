@@ -12,27 +12,37 @@ The Multi-Builder API enables distributed builder deployments with centralized m
 
 Crystal Forge remote builders use explicit execution strategies. The scheduler must not silently fall back between strategies; a builder only receives jobs for strategies it is configured to support.
 
-`server_derivation` remains the default strategy. `source_re_evaluate_verified` with `server_bundled_archive` delivery is available for network-isolated or GovCloud builders that must not contact Git remotes directly.
+### Recommended Default
 
-Default builder configuration:
-
-```toml
-[builder]
-supported_execution_strategies = ["server_derivation"]
-source_mirror_root = "/var/lib/crystal-forge/flake-mirrors"
-source_worktree_root = "/var/lib/crystal-forge/flake-worktrees"
-cleanup_source_worktrees = true
-```
-
-To enable verified source jobs, configure both the server strategy and builder capability explicitly, and ensure the builder has safe source access:
+**Use `source_re_evaluate_verified` + `server_bundled_archive` for all new deployments:**
 
 ```toml
+# /etc/crystal-forge/server.toml
 [server]
 remote_build_execution_strategy = "source_re_evaluate_verified"
+source_delivery_mode             = "server_bundled_archive"
+source_archive_root              = "/var/lib/crystal-forge/source-archives"
 
+# /etc/crystal-forge/builder.toml
 [builder]
-supported_execution_strategies = ["server_derivation", "source_re_evaluate_verified"]
+supported_execution_strategies = ["source_re_evaluate_verified"]
+source_mirror_root              = "/var/lib/crystal-forge/flake-mirrors"
+source_worktree_root            = "/var/lib/crystal-forge/flake-worktrees"
+cleanup_source_worktrees        = true
 ```
+
+This is the most reliable and fastest startup path because:
+- The builder evaluates the flake locally, so there is no dependency on Attic or any binary cache before the build starts.
+- The builder checks the evaluated `.drvPath` against the server's expected value before building — giving a build-plan integrity check (`derivation_mismatch` hard failure).
+- No Git credentials or direct Git remote access needed on the builder.
+
+### `server_derivation` — when to use it
+
+`server_derivation` is simpler and appropriate when you trust the server's evaluation completely and do not need the builder-side re-evaluation check. It is also the only option if the builder cannot run `nix eval` for some reason.
+
+**Materialization path (updated):** When the `.drv` is not already in the builder's local Nix store, the builder streams the `.drv` closure archive directly from the CF server into `nix-store --import` — no Attic or binary cache required. In the background, the server pushes the closure to the configured cache so future builds (or other builders) can pull via normal Nix substituters.
+
+**Previous bug (fixed):** Earlier versions called `publish_derivation_closure` synchronously before returning to the builder, which ran `attic push` of the full `.drv` closure (potentially thousands of paths) before the builder could start. This caused builders to stall for minutes on large NixOS closures. The fix: stream the archive first (no Attic dependency), kick off the cache push in the background.
 
 **Source delivery modes for `source_re_evaluate_verified`** are configured server-side via `source_delivery_mode`:
 
@@ -49,9 +59,9 @@ Job-scoped mirror layout for `server_bundled_archive`:
 
 ### `server_derivation`
 
-`server_derivation` keeps evaluation fully server-authoritative on the server side. The server evaluates the flake, records the authoritative `.drv` path, and sends that derivation identity to the API-only builder. The builder realizes/builds the supplied `.drv` and reports logs, progress, completion, or failure through the builder API. Builders do not access Postgres directly.
+`server_derivation` keeps evaluation fully server-authoritative. The server evaluates the flake, records the authoritative `.drv` path, and sends that derivation identity to the API-only builder. The builder materializes the `.drv` (see above), runs `nix-store --realise`, and reports logs, progress, and completion. Builders do not access Postgres directly.
 
-This mode keeps evaluation fully server-authoritative, but it requires the builder to materialize the server-evaluated `.drv` and its input closure through configured substituters or Crystal Forge transport before the real build can start. Materialization failures should be reported as `path_materialization` failures rather than leaving the job stuck in `building`.
+Materialization failures are reported as `path_materialization` phase failures and do not leave jobs stuck in `building`. Build input closure (nixpkgs, dependencies) is pulled from configured Nix substituters during `nix-store --realise`.
 
 ### `source_re_evaluate_verified`
 
