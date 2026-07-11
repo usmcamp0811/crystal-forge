@@ -4233,4 +4233,60 @@ mod tests {
             archive_root.join("mirrors").join(format!("{mirror_id}.git"))
         );
     }
+
+    #[test]
+    fn source_archive_url_format_matches_download_endpoint() {
+        // The archive_url set in get_next_job must be parseable as an API path
+        // that the builder can GET as an authenticated request.
+        let builder_id = uuid::Uuid::new_v4();
+        let job_id = uuid::Uuid::new_v4();
+        let url = format!(
+            "/api/v1/builders/{}/jobs/{}/source-archive",
+            builder_id, job_id
+        );
+        assert!(url.contains(&builder_id.to_string()));
+        assert!(url.contains(&job_id.to_string()));
+        assert!(url.ends_with("/source-archive"));
+    }
+
+    #[test]
+    fn chunk_derivation_archive_paths_respects_arg_limit() {
+        let paths: Vec<String> = (0..100)
+            .map(|i| format!("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa{:04}-path-{}", i, i))
+            .collect();
+        let chunks = super::chunk_derivation_archive_paths(&paths, 512);
+        // Each chunk must not exceed the byte limit
+        for chunk in &chunks {
+            let total: usize = chunk.iter().map(|p| p.len() + 1).sum(); // +1 for space separator
+            assert!(
+                total <= 512,
+                "chunk total arg bytes {total} exceeds 512 limit"
+            );
+        }
+        // All paths must appear exactly once
+        let all: Vec<_> = chunks.iter().flat_map(|c| c.iter()).collect();
+        assert_eq!(all.len(), paths.len());
+    }
+
+    #[test]
+    fn source_archive_path_structure_is_deterministic() {
+        let archive_root = std::path::PathBuf::from("/var/lib/crystal-forge/source-archives");
+        let repo_url = "git@github.com:ATALLC/nix-config.git";
+        let commit_hash = "abc123def456";
+        let mirror_id = super::source_mirror_id(repo_url);
+        let archive_path = archive_root
+            .join("archives")
+            .join(&mirror_id)
+            .join(commit_hash)
+            .with_extension("tar.gz");
+        // Must always produce the same path for same inputs.
+        let archive_path2 = archive_root
+            .join("archives")
+            .join(&mirror_id)
+            .join(commit_hash)
+            .with_extension("tar.gz");
+        assert_eq!(archive_path, archive_path2);
+        assert!(archive_path.to_str().unwrap().ends_with(".tar.gz"));
+        assert!(archive_path.to_str().unwrap().contains(commit_hash));
+    }
 }

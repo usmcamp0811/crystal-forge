@@ -2211,4 +2211,50 @@ mod tests {
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
+
+    // ── ServerBundledArchive delivery tests ─────────────────────────────────
+
+    #[test]
+    fn server_bundled_archive_with_url_strips_file_scheme() {
+        // The archive_url returned by the server starts with the API path
+        // (e.g. /api/v1/builders/.../source-archive), NOT a file:// path.
+        // source_flake_ref strips "file://" when present so the path is
+        // usable directly by nix as a flake ref.
+        let mut src = source(Some("file:///tmp/my-source-archive"));
+        src.archive_sha256 = None; // sha256 not checked in source_flake_ref
+        let flake_ref = source_flake_ref(
+            &src,
+            SourceInputDeliveryMode::ServerBundledArchive,
+            std::path::Path::new("/mirrors"),
+            std::path::Path::new("/worktrees"),
+        )
+        .expect("should succeed when archive_url is set");
+        // file:// prefix is stripped so nix can open it as a path
+        assert_eq!(flake_ref, "/tmp/my-source-archive");
+    }
+
+    #[test]
+    fn server_bundled_archive_without_url_is_source_fetch_failure() {
+        let src = source(None);
+        let err = source_flake_ref(
+            &src,
+            SourceInputDeliveryMode::ServerBundledArchive,
+            std::path::Path::new("/mirrors"),
+            std::path::Path::new("/worktrees"),
+        )
+        .expect_err("missing archive_url must produce SourceFetch failure");
+        assert_eq!(err.phase, BuildFailurePhase::SourceFetch);
+        assert!(err.message.contains("archive_url is missing"));
+    }
+
+    #[test]
+    fn path_materialization_failure_phase_serializes_correctly() {
+        // Ensure the PathMaterialization phase value is stable — builder.rs uses
+        // it when reporting ensure_derivation_available failures to the server.
+        use crystal_forge::models::builders::BuildFailurePhase;
+        assert_eq!(
+            BuildFailurePhase::PathMaterialization.to_string(),
+            "path_materialization"
+        );
+    }
 }
