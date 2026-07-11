@@ -234,9 +234,10 @@ Builder Host                           CF Server                     Git Remote 
 ### 4.2 ServerDerivation Strategy (No Source Access on Builder)
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│         ServerDerivation — Builder Has No Source Access      │
-└──────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│         ServerDerivation — Builder Has No Source Access                   │
+│         Uses delta-aware derivation materialization by default            │
+└───────────────────────────────────────────────────────────────────────────┘
 
 CF Server                                       Builder Host
 ─────────                                       ────────────
@@ -244,7 +245,7 @@ CF Server                                       Builder Host
 │ 1. Evaluate flake (server-side):                    │
 │    nix eval --impure \                              │
 │      "git+ssh://...?rev=<hash>" \                   │
-│      #nixosConfigs.host.system.build.toplevel.drvPath
+│      #nixosConfigurations.host.system.build.toplevel.drvPath
 │                                                     │
 │ 2. Job manifest sent to builder:                    │
 │    { drv_path: "/nix/store/xxx.drv",               │
@@ -252,28 +253,76 @@ CF Server                                       Builder Host
 │      source_input_delivery: none }                  │─────>│
 │                                                     │
 │ 3. Builder checks: does /nix/store/xxx.drv exist?   │
+│    (recursive closure — nix-store --check-validity) │
 │                                                     │
-│    IF YES → skip to step 5                          │
-│    IF NO  → GET derivation-archive (authenticated)  │
-│             server streams nix-store --export chunks│
-│             via piped stdout (no RAM buffer)         │
-│             builder pipes stdin → nix-store --import│
-│             (no Attic dependency, no cache required) │
+│    IF YES → skip to step 6                          │
 │                                                     │
-│ 4. Background (fire-and-forget, non-blocking):      │
+│    IF NO  → PREFERRED: two-step delta transport     │
+│                                                     │
+│    3a. GET /derivation-manifest                     │
+│        server computes nix-store --query            │
+│          --requisites <persisted_drv_path>           │
+│        returns sorted, deduplicated path manifest   │
+│                                                     │
+│    3b. Builder checks local validity of EACH        │
+│        manifest path (chunked 256/batch with        │
+│        per-path fallback within failed chunks)       │
+│                                                     │
+│    3c. POST /derivation-archive                     │
+│        { "paths": ["missing1", "missing2", ...] }   │
+│        server validates:                            │
+│          • all paths ∈ authorized manifest (403)    │
+│          • all paths are valid store paths (400)    │
+│          • empty request → 204 No Content           │
+│        then streams nix-store --export              │
+│          for exactly the validated subset           │
+│        builder pipes → nix-store --import           │
+│        (no full closure in RAM on either side)      │
+│                                                     │
+│    FALLBACK (server too old for delta):             │
+│    GET /derivation-archive (full closure)           │
+│    Server streams full nix-store --export           │
+│      of the recursive closure                       │
+│    Builder pipes → nix-store --import               │
+│                                                     │
+│ 4. Builder verifies full recursive closure          │
+│    is now valid via nix-store --check-validity      │
+│    If still incomplete → path_materialization fail  │
+│                                                     │
+│ 5. Background (fire-and-forget, non-blocking):      │
 │    POST /publish-derivation-closure                 │
 │    server runs attic push to cache                  │
 │    (next builder for same drv skips step 3)         │
 │                                                     │
-│ 5. Builder runs: nix-store --realise /nix/store/xxx.drv
+│ 6. Builder runs: nix-store --realise                │
+│    /nix/store/xxx.drv                               │
 │    (pulls build INPUTS from substituters/cache)     │
 │                                                     │
-│ 6. Builder reports output_path + cache_pushed       │
+│ 7. Builder reports output_path + cache_pushed       │
 │                                                ─────>│
 └─────────────────────────────────────────────────────────────┘
 
+SECURITY PROPERTY OF THE DELTA PROTOCOL:
+  • The server NEVER exports a path just because the builder asked.
+    The server computes the authorized manifest from its own persisted
+    drv_path and enforces requested ⊆ manifest.
+  • The builder NEVER sends its store inventory. It only names paths
+    from the manifest the server just gave it.
+  • A builder requesting a path outside the manifest is a 403 FORBIDDEN
+    (logged with builder and job IDs; path list is NOT logged).
+  • A builder requesting a non-store path is a 400 BAD REQUEST.
+
+FALLBACK POLICY:
+  • 404/405 from the delta endpoint = "Unsupported" → transparent
+    fallback to the full closure archive GET.  The builder never gets
+    stuck waiting for a server that doesn't speak delta.
+  • 403, drv path mismatch, malformed response, or import failure =
+    "Fatal" → hard error.  Never silently retried as full archive.
+  • The fallback distinction is encoded in the DeltaError enum at
+    the client level, not an ad-hoc string check.
+
 WHAT THE BUILDER CAN ACCESS IN THIS MODE:
-  ✅ CF server API (HTTPS) — for drv archive and job lifecycle
+  ✅ CF server API (HTTPS) — for drv manifest, drv archive, and job lifecycle
   ✅ Nix binary caches (HTTPS) — for build INPUTS during nix-store --realise
   ❌ Git remotes
   ❌ Database
@@ -281,9 +330,10 @@ WHAT THE BUILDER CAN ACCESS IN THIS MODE:
   ❌ Other builders
 
 NOTE: No Attic/S3 cache is required for the builder to START a build in this
-mode. The .drv closure arrives directly from the CF server via streaming archive.
-Attic is used in the background to warm the cache for subsequent builds.
-The build INPUTS (nixpkgs, dependencies) still come from Nix substituters.
+mode. The .drv closure (or the delta subset) arrives directly from the CF
+server via streaming export. Attic is used in the background to warm the
+cache for subsequent builds. The build INPUTS (nixpkgs, dependencies) still
+come from Nix substituters.
 
 ### 4.3 SourceReEvaluateVerified + ServerBundledArchive Strategy
 
@@ -405,7 +455,8 @@ The builder private key authorizes exactly:
 | Stream logs for claimed job | Access logs for other builders |
 | Complete / fail owned job | Complete / fail jobs owned by other builders |
 | Send heartbeat metrics | Read/write deployment policy |
-| Download .drv archive for claimed job | Evaluate flakes |
+| Download .drv manifest for claimed job (authorized path list) | Evaluate flakes |
+| Download .drv archive (full or delta subset) for claimed job | Manage builders (admin only) |
 | Publish closure to cache (server-side push) | Manage builders (admin only) |
 
 **Job ownership is double-checked on every API call:** The server verifies `builder_id` + `builder_session_id` + `job.status == "building"` before serving source archives, drv archives, or accepting completion reports.
@@ -443,8 +494,21 @@ The builder private key authorizes exactly:
 │                     │  Builder verifies sha256 before unpacking                 │
 ├─────────────────────┼───────────────────────────────────────────────────────────┤
 │  Server → Builder   │  nix-store export binary format (.drv + input closure)   │
-│  (drv archive)      │  Streamed per argv chunk; no full-closure server buffer   │
-│                     │  Fallback path when cache substituter unavailable         │
+│  (drv manifest)     │  GET /derivation-manifest — JSON list of store paths     │
+│                     │    (sorted, deduplicated requisite closure of the job's   │
+│                     │     persisted drv_path).  Server-computed, not builder-   │
+│                     │    supplied.  Used as authorization baseline for delta.   │
+├─────────────────────┼───────────────────────────────────────────────────────────┤
+│  Server → Builder   │  nix-store export binary format (full OR delta subset)   │
+│  (drv archive)      │  PREFERRED: POST /derivation-archive with JSON           │
+│                     │    { "paths": [missing...] } — server validates each     │
+│                     │    requested path against the authorized manifest;        │
+│                     │    403 if any path is NOT in the manifest.  Streams       │
+│                     │    nix-store --export for exactly the validated subset.   │
+│                     │  FALLBACK: GET /derivation-archive — streams full         │
+│                     │    recursive closure (for servers that do not support     │
+│                     │    the delta protocol).  Both paths are streamed per      │
+│                     │  argv chunk; no full-closure server buffer.               │
 ├─────────────────────┼───────────────────────────────────────────────────────────┤
 │  Server → Git       │  SSH private key (from DB, used by server only)          │
 │  (mirror clone)     │  Applied via GIT_SSH_COMMAND env var to git process      │
@@ -610,7 +674,8 @@ When a build cannot proceed safely, the builder reports a specific failure phase
 | `source_input_availability` | Required source inputs not available | `failed` or retry |
 | `evaluation` | `nix eval .drvPath` failed on builder (timeout, eval error) | `failed` or retry |
 | `derivation_mismatch` | Builder-evaluated `.drvPath` ≠ server-expected `.drvPath` | `failed` (no retry — policy violation) |
-| `path_materialization` | `.drv` not available locally after substituter pull and archive download | `failed` or retry |
+| `path_materialization` | `.drv` not available locally after delta manifest/archive or full archive download | `failed` or retry |
+| `delta_unsupported` (info only) | Delta endpoint returned 404/405 — transparent fallback to full archive | (not a failure) |
 | `build` | `nix-store --realise` failed | `failed` or retry |
 
 `derivation_mismatch` is treated as a hard failure with no automatic retry because it indicates the build plan has diverged from the server-evaluated state, which is a security-relevant event that warrants human review.
@@ -721,6 +786,10 @@ KEY ROTATION:
 | Source archive generated | Server log | job_id, mirror_id, commit_hash, sha256 |
 | Source archive downloaded | Server log | job_id, builder_id, HTTP response status |
 | `.drvPath` mismatch | Server log | job_id, expected, actual |
+| Derivation manifest served | Server log (debug) | job_id, path_count |
+| Derivation delta archive requested | Server log (debug) | job_id, builder_id, requested_path_count, validated_path_count |
+| Derivation delta path rejected (403) | Server log (warn) | job_id, builder_id, logged count only (paths not logged) |
+| Delta fallback to full archive | Builder log (info) | job_id, reason (always "Unsupported" — never on 403) |
 | Build complete | Server / DB | job_id, output_path, cache_reference |
 | Build failure | Server / DB | job_id, failure_phase, error message |
 | Session ID mismatch | Server log (warn) | builder_id, presented session vs. stored |

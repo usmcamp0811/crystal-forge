@@ -57,7 +57,19 @@ Job-scoped mirror layout for `server_bundled_archive`:
 
 ### `server_derivation`
 
-The server evaluates the flake, records the authoritative `.drv` path, and sends that derivation identity to the builder. The builder streams the `.drv` closure from the server, imports it locally, then runs `nix-store --realise`. Build inputs (nixpkgs, dependencies) are pulled from configured Nix substituters. Materialization failures are reported as `path_materialization` failures. Builders do not access Postgres directly.
+The server evaluates the flake, records the authoritative `.drv` path, and sends that derivation identity to the builder.
+
+**Materialization** uses a **delta-aware protocol** by default:
+
+1. Builder checks whether the `.drv` recursive closure is already valid locally via `nix-store --check-validity`.
+2. If not, it requests the derivation **manifest** — the server computes `nix-store --query --requisites` from the job's *persisted* drv_path (never a builder-supplied path) and returns the sorted, deduplicated list of store paths.
+3. Builder checks local validity of each manifest path (chunked 256/batch with per-path fallback within failed chunks) and requests **only the missing subset** via `POST /derivation-archive { "paths": [...] }`.
+4. Server validates every requested path against the authorized manifest and streams `nix-store --export` for exactly that subset. The builder pipes the response into `nix-store --import`.
+5. If the server does not support delta endpoints (404/405), the builder transparently falls back to the full closure archive GET.
+
+All streaming is piped stdout with bounded stderr drain — no full closure is buffered in RAM on either side.
+
+Build inputs (nixpkgs, dependencies) are pulled from configured Nix substituters during `nix-store --realise`. Materialization failures are reported as `path_materialization` failures. Builders do not access Postgres directly.
 
 ### `source_re_evaluate_verified`
 
@@ -488,6 +500,104 @@ Mark job as started (no-op, included for API consistency).
 **Response**: `202 Accepted`
 
 **Note**: Job is already marked as "building" when assigned via `next-job`.
+
+#### GET /api/v1/builders/:id/jobs/:job_id/derivation-manifest
+
+Fetch the derivation manifest (sorted, deduplicated list of requisite store
+paths for the job's drv_path).  Used as the authorization baseline for delta
+materialization.
+
+**Authentication**: Required (Ed25519 builder signature)
+
+**Authorization**: Builder must own the job (job.status = "building") with a
+matching session ID.
+
+**Response**: `200 OK`
+```json
+{
+  "job_id": "job-uuid",
+  "drv_path": "/nix/store/abc123...-hostname.drv",
+  "paths": [
+    "/nix/store/abc123...-hostname.drv",
+    "/nix/store/def456...-source.drv",
+    "/nix/store/ghi789...-nixos.drv"
+  ]
+}
+```
+
+**Security**: The manifest is computed server-side from the job's persisted
+drv_path.  The builder never supplies the drv_path — this prevents a malicious
+or compromised builder from requesting a manifest for a different derivation.
+
+#### POST /api/v1/builders/:id/jobs/:job_id/derivation-archive (delta)
+
+Upload a `nix-store --export` archive for a **subset** of the authorized
+manifest paths into the builder's local Nix store.
+
+**Authentication**: Required (Ed25519 builder signature)
+
+**Authorization**: Builder must own the job (job.status = "building") with a
+matching session ID.
+
+**Request Body**:
+```json
+{
+  "paths": [
+    "/nix/store/abc123...-hostname.drv",
+    "/nix/store/def456...-source.drv"
+  ]
+}
+```
+
+**Validation**:
+- Every path must be in the authorized manifest (computed server-side from the
+  job's persisted drv_path).  A path outside the manifest → **403 FORBIDDEN**
+  (logged with builder/job IDs; path list is NOT logged to avoid leaking which
+  paths a builder was not authorized for).
+- Every path must match the pattern `/nix/store/<32-char-hash>-<name>`.  A
+  malformed path → **400 BAD REQUEST**.
+- Duplicates are silently deduplicated.
+- An empty `paths` array → **204 No Content** (all paths are already valid
+  locally).
+
+**Response**: `200 OK` — streaming binary body (`application/octet-stream`)
+containing the `nix-store --export` output for exactly the validated paths.
+
+**Response**: `204 No Content` — all requested paths already valid locally;
+nothing to export.
+
+**Response**: `403 Forbidden` — one or more requested paths are not in the
+authorized manifest.  The entire request is rejected; no partial export is ever
+served.
+
+**Fallback note from the builder side**: If this endpoint returns 404 (server
+too old to support delta protocol), the builder transparently falls back to the
+full-archive GET on the same path (see below).  A 403 is never silently
+retried as a full archive — that would bypass the authorization check.
+
+#### GET /api/v1/builders/:id/jobs/:job_id/derivation-archive (full closure, fallback)
+
+Stream the full `.drv` closure archive into the builder's local Nix store.
+This is the **fallback** path used when the server does not support the delta
+protocol (always available for backward compatibility).
+
+**Authentication**: Required (Ed25519 builder signature)
+
+**Authorization**: Builder must own the job (job.status = "building") with a
+matching session ID.
+
+**Response**: `200 OK` — streaming binary body (`application/octet-stream`)
+containing `nix-store --export` of the job's `.drv` recursive closure.  The
+response is piped directly into `nix-store --import` on the builder; neither
+side buffers the full closure in RAM.
+
+**Use by the builder**:
+- Preferred for cold materialization when delta is unavailable.
+- The builder should always try the delta POST first; 404/405 causes a
+  transparent fallback to this GET.
+- A background cache publish (`POST /publish-derivation-closure`) is triggered
+  after successful materialization so subsequent builds of the same derivation
+  can pull from the binary cache instead.
 
 #### POST /api/v1/builders/:id/jobs/:job_id/complete
 
