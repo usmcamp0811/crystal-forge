@@ -82,18 +82,19 @@ pub fn SidebarNav() -> Element {
     let show_dev_tools = false;
 
     // Fetch navigation badge counts and re-poll every 30 seconds.
-    let badges = use_resource(|| async move {
-        let mut current = get_navigation_badges().await.unwrap_or_default();
+    // A signal is used instead of a use_resource loop so each successful poll
+    // immediately re-renders the sidebar with fresh counts.
+    let mut badges = use_signal(NavigationBadges::default);
+    let mut badges_for_poll = badges;
+    use_future(move || async move {
         loop {
-            gloo_timers::future::TimeoutFuture::new(30_000).await;
             if let Ok(fresh) = get_navigation_badges().await {
-                current = fresh;
+                badges_for_poll.set(fresh);
             }
+            gloo_timers::future::TimeoutFuture::new(30_000).await;
         }
-        #[allow(unreachable_code)]
-        current
     });
-    let badges: NavigationBadges = badges.read().clone().unwrap_or_default();
+    let badges = badges();
     // Subscribe to ALERT_STATE so re-renders happen when badges are acknowledged.
     let _alert = ALERT_STATE.read();
 
