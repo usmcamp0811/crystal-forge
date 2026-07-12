@@ -17,7 +17,7 @@ pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> 
     // ── Systems: critical or offline ──────────────────────────────────────────
     // Mirrors the health_status column from view_system_deployment_status which
     // the Systems list already uses.
-    let (systems_attention, systems_total): (i64, i64) = sqlx::query_as(
+    let (systems_attention, systems_total): (i64, i64) = match sqlx::query_as(
         r#"
         SELECT
             COUNT(*) FILTER (WHERE health_status IN ('critical', 'offline'))::bigint,
@@ -27,10 +27,17 @@ pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> 
         "#,
     )
     .fetch_one(pool)
-    .await?;
+    .await
+    {
+        Ok(counts) => counts,
+        Err(e) => {
+            tracing::warn!("Failed to fetch systems navigation badge counts: {e:#}");
+            (0, 0)
+        }
+    };
 
     // ── Flakes: sync_status = error ───────────────────────────────────────────
-    let (flakes_errored, flakes_total): (i64, i64) = sqlx::query_as(
+    let (flakes_errored, flakes_total): (i64, i64) = match sqlx::query_as(
         r#"
         SELECT
             COUNT(*) FILTER (WHERE sync_status = 'error')::bigint,
@@ -40,11 +47,18 @@ pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> 
         "#,
     )
     .fetch_one(pool)
-    .await?;
+    .await
+    {
+        Ok(counts) => counts,
+        Err(e) => {
+            tracing::warn!("Failed to fetch flakes navigation badge counts: {e:#}");
+            (0, 0)
+        }
+    };
 
     // ── Environments: contain ≥1 attention system ─────────────────────────────
     // Uses the environment rollup view which the Environments list uses.
-    let (environments_attention, environments_total): (i64, i64) = sqlx::query_as(
+    let (environments_attention, environments_total): (i64, i64) = match sqlx::query_as(
         r#"
         SELECT
             COUNT(*) FILTER (WHERE critical_count > 0 OR offline_count > 0)::bigint,
@@ -53,10 +67,17 @@ pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> 
         "#,
     )
     .fetch_one(pool)
-    .await?;
+    .await
+    {
+        Ok(counts) => counts,
+        Err(e) => {
+            tracing::warn!("Failed to fetch environments navigation badge counts: {e:#}");
+            (0, 0)
+        }
+    };
 
     // ── Builds: failed build jobs (matches /build-jobs/recent semantics) ─────
-    let builds_failed_24h: i64 = sqlx::query_scalar(
+    let builds_failed_24h: i64 = match sqlx::query_scalar(
         r#"
         SELECT COUNT(*)::bigint
         FROM build_jobs
@@ -64,10 +85,17 @@ pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> 
         "#,
     )
     .fetch_one(pool)
-    .await?;
+    .await
+    {
+        Ok(count) => count,
+        Err(e) => {
+            tracing::warn!("Failed to fetch builds navigation badge count: {e:#}");
+            0
+        }
+    };
 
     // ── Evals: failed commit evaluations (matches list_eval_history semantics) ─
-    let evals_failed_24h: i64 = sqlx::query_scalar(
+    let evals_failed_24h: i64 = match sqlx::query_scalar(
         r#"
         SELECT COUNT(*)::bigint
         FROM commits
@@ -75,11 +103,18 @@ pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> 
         "#,
     )
     .fetch_one(pool)
-    .await?;
+    .await
+    {
+        Ok(count) => count,
+        Err(e) => {
+            tracing::warn!("Failed to fetch evaluations navigation badge count: {e:#}");
+            0
+        }
+    };
 
     // ── CVEs: critical open across the fleet ─────────────────────────────────
     // Reuses the same view as /api/v1/cves/stats (view_cve_fleet_stats).
-    let cves_critical: i64 = sqlx::query_scalar(
+    let cves_critical: i64 = match sqlx::query_scalar(
         r#"
         SELECT COALESCE((to_jsonb(v)->>'critical')::bigint, 0)
         FROM view_cve_fleet_stats v
@@ -87,8 +122,14 @@ pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> 
         "#,
     )
     .fetch_optional(pool)
-    .await?
-    .unwrap_or(0);
+    .await
+    {
+        Ok(count) => count.unwrap_or(0),
+        Err(e) => {
+            tracing::warn!("Failed to fetch CVE navigation badge count: {e:#}");
+            0
+        }
+    };
 
     Ok(NavigationBadges {
         systems_attention,

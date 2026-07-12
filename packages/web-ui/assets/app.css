@@ -2122,12 +2122,12 @@ html[data-theme="light"] .sd-nix {
 }
 
 .nav-item .nav-count.nav-count-alert {
-  background: color-mix(in oklab, var(--cf-red) 16%, transparent);
-  color: var(--cf-red);
+  background: var(--cf-red, #ef4444);
+  color: #fff;
   min-width: 18px;
   height: 18px;
-  padding: 0 6px;
-  border-radius: 999px;
+  padding: 0 5px;
+  border-radius: 9px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
