@@ -1393,6 +1393,103 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.sd-tab.active .sd-tab-badge {
+  background: rgba(248, 113, 113, 0.18);
+  color: #f87171;
+}
+
+.q-search {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px 4px 10px;
+  margin-top: 6px;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  border: 1px solid var(--cf-card-border);
+  background: var(--cf-subtle-bg);
+}
+
+.q-search:focus-within {
+  border-color: color-mix(in oklab, var(--cf-brand-purple) 55%, var(--cf-card-border));
+}
+
+.q-search > svg {
+  color: var(--cf-text-muted);
+  flex-shrink: 0;
+}
+
+.q-search-input {
+  border: none;
+  background: transparent;
+  outline: none;
+  color: var(--cf-text-primary);
+  font-size: 12.5px;
+  width: 200px;
+}
+
+.q-search-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--cf-text-muted);
+  white-space: nowrap;
+  padding-left: 2px;
+}
+
+.q-search .btn-icon.xs {
+  width: 22px;
+  height: 22px;
+}
+
+.log-search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px 3px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--cf-card-border);
+  background: var(--cf-subtle-bg);
+}
+
+.log-search:focus-within {
+  border-color: color-mix(in oklab, var(--cf-brand-purple) 55%, var(--cf-card-border));
+}
+
+.log-search > svg {
+  color: var(--cf-text-muted);
+  flex-shrink: 0;
+}
+
+.log-search-input {
+  border: none;
+  background: transparent;
+  outline: none;
+  color: var(--cf-text-primary);
+  font-size: 12.5px;
+  width: 150px;
+}
+
+.log-search-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--cf-text-muted);
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+.dtg {
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.dtg-rel {
+  color: var(--cf-text-muted);
+  font-family: var(--font-sans);
+  letter-spacing: 0;
+}
+
 /* card must always have explicit background */
 .card {
   background: var(--cf-card-bg);

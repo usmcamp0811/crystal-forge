@@ -156,6 +156,7 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
             .builder_name
             .clone()
             .unwrap_or_else(|| "unassigned".to_string()),
+        queued_at: item.queued_at,
         queued_for,
         runtime: item.elapsed_secs.map(format_human_duration),
         duration_secs: item.elapsed_secs,
@@ -355,6 +356,7 @@ pub fn BuildsView() -> Element {
                             .builder_name
                             .clone()
                             .unwrap_or_else(|| "unassigned".to_string()),
+                        queued_at: item.queued_at,
                         queued_for: finished_for,
                         runtime: item.elapsed_secs.map(format_human_duration),
                         duration_secs: item.elapsed_secs,

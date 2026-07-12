@@ -1,5 +1,6 @@
 //! Build detail pane component for the builds control center.
 
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use dioxus::prelude::*;
 
 use crate::theme;
@@ -58,6 +59,14 @@ pub fn BuildDetailPane(
         build.worker_id.clone()
     };
     let duration_label = build.runtime.clone().unwrap_or_else(|| "—".to_string());
+    let queued_relative = relative_label(build.queued_at);
+    let queued_dtg = dtg_label(build.queued_at, Some(&queued_relative));
+    let completed_dtg = build.completed_at.map(|ts| dtg_label(ts, None));
+    let completed_label = if build.status == BuildStatus::Failed {
+        "Failed"
+    } else {
+        "Completed"
+    };
     let drv = build.drv();
     let drv_preview = truncate_with_ellipsis(&drv, 40);
     let has_drv_progress = build.total_derivs > 0
@@ -206,7 +215,7 @@ pub fn BuildDetailPane(
         div { class: "ed-stats",
             div { class: "ed-stat",
                 div { class: "ed-stat-label", "Queued" }
-                div { class: "ed-stat-val", style: "font-size: 12.5px; font-weight: 600;", "{build.queued_for}" }
+                div { class: "ed-stat-val", style: "font-size: 12.5px; font-weight: 600;", dangerous_inner_html: "{queued_dtg}" }
             }
             div { class: "ed-stat",
                 div { class: "ed-stat-label", "Duration" }
@@ -279,7 +288,11 @@ pub fn BuildDetailPane(
                         dt { "Derivations" }
                         dd { "{derivs_label}" }
                         dt { "Queued" }
-                        dd { "{build.queued_for}" }
+                        dd { dangerous_inner_html: "{queued_dtg}" }
+                        if let Some(completed_dtg) = completed_dtg.clone() {
+                            dt { "{completed_label}" }
+                            dd { dangerous_inner_html: "{completed_dtg}" }
+                        }
                         dt { "Duration" }
                         dd { class: "mono", "{duration_label}" }
                         dt { "Attempts" }
@@ -407,6 +420,44 @@ fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
         format!("{truncated}…")
     } else {
         truncated
+    }
+}
+
+fn dtg_label(ts: DateTime<Utc>, relative: Option<&str>) -> String {
+    const MONTHS: [&str; 12] = [
+        "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    ];
+    let dtg = format!(
+        "{:02}{:02}{:02}Z {} {:02}",
+        ts.day(),
+        ts.hour(),
+        ts.minute(),
+        MONTHS[ts.month0() as usize],
+        ts.year().rem_euclid(100)
+    );
+    let local = ts.format("%b %-d, %Y, %H:%M UTC").to_string();
+    match relative {
+        Some(relative) if !relative.is_empty() => format!(
+            "<span class=\"mono dtg\" title=\"{} · {}\">{}<span class=\"dtg-rel\"> · {}</span></span>",
+            local, relative, dtg, relative
+        ),
+        _ => format!(
+            "<span class=\"mono dtg\" title=\"{}\">{}</span>",
+            local, dtg
+        ),
+    }
+}
+
+fn relative_label(ts: DateTime<Utc>) -> String {
+    let secs = (Utc::now() - ts).num_seconds().max(0);
+    if secs < 60 {
+        format!("{}s ago", secs)
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
     }
 }
 
