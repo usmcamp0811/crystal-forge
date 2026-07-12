@@ -262,8 +262,21 @@ pub fn SystemDetailView(id: String) -> Element {
     let nav = navigator();
     let app_state = use_context::<Signal<AppState>>();
 
-    // Current tab state
+    // Current tab state — defaults to Overview but honours a ?tab=deploy query param
+    // so that the systems list "Deploy" button can deep-link straight to the Deploy tab.
     let mut active_tab = use_signal(|| Tab::Overview);
+    use_effect(move || {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window() {
+                if let Ok(search) = window.location().search() {
+                    if search.contains("tab=deploy") {
+                        active_tab.set(Tab::Deploy);
+                    }
+                }
+            }
+        }
+    });
     let mut edit_modal_open = use_signal(|| false);
     let mut remove_in_progress = use_signal(|| false);
     let mut remove_error_message: Signal<Option<String>> = use_signal(|| None);

@@ -197,6 +197,15 @@ pub fn BuildsView() -> Element {
     let mut workers = use_signal(Vec::<WorkerItem>::new);
     let mut refresh_trigger = use_signal(|| 0_u64);
 
+    // Auto-refresh: bump refresh_trigger every 5 s so active builds, queue
+    // positions, and live log snapshots stay current without user interaction.
+    use_future(move || async move {
+        loop {
+            gloo_timers::future::TimeoutFuture::new(5_000).await;
+            refresh_trigger.set(refresh_trigger() + 1);
+        }
+    });
+
     // --- Active queue state ---
     let mut queue_page = use_signal(|| 1_i64);
     let mut queue_total = use_signal(|| 0_i64);
@@ -691,6 +700,17 @@ pub fn BuildsView() -> Element {
                                     }
                                 } else {
                                     div { class: "text-gray-500 italic", "No logs available" }
+                                }
+                                // If the job is actively building, show a live status line so
+                                // the user knows the build is running and not hung. The queue
+                                // auto-refreshes every 5 s so this will update with real log
+                                // output as it arrives from the builder.
+                                if matches!(build.status, BuildStatus::Building | BuildStatus::Stopping) {
+                                    div {
+                                        style: "margin-top: 6px; font-size: 11px; color: var(--cf-text-muted); display: flex; align-items: center; gap: 6px;",
+                                        span { class: "ed-pulse", style: "position: static; margin: 0;" }
+                                        span { "Build running on {build.worker_id} · log refreshes every 5 s" }
+                                    }
                                 }
                             }
                             // JSX: <div className="sd-log-caret">▍</div>
