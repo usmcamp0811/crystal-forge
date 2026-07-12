@@ -1739,12 +1739,17 @@ async fn execute_build_job(
 /// check would incorrectly skip re-import and then fail later inside
 /// `nix-store --realise`.
 async fn drv_closure_available_locally(drv_path: &str) -> anyhow::Result<bool> {
-    let output = tokio::process::Command::new("nix-store")
+    let output = match tokio::process::Command::new("nix-store")
         .arg("--check-validity")
         .arg("--recursive")
         .arg(drv_path)
         .output()
-        .await?;
+        .await
+    {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
 
     Ok(output.status.success())
 }
@@ -1758,22 +1763,38 @@ async fn missing_store_paths_batched(paths: &[String]) -> anyhow::Result<Vec<Str
     let mut missing = Vec::new();
 
     for chunk in paths.chunks(256) {
-        let output = tokio::process::Command::new("nix-store")
+        let output = match tokio::process::Command::new("nix-store")
             .arg("--check-validity")
             .args(chunk)
             .output()
-            .await?;
+            .await
+        {
+            Ok(output) => output,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.extend(chunk.iter().cloned());
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         if output.status.success() {
             continue;
         }
 
         for path in chunk {
-            let single = tokio::process::Command::new("nix-store")
+            let single = match tokio::process::Command::new("nix-store")
                 .arg("--check-validity")
                 .arg(path)
                 .output()
-                .await?;
+                .await
+            {
+                Ok(output) => output,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(path.clone());
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
 
             if !single.status.success() {
                 missing.push(path.clone());
