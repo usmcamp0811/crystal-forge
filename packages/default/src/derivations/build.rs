@@ -833,7 +833,11 @@ mod tests {
         let line = r#"@nix {"action":"start","id":123,"level":2,"parent":0,"text":"querying info about missing paths","type":0}"#;
         let result = decode_nix_log_line(line);
         assert!(result.is_some());
-        assert!(result.unwrap().contains("querying info about missing paths"));
+        assert!(
+            result
+                .unwrap()
+                .contains("querying info about missing paths")
+        );
     }
 
     #[test]

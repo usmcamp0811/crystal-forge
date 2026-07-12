@@ -2387,6 +2387,64 @@ pub async fn download_job_derivation_archive(
     stream_nix_export_response(archive_paths, job_id, drv_path.to_string())
 }
 
+/// Splices multiple `nix-store --export` streams into one valid stream.
+///
+/// The Nix export stream format is a sequence of `[1u64][path entry]` records
+/// followed by a single `[0u64]` end-of-stream terminator. Concatenating the
+/// raw stdout of several `nix-store --export` invocations therefore produces
+/// an INVALID stream: `nix-store --import` stops at the first chunk's
+/// terminator and silently discards everything after it, leaving the closure
+/// incomplete on the builder.
+///
+/// This helper holds back the trailing 8 bytes of each chunk's stream. For
+/// every chunk except the last, the held-back terminator is verified to be
+/// the 8-byte zero marker and dropped; the final chunk keeps its terminator
+/// so the spliced stream ends correctly.
+struct ExportStreamSplicer {
+    tail: Vec<u8>,
+}
+
+impl ExportStreamSplicer {
+    const TERMINATOR_LEN: usize = 8;
+
+    fn new() -> Self {
+        Self { tail: Vec::new() }
+    }
+
+    /// Accept the next bytes of the current chunk's stdout. Returns the bytes
+    /// that are safe to forward now — everything except the last 8 bytes seen
+    /// so far (which may turn out to be the stream terminator).
+    fn push(&mut self, incoming: &[u8]) -> Vec<u8> {
+        let mut combined = std::mem::take(&mut self.tail);
+        combined.extend_from_slice(incoming);
+        if combined.len() <= Self::TERMINATOR_LEN {
+            self.tail = combined;
+            return Vec::new();
+        }
+        let split = combined.len() - Self::TERMINATOR_LEN;
+        self.tail = combined.split_off(split);
+        combined
+    }
+
+    /// Finish the current chunk. When `emit_terminator` is true (final chunk)
+    /// the held-back bytes are returned for forwarding. Otherwise the
+    /// held-back bytes MUST be the 8-byte zero terminator, which is dropped so
+    /// the next chunk's records continue the stream seamlessly.
+    fn finish(&mut self, emit_terminator: bool) -> Result<Option<Vec<u8>>, String> {
+        let tail = std::mem::take(&mut self.tail);
+        if emit_terminator {
+            return Ok(if tail.is_empty() { None } else { Some(tail) });
+        }
+        if tail.len() != Self::TERMINATOR_LEN || tail.iter().any(|b| *b != 0) {
+            return Err(format!(
+                "unexpected nix-store --export stream tail ({} bytes, expected 8-byte zero terminator)",
+                tail.len()
+            ));
+        }
+        Ok(None)
+    }
+}
+
 /// Build a streaming HTTP response of `nix-store --export <paths>`.
 ///
 /// True process-stdout streaming: spawns each nix-store --export chunk with
@@ -2395,6 +2453,11 @@ pub async fn download_job_derivation_archive(
 /// a Vec<u8>. Per-chunk memory overhead is bounded by the HTTP buffer size.
 /// stderr is drained concurrently with a bounded 64 KiB tail so a noisy child
 /// cannot deadlock the pipe or OOM the server.
+///
+/// Multiple export chunks are spliced into a single valid import stream via
+/// [`ExportStreamSplicer`] — each intermediate chunk's end-of-stream
+/// terminator is stripped so `nix-store --import` on the builder consumes the
+/// entire multi-chunk archive instead of stopping at the first terminator.
 fn stream_nix_export_response(
     archive_paths: Vec<String>,
     job_id: Uuid,
@@ -2462,13 +2525,21 @@ fn stream_nix_export_response(
             });
 
             // Stream stdout bytes into the response channel as they arrive.
+            // The splicer holds back each chunk's trailing 8-byte terminator so
+            // that intermediate chunks join into one valid import stream; only
+            // the final chunk's terminator is forwarded.
+            let is_last_chunk = chunk_index == chunk_count - 1;
+            let mut splicer = ExportStreamSplicer::new();
             if let Some(stdout) = child.stdout.take() {
                 let mut reader = ReaderStream::new(stdout);
                 loop {
                     use futures::StreamExt;
                     match reader.next().await {
                         Some(Ok(chunk)) if !chunk.is_empty() => {
-                            if tx.send(Ok(chunk)).await.is_err() {
+                            let forward = splicer.push(&chunk);
+                            if !forward.is_empty()
+                                && tx.send(Ok(bytes::Bytes::from(forward))).await.is_err()
+                            {
                                 tracing::debug!(
                                     job_id = %job_id_copy,
                                     "derivation archive stream cancelled by client"
@@ -2490,6 +2561,33 @@ fn stream_nix_export_response(
                         }
                         None => break, // stdout EOF
                     }
+                }
+            }
+
+            // Chunk stdout complete: emit or verify-and-drop the held-back
+            // stream terminator depending on whether this is the final chunk.
+            match splicer.finish(is_last_chunk) {
+                Ok(Some(tail)) => {
+                    if tx.send(Ok(bytes::Bytes::from(tail))).await.is_err() {
+                        tracing::debug!(
+                            job_id = %job_id_copy,
+                            "derivation archive stream cancelled by client at tail"
+                        );
+                        let _ = child.kill().await;
+                        return;
+                    }
+                }
+                Ok(None) => {}
+                Err(msg) => {
+                    tracing::error!(
+                        job_id = %job_id_copy,
+                        drv_path = %drv_path_owned,
+                        chunk_index,
+                        chunk_count,
+                        "export stream splice failed: {msg}"
+                    );
+                    let _ = tx.send(Err(std::io::Error::other(msg))).await;
+                    return;
                 }
             }
 
@@ -4590,6 +4688,100 @@ mod tests {
         // All paths must appear exactly once
         let all: Vec<_> = chunks.iter().flat_map(|c| c.iter()).collect();
         assert_eq!(all.len(), paths.len());
+    }
+
+    // ── ExportStreamSplicer: multi-chunk export stream splicing ─────────────
+
+    /// Simulate a single-chunk export stream: records then 8-byte terminator.
+    /// The final chunk must pass its terminator through untouched.
+    #[test]
+    fn export_splicer_single_chunk_passes_terminator_through() {
+        let mut splicer = super::ExportStreamSplicer::new();
+        // "records" payload followed by the 8-byte zero terminator
+        let mut stream = b"RECORDS-PAYLOAD".to_vec();
+        stream.extend_from_slice(&[0u8; 8]);
+
+        let forwarded = splicer.push(&stream);
+        let tail = splicer
+            .finish(true)
+            .expect("final chunk finish must succeed");
+
+        let mut result = forwarded;
+        if let Some(t) = tail {
+            result.extend_from_slice(&t);
+        }
+        assert_eq!(
+            result, stream,
+            "single-chunk stream must be forwarded byte-identical"
+        );
+    }
+
+    /// Two chunks: the first chunk's terminator must be stripped, the second's
+    /// kept, producing one valid continuous stream.
+    #[test]
+    fn export_splicer_strips_intermediate_terminator() {
+        let mut chunk1 = b"CHUNK-ONE-RECORDS".to_vec();
+        chunk1.extend_from_slice(&[0u8; 8]);
+        let mut chunk2 = b"CHUNK-TWO-RECORDS".to_vec();
+        chunk2.extend_from_slice(&[0u8; 8]);
+
+        let mut spliced: Vec<u8> = Vec::new();
+
+        // Chunk 1 (intermediate): terminator must be verified and dropped.
+        let mut splicer = super::ExportStreamSplicer::new();
+        spliced.extend_from_slice(&splicer.push(&chunk1));
+        let tail = splicer
+            .finish(false)
+            .expect("intermediate chunk with zero terminator must succeed");
+        assert!(tail.is_none(), "intermediate terminator must be dropped");
+
+        // Chunk 2 (final): terminator must be forwarded.
+        let mut splicer = super::ExportStreamSplicer::new();
+        spliced.extend_from_slice(&splicer.push(&chunk2));
+        if let Some(t) = splicer.finish(true).expect("final chunk must succeed") {
+            spliced.extend_from_slice(&t);
+        }
+
+        let mut expected = b"CHUNK-ONE-RECORDS".to_vec();
+        expected.extend_from_slice(b"CHUNK-TWO-RECORDS");
+        expected.extend_from_slice(&[0u8; 8]);
+        assert_eq!(
+            spliced, expected,
+            "spliced stream must contain both chunks' records and exactly one terminator"
+        );
+    }
+
+    /// A nonzero tail on an intermediate chunk indicates a malformed or
+    /// truncated export stream — must be a hard error, not silently spliced.
+    #[test]
+    fn export_splicer_rejects_nonzero_intermediate_tail() {
+        let mut chunk = b"RECORDS".to_vec();
+        chunk.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]); // last byte nonzero
+
+        let mut splicer = super::ExportStreamSplicer::new();
+        let _ = splicer.push(&chunk);
+        assert!(
+            splicer.finish(false).is_err(),
+            "nonzero tail must be rejected for intermediate chunks"
+        );
+    }
+
+    /// Bytes arriving in small increments (smaller than the 8-byte holdback)
+    /// must still be spliced correctly.
+    #[test]
+    fn export_splicer_handles_tiny_reads() {
+        let mut stream = b"AB".to_vec();
+        stream.extend_from_slice(&[0u8; 8]);
+
+        let mut splicer = super::ExportStreamSplicer::new();
+        let mut forwarded: Vec<u8> = Vec::new();
+        // Feed one byte at a time.
+        for b in &stream {
+            forwarded.extend_from_slice(&splicer.push(&[*b]));
+        }
+        let tail = splicer.finish(false).expect("zero terminator expected");
+        assert!(tail.is_none());
+        assert_eq!(forwarded, b"AB", "only the records may be forwarded");
     }
 
     #[test]
