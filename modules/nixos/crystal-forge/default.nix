@@ -41,6 +41,8 @@
           eval_check_cache = cfg.server.eval_check_cache;
           allow_private_cache_test_targets =
             cfg.server.allow_private_cache_test_targets;
+          trust_forwarded_builder_https =
+            cfg.server.trust_forwarded_builder_https;
           remote_build_execution_strategy = cfg.build.remote_execution_strategy;
           source_delivery_mode = cfg.build.source_delivery_mode;
           source_archive_root = toString cfg.build.source_archive_root;
@@ -1635,6 +1637,29 @@ in {
 
           Keep disabled unless you explicitly need to test internal Attic/cache
           hosts from the admin UI.
+        '';
+      };
+
+      trust_forwarded_builder_https = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = lib.mdDoc ''
+          Trust the `X-Forwarded-Proto: https` / `Forwarded: proto=https`
+          headers set by a reverse proxy when sending cache-push credentials
+          to remote builders.
+
+          When `false` (the default), the server refuses to send any
+          credential-bearing cache-push config to builders and returns
+          `426 Upgrade Required`, regardless of forwarded-proto headers.
+
+          **Only set this to `true` when your reverse proxy unconditionally
+          strips and re-sets these headers itself.** Builders that can reach
+          the server directly over plaintext HTTP could otherwise spoof the
+          header and receive real cache credentials.
+
+          Typical deployment: set this to `true` when Crystal Forge is behind
+          an HTTPS-terminating reverse proxy (e.g. nginx, Caddy) that you
+          control, and builders only reach the server through that proxy.
         '';
       };
 
