@@ -6,22 +6,20 @@ use crate::theme;
 
 use super::helpers::{
     BuildAction, BuildItem, BuildStatus, PendingAction, build_status_badge_class,
-    extract_system_name,
+    extract_system_name, short_commit,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DetailTab {
     Logs,
-    Events,
-    Artifacts,
+    Details,
 }
 
 impl DetailTab {
     pub fn label(self) -> &'static str {
         match self {
-            DetailTab::Logs => "Live Logs",
-            DetailTab::Events => "Events",
-            DetailTab::Artifacts => "Artifacts",
+            DetailTab::Logs => "Log",
+            DetailTab::Details => "Details",
         }
     }
 }
@@ -45,13 +43,23 @@ pub fn BuildDetailPane(
         return rsx! { div {} };
     };
 
-    let _ = tab;
-    let _ = on_tab_change;
-    let _ = follow_logs;
-    let _ = pause_logs;
-    let _ = wrap_logs;
-    let _ = log_query;
+    let active_tab = *tab.read();
+    let live = matches!(build.status, BuildStatus::Building | BuildStatus::Stopping);
+    let active = live || build.status == BuildStatus::Queued;
+    let system_name = extract_system_name(&build.hostname).to_string();
+    let worker_label = if build.worker_id == "unassigned" {
+        "—".to_string()
+    } else {
+        build.worker_id.clone()
+    };
+    let details_worker_label = if build.worker_id == "unassigned" {
+        "unassigned".to_string()
+    } else {
+        build.worker_id.clone()
+    };
     let duration_label = build.runtime.clone().unwrap_or_else(|| "—".to_string());
+    let drv = build.drv();
+    let drv_preview = truncate_with_ellipsis(&drv, 40);
     let has_drv_progress = build.total_derivs > 0
         && build.built_derivs < build.total_derivs
         && matches!(build.status, BuildStatus::Building | BuildStatus::Stopping);
@@ -63,32 +71,120 @@ pub fn BuildDetailPane(
     } else {
         "—".to_string()
     };
+    let raw_logs = build.logs.clone().unwrap_or_else(|| {
+        format!(
+            "{} build for {} queued on {}\n{} · {}\nDerivations: {}/{} built · {} cached",
+            build.status_label(),
+            system_name,
+            build.arch,
+            short_commit(&build.commit),
+            drv,
+            build.built_derivs,
+            build.total_derivs,
+            build.cached_derivs
+        )
+    });
+    let log_lines: Vec<String> = raw_logs.lines().map(str::to_string).collect();
+    let log_line_count = log_lines.len();
+    let log_q = log_query.read().trim().to_lowercase();
+    let log_match_count = if log_q.is_empty() {
+        0
+    } else {
+        log_lines
+            .iter()
+            .filter(|line| line.to_lowercase().contains(&log_q))
+            .count()
+    };
+    let log_count_label = if log_q.is_empty() {
+        format!(
+            "{} line{}",
+            log_line_count,
+            if log_line_count == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "{} match{}",
+            log_match_count,
+            if log_match_count == 1 { "" } else { "es" }
+        )
+    };
+    let log_stream_class = if *wrap_logs.read() {
+        "sd-log-stream build-log-stream wrap"
+    } else {
+        "sd-log-stream build-log-stream"
+    };
 
     rsx! {
-        // Note: The aside.side-panel wrapper is in builds.rs
-        div {
-            // JSX: <div className="panel-head">
-            div {
-                class: "panel-head",
-                // JSX: <div className="panel-title">
+        // Note: The aside.fl-tray.build-log-tray wrapper is in builds.rs.
+        header { class: "fl-tray-head",
+            div { style: "display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;",
+                svg {
+                    width: "18", height: "18",
+                    view_box: "0 0 24 24",
+                    fill: "none", stroke: "currentColor",
+                    stroke_width: "2",
+                    stroke_linecap: "round", stroke_linejoin: "round",
+                    style: "color: var(--cf-brand-purple); flex-shrink: 0;",
+                    path { d: "M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" }
+                    polyline { points: "3.27 6.96 12 12.01 20.73 6.96" }
+                    line { x1: "12", y1: "22.08", x2: "12", y2: "12" }
+                }
                 div {
-                    class: "panel-title",
-                    h2 {
-                        style: "font-size: 15px;",
+                    style: "min-width: 0;",
+                    div { style: "display: flex; align-items: center; gap: 8px; flex-wrap: wrap;",
+                        span { style: "font-weight: 700; font-size: 15px;", "{system_name}" }
                         span {
                             class: "chip {build_status_badge_class(build.status)}",
-                            style: "margin-right: 6px;",
+                            style: "font-size: 10px;",
+                            span { class: "chip-dot", style: "background: {status_color(build.status)};" }
                             "{build.status_label()}"
+                            if live {
+                                span { class: "live-dot", style: "margin-left: 6px;" }
+                            }
                         }
-                        // JSX title: Build {b.pkg}
-                        "Build {build.pkg()}"
                     }
-                    // JSX subtitle: {b.drv} (full derivation path, mono, muted)
-                    span { class: "fqdn mono", "{build.drv()}" }
+                    div {
+                        class: "mono",
+                        style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                        "{short_commit(&build.commit)} · {drv_preview}"
+                    }
                 }
-                // JSX: <button className="btn-icon focus-ring"><Icon name="x" size={16} /></button>
+            }
+            div { style: "display: flex; gap: 6px; align-items: center; flex-shrink: 0;",
+                if can_requeue && active {
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        style: if build.status == BuildStatus::Stopping { "color: var(--cf-red);" } else { "" },
+                        onclick: move |_| {
+                            if build.status == BuildStatus::Stopping {
+                                on_build_action.call(BuildAction::ForceCancel);
+                            } else {
+                                on_build_action.call(BuildAction::Stop);
+                            }
+                        },
+                        if build.status == BuildStatus::Stopping { "Force kill" } else { "Cancel" }
+                    }
+                }
+                if can_requeue && build.status == BuildStatus::Failed {
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        onclick: move |_| on_build_action.call(BuildAction::Restart),
+                        svg {
+                            width: "12", height: "12",
+                            view_box: "0 0 24 24",
+                            fill: "none", stroke: "currentColor",
+                            stroke_width: "2",
+                            style: "margin-right: 4px;",
+                            path { d: "M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74" }
+                            path { d: "M21 3v9h-9" }
+                            path { d: "M21 12A9 9 0 0 0 3.26 9.26" }
+                        }
+                        "Retry"
+                    }
+                }
                 button {
                     class: "btn-icon focus-ring",
+                    title: "Close",
                     onclick: move |_| on_close.call(()),
                     svg {
                         width: "16",
@@ -104,27 +200,80 @@ pub fn BuildDetailPane(
                     }
                 }
             }
+        }
 
-            // JSX: <div className="panel-body">
-            div {
-                class: "panel-body",
-                // JSX: <section className="panel-section">
-                section {
-                    class: "panel-section",
-                    // JSX: <dl className="kv-grid">
-                    // JSX: <dl className="kv-grid">
-                    // System, Flake, Commit, Worker, Arch, Derivations, Queued, Duration, Attempts
-                    dl { class: "kv-grid",
+        // Stats grid
+        div { class: "ed-stats",
+            div { class: "ed-stat",
+                div { class: "ed-stat-label", "Queued" }
+                div { class: "ed-stat-val", style: "font-size: 12.5px; font-weight: 600;", "{build.queued_for}" }
+            }
+            div { class: "ed-stat",
+                div { class: "ed-stat-label", "Duration" }
+                div { class: "ed-stat-val mono", "{duration_label}" }
+            }
+            div { class: "ed-stat",
+                div { class: "ed-stat-label", "Derivations" }
+                div { class: "ed-stat-val",
+                    "{build.built_derivs}"
+                    span { style: "font-size: 12px; color: var(--cf-text-muted);", "/{build.total_derivs}" }
+                }
+            }
+            div { class: "ed-stat",
+                div { class: "ed-stat-label", "Worker" }
+                div { class: "ed-stat-val mono", style: "font-size: 12.5px;", "{worker_label}" }
+            }
+            div { class: "ed-stat",
+                div { class: "ed-stat-label", "Arch" }
+                div { class: "ed-stat-val mono", style: "font-size: 12.5px;", "{build.arch}" }
+            }
+        }
+
+        // Tabs
+        div {
+            class: "sd-tabs",
+            style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border); flex-shrink: 0;",
+            button {
+                class: if active_tab == DetailTab::Logs { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                onclick: move |_| on_tab_change.call(DetailTab::Logs),
+                svg {
+                    width: "12", height: "12",
+                    view_box: "0 0 24 24",
+                    fill: "none", stroke: "currentColor",
+                    stroke_width: "2",
+                    polyline { points: "4 17 10 11 4 5" }
+                    line { x1: "12", y1: "19", x2: "20", y2: "19" }
+                }
+                "Log"
+                if live { span { class: "live-dot", style: "margin-left: 4px;" } }
+            }
+            button {
+                class: if active_tab == DetailTab::Details { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                onclick: move |_| on_tab_change.call(DetailTab::Details),
+                svg {
+                    width: "12", height: "12",
+                    view_box: "0 0 24 24",
+                    fill: "none", stroke: "currentColor",
+                    stroke_width: "2",
+                    circle { cx: "12", cy: "12", r: "10" }
+                    line { x1: "12", y1: "16", x2: "12", y2: "12" }
+                    line { x1: "12", y1: "8", x2: "12.01", y2: "8" }
+                }
+                "Details"
+            }
+        }
+
+        if active_tab == DetailTab::Details {
+            div { class: "ed-body", style: "padding: 14px 16px;",
+                dl { class: "kv-grid",
                         dt { "System" }
-                        dd { class: "mono", "{extract_system_name(&build.hostname)}" }
+                        dd { class: "mono", "{system_name}" }
                         dt { "Flake" }
                         dd { "{build.flake}" }
                         dt { "Commit" }
                         dd { class: "mono", "{build.commit}" }
                         dt { "Worker" }
-                        dd { class: "mono",
-                            if build.worker_id == "unassigned" { "unassigned" } else { "{build.worker_id}" }
-                        }
+                        dd { class: "mono", "{details_worker_label}" }
                         dt { "Arch" }
                         dd { class: "mono", "{build.arch}" }
                         dt { "Derivations" }
@@ -136,12 +285,9 @@ pub fn BuildDetailPane(
                         dt { "Attempts" }
                         dd { "{build.attempts}" }
                     }
-                }
-
-                // JSX: derivation progress section — shown when build is in progress
                 if has_drv_progress {
-                    section { class: "panel-section",
-                        h3 { "Derivation progress" }
+                    section { style: "margin-top: 18px;",
+                        h3 { style: "font-size: 12px; font-weight: 600; margin: 0 0 8px; color: var(--cf-text-secondary);", "Derivation progress" }
                         {
                             let total = build.total_derivs as f64;
                             let cached_pct = (build.cached_derivs as f64 / total * 100.0).min(100.0);
@@ -166,85 +312,101 @@ pub fn BuildDetailPane(
                     }
                 }
             }
-
-            // JSX: <div className="panel-actions">
-            div {
-                class: "panel-actions",
-                // Logs always available
-                button {
-                    class: "btn btn-ghost focus-ring xs",
-                    onclick: move |_| on_log.call(()),
-                    // terminal icon
-                    svg {
-                        width: "12", height: "12",
-                        view_box: "0 0 24 24",
-                        fill: "none", stroke: "currentColor",
-                        stroke_width: "2",
-                        stroke_linecap: "round", stroke_linejoin: "round",
-                        style: "margin-right: 4px;",
-                        polyline { points: "4 17 10 11 4 5" }
-                        line { x1: "12", y1: "19", x2: "20", y2: "19" }
+        } else {
+            div { style: "display: flex; flex-direction: column; flex: 1; min-height: 0;",
+                div { style: "padding: 8px 16px; border-bottom: 1px solid var(--cf-divider); display: flex; gap: 10px; align-items: center; flex-shrink: 0;",
+                    span { style: "font-size: 11px; color: var(--cf-text-muted); white-space: nowrap;", "{log_count_label}" }
+                    div { style: "flex: 1;" }
+                    label { style: "display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--cf-text-muted);",
+                        input {
+                            r#type: "checkbox",
+                            checked: *follow_logs.read(),
+                            onchange: move |evt| follow_logs.set(evt.checked()),
+                        }
+                        "Follow"
                     }
-                    "Logs"
-                }
-                // Cancel for building/queued
-                if can_requeue && matches!(build.status, BuildStatus::Building | BuildStatus::Queued) {
+                    label { style: "display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--cf-text-muted);",
+                        input {
+                            r#type: "checkbox",
+                            checked: *wrap_logs.read(),
+                            onchange: move |evt| wrap_logs.set(evt.checked()),
+                        }
+                        "Wrap"
+                    }
                     button {
-                        class: "btn btn-ghost focus-ring xs",
-                        onclick: move |_| on_build_action.call(BuildAction::Stop),
+                        class: "btn-icon focus-ring",
+                        title: if *pause_logs.read() { "Resume" } else { "Pause" },
+                        onclick: move |_| {
+                            let paused = pause_logs();
+                            pause_logs.set(!paused);
+                        },
+                        if *pause_logs.read() { "▶" } else { "Ⅱ" }
+                    }
+                    div { class: "log-search",
                         svg {
-                            width: "12", height: "12",
+                            width: "13", height: "13",
                             view_box: "0 0 24 24",
                             fill: "none", stroke: "currentColor",
                             stroke_width: "2",
-                            stroke_linecap: "round", stroke_linejoin: "round",
-                            style: "margin-right: 4px;",
-                            line { x1: "18", y1: "6", x2: "6", y2: "18" }
-                            line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                            circle { cx: "11", cy: "11", r: "8" }
+                            line { x1: "21", y1: "21", x2: "16.65", y2: "16.65" }
                         }
-                        "Cancel build"
+                        input {
+                            class: "log-search-input",
+                            placeholder: "Search log…",
+                            value: "{log_query}",
+                            oninput: move |evt| log_query.set(evt.value()),
+                        }
+                        if !log_q.is_empty() {
+                            span { class: "log-search-count", "{log_match_count}" }
+                        }
                     }
-                }
-                // Force kill for stopping
-                if can_requeue && build.status == BuildStatus::Stopping {
                     button {
-                        class: "btn btn-ghost focus-ring xs",
-                        style: "color: var(--cf-red, #f87171);",
-                        onclick: move |_| on_build_action.call(BuildAction::ForceCancel),
+                        class: "btn-icon focus-ring",
+                        title: "Open log",
+                        onclick: move |_| on_log.call(()),
                         svg {
-                            width: "12", height: "12",
+                            width: "13", height: "13",
                             view_box: "0 0 24 24",
                             fill: "none", stroke: "currentColor",
                             stroke_width: "2",
-                            stroke_linecap: "round", stroke_linejoin: "round",
-                            style: "margin-right: 4px;",
-                            line { x1: "18", y1: "6", x2: "6", y2: "18" }
-                            line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                            polyline { points: "4 17 10 11 4 5" }
+                            line { x1: "12", y1: "19", x2: "20", y2: "19" }
                         }
-                        "Force kill"
                     }
                 }
-                // Retry for failed
-                if can_requeue && build.status == BuildStatus::Failed {
-                    button {
-                        class: "btn btn-ghost focus-ring xs",
-                        onclick: move |_| on_build_action.call(BuildAction::Restart),
-                        svg {
-                            width: "12", height: "12",
-                            view_box: "0 0 24 24",
-                            fill: "none", stroke: "currentColor",
-                            stroke_width: "2",
-                            stroke_linecap: "round", stroke_linejoin: "round",
-                            style: "margin-right: 4px;",
-                            path { d: "M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74" }
-                            path { d: "M21 3v9h-9" }
-                            path { d: "M21 12A9 9 0 0 0 3.26 9.26" }
+                pre { class: "{log_stream_class}",
+                    for (idx, line) in log_lines.iter().enumerate() {
+                        {
+                            let line = line.clone();
+                            let is_match = !log_q.is_empty() && line.to_lowercase().contains(&log_q);
+                            rsx! {
+                                div {
+                                    key: "{idx}",
+                                    class: if is_match { "sd-log-line sd-log-info log-line-hit" } else { "sd-log-line sd-log-info" },
+                                    span { class: "sd-log-t", "{idx + 1}" }
+                                    span { class: "sd-log-lvl", "LOG" }
+                                    span { class: "sd-log-m", "{line}" }
+                                }
+                            }
                         }
-                        "Retry build"
+                    }
+                    if live && !*pause_logs.read() {
+                        div { class: "sd-log-caret", "▍" }
                     }
                 }
             }
         }
+    }
+}
+
+fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
     }
 }
 

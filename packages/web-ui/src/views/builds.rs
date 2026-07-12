@@ -394,7 +394,7 @@ pub fn BuildsView() -> Element {
     let mut selected_build = use_signal(|| None::<i32>);
     let mut log_open = use_signal(|| false);
     let mut active_view = use_signal(|| BuildsTab::ActiveQueue);
-    let mut active_tab = use_signal(|| DetailTab::Logs);
+    let mut active_tab = use_signal(|| DetailTab::Details);
     let mut completed_status_filter = use_signal(|| CompletedStatusFilter::All);
     let mut completed_sort_order = use_signal(|| CompletedSortOrder::NewestFirst);
 
@@ -712,9 +712,10 @@ pub fn BuildsView() -> Element {
                             }
                         },
                         on_log: move |build_id| {
-                            // Open log modal immediately when Logs button clicked (JSX parity)
+                            // JSX parity: open the tray on its Log tab (not a separate modal).
                             selected_build.set(Some(build_id));
-                            log_open.set(true);
+                            active_tab.set(DetailTab::Logs);
+                            log_open.set(false);
                         },
                         on_bulk_rerun: {
                             move |build_ids: Vec<i32>| {
@@ -750,18 +751,18 @@ pub fn BuildsView() -> Element {
                 }
             }
 
-            if selected.is_some() && !log_open() {
-                // JSX: <div className="side-panel-backdrop" onClick={onClose} />
+            if selected.is_some() {
+                // JSX: <div className="fl-tray-backdrop" onClick={onClose} />
                 div {
-                    class: "side-panel-backdrop",
+                    class: "fl-tray-backdrop",
                     onclick: move |_| {
                         selected_build.set(None);
                         log_open.set(false);
                     },
                 }
-                // JSX: <aside className="side-panel">
+                // JSX: <aside className="fl-tray build-log-tray">
                 aside {
-                    class: "side-panel",
+                    class: "fl-tray build-log-tray",
                     onclick: |evt| evt.stop_propagation(),
                     {
                         let selected_for_action = selected.clone();
@@ -775,7 +776,7 @@ pub fn BuildsView() -> Element {
                         },
                         on_log: move |_| {
                             active_tab.set(DetailTab::Logs);
-                            log_open.set(true);
+                            log_open.set(false);
                         },
                         on_build_action: move |action| {
                             if let Some(build) = selected_for_action.clone() {
