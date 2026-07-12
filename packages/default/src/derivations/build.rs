@@ -6,6 +6,7 @@ use crate::config::BuildConfig;
 use crate::config::CacheConfig;
 use anyhow::Context;
 use anyhow::{Result, anyhow, bail};
+use serde_json::Value as JsonValue;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -192,6 +193,8 @@ impl Derivation {
                 "--",
                 "nix-store",
                 "--realise",
+                "--log-format",
+                "internal-json",
                 "--add-root",
                 &gc_root_path,
                 "--indirect",
@@ -203,6 +206,8 @@ impl Derivation {
             let mut direct = Command::new("nix-store");
             direct.args([
                 "--realise",
+                "--log-format",
+                "internal-json",
                 "--add-root",
                 &gc_root_path,
                 "--indirect",
@@ -451,16 +456,36 @@ impl Derivation {
                 line_result = stderr_reader.next_segment(), if !stderr_done => {
                     match line_result {
                         Ok(Some(segment)) => {
-                            let line = decode_log_segment(segment);
+                            let raw = decode_log_segment(segment);
                             last_output = Instant::now();
-                            debug!("build stderr: {}", line);
-                            if line.contains("building '") || line.contains("copying path '") {
-                                current_target = Some(line.clone());
-                            }
-                            // Forward to log sink if provided
-                            if let Some(ref sink) = log_sink {
-                                if let Some(batch) = log_buffer.append(&line) {
-                                    sink(batch);
+
+                            // Translate `@nix {...}` internal-json lines into
+                            // human-readable progress lines so the user sees
+                            // substitution activity instead of silent waiting.
+                            // Returns None for structural events (start/stop/result)
+                            // that have no user-visible text — those are skipped.
+                            let line_opt: Option<String> = if raw.starts_with("@nix ") {
+                                let decoded = decode_nix_log_line(&raw);
+                                if let Some(ref h) = decoded {
+                                    debug!("build nix-log: {}", h);
+                                } else {
+                                    debug!("build nix-log (skip): {}", raw);
+                                }
+                                decoded
+                            } else {
+                                debug!("build stderr: {}", raw);
+                                Some(raw)
+                            };
+
+                            if let Some(line) = line_opt {
+                                if line.contains("building '") || line.contains("copying path '") {
+                                    current_target = Some(line.clone());
+                                }
+                                // Forward to log sink if provided
+                                if let Some(ref sink) = log_sink {
+                                    if let Some(batch) = log_buffer.append(&line) {
+                                        sink(batch);
+                                    }
                                 }
                             }
                         }
@@ -568,7 +593,7 @@ impl Derivation {
         );
 
         let mut cmd = Command::new("nix-store");
-        cmd.args(["--realise", drv_path]);
+        cmd.args(["--realise", "--log-format", "internal-json", drv_path]);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         build_config.apply_to_command(&mut cmd);
@@ -605,6 +630,86 @@ impl Derivation {
             || error_str.contains("scope")
             || error_str.contains("failed to create")
     }
+}
+
+/// Decode a single `@nix {...}` internal-json log line emitted by
+/// `nix-store --log-format internal-json` into a human-readable string.
+///
+/// Returns `Some(line)` for events the user should see (human-readable messages,
+/// phase starts with descriptive text, copy/build activity). Returns `None` for
+/// purely structural events (progress counters, start/stop without text, result
+/// frames) that would be noise in a build log.
+fn decode_nix_log_line(raw: &str) -> Option<String> {
+    // Strip the "@nix " prefix and parse JSON.
+    let json_part = raw.strip_prefix("@nix ")?;
+    let obj: JsonValue = serde_json::from_str(json_part).ok()?;
+
+    let action = obj.get("action")?.as_str()?;
+
+    match action {
+        // Human-readable log message from Nix internals.
+        // level 0 = error, 1 = warn, 2 = notice, 3 = info, 4 = talkative, ...
+        // We show levels 0-3 (error/warn/notice/info); skip chatty debug levels.
+        "msg" => {
+            let level = obj.get("level").and_then(|v| v.as_u64()).unwrap_or(3);
+            if level > 3 {
+                return None;
+            }
+            let msg = obj.get("msg")?.as_str()?;
+            // Strip ANSI escape codes that Nix embeds (e.g. bold/colour).
+            let clean = strip_ansi(msg);
+            if clean.trim().is_empty() {
+                return None;
+            }
+            Some(format!("{}\n", clean.trim()))
+        }
+
+        // Activity start event — emit the descriptive text for named phases
+        // (type 0 = generic, 102 = copy path, 103 = substitute, 104 = build).
+        "start" => {
+            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let level = obj.get("level").and_then(|v| v.as_u64()).unwrap_or(99);
+            // Only surface level ≤ 3 start events with non-empty text.
+            if level > 3 || text.trim().is_empty() {
+                return None;
+            }
+            let clean = strip_ansi(text);
+            Some(format!("{}\n", clean.trim()))
+        }
+
+        // stop / result / build-log frames — purely structural, skip.
+        _ => None,
+    }
+}
+
+/// Remove ANSI CSI escape sequences (colour, bold, etc.) from a string.
+fn strip_ansi(s: &str) -> String {
+    // Fast path: if no ESC character, return as-is.
+    if !s.contains('\x1b') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            // Consume CSI sequence: ESC [ ... final-byte
+            if chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                // consume until a byte in 0x40–0x7E (the final byte)
+                for c in chars.by_ref() {
+                    if c as u32 >= 0x40 && c as u32 <= 0x7E {
+                        break;
+                    }
+                }
+            } else {
+                // Some other ESC sequence — consume one more char and skip.
+                chars.next();
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -695,6 +800,69 @@ mod tests {
     fn decode_log_segment_replaces_invalid_utf8() {
         let decoded = decode_log_segment(vec![b'o', b'k', b' ', 0xff, b'\r']);
 
-        assert_eq!(decoded, "ok �");
+        assert_eq!(decoded, "ok \u{fffd}");
+    }
+
+    // ── decode_nix_log_line ───────────────────────────────────────────────────
+
+    #[test]
+    fn nix_log_msg_info_level_is_returned() {
+        let line = r#"@nix {"action":"msg","level":3,"msg":"these 2 paths will be fetched"}"#;
+        let result = decode_nix_log_line(line);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("these 2 paths will be fetched"));
+    }
+
+    #[test]
+    fn nix_log_msg_copying_path_is_returned() {
+        let line = r#"@nix {"action":"msg","level":3,"msg":"copying path '/nix/store/abc-foo' from 'https://cache.nixos.org'"}"#;
+        let result = decode_nix_log_line(line);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("copying path"));
+    }
+
+    #[test]
+    fn nix_log_msg_debug_level_is_skipped() {
+        // level 4+ (talkative/debug) should be filtered out
+        let line = r#"@nix {"action":"msg","level":5,"msg":"some debug chatter"}"#;
+        assert!(decode_nix_log_line(line).is_none());
+    }
+
+    #[test]
+    fn nix_log_start_with_text_info_level_is_returned() {
+        let line = r#"@nix {"action":"start","id":123,"level":2,"parent":0,"text":"querying info about missing paths","type":0}"#;
+        let result = decode_nix_log_line(line);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("querying info about missing paths"));
+    }
+
+    #[test]
+    fn nix_log_start_empty_text_is_skipped() {
+        let line = r#"@nix {"action":"start","id":456,"level":0,"parent":0,"text":"","type":102}"#;
+        assert!(decode_nix_log_line(line).is_none());
+    }
+
+    #[test]
+    fn nix_log_stop_is_skipped() {
+        let line = r#"@nix {"action":"stop","id":123}"#;
+        assert!(decode_nix_log_line(line).is_none());
+    }
+
+    #[test]
+    fn nix_log_result_is_skipped() {
+        let line = r#"@nix {"action":"result","fields":[0,1,0,0],"id":123,"type":105}"#;
+        assert!(decode_nix_log_line(line).is_none());
+    }
+
+    #[test]
+    fn strip_ansi_removes_colour_codes() {
+        let input = "\x1b[35;1mwarning:\x1b[0m something happened";
+        assert_eq!(strip_ansi(input), "warning: something happened");
+    }
+
+    #[test]
+    fn strip_ansi_passthrough_no_escapes() {
+        let s = "plain text without escapes";
+        assert_eq!(strip_ansi(s), s);
     }
 }
