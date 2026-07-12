@@ -1478,6 +1478,21 @@ body {
   white-space: nowrap;
 }
 
+.build-log-tray {
+  width: min(840px, 100vw);
+  height: 100vh;
+  transition: width 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.build-log-tray .build-log-stream {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  height: auto;
+  border-radius: 0;
+  margin: 0;
+}
+
 .dtg {
   letter-spacing: 0.02em;
   white-space: nowrap;

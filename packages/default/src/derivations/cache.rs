@@ -225,9 +225,6 @@ impl Derivation {
                     warn!("Attic push returned 401; clearing login cache and retrying once...");
                     clear_attic_logged(&remote);
 
-                    // Re-login with current env
-                    let endpoint = std::env::var("ATTIC_SERVER_URL")?;
-                    let token = std::env::var("ATTIC_TOKEN")?;
                     ensure_attic_login(&remote, &endpoint, &token).await?;
 
                     // Retry push with streaming

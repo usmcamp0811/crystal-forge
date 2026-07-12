@@ -2081,8 +2081,18 @@ in {
         "postgresql.service";
 
       path = with pkgs;
-        [nix git vulnix systemd nix-fast-build nix-eval-jobs]
-        ++ lib.optional (cfg.cache.cache_type == "Attic") attic-client;
+        [
+          nix
+          git
+          vulnix
+          systemd
+          nix-fast-build
+          nix-eval-jobs
+          # API builders may receive server-supplied Attic cache-push
+          # credentials per job even when their local cfg.cache.cache_type is
+          # not Attic. Keep the client in PATH so those pushes can run.
+          attic-client
+        ];
 
       # Merge existing env with any Environment=… pairs from systemd_properties
       environment = lib.mkMerge [
