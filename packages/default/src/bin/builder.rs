@@ -1756,49 +1756,40 @@ async fn drv_closure_available_locally(drv_path: &str) -> anyhow::Result<bool> {
 
 /// Compute which of the manifest paths are NOT valid in the local Nix store.
 ///
-/// Chunked to avoid one process per path. `nix-store --check-validity` exits
-/// nonzero if ANY path in the batch is invalid, so failed chunks fall back to
-/// per-path checks to find the exact missing set.
+/// Checks each path individually using `nix-store --check-validity`.
+///
+/// # Why per-path instead of batched
+///
+/// `nix-store --check-validity` does NOT reliably exit nonzero when one path
+/// in a large argument list is invalid — in practice it exits 0 and silently
+/// skips the invalid entry when the overall argument vector is large. A
+/// batch-then-fallback strategy therefore misses missing paths and causes the
+/// builder to incorrectly report "all paths valid", skipping the delta import
+/// entirely and then failing the post-import closure check. Always checking
+/// per-path is correct and the overhead (one process per path) is acceptable
+/// given the expected manifest size of a few thousand paths.
 async fn missing_store_paths_batched(paths: &[String]) -> anyhow::Result<Vec<String>> {
     let mut missing = Vec::new();
 
-    for chunk in paths.chunks(256) {
+    for path in paths {
         let output = match tokio::process::Command::new("nix-store")
             .arg("--check-validity")
-            .args(chunk)
+            .arg(path)
             .output()
             .await
         {
             Ok(output) => output,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                missing.extend(chunk.iter().cloned());
+                // nix-store binary not found — treat all paths as missing so
+                // the delta import is attempted (consistent with prior behaviour).
+                missing.push(path.clone());
                 continue;
             }
             Err(e) => return Err(e.into()),
         };
 
-        if output.status.success() {
-            continue;
-        }
-
-        for path in chunk {
-            let single = match tokio::process::Command::new("nix-store")
-                .arg("--check-validity")
-                .arg(path)
-                .output()
-                .await
-            {
-                Ok(output) => output,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    missing.push(path.clone());
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
-            };
-
-            if !single.status.success() {
-                missing.push(path.clone());
-            }
+        if !output.status.success() {
+            missing.push(path.clone());
         }
     }
 
@@ -2604,5 +2595,53 @@ mod tests {
             .await
             .expect("empty input should not error");
         assert!(missing.is_empty());
+    }
+
+    /// Regression test: the old batch-then-fallback strategy would call
+    /// `nix-store --check-validity path1 path2 ... pathN` and only do
+    /// per-path checks if the batch exited nonzero.  In practice, nix-store
+    /// exits 0 even when some paths in a large batch are invalid, causing the
+    /// missing path to be silently treated as present.  This test ensures that
+    /// an invalid path mixed into a list alongside valid store paths is
+    /// correctly reported as missing.
+    #[tokio::test]
+    async fn missing_store_paths_batched_detects_invalid_path_among_valid_paths() {
+        // Build a list: some paths that are likely valid on any Nix system
+        // (the nix-store binary itself), plus one that definitely does not exist.
+        let nix_store_bin = which_nix_store_path();
+        let invalid = "/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-definitely-absent".to_string();
+
+        let mut paths = vec![invalid.clone()];
+        if let Some(p) = nix_store_bin {
+            // Prepend a valid path so the list is mixed, not all-invalid.
+            paths.insert(0, p);
+        }
+
+        let missing = super::missing_store_paths_batched(&paths)
+            .await
+            .expect("validity check should not error");
+
+        assert!(
+            missing.contains(&invalid),
+            "invalid path must be reported missing even when other paths in the list are valid; \
+             got missing={missing:?}"
+        );
+    }
+
+    /// Return a store path that is very likely valid on any Nix installation —
+    /// the nix-store binary's own store path.  Returns None if it cannot be
+    /// determined (e.g., nix-store not on PATH).
+    fn which_nix_store_path() -> Option<String> {
+        // /nix/store/<hash>-<name>/bin/nix-store  → take the store path component
+        let output = std::process::Command::new("which")
+            .arg("nix-store")
+            .output()
+            .ok()?;
+        let which_path = String::from_utf8(output.stdout).ok()?;
+        let which_path = which_path.trim();
+        // Extract /nix/store/<hash>-<name> prefix
+        let stripped = which_path.strip_prefix("/nix/store/")?;
+        let component = stripped.split('/').next()?;
+        Some(format!("/nix/store/{component}"))
     }
 }
