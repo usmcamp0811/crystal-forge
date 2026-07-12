@@ -1738,10 +1738,16 @@ async fn execute_build_job(
 /// file on disk but some of its requisites missing; a plain `Path::exists()`
 /// check would incorrectly skip re-import and then fail later inside
 /// `nix-store --realise`.
+/// Is the full recursive closure of `drv_path` valid in the local store?
+///
+/// Nix calls: `nix-store --query --requisites <drv>` (1 process) to enumerate
+/// the closure, then batched `nix-store --check-validity --print-invalid`
+/// (~1 process per 1024 paths) to verify every member. If the `.drv` itself is
+/// not in the local store, the requisites query fails and we return `false`.
 async fn drv_closure_available_locally(drv_path: &str) -> anyhow::Result<bool> {
     let output = match tokio::process::Command::new("nix-store")
-        .arg("--check-validity")
-        .arg("--recursive")
+        .arg("--query")
+        .arg("--requisites")
         .arg(drv_path)
         .output()
         .await
@@ -1751,30 +1757,43 @@ async fn drv_closure_available_locally(drv_path: &str) -> anyhow::Result<bool> {
         Err(e) => return Err(e.into()),
     };
 
-    Ok(output.status.success())
+    if !output.status.success() {
+        // drv not in local store (or unreadable) — closure not available.
+        return Ok(false);
+    }
+
+    let closure: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| l.starts_with("/nix/store/"))
+        .collect();
+
+    let missing = missing_store_paths_batched(&closure).await?;
+    Ok(missing.is_empty())
 }
 
-/// Compute which of the manifest paths are NOT valid in the local Nix store.
+/// Batch size for `nix-store --check-validity --print-invalid` argument lists.
+/// 1024 paths ≈ 90 KiB of argv, comfortably under Linux ARG_MAX (~2 MiB).
+const VALIDITY_CHECK_BATCH: usize = 1024;
+
+/// Compute which of the given store paths are NOT valid in the local Nix store.
 ///
-/// Checks each path individually using `nix-store --check-validity`.
-///
-/// # Why per-path instead of batched
-///
-/// `nix-store --check-validity` does NOT reliably exit nonzero when one path
-/// in a large argument list is invalid — in practice it exits 0 and silently
-/// skips the invalid entry when the overall argument vector is large. A
-/// batch-then-fallback strategy therefore misses missing paths and causes the
-/// builder to incorrectly report "all paths valid", skipping the delta import
-/// entirely and then failing the post-import closure check. Always checking
-/// per-path is correct and the overhead (one process per path) is acceptable
-/// given the expected manifest size of a few thousand paths.
+/// Nix calls: `nix-store --check-validity --print-invalid <paths…>` in chunks
+/// of [`VALIDITY_CHECK_BATCH`] — one process per chunk (a 29 000-path manifest
+/// is ~29 process spawns). `--print-invalid` makes nix print each invalid path
+/// on stdout and exit 0 instead of failing on the first invalid path, so a
+/// single batched call reports the exact missing set reliably. (A plain
+/// batched `--check-validity` without the flag does NOT reliably exit nonzero
+/// for invalid paths in large argument lists, which previously caused missing
+/// paths to be treated as present.)
 async fn missing_store_paths_batched(paths: &[String]) -> anyhow::Result<Vec<String>> {
     let mut missing = Vec::new();
 
-    for path in paths {
+    for chunk in paths.chunks(VALIDITY_CHECK_BATCH) {
         let output = match tokio::process::Command::new("nix-store")
             .arg("--check-validity")
-            .arg(path)
+            .arg("--print-invalid")
+            .args(chunk)
             .output()
             .await
         {
@@ -1782,14 +1801,23 @@ async fn missing_store_paths_batched(paths: &[String]) -> anyhow::Result<Vec<Str
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // nix-store binary not found — treat all paths as missing so
                 // the delta import is attempted (consistent with prior behaviour).
-                missing.push(path.clone());
+                missing.extend(chunk.iter().cloned());
                 continue;
             }
             Err(e) => return Err(e.into()),
         };
 
         if !output.status.success() {
-            missing.push(path.clone());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let first_line = stderr.lines().next().unwrap_or("unknown error");
+            anyhow::bail!("nix-store --check-validity --print-invalid failed: {first_line}");
+        }
+
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let path = line.trim();
+            if path.starts_with("/nix/store/") {
+                missing.push(path.to_string());
+            }
         }
     }
 
