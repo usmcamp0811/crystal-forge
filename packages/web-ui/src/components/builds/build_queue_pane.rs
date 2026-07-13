@@ -5,7 +5,7 @@
 
 use dioxus::prelude::*;
 
-use super::helpers::{extract_system_name, short_commit, BuildAction, BuildItem, BuildStatus};
+use super::helpers::{BuildAction, BuildItem, BuildStatus, extract_system_name, short_commit};
 
 fn queue_drag_reorder_actions(
     queued_ids: &[i32],
@@ -257,7 +257,7 @@ pub fn BuildQueuePane(
                                         if let Some(ref pkg) = build.current_pkg {
                                             div {
                                                 class: "mono",
-                                                style: "font-size: 10px; color: #60a5fa; margin-top: 2px;",
+                                                style: "font-size: 10px; font-weight: 600; color: #60a5fa; margin-top: 2px;",
                                                 "building {pkg}…"
                                             }
                                         }

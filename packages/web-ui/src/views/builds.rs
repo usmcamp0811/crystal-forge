@@ -542,9 +542,9 @@ pub fn BuildsView() -> Element {
             // JSX: <div className="card" style={{ overflow:"hidden" }}>
             div {
                 class: "card overflow-hidden",
-                // JSX: <div className="sd-tabs" style={{ padding:"0 16px", borderBottom:"1px solid var(--cf-card-border)" }}>
+                // JSX: <div className="sd-tabs q-tabbar" style={{ padding:"0 16px", borderBottom:"1px solid var(--cf-card-border)" }}>
                 div {
-                    class: "sd-tabs",
+                    class: "sd-tabs q-tabbar",
                     style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border);",
                     button {
                         class: if active_view() == BuildsTab::ActiveQueue {
@@ -591,14 +591,11 @@ pub fn BuildsView() -> Element {
                     if active_view() == BuildsTab::ActiveQueue
                         && queue_data.iter().any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building | BuildStatus::Stopping))
                     {
-                        div {
-                            style: "display: inline-flex; align-items: center; gap: 10px; margin-left: auto;",
-                            span {
-                                class: "ms-hint",
-                                title: "Shift-click to toggle cancellable rows",
-                                kbd { "⇧" }
-                                "-click to select"
-                            }
+                        span {
+                            class: "ms-hint",
+                            title: "Shift-click to toggle cancellable rows",
+                            kbd { "⇧" }
+                            "-click to select"
                         }
                     }
                     // JSX: search bar

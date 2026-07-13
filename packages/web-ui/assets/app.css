@@ -1287,6 +1287,13 @@ body {
   display: none;
 }
 
+/* Builds/Evals queue tab bar: vertically centers tabs + multi-select hint + search */
+.q-tabbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .cf-modal-table-scroll {
   scrollbar-width: thin;
   scrollbar-color: rgba(148, 163, 184, 0.75) rgba(15, 23, 42, 0.35);
@@ -3291,6 +3298,13 @@ tr.kbd-focused > td {
 .q-drop-before td { box-shadow: inset 0 2px 0 0 var(--cf-brand-purple); }
 .q-drop-after td  { box-shadow: inset 0 -2px 0 0 var(--cf-brand-purple); }
 
+.q-move-group {
+  display: inline-flex;
+  flex-direction: column;
+  border: 1px solid var(--cf-card-border);
+  border-radius: 7px;
+  overflow: hidden;
+}
 .q-move-btn {
   display: flex;
   align-items: center;
@@ -4878,27 +4892,15 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
 }
 
 /* ─── Build queue table (TASK-347.1 — matches BuildsView.jsx) ─────────────── */
+/* Header cell typography/background comes from .sys-table thead th (shared
+   with q-queue-table via className="sys-table q-queue-table"); do not
+   redeclare it here or it will override the design-matched shared rule. */
 .q-queue-table { width: 100%; }
-.q-queue-table thead th { font-size: 12px; font-weight: 600; color: var(--cf-text-muted);
-  padding: 8px 12px; text-align: left; }
 .q-row { cursor: pointer; border-bottom: 1px solid var(--cf-card-border); transition: background 0.1s; }
 .q-row:hover { background: rgba(255,255,255,0.03); }
 .q-row.selected { background: color-mix(in oklab, var(--cf-brand-purple) 10%, var(--cf-card-bg)); }
 .q-row.row-checked { background: color-mix(in oklab, var(--cf-brand-purple) 9%, transparent); }
 .q-row td { padding: 8px 12px; vertical-align: middle; }
-/* Drag-and-drop visual indicators */
-.q-dragging { opacity: 0.4; }
-.q-drop-before { box-shadow: inset 0 2px 0 0 var(--cf-brand-purple); }
-.q-drop-after  { box-shadow: inset 0 -2px 0 0 var(--cf-brand-purple); }
-/* Drag handle */
-.q-drag-handle { cursor: grab; color: var(--cf-text-muted); display: inline-flex; align-items: center; }
-.q-drag-handle:active { cursor: grabbing; }
-/* Move up/down buttons */
-.q-move-group { display: inline-flex; flex-direction: column; gap: 1px; }
-.q-move-btn { background: none; border: none; color: var(--cf-text-muted); cursor: pointer;
-  padding: 1px 3px; border-radius: 3px; display: flex; align-items: center; }
-.q-move-btn:hover:not(:disabled) { color: var(--cf-text-primary); background: var(--cf-subtle-bg); }
-.q-move-btn:disabled { opacity: 0.3; cursor: default; }
 /* chip-dot inside status chips in the queue table */
 .chip-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; flex-shrink: 0; }
 
