@@ -5,8 +5,8 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::alerts::{
-    acknowledge, attention_row_class, dismiss_attention_item, is_acknowledged, set_attention_count,
-    should_flash,
+    acknowledge, attention_row_class, dismiss_attention_item, is_acknowledged, reset_acknowledge,
+    set_attention_count, should_flash,
 };
 
 use crate::api::{
@@ -54,6 +54,10 @@ fn EvaluationsPage() -> Element {
     let mut focused_index: Signal<Option<usize>> = use_signal(|| None);
     // Tab flash: pulses until the History tab is opened for the first time.
     let mut acked_hist = use_signal(|| false);
+    // Track the peak failed count so we can re-trigger the tab flash
+    // when new failures arrive after the user has acknowledged.
+    // Initialised lazily when `failed_count` becomes available.
+    let mut peak_failed = use_signal(|| None::<i64>);
 
     // Active queue multi-select (bulk cancel)
     let mut active_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
@@ -157,6 +161,22 @@ fn EvaluationsPage() -> Element {
         .iter()
         .filter(|item| item.evaluation_status == "failed")
         .count() as i64;
+    // Re-trigger tab flash when new failures arrive after acknowledgment.
+    {
+        let current = failed_count;
+        let peak = peak_failed();
+        match peak {
+            None => peak_failed.set(Some(current)),
+            Some(p) if current > p => {
+                peak_failed.set(Some(current));
+                if is_acknowledged("evals") {
+                    acked_hist.set(false);
+                    reset_acknowledge("evals");
+                }
+            }
+            _ => {}
+        }
+    }
     let total_count = queue_items.read().len() as i64;
     let selected_count = history_selected_ids.read().len();
     let selected_history_rows = history_resource

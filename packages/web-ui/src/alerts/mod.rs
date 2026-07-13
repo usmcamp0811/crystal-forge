@@ -46,6 +46,14 @@ pub fn is_acknowledged(view_key: &str) -> bool {
     ALERT_STATE.read().acknowledged.contains(view_key)
 }
 
+/// Remove the acknowledge + flash-triggered flags so the tab and rows
+/// can flash again for newly arrived failures.
+pub fn reset_acknowledge(view_key: &str) {
+    let mut state = ALERT_STATE.write();
+    state.acknowledged.remove(view_key);
+    state.flashed.remove(view_key);
+}
+
 /// Returns `true` exactly once per page load for a view that has attention
 /// items.  Subsequent calls always return `false`.
 ///

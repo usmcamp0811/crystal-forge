@@ -3,7 +3,7 @@
 use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
-use crate::alerts::{acknowledge, is_acknowledged, set_attention_count, should_flash};
+use crate::alerts::{acknowledge, is_acknowledged, reset_acknowledge, set_attention_count, should_flash};
 
 use crate::api::{
     self,
@@ -450,6 +450,20 @@ pub fn BuildsView() -> Element {
     });
     // Tab flash: pulses until the Completed tab is opened for the first time.
     let mut acked_hist = use_signal(|| false);
+    // Track the peak failed count so we can re-trigger the tab flash
+    // when new failures arrive after the user has acknowledged.
+    let mut peak_failed = use_signal(|| completed_failed_count);
+    {
+        let current = completed_failed_count;
+        let peak = peak_failed();
+        if current > peak {
+            peak_failed.set(current);
+            if is_acknowledged("builds") {
+                acked_hist.set(false);
+                reset_acknowledge("builds");
+            }
+        }
+    }
     completed_rows.sort_by(|left, right| {
         let left_key = left.completed_at.unwrap_or_else(Utc::now);
         let right_key = right.completed_at.unwrap_or_else(Utc::now);
