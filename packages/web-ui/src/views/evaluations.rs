@@ -5,7 +5,8 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::alerts::{
-    acknowledge, attention_row_class, dismiss_attention_item, set_attention_count, should_flash,
+    acknowledge, attention_row_class, dismiss_attention_item, is_acknowledged, set_attention_count,
+    should_flash,
 };
 
 use crate::api::{
@@ -402,7 +403,7 @@ fn EvaluationsPage() -> Element {
                         button {
                             class: if active_tab() == EvaluationsTab::History {
                                 "sd-tab focus-ring active"
-                            } else if failed_count > 0 && !acked_hist() {
+                            } else if failed_count > 0 && !acked_hist() && !is_acknowledged("evals") {
                                 "sd-tab focus-ring attention-flash-tab"
                             } else {
                                 "sd-tab focus-ring"

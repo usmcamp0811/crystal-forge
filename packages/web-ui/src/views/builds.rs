@@ -3,7 +3,7 @@
 use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
-use crate::alerts::{acknowledge, set_attention_count, should_flash};
+use crate::alerts::{acknowledge, is_acknowledged, set_attention_count, should_flash};
 
 use crate::api::{
     self,
@@ -405,7 +405,6 @@ pub fn BuildsView() -> Element {
     // Search/filter state (JSX: query)
     let mut search_query = use_signal(String::new);
     // Attention flash for failed rows on first Completed tab open (JSX: flashHistRows)
-    let mut acked_hist = use_signal(|| false);
     let mut flash_hist_rows = use_signal(|| false);
 
     let follow_logs = use_signal(|| true);
@@ -419,14 +418,6 @@ pub fn BuildsView() -> Element {
 
     let queue_data = builds.read().clone();
     let worker_data = workers.read().clone();
-
-    // JSX: const hasFailed = HISTORY_BUILDS.some(b => b.status === "failed");
-    //      const flashTab = hasFailed && !ackedHist;
-    let has_failed = build_history
-        .read()
-        .iter()
-        .any(|b| b.status == BuildStatus::Failed);
-    let flash_tab = has_failed && !acked_hist();
 
     let mut completed_rows = build_history.read().clone();
     completed_rows.retain(|item| {
@@ -594,7 +585,7 @@ pub fn BuildsView() -> Element {
                         // JSX: `sd-tab focus-ring${tab===t.k?" active":""}${flashTab && t.k==="history"?" attention-flash-tab":""}`
                         class: if active_view() == BuildsTab::Completed {
                             "sd-tab focus-ring active"
-                        } else if completed_failed_count > 0 && !acked_hist() {
+                        } else if completed_failed_count > 0 && !acked_hist() && !is_acknowledged("builds") {
                             "sd-tab focus-ring attention-flash-tab"
                         } else {
                             "sd-tab focus-ring"
@@ -606,7 +597,7 @@ pub fn BuildsView() -> Element {
                             log_open.set(false);
                             search_query.set(String::new());
                             // JSX: flash failed rows on first history open
-                            if prev != BuildsTab::Completed && !acked_hist() {
+                            if prev != BuildsTab::Completed && !acked_hist() && !is_acknowledged("builds") {
                                 acked_hist.set(true);
                                 flash_hist_rows.set(true);
                                 let mut fh = flash_hist_rows;

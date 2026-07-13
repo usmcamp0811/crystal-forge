@@ -41,6 +41,11 @@ pub fn acknowledge(view_key: &str) {
     state.acknowledged.insert(view_key.to_string());
 }
 
+/// Returns `true` if the view has been acknowledged this page load.
+pub fn is_acknowledged(view_key: &str) -> bool {
+    ALERT_STATE.read().acknowledged.contains(view_key)
+}
+
 /// Returns `true` exactly once per page load for a view that has attention
 /// items.  Subsequent calls always return `false`.
 ///
