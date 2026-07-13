@@ -252,6 +252,23 @@ const DETAIL_TAB_ORDER: [Tab; 8] = [
     Tab::Compliance,
 ];
 
+/// Reads `?tab=deploy` from the current browser URL synchronously, so callers
+/// can use it as a `use_signal` initial value. Matches the systems list
+/// "Deploy" button, which navigates to `/systems/:id?tab=deploy`.
+fn system_detail_wants_deploy_tab() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|window| window.location().search().ok())
+            .map(|search| search.contains("tab=deploy"))
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main Component
 // ─────────────────────────────────────────────────────────────────────────────
@@ -264,17 +281,18 @@ pub fn SystemDetailView(id: String) -> Element {
 
     // Current tab state — defaults to Overview but honours a ?tab=deploy query param
     // so that the systems list "Deploy" button can deep-link straight to the Deploy tab.
-    let mut active_tab = use_signal(|| Tab::Overview);
-    use_effect(move || {
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let Some(window) = web_sys::window() {
-                if let Ok(search) = window.location().search() {
-                    if search.contains("tab=deploy") {
-                        active_tab.set(Tab::Deploy);
-                    }
-                }
-            }
+    //
+    // NOTE: this must be read synchronously into the signal's initial value (matching
+    // the query_param() pattern used by views::cves), not inside a use_effect. A
+    // use_effect runs after the first render/commit, so the Overview tab's content
+    // (and any tab-specific data loading it triggers) would flash briefly before the
+    // effect ever fires, and on the WASM target the effect was observed to land too
+    // late to reliably override the initial tab.
+    let mut active_tab = use_signal(|| {
+        if system_detail_wants_deploy_tab() {
+            Tab::Deploy
+        } else {
+            Tab::Overview
         }
     });
     let mut edit_modal_open = use_signal(|| false);

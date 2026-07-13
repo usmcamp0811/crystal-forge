@@ -60,14 +60,16 @@ pub enum BuildStatus {
 }
 
 impl BuildStatus {
+    // JSX: BUILD_STATUS_META labels are Title Case (data-builds.js): "Queued",
+    // "Building", "Stopping", "Complete", "Failed", "Cancelled".
     pub fn label(self) -> &'static str {
         match self {
-            BuildStatus::Queued => "queued",
-            BuildStatus::Building => "building",
-            BuildStatus::Stopping => "stopping",
-            BuildStatus::Failed => "failed",
-            BuildStatus::Complete => "complete",
-            BuildStatus::Cancelled => "cancelled",
+            BuildStatus::Queued => "Queued",
+            BuildStatus::Building => "Building",
+            BuildStatus::Stopping => "Stopping",
+            BuildStatus::Failed => "Failed",
+            BuildStatus::Complete => "Complete",
+            BuildStatus::Cancelled => "Cancelled",
         }
     }
 }
