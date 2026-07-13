@@ -3,9 +3,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use crate::alerts::{
-    acknowledge, set_attention_count, should_flash,
-};
+use crate::alerts::{acknowledge, set_attention_count, should_flash};
 
 use crate::components::environments::{
     EnvironmentCard, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentFormModal,
@@ -107,9 +105,8 @@ pub fn EnvironmentsListView() -> Element {
     let totals = EnvironmentTotals::from(&items);
 
     // Attention flash for environments with critical/offline systems (TASK-385).
-    let env_needs_attention = |env: &EnvironmentItem| -> bool {
-        env.health.critical > 0 || env.health.offline > 0
-    };
+    let env_needs_attention =
+        |env: &EnvironmentItem| -> bool { env.health.critical > 0 || env.health.offline > 0 };
     let attention_count = items.iter().filter(|e| env_needs_attention(e)).count() as i64;
     let mut flash_signal = use_signal(|| false);
     let flash_global = flash_signal();
@@ -127,7 +124,10 @@ pub fn EnvironmentsListView() -> Element {
     });
 
     // Pre-compute per-item flash booleans for cards/table (outside rsx! to avoid parse issues).
-    let flashes: Vec<bool> = filtered.iter().map(|env| flash_global && env_needs_attention(env)).collect();
+    let flashes: Vec<bool> = filtered
+        .iter()
+        .map(|env| flash_global && env_needs_attention(env))
+        .collect();
 
     rsx! {
         div { style: "display:flex; flex-direction:column; gap:16px;",

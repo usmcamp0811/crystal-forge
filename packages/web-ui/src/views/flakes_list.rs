@@ -2542,14 +2542,21 @@ fn extract_history_rewrite_conflict(
             let body_lower = body.to_ascii_lowercase();
             let rewrite_marker = body_lower.contains("history rewrite")
                 || body_lower.contains("history_rewrite_detected");
-            let sync_failure_marker = body_lower.contains("failed to sync")
-                || body_lower.contains("force push")
-                || body_lower.contains("non-fast-forward");
 
-            let looks_like_rewrite_conflict = (*code == 409 && rewrite_marker)
-                || (*code == 500 && (rewrite_marker || sync_failure_marker));
-
-            if !looks_like_rewrite_conflict {
+            // The backend ALWAYS returns 409 with the history_rewrite_detected
+            // marker for a genuine divergence (see is_history_rewrite_error in
+            // flake/commits.rs, which routes to a 409 CONFLICT response).
+            // Generic sync failures (network errors, missing/invalid
+            // credentials, "Failed to initialize commits for <url>", etc.)
+            // return 500 with a message formatted as "Failed to sync {name}
+            // from source: {err}" — that message ALWAYS contains the
+            // substring "failed to sync", so previously matching on it for
+            // any 500 response misclassified every generic sync failure as
+            // a rewrite conflict. That caused the "Accept rewrite and
+            // resync" flow to repeatedly purge good commit history and
+            // re-show the modal in a loop without ever fixing the real
+            // underlying error. Only trust the explicit 409 + marker signal.
+            if *code != 409 || !rewrite_marker {
                 return None;
             }
 
@@ -2750,6 +2757,46 @@ mod tests {
             commits[0].system_paths[0].current_store_path.as_deref(),
             Some("/nix/store/current-gamma")
         );
+    }
+
+    #[test]
+    fn extract_history_rewrite_conflict_matches_genuine_409_marker() {
+        let body = "Git history rewrite detected for boterf-config. Review and accept rewrite before sync.".to_string();
+        let error = ApiClientError::Status {
+            code: 409,
+            body: body.clone(),
+        };
+        assert_eq!(
+            extract_history_rewrite_conflict(&error, Some(4)),
+            Some((4, body))
+        );
+    }
+
+    #[test]
+    fn extract_history_rewrite_conflict_ignores_generic_500_sync_failure() {
+        // Regression test: a generic sync failure (e.g. network/credentials
+        // issue) is always formatted as "Failed to sync {name} from source:
+        // {err}" by the backend, which contains the substring "failed to
+        // sync" but is NOT a real history rewrite. Misclassifying this
+        // caused "Accept rewrite and resync" to loop forever, repeatedly
+        // purging good commit history without ever fixing the real error.
+        let error = ApiClientError::Status {
+            code: 500,
+            body: "Failed to sync boterf-config from source: Failed to initialize commits for https://gitlab.com/michaelboterf/nix-configurations".to_string(),
+        };
+        assert_eq!(extract_history_rewrite_conflict(&error, Some(4)), None);
+    }
+
+    #[test]
+    fn extract_history_rewrite_conflict_ignores_marker_text_on_non_409_status() {
+        // Even if a 500 response happens to mention "history rewrite" in
+        // free text, only the backend's canonical 409 CONFLICT response is
+        // trusted as a genuine divergence signal.
+        let error = ApiClientError::Status {
+            code: 500,
+            body: "unexpected error while checking history rewrite state".to_string(),
+        };
+        assert_eq!(extract_history_rewrite_conflict(&error, Some(4)), None);
     }
 
     #[test]

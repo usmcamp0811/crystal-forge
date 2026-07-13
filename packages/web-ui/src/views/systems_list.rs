@@ -197,7 +197,12 @@ pub fn SystemsListView() -> Element {
         let attention_count = local_systems
             .read()
             .iter()
-            .filter(|s| matches!(s.health_status, HealthStatus::Critical | HealthStatus::Offline))
+            .filter(|s| {
+                matches!(
+                    s.health_status,
+                    HealthStatus::Critical | HealthStatus::Offline
+                )
+            })
             .count() as i64;
         set_attention_count("systems", attention_count);
         acknowledge("systems");
@@ -275,7 +280,6 @@ pub fn SystemsListView() -> Element {
     let mut edit_remove_in_progress = use_signal(|| false);
     let mut preview_system = use_signal(|| None::<SystemDetail>);
     let selected_preview_id = preview_system.read().as_ref().map(|d| d.id);
-
 
     let current_systems = local_systems.read().clone();
     let environments = unique_environments(&current_systems);

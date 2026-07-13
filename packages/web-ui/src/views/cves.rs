@@ -9,9 +9,7 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::{
-    acknowledge, set_attention_count, should_flash,
-};
+use crate::alerts::{acknowledge, set_attention_count, should_flash};
 
 use crate::api::client;
 use crate::api::models::{

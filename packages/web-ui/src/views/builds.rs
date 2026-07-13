@@ -3,7 +3,9 @@
 use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
-use crate::alerts::{acknowledge, is_acknowledged, reset_acknowledge, set_attention_count, should_flash};
+use crate::alerts::{
+    acknowledge, is_acknowledged, reset_acknowledge, set_attention_count, should_flash,
+};
 
 use crate::api::{
     self,
