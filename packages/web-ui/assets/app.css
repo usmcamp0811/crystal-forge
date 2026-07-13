@@ -1390,8 +1390,8 @@ body {
 }
 
 .sd-tab-badge {
-  background: rgba(248, 113, 113, 0.15);
-  color: #f87171;
+  background: var(--cf-subtle-bg);
+  color: var(--cf-text-muted);
   font-size: 10px;
   font-weight: 600;
   padding: 1px 6px;
@@ -1401,8 +1401,28 @@ body {
 }
 
 .sd-tab.active .sd-tab-badge {
-  background: rgba(248, 113, 113, 0.18);
-  color: #f87171;
+  color: var(--cf-text-secondary);
+}
+
+/* Tab holding unacknowledged failures pulses continuously until it's opened. */
+@keyframes attention-flash-tab {
+  0%, 100% { box-shadow: inset 0 -2px 0 0 transparent; }
+  50%      { box-shadow: inset 0 -2px 0 0 var(--cf-red); }
+}
+.sd-tab.attention-flash-tab {
+  animation: attention-flash-tab 1.2s ease-in-out infinite;
+}
+@keyframes attention-badge-pulse {
+  0%, 100% { background: color-mix(in oklab, var(--cf-red) 16%, transparent); color: var(--cf-red); }
+  50%      { background: var(--cf-red); color: #fff; }
+}
+.sd-tab.attention-flash-tab .sd-tab-badge {
+  animation: attention-badge-pulse 1.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sd-tab.attention-flash-tab,
+  .sd-tab.attention-flash-tab .sd-tab-badge { animation: none; }
+  .sd-tab.attention-flash-tab .sd-tab-badge { background: color-mix(in oklab, var(--cf-red) 16%, transparent); color: var(--cf-red); }
 }
 
 .q-search {

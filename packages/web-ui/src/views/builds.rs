@@ -418,6 +418,14 @@ pub fn BuildsView() -> Element {
     let queue_data = builds.read().clone();
     let worker_data = workers.read().clone();
 
+    // JSX: const hasFailed = HISTORY_BUILDS.some(b => b.status === "failed");
+    //      const flashTab = hasFailed && !ackedHist;
+    let has_failed = build_history
+        .read()
+        .iter()
+        .any(|b| b.status == BuildStatus::Failed);
+    let flash_tab = has_failed && !acked_hist();
+
     let mut completed_rows = build_history.read().clone();
     completed_rows.retain(|item| {
         matches!(
@@ -562,10 +570,12 @@ pub fn BuildsView() -> Element {
                         span { class: "sd-tab-badge", "{queue_data.len()}" }
                     }
                     button {
-                        class: if active_view() == BuildsTab::Completed {
-                            "sd-tab focus-ring active"
-                        } else {
-                            "sd-tab focus-ring"
+                        // JSX: `sd-tab focus-ring${tab===t.k?" active":""}${flashTab && t.k==="history"?" attention-flash-tab":""}`
+                        class: match (active_view() == BuildsTab::Completed, flash_tab) {
+                            (true, true) => "sd-tab focus-ring active attention-flash-tab",
+                            (true, false) => "sd-tab focus-ring active",
+                            (false, true) => "sd-tab focus-ring attention-flash-tab",
+                            (false, false) => "sd-tab focus-ring",
                         },
                         onclick: move |_| {
                             let prev = active_view();
@@ -587,13 +597,21 @@ pub fn BuildsView() -> Element {
                         "Completed "
                         span { class: "sd-tab-badge", "{build_history.read().len()}" }
                     }
-                    // JSX: {tab==="active" && cancellable.length > 0 && <MultiSelectHint />}
-                    if active_view() == BuildsTab::ActiveQueue
-                        && queue_data.iter().any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building | BuildStatus::Stopping))
-                    {
+                    // JSX: {selectableIds.length > 0 && <MultiSelectHint />}
+                    // selectableIds = cancellable builds on Active, filteredList on Completed.
+                    if if active_view() == BuildsTab::ActiveQueue {
+                        queue_data.iter().any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building | BuildStatus::Stopping))
+                    } else {
+                        filtered_len > 0
+                    } {
+                        // JSX: <span className="ms-hint" title="⌘/Ctrl-click to toggle rows · Shift-click to select a range">
+                        //        <kbd>⌘</kbd>/<kbd>⇧</kbd>-click to select
+                        //      </span>
                         span {
                             class: "ms-hint",
-                            title: "Shift-click to toggle cancellable rows",
+                            title: "⌘/Ctrl-click to toggle rows · Shift-click to select a range",
+                            kbd { "⌘" }
+                            "/"
                             kbd { "⇧" }
                             "-click to select"
                         }
