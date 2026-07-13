@@ -3,7 +3,7 @@ id: TASK-385
 title: >-
   Flakes sync-error surfaces (real backend errors) + sidebar alert badge system
   with attention flash
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-07-08 07:26'
 updated_date: '2026-07-08 13:13'
@@ -114,5 +114,22 @@ Per doc-18 §8: fmt + clippy `-D warnings` + tests in both crates; `db-only up` 
 LOCK: opencode-agent on host in /home/mcamp/code/crystal-forge/TASK-385-flakes-sync-errors-sidebar-badges
 
 Branch: TASK-385-flakes-sync-errors-sidebar-badges
-Base: dev (2f326543)
+Base: dev (ddef201c)
+MR: !298 (https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/298)
+
+## Latest Changes (2026-07-11)
+
+Three UX fixes added in commit 95f19a20:
+
+1. **Attention-flash on eval history rows** - Failed evaluation rows now receive the `attention-flash` CSS class (red glow + left-border pulse) on first page load, matching the pattern already used in flake error rows.
+2. **Attention-flash on build completed rows** - Failed build rows in the Completed tab receive the `attention-flash` CSS class via a new `flash_failed` prop on `BuildQueuePane`.
+3. **Eval history default-all selected** - Evaluation history checkbox column auto-selects all items on first successful data load.
+4. **Sidebar badge query alignment** - Navigation badges endpoint now queries `build_jobs` (instead of `derivations`) for the builds badge, and the arbitrary 24-hour time filter was removed from both builds and evals badge queries to match view semantics.
+
+## Latest Changes (2026-07-13)
+
+1. **Rebase onto origin/dev** - Rebased branch onto dev (33 commits), resolving conflicts in `app.css`, `builds.rs`, and `components/builds/build_queue_pane.rs` (duplicate `flash_failed` prop from the parallel TASK-390 merge).
+2. **Completed/History tab flash acknowledgment fixed** - `acked_hist` was a component-local signal that reset on every remount, so the tab badge pulse restarted on every re-visit to Builds/Evaluations. Added `alerts::is_acknowledged()` and gated the flash condition on it (persists for the page load via the existing global `ALERT_STATE`).
+3. **Tab flash re-triggers on new failures** - Added peak-failed-count tracking (`peak_failed` signal) in both `builds.rs` and `evaluations.rs`; when the failed count increases after acknowledgment, `alerts::reset_acknowledge()` clears the acknowledged/flashed flags so the badge pulses again for genuinely new failures.
+4. **Fixed "History Rewrite Detected" modal infinite loop (user-reported bug)** - `extract_history_rewrite_conflict()` in `flakes_list.rs` matched ANY 500-status sync failure containing the substring "failed to sync" as a rewrite conflict. Since every generic sync failure is formatted as `"Failed to sync {name} from source: {err}"`, this misclassified normal errors (network issues, bad credentials, "Failed to initialize commits for {url}") as history rewrites. Clicking "Accept rewrite and resync" then purged the flake's healthy commit history and retried the sync; if the real underlying error persisted, the retry failed with the same message, which was misclassified again — an infinite loop that destroyed commit lineage on every iteration. Fix: only trust the backend's canonical signal (`code == 409` + explicit `history_rewrite_detected` marker text, per `is_history_rewrite_error` in `flake/commits.rs` / TASK-216). Added 3 unit tests (genuine 409 case, the exact reported regression case, and marker-text-on-wrong-status-code). Reported root cause for the specific flake in the bug report ("boterf-config", `https://gitlab.com/michaelboterf/nix-configurations`) is a separate, still-unresolved connectivity/credentials issue — the fix stops the misleading modal loop but the underlying sync failure itself needs separate investigation (repo reachability / credentials for that flake).
 <!-- SECTION:NOTES:END -->
