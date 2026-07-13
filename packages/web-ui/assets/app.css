@@ -1287,6 +1287,13 @@ body {
   display: none;
 }
 
+/* Builds/Evals queue tab bar: vertically centers tabs + multi-select hint + search */
+.q-tabbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .cf-modal-table-scroll {
   scrollbar-width: thin;
   scrollbar-color: rgba(148, 163, 184, 0.75) rgba(15, 23, 42, 0.35);
@@ -1383,14 +1390,146 @@ body {
 }
 
 .sd-tab-badge {
-  background: rgba(248, 113, 113, 0.15);
-  color: #f87171;
+  background: var(--cf-subtle-bg);
+  color: var(--cf-text-muted);
   font-size: 10px;
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 99px;
   margin-left: 2px;
   font-variant-numeric: tabular-nums;
+}
+
+.sd-tab.active .sd-tab-badge {
+  color: var(--cf-text-secondary);
+}
+
+/* Tab holding unacknowledged failures pulses continuously until it's opened. */
+@keyframes attention-flash-tab {
+  0%, 100% { box-shadow: inset 0 -2px 0 0 transparent; }
+  50%      { box-shadow: inset 0 -2px 0 0 var(--cf-red); }
+}
+.sd-tab.attention-flash-tab {
+  animation: attention-flash-tab 1.2s ease-in-out infinite;
+}
+@keyframes attention-badge-pulse {
+  0%, 100% { background: color-mix(in oklab, var(--cf-red) 16%, transparent); color: var(--cf-red); }
+  50%      { background: var(--cf-red); color: #fff; }
+}
+.sd-tab.attention-flash-tab .sd-tab-badge {
+  animation: attention-badge-pulse 1.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sd-tab.attention-flash-tab,
+  .sd-tab.attention-flash-tab .sd-tab-badge { animation: none; }
+  .sd-tab.attention-flash-tab .sd-tab-badge { background: color-mix(in oklab, var(--cf-red) 16%, transparent); color: var(--cf-red); }
+}
+
+.q-search {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px 4px 10px;
+  margin-top: 6px;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  border: 1px solid var(--cf-card-border);
+  background: var(--cf-subtle-bg);
+}
+
+.q-search:focus-within {
+  border-color: color-mix(in oklab, var(--cf-brand-purple) 55%, var(--cf-card-border));
+}
+
+.q-search > svg {
+  color: var(--cf-text-muted);
+  flex-shrink: 0;
+}
+
+.q-search-input {
+  border: none;
+  background: transparent;
+  outline: none;
+  color: var(--cf-text-primary);
+  font-size: 12.5px;
+  width: 200px;
+}
+
+.q-search-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--cf-text-muted);
+  white-space: nowrap;
+  padding-left: 2px;
+}
+
+.q-search .btn-icon.xs {
+  width: 22px;
+  height: 22px;
+}
+
+.log-search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px 3px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--cf-card-border);
+  background: var(--cf-subtle-bg);
+}
+
+.log-search:focus-within {
+  border-color: color-mix(in oklab, var(--cf-brand-purple) 55%, var(--cf-card-border));
+}
+
+.log-search > svg {
+  color: var(--cf-text-muted);
+  flex-shrink: 0;
+}
+
+.log-search-input {
+  border: none;
+  background: transparent;
+  outline: none;
+  color: var(--cf-text-primary);
+  font-size: 12.5px;
+  width: 150px;
+}
+
+.log-search-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--cf-text-muted);
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+.build-log-tray {
+  width: min(840px, 100vw);
+  height: 100vh;
+  transition: width 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.build-log-tray .build-log-stream {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  height: auto;
+  border-radius: 0;
+  margin: 0;
+}
+
+.dtg {
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.dtg-rel {
+  color: var(--cf-text-muted);
+  font-family: var(--font-sans);
+  letter-spacing: 0;
 }
 
 /* card must always have explicit background */
@@ -3179,6 +3318,13 @@ tr.kbd-focused > td {
 .q-drop-before td { box-shadow: inset 0 2px 0 0 var(--cf-brand-purple); }
 .q-drop-after td  { box-shadow: inset 0 -2px 0 0 var(--cf-brand-purple); }
 
+.q-move-group {
+  display: inline-flex;
+  flex-direction: column;
+  border: 1px solid var(--cf-card-border);
+  border-radius: 7px;
+  overflow: hidden;
+}
 .q-move-btn {
   display: flex;
   align-items: center;
@@ -4766,27 +4912,15 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
 }
 
 /* ─── Build queue table (TASK-347.1 — matches BuildsView.jsx) ─────────────── */
+/* Header cell typography/background comes from .sys-table thead th (shared
+   with q-queue-table via className="sys-table q-queue-table"); do not
+   redeclare it here or it will override the design-matched shared rule. */
 .q-queue-table { width: 100%; }
-.q-queue-table thead th { font-size: 12px; font-weight: 600; color: var(--cf-text-muted);
-  padding: 8px 12px; text-align: left; }
 .q-row { cursor: pointer; border-bottom: 1px solid var(--cf-card-border); transition: background 0.1s; }
 .q-row:hover { background: rgba(255,255,255,0.03); }
 .q-row.selected { background: color-mix(in oklab, var(--cf-brand-purple) 10%, var(--cf-card-bg)); }
 .q-row.row-checked { background: color-mix(in oklab, var(--cf-brand-purple) 9%, transparent); }
 .q-row td { padding: 8px 12px; vertical-align: middle; }
-/* Drag-and-drop visual indicators */
-.q-dragging { opacity: 0.4; }
-.q-drop-before { box-shadow: inset 0 2px 0 0 var(--cf-brand-purple); }
-.q-drop-after  { box-shadow: inset 0 -2px 0 0 var(--cf-brand-purple); }
-/* Drag handle */
-.q-drag-handle { cursor: grab; color: var(--cf-text-muted); display: inline-flex; align-items: center; }
-.q-drag-handle:active { cursor: grabbing; }
-/* Move up/down buttons */
-.q-move-group { display: inline-flex; flex-direction: column; gap: 1px; }
-.q-move-btn { background: none; border: none; color: var(--cf-text-muted); cursor: pointer;
-  padding: 1px 3px; border-radius: 3px; display: flex; align-items: center; }
-.q-move-btn:hover:not(:disabled) { color: var(--cf-text-primary); background: var(--cf-subtle-bg); }
-.q-move-btn:disabled { opacity: 0.3; cursor: default; }
 /* chip-dot inside status chips in the queue table */
 .chip-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; flex-shrink: 0; }
 

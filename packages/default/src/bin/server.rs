@@ -102,6 +102,17 @@ async fn main() -> anyhow::Result<()> {
     }
     cfg.sync_systems_to_db(&pool).await?;
 
+    if let Ok(path) = std::env::var("FIXTURE_JSON_PATH") {
+        if !path.is_empty() {
+            info!("Fixture seeding enabled — loading from {}", path);
+            if let Err(e) = seed_from_fixture(&pool, std::path::Path::new(&path)).await {
+                warn!("Fixture seeding failed (continuing): {}", e);
+            } else {
+                info!("Fixture seeding complete");
+            }
+        }
+    }
+
     // Initialize dev mode fixtures if AUTH_MODE=dev
     if auth_mode == "dev" {
         info!("Initializing development auth fixtures...");
@@ -147,18 +158,6 @@ async fn main() -> anyhow::Result<()> {
     // Create event-driven queue notifier
     let queue_notifier = Arc::new(QueueNotifier::new());
     info!("🔔 Initialized event-driven queue notification system");
-
-    // Seed database from fixture JSON if FIXTURE_JSON_PATH is set.
-    if let Ok(path) = std::env::var("FIXTURE_JSON_PATH") {
-        if !path.is_empty() {
-            info!("📦 Fixture seeding enabled — loading from {}", path);
-            if let Err(e) = seed_from_fixture(&pool, std::path::Path::new(&path)).await {
-                warn!("📦 Fixture seeding failed (continuing): {}", e);
-            } else {
-                info!("📦 Fixture seeding complete");
-            }
-        }
-    }
 
     let state = CFState::new(pool, server_cfg.clone(), queue_notifier.clone());
     let state_arc = Arc::new(state.clone());
@@ -527,7 +526,16 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/api/v1/builders/:id/jobs/:job_id/derivation-archive",
-            get(builders::download_job_derivation_archive),
+            get(builders::download_job_derivation_archive)
+                .post(builders::download_job_derivation_archive_delta),
+        )
+        .route(
+            "/api/v1/builders/:id/jobs/:job_id/derivation-manifest",
+            get(builders::get_job_derivation_manifest),
+        )
+        .route(
+            "/api/v1/builders/:id/jobs/:job_id/source-archive",
+            get(builders::download_job_source_archive),
         )
         .route(
             "/api/v1/builders/:id/jobs/:job_id/publish-derivation-closure",

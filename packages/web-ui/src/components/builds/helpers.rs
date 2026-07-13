@@ -60,14 +60,16 @@ pub enum BuildStatus {
 }
 
 impl BuildStatus {
+    // JSX: BUILD_STATUS_META labels are Title Case (data-builds.js): "Queued",
+    // "Building", "Stopping", "Complete", "Failed", "Cancelled".
     pub fn label(self) -> &'static str {
         match self {
-            BuildStatus::Queued => "queued",
-            BuildStatus::Building => "building",
-            BuildStatus::Stopping => "stopping",
-            BuildStatus::Failed => "failed",
-            BuildStatus::Complete => "complete",
-            BuildStatus::Cancelled => "cancelled",
+            BuildStatus::Queued => "Queued",
+            BuildStatus::Building => "Building",
+            BuildStatus::Stopping => "Stopping",
+            BuildStatus::Failed => "Failed",
+            BuildStatus::Complete => "Complete",
+            BuildStatus::Cancelled => "Cancelled",
         }
     }
 }
@@ -153,6 +155,7 @@ pub struct BuildItem {
     pub branch: String,
     pub arch: String,
     pub worker_id: String,
+    pub queued_at: DateTime<Utc>,
     pub queued_for: String,
     pub runtime: Option<String>,
     pub duration_secs: Option<i64>,
@@ -432,6 +435,7 @@ pub fn mock_builds() -> Vec<BuildItem> {
             branch: "main".to_string(),
             arch: "x86_64-linux".to_string(),
             worker_id: "worker-a".to_string(),
+            queued_at: Utc::now(),
             queued_for: "queued 00:58 ago".to_string(),
             runtime: Some("02:13".to_string()),
             duration_secs: Some(133),
@@ -459,6 +463,7 @@ pub fn mock_builds() -> Vec<BuildItem> {
             branch: "main".to_string(),
             arch: "x86_64-linux".to_string(),
             worker_id: "worker-b".to_string(),
+            queued_at: Utc::now(),
             queued_for: "queued 01:32 ago".to_string(),
             runtime: None,
             duration_secs: None,
@@ -485,6 +490,7 @@ pub fn mock_builds() -> Vec<BuildItem> {
             branch: "main".to_string(),
             arch: "x86_64-linux".to_string(),
             worker_id: "worker-a".to_string(),
+            queued_at: Utc::now(),
             queued_for: "queued 00:29 ago".to_string(),
             runtime: None,
             duration_secs: None,
@@ -511,6 +517,7 @@ pub fn mock_builds() -> Vec<BuildItem> {
             branch: "release/2026-02".to_string(),
             arch: "x86_64-linux".to_string(),
             worker_id: "worker-b".to_string(),
+            queued_at: Utc::now(),
             queued_for: "queued 06:11 ago".to_string(),
             runtime: Some("04:22".to_string()),
             duration_secs: Some(262),
