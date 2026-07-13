@@ -598,7 +598,6 @@ pub fn BuildsView() -> Element {
                             "sd-tab focus-ring attention-flash-tab"
                         } else {
                             "sd-tab focus-ring"
-                        }
                         },
                         onclick: move |_| {
                             let prev = active_view();

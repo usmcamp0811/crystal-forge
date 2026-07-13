@@ -221,7 +221,6 @@ fn activity_row_from_history(entry: &SystemHistoryEntry) -> ActivityRow {
     }
 }
 
-
 fn format_short_duration(seconds: f64) -> String {
     let value = seconds.abs().round() as i64;
     if value < 60 {

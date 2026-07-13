@@ -12,8 +12,7 @@ use dioxus::prelude::*;
 #[component]
 pub fn FlakeSyncChip(
     sync_status: String,
-    #[props(default)]
-    last_sync_error: Option<String>,
+    #[props(default)] last_sync_error: Option<String>,
 ) -> Element {
     let (chip_class, dot_color, label) = match sync_status.as_str() {
         "synced" => ("chip chip-healthy", "#34d399", "synced"),
