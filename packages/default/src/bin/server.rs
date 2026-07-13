@@ -205,6 +205,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/navigation/badges",
             get(navigation::get_navigation_badges),
         )
+        .route(
+            "/api/v1/navigation/acknowledge",
+            post(navigation::acknowledge_navigation_category),
+        )
         .route("/api/v1/cves", get(cves::list_cves))
         .route("/api/v1/cves/grouped", get(cves::list_cves_grouped))
         .route("/api/v1/cves/stats", get(cves::get_fleet_stats))

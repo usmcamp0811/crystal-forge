@@ -205,7 +205,7 @@ pub fn SystemsListView() -> Element {
             })
             .count() as i64;
         set_attention_count("systems", attention_count);
-        acknowledge("systems");
+        acknowledge("systems", attention_count);
     });
 
     let mut load_error = use_signal(|| None::<String>);

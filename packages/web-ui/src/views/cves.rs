@@ -203,8 +203,10 @@ pub fn CvesView() -> Element {
                     flash_crit_signal.set(false);
                 });
             }
+            // Only acknowledge once stats have actually loaded so we don't
+            // seed the acknowledgment baseline with a premature count of 0.
+            acknowledge("cves", crit_count);
         }
-        acknowledge("cves");
     });
 
     let package_names =

@@ -1204,6 +1204,29 @@ pub async fn get_navigation_badges() -> Result<NavigationBadges, ApiClientError>
     fetch_json(&url).await
 }
 
+/// Record that the current user has acknowledged an alert category (e.g. by
+/// visiting Systems/Flakes/Environments/CVEs, or opening the failures tab on
+/// Builds/Evaluations). Persists server-side so the corresponding badge stays
+/// hidden across page refresh, browser restart, and re-login until something
+/// new appears — see `alerts::acknowledge`.
+pub async fn acknowledge_navigation_category(
+    category: &str,
+    current_count: i64,
+) -> Result<(), ApiClientError> {
+    #[derive(serde::Serialize)]
+    struct AcknowledgeRequest<'a> {
+        category: &'a str,
+        current_count: i64,
+    }
+    let url = format!("{}/navigation/acknowledge", base_url());
+    let body = AcknowledgeRequest {
+        category,
+        current_count,
+    };
+    let _: serde_json::Value = send_json_with_csrf("POST", &url, Some(&body)).await?;
+    Ok(())
+}
+
 /// Fetch the git diff for a specific commit in a flake.
 pub async fn fetch_commit_diff(
     flake_id: i32,

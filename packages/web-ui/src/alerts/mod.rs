@@ -1,18 +1,33 @@
 //! Sidebar alert state — badge acknowledgment and attention flash.
 //!
 //! Mirrors the Shell.jsx `useAttentionFlash` / `acknowledgeView` /
-//! `useAcknowledgedViews` pattern (lines 167-200).
+//! `useAcknowledgedViews` pattern (lines 167-200), extended with server-side
+//! persistence (TASK-385 follow-up) so badges reflect "new since your last
+//! visit" rather than a raw total that reappears identically on every page
+//! refresh.
 //!
 //! # How it works
 //! - Each navigation view has a string key (e.g. `"flakes"`, `"systems"`).
-//! - When a view with an attention badge is visited, call [`acknowledge`].
-//!   That badge hides for the rest of this page load.
+//! - When a view with an attention badge is visited, call [`acknowledge`]
+//!   with the view's current raw attention count. This immediately hides the
+//!   badge locally AND persists the acknowledgment server-side (per
+//!   authenticated user), so the badge stays hidden across page refresh,
+//!   browser restart, and re-login — not just for the current page load.
+//! - [`NAV_BADGES`] holds the latest server-computed "new since last
+//!   acknowledgment" counts per category, polled every 30s by the sidebar and
+//!   refreshed immediately after every [`acknowledge`] call. Views read this
+//!   directly for their own badge/flash display so the number always matches
+//!   what the sidebar shows and reflects the persisted, delta-based
+//!   semantics — see `queries::navigation` on the server for the per-category
+//!   "new since" computation.
 //! - On first visit to a view that has attention items, call
 //!   [`should_flash`] to get a `true` once — triggering the CSS
 //!   `.attention-flash` pulse on alerting rows. Subsequent calls return `false`.
 //! - A `GlobalSignal<AlertState>` is the backing store so any component that
 //!   reads it re-renders when it changes.
 
+use crate::api::client::{acknowledge_navigation_category, get_navigation_badges};
+use crate::api::models::NavigationBadges;
 use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet};
 
@@ -32,26 +47,46 @@ pub struct AlertState {
 /// Global singleton.  Initialised to default (empty) on startup.
 pub static ALERT_STATE: GlobalSignal<AlertState> = Signal::global(AlertState::default);
 
-/// Acknowledge a view — hides its attention badge for this page load.
+/// Latest polled navigation badge counts — server-computed "new since last
+/// acknowledgment" per category. Populated by the sidebar's 30s poll and
+/// refreshed immediately after [`acknowledge`]. Views may read this directly
+/// for their own in-view badge/flash display instead of computing a raw
+/// local count, so the number shown stays consistent with the sidebar and
+/// correctly reflects the persisted, delta-based semantics.
+pub static NAV_BADGES: GlobalSignal<NavigationBadges> = Signal::global(NavigationBadges::default);
+
+/// Acknowledge a view — hides its attention badge for this page load AND
+/// persists the acknowledgment server-side (per authenticated user) so it
+/// stays hidden across page refresh, browser restart, and re-login until a
+/// new failure appears for that category.
 ///
-/// Call this when entering the view (on mount).
-/// For Builds/Evals, call only when the failures tab is opened.
-pub fn acknowledge(view_key: &str) {
-    let mut state = ALERT_STATE.write();
-    state.acknowledged.insert(view_key.to_string());
-}
-
-/// Returns `true` if the view has been acknowledged this page load.
-pub fn is_acknowledged(view_key: &str) -> bool {
-    ALERT_STATE.read().acknowledged.contains(view_key)
-}
-
-/// Remove the acknowledge + flash-triggered flags so the tab and rows
-/// can flash again for newly arrived failures.
-pub fn reset_acknowledge(view_key: &str) {
-    let mut state = ALERT_STATE.write();
-    state.acknowledged.remove(view_key);
-    state.flashed.remove(view_key);
+/// `current_count` is the view's raw attention count at acknowledgment time.
+/// It is used server-side as the count-diff baseline for categories with no
+/// discrete per-item timestamp (systems, environments); it is ignored for
+/// timestamp-based categories (flakes, builds, evals, cves), which use the
+/// acknowledgment's `NOW()` as their cutoff instead — pass the best count you
+/// have available regardless.
+///
+/// Call this when entering the view (on mount). For Builds/Evals, call only
+/// when the failures tab is opened.
+pub fn acknowledge(view_key: &str, current_count: i64) {
+    {
+        let mut state = ALERT_STATE.write();
+        state.acknowledged.insert(view_key.to_string());
+    }
+    let view_key = view_key.to_string();
+    spawn(async move {
+        if acknowledge_navigation_category(&view_key, current_count)
+            .await
+            .is_ok()
+        {
+            // Refresh immediately so the sidebar/tab badges reflect the new
+            // baseline without waiting for the next scheduled 30s poll.
+            if let Ok(fresh) = get_navigation_badges().await {
+                *NAV_BADGES.write() = fresh;
+            }
+        }
+    });
 }
 
 /// Returns `true` exactly once per page load for a view that has attention

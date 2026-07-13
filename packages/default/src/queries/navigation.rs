@@ -1,23 +1,125 @@
 //! Navigation badge aggregate queries.
 //!
 //! Provides cheap COUNT queries for the sidebar badge counts so the UI can show
-//! "needs attention" signals per navigation entry.  Each count reuses the same
+//! "needs attention" signals per navigation entry. Each count reuses the same
 //! semantics as its corresponding list endpoint (e.g. system health = same view
 //! that drives the Systems list).
+//!
+//! Counts are computed as "new since the user's last acknowledgment" of that
+//! category (see `user_alert_acknowledgments`), not raw totals. Without this,
+//! a badge showing e.g. "25 failed builds" reappears identically on every
+//! page refresh even after the user has already looked, training users to
+//! ignore it. Categories with a discrete per-item completion/detection
+//! timestamp (flakes, builds, evals, cves) compute a true delta: items whose
+//! timestamp is newer than the user's last acknowledgment. Categories without
+//! one (systems, environments — health status is a continuously-recomputed
+//! function of heartbeat staleness, not a discrete event) instead show the
+//! current total only when it differs from what was recorded at last
+//! acknowledgment, avoiding a misleading subtraction.
 
 use crate::api::models::NavigationBadges;
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
+use std::collections::HashMap;
+use uuid::Uuid;
 
-/// Fetch all sidebar badge counts in one round-trip.
+/// One row of `user_alert_acknowledgments`.
+#[derive(Debug, Clone, Copy)]
+struct AckBaseline {
+    last_seen_at: DateTime<Utc>,
+    last_seen_count: i64,
+}
+
+/// Fetch a user's acknowledgment baseline for every category in one query.
+async fn fetch_user_acknowledgments(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<HashMap<String, AckBaseline>> {
+    let rows: Vec<(String, DateTime<Utc>, i64)> = sqlx::query_as(
+        r#"
+        SELECT category, last_seen_at, last_seen_count
+        FROM user_alert_acknowledgments
+        WHERE user_id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(category, last_seen_at, last_seen_count)| {
+            (
+                category,
+                AckBaseline {
+                    last_seen_at,
+                    last_seen_count,
+                },
+            )
+        })
+        .collect())
+}
+
+/// Record a user's acknowledgment of a category's current state.
+///
+/// `current_count` is the raw attention count at the moment of acknowledgment
+/// (used as the baseline for count-diff categories like systems/environments;
+/// timestamp categories use `NOW()` as the cutoff going forward).
+pub async fn upsert_user_alert_acknowledgment(
+    pool: &PgPool,
+    user_id: Uuid,
+    category: &str,
+    current_count: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO user_alert_acknowledgments (user_id, category, last_seen_at, last_seen_count, updated_at)
+        VALUES ($1, $2, NOW(), $3, NOW())
+        ON CONFLICT (user_id, category) DO UPDATE
+        SET last_seen_at = EXCLUDED.last_seen_at,
+            last_seen_count = EXCLUDED.last_seen_count,
+            updated_at = NOW()
+        "#,
+    )
+    .bind(user_id)
+    .bind(category)
+    .bind(current_count)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// For count-diff categories (no discrete per-item timestamp): show the
+/// current total only if it differs from the last-acknowledged total, so the
+/// badge stays hidden after acknowledgment until something actually changes,
+/// without fabricating a subtraction that could hide a real regression
+/// (e.g. 3 systems recovering while 3 different systems go critical).
+fn new_since_by_count(current_total: i64, baseline: Option<&AckBaseline>) -> i64 {
+    match baseline {
+        None => current_total,
+        Some(b) if b.last_seen_count != current_total => current_total,
+        Some(_) => 0,
+    }
+}
+
+/// Fetch all sidebar badge counts in one round-trip, computed relative to
+/// `user_id`'s last acknowledgment of each category.
 ///
 /// Each sub-count is a separate scalar query; the implementation deliberately
 /// avoids a complex JOIN so each count stays cheap and independently correct.
-pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> {
+pub async fn fetch_navigation_badges(pool: &PgPool, user_id: Uuid) -> Result<NavigationBadges> {
+    let acks = fetch_user_acknowledgments(pool, user_id)
+        .await
+        .unwrap_or_default();
+
     // ── Systems: critical or offline ──────────────────────────────────────────
     // Mirrors the health_status column from view_system_deployment_status which
-    // the Systems list already uses.
-    let (systems_attention, systems_total): (i64, i64) = match sqlx::query_as(
+    // the Systems list already uses. No discrete "became critical at"
+    // timestamp exists (health is derived from heartbeat staleness), so this
+    // uses the count-diff baseline.
+    let (systems_attention_total, systems_total): (i64, i64) = match sqlx::query_as(
         r#"
         SELECT
             COUNT(*) FILTER (WHERE health_status IN ('critical', 'offline'))::bigint,
@@ -35,17 +137,23 @@ pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> 
             (0, 0)
         }
     };
+    let systems_attention = new_since_by_count(systems_attention_total, acks.get("systems"));
 
-    // ── Flakes: sync_status = error ───────────────────────────────────────────
+    // ── Flakes: sync_status = error, new since last_sync_at baseline ─────────
+    let flakes_since = acks.get("flakes").map(|b| b.last_seen_at);
     let (flakes_errored, flakes_total): (i64, i64) = match sqlx::query_as(
         r#"
         SELECT
-            COUNT(*) FILTER (WHERE sync_status = 'error')::bigint,
+            COUNT(*) FILTER (
+                WHERE sync_status = 'error'
+                  AND ($1::timestamptz IS NULL OR last_sync_at > $1)
+            )::bigint,
             COUNT(*)::bigint
         FROM flakes
         WHERE deleted_at IS NULL
         "#,
     )
+    .bind(flakes_since)
     .fetch_one(pool)
     .await
     {
@@ -56,9 +164,8 @@ pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> 
         }
     };
 
-    // ── Environments: contain ≥1 attention system ─────────────────────────────
-    // Uses the environment rollup view which the Environments list uses.
-    let (environments_attention, environments_total): (i64, i64) = match sqlx::query_as(
+    // ── Environments: contain ≥1 attention system (count-diff baseline) ──────
+    let (environments_attention_total, environments_total): (i64, i64) = match sqlx::query_as(
         r#"
         SELECT
             COUNT(*) FILTER (WHERE critical_count > 0 OR offline_count > 0)::bigint,
@@ -75,15 +182,20 @@ pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> 
             (0, 0)
         }
     };
+    let environments_attention =
+        new_since_by_count(environments_attention_total, acks.get("environments"));
 
-    // ── Builds: failed build jobs (matches /build-jobs/recent semantics) ─────
-    let builds_failed_24h: i64 = match sqlx::query_scalar(
+    // ── Builds: failed build jobs, new since completed_at baseline ───────────
+    let builds_since = acks.get("builds").map(|b| b.last_seen_at);
+    let builds_failed_new: i64 = match sqlx::query_scalar(
         r#"
         SELECT COUNT(*)::bigint
         FROM build_jobs
         WHERE status = 'failed'
+          AND ($1::timestamptz IS NULL OR completed_at > $1)
         "#,
     )
+    .bind(builds_since)
     .fetch_one(pool)
     .await
     {
@@ -94,14 +206,17 @@ pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> 
         }
     };
 
-    // ── Evals: failed commit evaluations (matches list_eval_history semantics) ─
-    let evals_failed_24h: i64 = match sqlx::query_scalar(
+    // ── Evals: failed commit evaluations, new since evaluation_completed_at ──
+    let evals_since = acks.get("evals").map(|b| b.last_seen_at);
+    let evals_failed_new: i64 = match sqlx::query_scalar(
         r#"
         SELECT COUNT(*)::bigint
         FROM commits
         WHERE evaluation_status = 'failed'
+          AND ($1::timestamptz IS NULL OR evaluation_completed_at > $1)
         "#,
     )
+    .bind(evals_since)
     .fetch_one(pool)
     .await
     {
@@ -112,19 +227,23 @@ pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> 
         }
     };
 
-    // ── CVEs: critical open across the fleet ─────────────────────────────────
-    // Reuses the same view as /api/v1/cves/stats (view_cve_fleet_stats).
-    let cves_critical: i64 = match sqlx::query_scalar(
+    // ── CVEs: critical, new since first_seen baseline ────────────────────────
+    // Reuses the same view + severity predicate as /api/v1/cves/stats
+    // (view_cve_fleet_stats is itself computed from view_cve_list_with_metadata).
+    let cves_since = acks.get("cves").map(|b| b.last_seen_at);
+    let cves_critical_new: i64 = match sqlx::query_scalar(
         r#"
-        SELECT COALESCE((to_jsonb(v)->>'critical')::bigint, 0)
-        FROM view_cve_fleet_stats v
-        LIMIT 1
+        SELECT COUNT(*)::bigint
+        FROM view_cve_list_with_metadata
+        WHERE severity = 'CRITICAL'
+          AND ($1::timestamptz IS NULL OR first_seen > $1)
         "#,
     )
-    .fetch_optional(pool)
+    .bind(cves_since)
+    .fetch_one(pool)
     .await
     {
-        Ok(count) => count.unwrap_or(0),
+        Ok(count) => count,
         Err(e) => {
             tracing::warn!("Failed to fetch CVE navigation badge count: {e:#}");
             0
@@ -138,15 +257,43 @@ pub async fn fetch_navigation_badges(pool: &PgPool) -> Result<NavigationBadges> 
         flakes_total,
         environments_attention,
         environments_total,
-        builds_failed_24h,
-        evals_failed_24h,
-        cves_critical,
+        builds_failed_new,
+        evals_failed_new,
+        cves_critical_new,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_since_by_count_shows_full_total_when_never_acknowledged() {
+        assert_eq!(new_since_by_count(7, None), 7);
+    }
+
+    #[test]
+    fn new_since_by_count_hides_when_unchanged_since_acknowledgment() {
+        let baseline = AckBaseline {
+            last_seen_at: Utc::now(),
+            last_seen_count: 7,
+        };
+        assert_eq!(new_since_by_count(7, Some(&baseline)), 0);
+    }
+
+    #[test]
+    fn new_since_by_count_shows_total_when_changed_since_acknowledgment() {
+        let baseline = AckBaseline {
+            last_seen_at: Utc::now(),
+            last_seen_count: 7,
+        };
+        // Any change from the acknowledged baseline (up or down) re-surfaces
+        // the current total rather than fabricating a delta, since count-diff
+        // categories have no discrete per-item timestamp to compute a true
+        // "new" count from.
+        assert_eq!(new_since_by_count(9, Some(&baseline)), 9);
+        assert_eq!(new_since_by_count(3, Some(&baseline)), 3);
+    }
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
@@ -157,19 +304,74 @@ mod tests {
         .await
         .expect("Failed to connect");
 
-        let badges = fetch_navigation_badges(&pool)
+        let user_id = uuid::Uuid::new_v4();
+        let badges = fetch_navigation_badges(&pool, user_id)
             .await
             .expect("fetch_navigation_badges failed");
 
-        // Totals must be non-negative and attention ≤ total
+        // Totals must be non-negative and attention <= total
         assert!(badges.systems_total >= 0);
         assert!(badges.systems_attention <= badges.systems_total);
         assert!(badges.flakes_total >= 0);
         assert!(badges.flakes_errored <= badges.flakes_total);
         assert!(badges.environments_total >= 0);
         assert!(badges.environments_attention <= badges.environments_total);
-        assert!(badges.builds_failed_24h >= 0);
-        assert!(badges.evals_failed_24h >= 0);
-        assert!(badges.cves_critical >= 0);
+        assert!(badges.builds_failed_new >= 0);
+        assert!(badges.evals_failed_new >= 0);
+        assert!(badges.cves_critical_new >= 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_acknowledgment_upsert_and_roundtrip() {
+        let pool = sqlx::PgPool::connect(
+            &std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"),
+        )
+        .await
+        .expect("Failed to connect");
+
+        // Self-contained: create a throwaway user (FK requirement), exercise
+        // upsert + roundtrip + conflict-update, then clean up.
+        let user_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO users (id, username, first_name, last_name, email, user_type)
+            VALUES ($1, $2, 'Test', 'User', $3, 'human')
+            "#,
+        )
+        .bind(user_id)
+        .bind(format!("nav-test-{user_id}"))
+        .bind(format!("nav-test-{user_id}@example.com"))
+        .execute(&pool)
+        .await
+        .expect("failed to insert throwaway test user");
+
+        upsert_user_alert_acknowledgment(&pool, user_id, "builds", 5)
+            .await
+            .expect("initial upsert should succeed");
+
+        let acks = fetch_user_acknowledgments(&pool, user_id)
+            .await
+            .expect("fetch should succeed");
+        let builds_ack = acks.get("builds").expect("builds ack should exist");
+        assert_eq!(builds_ack.last_seen_count, 5);
+
+        // Conflict path: re-acknowledging updates the existing row rather
+        // than erroring or duplicating.
+        upsert_user_alert_acknowledgment(&pool, user_id, "builds", 9)
+            .await
+            .expect("conflict upsert should succeed");
+        let acks = fetch_user_acknowledgments(&pool, user_id)
+            .await
+            .expect("fetch should succeed");
+        assert_eq!(acks.get("builds").unwrap().last_seen_count, 9);
+        assert_eq!(acks.len(), 1, "only one row per (user, category)");
+
+        // Cleanup.
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 }

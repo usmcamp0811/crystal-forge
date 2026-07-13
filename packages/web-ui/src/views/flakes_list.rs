@@ -3048,7 +3048,7 @@ pub fn FlakesListViewNew() -> Element {
     let has_flake_errors = error_count > 0;
     let flash_flakes = should_flash("flakes", has_flake_errors);
     use_effect(move || {
-        acknowledge("flakes");
+        acknowledge("flakes", error_count as i64);
     });
     use_effect(move || {
         set_attention_count("flakes", error_count as i64);

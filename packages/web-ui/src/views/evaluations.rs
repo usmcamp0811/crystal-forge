@@ -5,8 +5,7 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::alerts::{
-    acknowledge, attention_row_class, dismiss_attention_item, is_acknowledged, reset_acknowledge,
-    set_attention_count, should_flash,
+    NAV_BADGES, acknowledge, attention_row_class, dismiss_attention_item, should_flash,
 };
 
 use crate::api::{
@@ -52,12 +51,6 @@ fn EvaluationsPage() -> Element {
     // Keyboard navigation: index into the currently visible list (queue or history).
     // Start at 0 so the first row is auto-selected when the page loads (matching JSX).
     let mut focused_index: Signal<Option<usize>> = use_signal(|| None);
-    // Tab flash: pulses until the History tab is opened for the first time.
-    let mut acked_hist = use_signal(|| false);
-    // Track the peak failed count so we can re-trigger the tab flash
-    // when new failures arrive after the user has acknowledged.
-    // Initialised lazily when `failed_count` becomes available.
-    let mut peak_failed = use_signal(|| None::<i64>);
 
     // Active queue multi-select (bulk cancel)
     let mut active_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
@@ -161,22 +154,6 @@ fn EvaluationsPage() -> Element {
         .iter()
         .filter(|item| item.evaluation_status == "failed")
         .count() as i64;
-    // Re-trigger tab flash when new failures arrive after acknowledgment.
-    {
-        let current = failed_count;
-        let peak = peak_failed();
-        match peak {
-            None => peak_failed.set(Some(current)),
-            Some(p) if current > p => {
-                peak_failed.set(Some(current));
-                if is_acknowledged("evals") {
-                    acked_hist.set(false);
-                    reset_acknowledge("evals");
-                }
-            }
-            _ => {}
-        }
-    }
     let total_count = queue_items.read().len() as i64;
     let selected_count = history_selected_ids.read().len();
     let selected_history_rows = history_resource
@@ -202,25 +179,18 @@ fn EvaluationsPage() -> Element {
         "Compare selected evaluations"
     };
 
-    // Attention flash for history rows: flash on first page load when there are failed items.
-    let history_failed_count = history_resource
-        .read()
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .map(|page| {
-            page.items
-                .iter()
-                .filter(|item| item.evaluation_status == "failed")
-                .count() as i64
-        })
-        .unwrap_or(0);
-    let has_failed_history = history_failed_count > 0;
-    let evals_attention_count = failed_count.max(history_failed_count);
+    // Server-computed "new failed evaluations since last acknowledgment"
+    // (persists across page refresh/re-login — see alerts::NAV_BADGES).
+    // Drives both the History tab's badge/attention-flash-tab pulse and the
+    // one-shot row flash below, replacing a raw total that would otherwise
+    // reappear identically on every reload. should_flash still guards the
+    // one-shot-per-page-load timing (safe: reads/writes ALERT_STATE, not a
+    // signal read inside this same effect).
+    let evals_failed_new = NAV_BADGES().evals_failed_new;
     let mut flash_evals_signal = use_signal(|| false);
     let flash_evals = flash_evals_signal();
     use_effect(move || {
-        set_attention_count("evals", evals_attention_count);
-        if should_flash("evals", has_failed_history) {
+        if should_flash("evals", evals_failed_new > 0) {
             flash_evals_signal.set(true);
             spawn(async move {
                 gloo_timers::future::TimeoutFuture::new(3200).await;
@@ -423,7 +393,7 @@ fn EvaluationsPage() -> Element {
                         button {
                             class: if active_tab() == EvaluationsTab::History {
                                 "sd-tab focus-ring active"
-                            } else if failed_count > 0 && !acked_hist() && !is_acknowledged("evals") {
+                            } else if evals_failed_new > 0 {
                                 "sd-tab focus-ring attention-flash-tab"
                             } else {
                                 "sd-tab focus-ring"
@@ -431,13 +401,13 @@ fn EvaluationsPage() -> Element {
                             onclick: move |_| {
                                 active_tab.set(EvaluationsTab::History);
                                 focused_index.set(None);
-                                acked_hist.set(true);
-                                // Acknowledge the "evals" sidebar badge only when History tab is opened (TASK-385).
-                                acknowledge("evals");
+                                // Acknowledge the "evals" sidebar/tab badge when History tab
+                                // is opened (persists server-side — TASK-385 follow-up).
+                                acknowledge("evals", failed_count);
                             },
                             "History"
-                            if failed_count > 0 {
-                                span { class: "sd-tab-badge", "{failed_count}" }
+                            if evals_failed_new > 0 {
+                                span { class: "sd-tab-badge", "{evals_failed_new}" }
                             }
                         }
                     }

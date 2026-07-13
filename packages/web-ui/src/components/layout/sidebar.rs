@@ -2,9 +2,8 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::{ALERT_STATE, attention_count};
+use crate::alerts::{ALERT_STATE, NAV_BADGES, attention_count};
 use crate::api::client::get_navigation_badges;
-use crate::api::models::NavigationBadges;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
@@ -82,20 +81,21 @@ pub fn SidebarNav() -> Element {
     #[cfg(not(debug_assertions))]
     let show_dev_tools = false;
 
-    // Fetch navigation badge counts and re-poll every 30 seconds.
-    // A signal is used instead of a use_resource loop so each successful poll
-    // immediately re-renders the sidebar with fresh counts.
-    let mut badges = use_signal(NavigationBadges::default);
-    let mut badges_for_poll = badges;
+    // Fetch navigation badge counts and re-poll every 30 seconds, writing into
+    // the shared NAV_BADGES global so other views (e.g. Builds/Evaluations
+    // tab badges) can read the same server-computed "new since last
+    // acknowledgment" counts. alerts::acknowledge() also refreshes NAV_BADGES
+    // immediately after recording an acknowledgment, so badges clear quickly
+    // without waiting for the next scheduled poll.
     use_future(move || async move {
         loop {
             if let Ok(fresh) = get_navigation_badges().await {
-                badges_for_poll.set(fresh);
+                *NAV_BADGES.write() = fresh;
             }
             gloo_timers::future::TimeoutFuture::new(30_000).await;
         }
     });
-    let badges = badges();
+    let badges = NAV_BADGES();
     // Subscribe to ALERT_STATE so re-renders happen when badges are acknowledged.
     let alert_state = ALERT_STATE.read();
     let acked = alert_state.acknowledged.clone();
@@ -104,9 +104,11 @@ pub fn SidebarNav() -> Element {
     let environments_attention = badges
         .environments_attention
         .max(attention_count("environments"));
-    let builds_failed = badges.builds_failed_24h.max(attention_count("builds"));
-    let evals_failed = badges.evals_failed_24h.max(attention_count("evals"));
-    let cves_critical = badges.cves_critical.max(attention_count("cves"));
+    // Builds/Evals badges are fully server-driven (delta counts persisted via
+    // acknowledge()); no local raw-count reconciliation needed here.
+    let builds_failed = badges.builds_failed_new;
+    let evals_failed = badges.evals_failed_new;
+    let cves_critical = badges.cves_critical_new.max(attention_count("cves"));
 
     // Get user data for profile section
     let user_initials = if let Some(name) = auth::user_short_name(&auth_context) {
@@ -299,7 +301,7 @@ pub fn SidebarNav() -> Element {
                     badge_count: if builds_failed > 0 { Some(builds_failed) } else { None },
                     badge_attention: builds_failed > 0,
                     badge_hidden: builds_failed == 0 || (builds_failed > 0 && acked.contains("builds")),
-                    badge_title: Some(format!("{} failed build{} in the last 24h", builds_failed, if builds_failed == 1 { "" } else { "s" })),
+                    badge_title: Some(format!("{} new failed build{} since you last checked", builds_failed, if builds_failed == 1 { "" } else { "s" })),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -319,7 +321,7 @@ pub fn SidebarNav() -> Element {
                     badge_count: if evals_failed > 0 { Some(evals_failed) } else { None },
                     badge_attention: evals_failed > 0,
                     badge_hidden: evals_failed == 0 || (evals_failed > 0 && acked.contains("evals")),
-                    badge_title: Some(format!("{} failed evaluation{} in the last 24h", evals_failed, if evals_failed == 1 { "" } else { "s" })),
+                    badge_title: Some(format!("{} new failed evaluation{} since you last checked", evals_failed, if evals_failed == 1 { "" } else { "s" })),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -361,7 +363,7 @@ pub fn SidebarNav() -> Element {
                         badge_count: if cves_critical > 0 { Some(cves_critical) } else { None },
                         badge_attention: cves_critical > 0,
                         badge_hidden: cves_critical == 0 || (cves_critical > 0 && acked.contains("cves")),
-                        badge_title: Some(format!("{} critical CVEs open across the fleet", cves_critical)),
+                        badge_title: Some(format!("{} new critical CVE{} since you last checked", cves_critical, if cves_critical == 1 { "" } else { "s" })),
                         icon: rsx!(
                             svg {
                                 class: "w-4 h-4",

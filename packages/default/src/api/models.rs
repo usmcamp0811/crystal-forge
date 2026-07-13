@@ -942,25 +942,35 @@ pub struct FlakeRegistryItem {
     pub last_sync_error: Option<String>,
 }
 
-/// Navigation badge aggregate — counts of items needing attention per view.
-/// Returned by GET /api/v1/navigation/badges; polled by the sidebar every 30s.
+/// Navigation badge aggregate — counts of items needing attention per view,
+/// computed relative to the requesting user's last acknowledgment of each
+/// category (see `queries::navigation`), not raw totals. Returned by
+/// GET /api/v1/navigation/badges; polled by the sidebar every 30s.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NavigationBadges {
-    /// Systems whose health is "critical" or "offline".
+    /// Systems whose health is "critical" or "offline" — current total shown
+    /// only if it changed since the user's last acknowledgment (systems have
+    /// no discrete per-item "became critical at" timestamp to diff against).
     pub systems_attention: i64,
     pub systems_total: i64,
-    /// Flakes whose sync_status is "error".
+    /// Flakes whose sync_status is "error" and last_sync_at is newer than the
+    /// user's last acknowledgment of the flakes category.
     pub flakes_errored: i64,
     pub flakes_total: i64,
-    /// Environments containing ≥1 attention system.
+    /// Environments containing ≥1 attention system — current total shown only
+    /// if it changed since the user's last acknowledgment (same rationale as
+    /// systems_attention).
     pub environments_attention: i64,
     pub environments_total: i64,
-    /// Build derivations that failed within the last 24 hours.
-    pub builds_failed_24h: i64,
-    /// Commit evaluations that failed within the last 24 hours.
-    pub evals_failed_24h: i64,
-    /// Open critical CVEs across the fleet.
-    pub cves_critical: i64,
+    /// Build jobs that failed and completed after the user's last
+    /// acknowledgment of the builds category.
+    pub builds_failed_new: i64,
+    /// Commit evaluations that failed and completed after the user's last
+    /// acknowledgment of the evals category.
+    pub evals_failed_new: i64,
+    /// Critical CVEs first detected after the user's last acknowledgment of
+    /// the cves category.
+    pub cves_critical_new: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

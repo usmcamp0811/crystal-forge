@@ -3,9 +3,7 @@
 use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
-use crate::alerts::{
-    acknowledge, is_acknowledged, reset_acknowledge, set_attention_count, should_flash,
-};
+use crate::alerts::{NAV_BADGES, acknowledge};
 
 use crate::api::{
     self,
@@ -438,34 +436,11 @@ pub fn BuildsView() -> Element {
         .iter()
         .filter(|item| item.status == BuildStatus::Failed)
         .count();
-    let mut flash_builds_signal = use_signal(|| false);
-    let flash_builds = flash_builds_signal();
-    use_effect(move || {
-        set_attention_count("builds", completed_failed_count as i64);
-        if should_flash("builds", completed_failed_count > 0) {
-            flash_builds_signal.set(true);
-            spawn(async move {
-                gloo_timers::future::TimeoutFuture::new(3200).await;
-                flash_builds_signal.set(false);
-            });
-        }
-    });
-    // Tab flash: pulses until the Completed tab is opened for the first time.
-    let mut acked_hist = use_signal(|| false);
-    // Track the peak failed count so we can re-trigger the tab flash
-    // when new failures arrive after the user has acknowledged.
-    let mut peak_failed = use_signal(|| completed_failed_count);
-    {
-        let current = completed_failed_count;
-        let peak = peak_failed();
-        if current > peak {
-            peak_failed.set(current);
-            if is_acknowledged("builds") {
-                acked_hist.set(false);
-                reset_acknowledge("builds");
-            }
-        }
-    }
+    // Server-computed "new failed builds since last acknowledgment" (persists
+    // across page refresh/re-login — see alerts::NAV_BADGES). Drives both the
+    // Completed tab's badge count and its attention-flash-tab pulse, replacing
+    // a raw total that would otherwise reappear identically on every reload.
+    let builds_failed_new = NAV_BADGES().builds_failed_new;
     completed_rows.sort_by(|left, right| {
         let left_key = left.completed_at.unwrap_or_else(Utc::now);
         let right_key = right.completed_at.unwrap_or_else(Utc::now);
@@ -601,7 +576,7 @@ pub fn BuildsView() -> Element {
                         // JSX: `sd-tab focus-ring${tab===t.k?" active":""}${flashTab && t.k==="history"?" attention-flash-tab":""}`
                         class: if active_view() == BuildsTab::Completed {
                             "sd-tab focus-ring active"
-                        } else if completed_failed_count > 0 && !acked_hist() && !is_acknowledged("builds") {
+                        } else if builds_failed_new > 0 {
                             "sd-tab focus-ring attention-flash-tab"
                         } else {
                             "sd-tab focus-ring"
@@ -612,9 +587,10 @@ pub fn BuildsView() -> Element {
                             selected_build.set(None);
                             log_open.set(false);
                             search_query.set(String::new());
-                            // JSX: flash failed rows on first history open
-                            if prev != BuildsTab::Completed && !acked_hist() && !is_acknowledged("builds") {
-                                acked_hist.set(true);
+                            // JSX: flash failed rows on first history open.
+                            // Only flash if there's something genuinely new
+                            // since the user's last acknowledgment of Builds.
+                            if prev != BuildsTab::Completed && builds_failed_new > 0 {
                                 flash_hist_rows.set(true);
                                 let mut fh = flash_hist_rows;
                                 spawn(async move {
@@ -622,12 +598,13 @@ pub fn BuildsView() -> Element {
                                     fh.set(false);
                                 });
                             }
-                            // Acknowledge the "builds" sidebar badge only when this tab is opened (TASK-385).
-                            acknowledge("builds");
+                            // Acknowledge the "builds" sidebar/tab badge when this tab is opened
+                            // (persists server-side — TASK-385 follow-up).
+                            acknowledge("builds", completed_failed_count as i64);
                         },
                         "Completed ({build_history.read().len()})"
-                        if completed_failed_count > 0 {
-                            span { class: "sd-tab-badge", "{completed_failed_count}" }
+                        if builds_failed_new > 0 {
+                            span { class: "sd-tab-badge", "{builds_failed_new}" }
                         }
                     }
                     // JSX: {selectableIds.length > 0 && <MultiSelectHint />}

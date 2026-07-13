@@ -777,7 +777,10 @@ fn default_sync_status() -> String {
 }
 
 /// Navigation badge aggregate returned by GET /api/v1/navigation/badges.
-/// Polled by the sidebar every 30 seconds.
+/// Polled by the sidebar every 30 seconds. Counts are computed server-side
+/// relative to the requesting user's last acknowledgment of each category
+/// (persisted, survives refresh/re-login) — not raw totals. See
+/// `alerts::acknowledge` for how the frontend records acknowledgment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct NavigationBadges {
     #[serde(default)]
@@ -793,11 +796,11 @@ pub struct NavigationBadges {
     #[serde(default)]
     pub environments_total: i64,
     #[serde(default)]
-    pub builds_failed_24h: i64,
+    pub builds_failed_new: i64,
     #[serde(default)]
-    pub evals_failed_24h: i64,
+    pub evals_failed_new: i64,
     #[serde(default)]
-    pub cves_critical: i64,
+    pub cves_critical_new: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
