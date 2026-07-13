@@ -1,3 +1,4 @@
+use anyhow::Context;
 use crystal_forge::builder::api_client::{ApiBuildReporter, BuilderApiClient};
 use crystal_forge::builder::metrics::SystemMetrics;
 use crystal_forge::config::{CacheConfig, CacheType, CrystalForgeConfig};
@@ -31,6 +32,7 @@ use tracing_subscriber::EnvFilter;
 /// task cannot keep up with build output.
 const LOG_CHANNEL_CAPACITY: usize = 64;
 const LOG_DRAIN_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
+const DERIVATION_DELTA_ARCHIVE_REQUEST_MAX_BYTES: usize = 512 * 1024;
 
 fn required_cache_push_reference(
     cache_config: &CacheConfig,
@@ -1860,9 +1862,60 @@ async fn materialize_derivation_delta(
         manifest.paths.len()
     );
 
-    client
-        .stream_derivation_delta_archive_to_import(job_id, &missing)
-        .await
+    let chunks = chunk_paths_by_json_size(&missing, DERIVATION_DELTA_ARCHIVE_REQUEST_MAX_BYTES)
+        .map_err(DeltaError::Fatal)?;
+    for (index, chunk) in chunks.iter().enumerate() {
+        info!(
+            "📥 Delta materialization: importing request chunk {}/{} ({} path(s))",
+            index + 1,
+            chunks.len(),
+            chunk.len()
+        );
+        client
+            .stream_derivation_delta_archive_to_import(job_id, chunk)
+            .await?;
+    }
+
+    Ok(())
+}
+
+fn chunk_paths_by_json_size(
+    paths: &[String],
+    max_bytes: usize,
+) -> anyhow::Result<Vec<Vec<String>>> {
+    const EMPTY_REQUEST_BYTES: usize = br#"{"paths":[]}"#.len();
+
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let max_bytes = max_bytes.max(EMPTY_REQUEST_BYTES + 1);
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    let mut current_bytes = EMPTY_REQUEST_BYTES;
+
+    for path in paths {
+        let encoded_path_bytes = serde_json::to_vec(path)
+            .with_context(|| format!("failed to serialize store path for delta request: {path}"))?
+            .len();
+        let separator_bytes = usize::from(!current.is_empty());
+        let candidate_bytes = current_bytes + separator_bytes + encoded_path_bytes;
+
+        if candidate_bytes > max_bytes && !current.is_empty() {
+            chunks.push(std::mem::take(&mut current));
+            current_bytes = EMPTY_REQUEST_BYTES;
+        }
+
+        let separator_bytes = usize::from(!current.is_empty());
+        current_bytes += separator_bytes + encoded_path_bytes;
+        current.push(path.clone());
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    Ok(chunks)
 }
 
 async fn ensure_derivation_available(
@@ -2623,6 +2676,51 @@ mod tests {
             .await
             .expect("empty input should not error");
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn chunk_paths_by_json_size_limits_serialized_request_size() {
+        let paths = vec![
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-fake-one.drv".to_string(),
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-fake-two.drv".to_string(),
+            "/nix/store/cccccccccccccccccccccccccccccccc-fake-three.drv".to_string(),
+        ];
+        let max_bytes =
+            serde_json::to_vec(&crystal_forge::models::builders::DerivationArchiveRequest {
+                paths: vec![paths[0].clone(), paths[1].clone()],
+            })
+            .expect("test request should serialize")
+            .len();
+
+        let chunks =
+            super::chunk_paths_by_json_size(&paths, max_bytes).expect("chunking should not fail");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], vec![paths[0].clone(), paths[1].clone()]);
+        assert_eq!(chunks[1], vec![paths[2].clone()]);
+
+        for chunk in chunks {
+            let bytes =
+                serde_json::to_vec(&crystal_forge::models::builders::DerivationArchiveRequest {
+                    paths: chunk,
+                })
+                .expect("test request should serialize")
+                .len();
+            assert!(bytes <= max_bytes, "chunk serialized to {bytes} bytes");
+        }
+    }
+
+    #[test]
+    fn chunk_paths_by_json_size_keeps_single_oversized_path() {
+        let path = format!(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-{}",
+            "x".repeat(128)
+        );
+
+        let chunks =
+            super::chunk_paths_by_json_size(&[path.clone()], 32).expect("chunking should not fail");
+
+        assert_eq!(chunks, vec![vec![path]]);
     }
 
     /// Regression test: the old batch-then-fallback strategy would call
