@@ -41,7 +41,11 @@
           eval_check_cache = cfg.server.eval_check_cache;
           allow_private_cache_test_targets =
             cfg.server.allow_private_cache_test_targets;
+          trust_forwarded_builder_https =
+            cfg.server.trust_forwarded_builder_https;
           remote_build_execution_strategy = cfg.build.remote_execution_strategy;
+          source_delivery_mode = cfg.build.source_delivery_mode;
+          source_archive_root = toString cfg.build.source_archive_root;
         }
         // lib.optionalAttrs (cfg.server.role_mapping != {}) {
           role_mapping = cfg.server.role_mapping;
@@ -1051,19 +1055,24 @@ in {
 
       remote_execution_strategy = lib.mkOption {
         type = lib.types.enum ["server_derivation" "source_re_evaluate_verified"];
-        default = "server_derivation";
+        default = "source_re_evaluate_verified";
         description = lib.mdDoc ''
           Default remote build execution strategy for API builders.
 
-          - `server_derivation` (default): the server evaluates and provides the
-            authoritative `.drv`; the builder realizes it via cache/closure
-            transport.
-          - `source_re_evaluate_verified`: the server records the expected
-            toplevel `.drvPath`; the builder evaluates immutable source from a
-            local Git worktree (created from a bare mirror at the exact
-            authorized commit) and only builds when its locally evaluated
-            `.drvPath` matches the server-authorized value. Builders must be
-            configured with source access before selecting this strategy.
+          - `source_re_evaluate_verified` (recommended default): the server
+            records the expected toplevel `.drvPath`; the builder obtains the
+            source (via `source_delivery_mode`), evaluates the flake locally,
+            and only builds when its locally evaluated `.drvPath` matches the
+            server-authorized value. Provides a cryptographic build-plan
+            integrity check (`derivation_mismatch` hard failure). With
+            `server_bundled_archive` delivery the builder requires no Git
+            credentials and no Attic/binary cache before the build starts.
+
+          - `server_derivation`: the server evaluates and provides the
+            authoritative `.drv`; the builder streams the `.drv` closure
+            archive from the CF server and imports it locally before building.
+            Simpler but provides no builder-side derivation identity check.
+            Use when the builder cannot run `nix eval`.
 
           Builders must advertise support for whichever strategy is selected via
           `supported_execution_strategies`.
@@ -1074,12 +1083,61 @@ in {
         type = lib.types.listOf (
           lib.types.enum ["server_derivation" "source_re_evaluate_verified"]
         );
-        default = ["server_derivation"];
+        default = ["source_re_evaluate_verified"];
         description = lib.mdDoc ''
           Remote build strategies this builder will accept. Jobs using a strategy
           not listed here are rejected explicitly (no silent fallback).
         '';
         example = ["server_derivation" "source_re_evaluate_verified"];
+      };
+
+      source_delivery_mode = lib.mkOption {
+        type = lib.types.enum ["local_git_worktree" "server_bundled_archive"];
+        default = "server_bundled_archive";
+        description = lib.mdDoc ''
+          How the builder obtains the flake source for
+          `source_re_evaluate_verified` builds.
+
+          - `server_bundled_archive` (recommended default): the server packages
+            the top-level flake repository as a gzipped tar archive (from its
+            own bare Git mirror) and serves it via an authenticated API
+            endpoint. The builder downloads, verifies the SHA-256 digest, and
+            extracts to a job-scoped directory. The builder does not need Git
+            credentials or direct access to the Git remote. Each job uses an
+            isolated directory so concurrent builds for the same repository do
+            not interfere.
+
+            Note: only the top-level repository is bundled. Locked flake inputs
+            (nixpkgs, etc.) must be reachable via Nix substituters or already
+            present in the builder's Nix store.
+
+          - `local_git_worktree`: the builder maintains its own bare Git mirror.
+            It clones on first use and fetches when the authorized commit is
+            absent. The builder needs network access and credentials for the
+            repository URL. Colocated server/builder deployments may share the
+            same mirror root.
+
+          This option is written to the server config and controls what the
+          server sends in job manifests. Ignored when
+          `remote_execution_strategy` is `server_derivation`.
+        '';
+      };
+
+      source_archive_root = lib.mkOption {
+        type = lib.types.path;
+        default = "/var/lib/crystal-forge/source-archives";
+        description = lib.mdDoc ''
+          Root directory on the **server** where bare Git mirrors and per-job
+          source archives are stored for `server_bundled_archive` delivery.
+
+          Layout under this directory:
+          - `mirrors/<mirror_id>.git` — shared bare Git mirror per repository
+          - `archives/jobs/<job_id>.tar.gz` — per-job source archive
+            (created at job-claim time, deleted on job complete/fail)
+
+          Must be writable by the Crystal Forge server process. Only relevant
+          when `source_delivery_mode = "server_bundled_archive"`.
+        '';
       };
 
       source_mirror_root = lib.mkOption {
@@ -1582,6 +1640,29 @@ in {
         '';
       };
 
+      trust_forwarded_builder_https = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = lib.mdDoc ''
+          Trust the `X-Forwarded-Proto: https` / `Forwarded: proto=https`
+          headers set by a reverse proxy when sending cache-push credentials
+          to remote builders.
+
+          When `false` (the default), the server refuses to send any
+          credential-bearing cache-push config to builders and returns
+          `426 Upgrade Required`, regardless of forwarded-proto headers.
+
+          **Only set this to `true` when your reverse proxy unconditionally
+          strips and re-sets these headers itself.** Builders that can reach
+          the server directly over plaintext HTTP could otherwise spoof the
+          header and receive real cache credentials.
+
+          Typical deployment: set this to `true` when Crystal Forge is behind
+          an HTTPS-terminating reverse proxy (e.g. nginx, Caddy) that you
+          control, and builders only reach the server through that proxy.
+        '';
+      };
+
       role_mapping = lib.mkOption {
         type = lib.types.attrsOf lib.types.str;
         default = {};
@@ -2000,8 +2081,18 @@ in {
         "postgresql.service";
 
       path = with pkgs;
-        [nix git vulnix systemd nix-fast-build nix-eval-jobs]
-        ++ lib.optional (cfg.cache.cache_type == "Attic") attic-client;
+        [
+          nix
+          git
+          vulnix
+          systemd
+          nix-fast-build
+          nix-eval-jobs
+          # API builders may receive server-supplied Attic cache-push
+          # credentials per job even when their local cfg.cache.cache_type is
+          # not Attic. Keep the client in PATH so those pushes can run.
+          attic-client
+        ];
 
       # Merge existing env with any Environment=… pairs from systemd_properties
       environment = lib.mkMerge [

@@ -1,3 +1,4 @@
+use anyhow::Context;
 use crystal_forge::builder::api_client::{ApiBuildReporter, BuilderApiClient};
 use crystal_forge::builder::metrics::SystemMetrics;
 use crystal_forge::config::{CacheConfig, CacheType, CrystalForgeConfig};
@@ -12,7 +13,7 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -21,7 +22,7 @@ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 /// - `PRE_BUILD_EVALUATION`: nix eval phase
 const PRE_BUILD_SOURCE_FETCH: u8 = 0;
 const PRE_BUILD_EVALUATION: u8 = 1;
-use tokio::io::AsyncWriteExt;
+
 use tokio::signal;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -31,6 +32,7 @@ use tracing_subscriber::EnvFilter;
 /// task cannot keep up with build output.
 const LOG_CHANNEL_CAPACITY: usize = 64;
 const LOG_DRAIN_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
+const DERIVATION_DELTA_ARCHIVE_REQUEST_MAX_BYTES: usize = 512 * 1024;
 
 fn required_cache_push_reference(
     cache_config: &CacheConfig,
@@ -747,6 +749,91 @@ async fn ensure_source_worktree(
     Ok(worktree_path)
 }
 
+/// Create a detached source worktree from an already-populated mirror.
+///
+/// Unlike [`ensure_source_worktree`], this does NOT call
+/// [`ensure_mirror_has_commit`] — the caller is responsible for ensuring the
+/// mirror already contains the authorized commit (e.g. by extracting a
+/// server-provided archive). Used for `ServerBundledArchive` delivery.
+///
+/// `mirror_path` must be the job-scoped bare mirror directory
+/// (`mirror_root/server-bundled/<job_id>/<mirror_id>.git`). The worktree is
+/// placed at `worktree_root/<mirror_id>/<commit>/<job_id>` so each job has
+/// an isolated worktree that does not race with other concurrent jobs.
+async fn ensure_source_worktree_from_mirror(
+    source: &VerifiedSourceIdentity,
+    mirror_path: &Path,
+    worktree_root: &Path,
+    job_id: uuid::Uuid,
+) -> Result<PathBuf, PreBuildFailure> {
+    // Derive the worktree path — job-scoped under <worktree_root>/<mirror_id>/<commit>/<job_id>.
+    let mirror_id = source
+        .mirror_id
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: "ServerBundledArchive delivery is missing mirror_id for worktree path"
+                .to_string(),
+        })?;
+    let worktree_path = worktree_root
+        .join(mirror_id)
+        .join(&source.commit_hash)
+        .join(job_id.to_string());
+
+    if worktree_path.exists() {
+        info!("🌳 Reusing source worktree {}", worktree_path.display());
+        verify_worktree_head(&worktree_path, &source.commit_hash).await?;
+        return Ok(worktree_path);
+    }
+
+    info!(
+        "🌳 Creating detached source worktree {} at commit {} (from pre-populated mirror)",
+        worktree_path.display(),
+        source.commit_hash
+    );
+
+    if let Some(parent) = worktree_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| PreBuildFailure {
+                phase: BuildFailurePhase::SourceFetch,
+                message: format!(
+                    "failed to create source worktree parent {}: {e}",
+                    parent.display()
+                ),
+            })?;
+    }
+
+    let output = tokio::process::Command::new("git")
+        .kill_on_drop(true)
+        .arg("--git-dir")
+        .arg(&mirror_path)
+        .arg("worktree")
+        .arg("add")
+        .arg("--detach")
+        .arg(&worktree_path)
+        .arg(&source.commit_hash)
+        .output()
+        .await
+        .map_err(|e| PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: format!("failed to spawn git worktree add: {e}"),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: format!("git worktree add failed: {stderr}"),
+        });
+    }
+
+    verify_worktree_head(&worktree_path, &source.commit_hash).await?;
+    info!("✅ Source worktree ready at {}", worktree_path.display());
+    Ok(worktree_path)
+}
+
 async fn verify_worktree_head(
     worktree_path: &Path,
     expected_commit: &str,
@@ -798,6 +885,11 @@ async fn verify_worktree_head(
 struct CleanupSourceWorktree {
     mirror_path: PathBuf,
     worktree_path: PathBuf,
+    /// For ServerBundledArchive jobs: the job-scoped mirror *directory*
+    /// (`mirror_root/server-bundled/<job_id>/`) to remove after the worktree
+    /// is detached.  `None` for LocalGitWorktree jobs where the mirror is
+    /// shared across jobs.
+    job_mirror_dir: Option<PathBuf>,
 }
 
 fn cleanup_candidate_worktree(
@@ -806,58 +898,106 @@ fn cleanup_candidate_worktree(
     worktree_root: &Path,
     job_id: uuid::Uuid,
 ) -> Option<CleanupSourceWorktree> {
-    if payload.execution_strategy != RemoteBuildExecutionStrategy::SourceReEvaluateVerified
-        || payload.source_input_delivery != SourceInputDeliveryMode::LocalGitWorktree
-    {
+    if payload.execution_strategy != RemoteBuildExecutionStrategy::SourceReEvaluateVerified {
         return None;
     }
 
     let source = payload.source.as_ref()?;
-    let (mirror_path, worktree_path) =
-        source_workspace_paths_for_job(source, mirror_root, worktree_root, Some(job_id)).ok()?;
-    if worktree_path.starts_with(worktree_root) {
-        Some(CleanupSourceWorktree {
-            mirror_path,
-            worktree_path,
-        })
-    } else {
-        None
+
+    match payload.source_input_delivery {
+        SourceInputDeliveryMode::LocalGitWorktree => {
+            let (mirror_path, worktree_path) =
+                source_workspace_paths_for_job(source, mirror_root, worktree_root, Some(job_id))
+                    .ok()?;
+            if worktree_path.starts_with(worktree_root) {
+                Some(CleanupSourceWorktree {
+                    mirror_path,
+                    worktree_path,
+                    job_mirror_dir: None,
+                })
+            } else {
+                None
+            }
+        }
+        SourceInputDeliveryMode::ServerBundledArchive => {
+            // Job-scoped mirror: mirror_root/server-bundled/<job_id>/<mirror_id>.git
+            let mirror_id = source.mirror_id.as_deref().filter(|v| !v.is_empty())?;
+            let job_mirror_dir = mirror_root.join("server-bundled").join(job_id.to_string());
+            let mirror_path = job_mirror_dir.join(format!("{mirror_id}.git"));
+            // Worktree is shared-layout: worktree_root/<mirror_id>/<commit>/<job_id>
+            let worktree_path = worktree_root
+                .join(mirror_id)
+                .join(&source.commit_hash)
+                .join(job_id.to_string());
+            if worktree_path.starts_with(worktree_root) {
+                Some(CleanupSourceWorktree {
+                    mirror_path,
+                    worktree_path,
+                    job_mirror_dir: Some(job_mirror_dir),
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
 async fn cleanup_source_worktree(cleanup: &CleanupSourceWorktree) {
     let path = cleanup.worktree_path.as_path();
-    if !path.exists() {
-        return;
+
+    if path.exists() {
+        let status = tokio::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(&cleanup.mirror_path)
+            .arg("worktree")
+            .arg("remove")
+            .arg("--force")
+            .arg(path)
+            .status()
+            .await;
+
+        match status {
+            Ok(status) if status.success() => {
+                info!("🧹 Removed source worktree {}", path.display());
+            }
+            Ok(status) => {
+                warn!(
+                    "source worktree cleanup command exited with status {} for {}",
+                    status,
+                    path.display()
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "failed to run source worktree cleanup for {}: {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
     }
 
-    let status = tokio::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(&cleanup.mirror_path)
-        .arg("worktree")
-        .arg("remove")
-        .arg("--force")
-        .arg(path)
-        .status()
-        .await;
-
-    match status {
-        Ok(status) if status.success() => {
-            info!("🧹 Removed source worktree {}", path.display());
-        }
-        Ok(status) => {
-            warn!(
-                "source worktree cleanup command exited with status {} for {}",
-                status,
-                path.display()
-            );
-        }
-        Err(e) => {
-            warn!(
-                "failed to run source worktree cleanup for {}: {}",
-                path.display(),
-                e
-            );
+    // For ServerBundledArchive jobs, also remove the job-scoped mirror directory.
+    // This dir (mirror_root/server-bundled/<job_id>/) was created exclusively for
+    // this job so it is safe to delete in full after the worktree is gone.
+    if let Some(ref job_mirror_dir) = cleanup.job_mirror_dir {
+        if job_mirror_dir.exists() {
+            match tokio::fs::remove_dir_all(job_mirror_dir).await {
+                Ok(()) => {
+                    info!(
+                        "🧹 Removed job-scoped source mirror dir {}",
+                        job_mirror_dir.display()
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "failed to remove job-scoped source mirror dir {}: {}",
+                        job_mirror_dir.display(),
+                        e
+                    );
+                }
+            }
         }
     }
 }
@@ -889,8 +1029,95 @@ async fn evaluate_verified_source_drv(
     worktree_root: &Path,
     job_id: uuid::Uuid,
     pre_build_phase: &AtomicU8,
+    client: Option<&crystal_forge::builder::api_client::BuilderApiClient>,
 ) -> Result<String, PreBuildFailure> {
-    let source_ref = if delivery == SourceInputDeliveryMode::LocalGitWorktree {
+    let source_ref = if delivery == SourceInputDeliveryMode::ServerBundledArchive {
+        // ServerBundledArchive: download the source archive from the server API,
+        // extract it to the mirror path, then create a worktree from the mirror.
+        let source_err = |msg: String| PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            message: msg,
+        };
+
+        let client = client.ok_or_else(|| {
+            source_err(
+                "ServerBundledArchive requires an API client for archive download".to_string(),
+            )
+        })?;
+
+        // Determine the mirror_id for path construction.
+        let mirror_id = source
+            .mirror_id
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                source_err("ServerBundledArchive delivery is missing mirror_id".to_string())
+            })?;
+
+        // Job-scoped mirror path: each job extracts into its own directory so
+        // concurrent jobs for the same repo never race on the same bare mirror.
+        // Layout: mirror_root/server-bundled/<job_id>/<mirror_id>.git
+        let job_mirror_dir = mirror_root.join("server-bundled").join(job_id.to_string());
+        let mirror_path = job_mirror_dir.join(format!("{mirror_id}.git"));
+
+        // Stream archive to a temp file, verifying SHA-256 incrementally.
+        // This avoids buffering the entire archive in RAM.
+        info!(
+            "📦 Streaming source archive for job {} to temp file...",
+            job_id
+        );
+        let tmp_archive = client
+            .stream_source_archive_to_tempfile(
+                job_id,
+                source.archive_sha256.as_deref(),
+                &job_mirror_dir,
+            )
+            .await
+            .map_err(|e| source_err(format!("failed to stream source archive: {e}")))?;
+
+        // Create the job-scoped mirror directory for extraction.
+        tokio::fs::create_dir_all(&job_mirror_dir)
+            .await
+            .map_err(|e| {
+                source_err(format!(
+                    "failed to create job mirror directory {}: {e}",
+                    job_mirror_dir.display()
+                ))
+            })?;
+
+        let output = tokio::process::Command::new("tar")
+            .kill_on_drop(true)
+            .arg("-xzf")
+            .arg(&tmp_archive)
+            .arg("-C")
+            .arg(&job_mirror_dir)
+            .output()
+            .await
+            .map_err(|e| source_err(format!("failed to spawn tar extraction: {e}")))?;
+
+        // Clean up the temp archive file regardless of extraction success.
+        let _ = tokio::fs::remove_file(&tmp_archive).await;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            // Clean up the job mirror dir on failure to avoid stale state.
+            let _ = tokio::fs::remove_dir_all(&job_mirror_dir).await;
+            return Err(source_err(format!("tar extraction failed: {stderr}")));
+        }
+
+        info!(
+            "✅ Source archive extracted to job-scoped mirror at {}",
+            mirror_path.display()
+        );
+
+        // Create a worktree from the job-scoped extracted mirror.
+        // ensure_source_worktree_from_mirror takes the mirror_path directly;
+        // the worktree is placed at worktree_root/<mirror_id>/<commit>/<job_id>.
+        ensure_source_worktree_from_mirror(source, &mirror_path, worktree_root, job_id)
+            .await?
+            .to_string_lossy()
+            .to_string()
+    } else if delivery == SourceInputDeliveryMode::LocalGitWorktree {
         ensure_source_worktree(source, mirror_root, worktree_root, job_id)
             .await?
             .to_string_lossy()
@@ -939,6 +1166,7 @@ async fn verify_source_build_plan(
     worktree_root: &Path,
     job_id: uuid::Uuid,
     pre_build_phase: &AtomicU8,
+    client: Option<&crystal_forge::builder::api_client::BuilderApiClient>,
 ) -> Result<String, PreBuildFailure> {
     let expected = expected_drv_path(payload)?.to_string();
     let source = payload.source.as_ref().ok_or_else(|| PreBuildFailure {
@@ -952,6 +1180,7 @@ async fn verify_source_build_plan(
         worktree_root,
         job_id,
         pre_build_phase,
+        client,
     )
     .await?;
     verify_drv_identity(&expected, &actual)?;
@@ -1011,6 +1240,7 @@ async fn execute_build_job(
                 source_worktree_root,
                 job_id,
                 &pre_build_phase,
+                Some(&client),
             );
             wait_for_pre_build_verification(verification_future, build_timeout, &pre_build_phase, || {
                 let client = client.clone();
@@ -1502,67 +1732,258 @@ async fn execute_build_job(
     }
 }
 
+/// Check whether the full `.drv` requisite closure is locally valid.
+///
+/// Uses `nix-store --check-validity --recursive` so a partially imported
+/// closure (e.g. from a mid-stream crash on a previous attempt) is not
+/// mistaken for a usable one.  A partial import leaves the top-level `.drv`
+/// file on disk but some of its requisites missing; a plain `Path::exists()`
+/// check would incorrectly skip re-import and then fail later inside
+/// `nix-store --realise`.
+/// Is the full recursive closure of `drv_path` valid in the local store?
+///
+/// Nix calls: `nix-store --query --requisites <drv>` (1 process) to enumerate
+/// the closure, then batched `nix-store --check-validity --print-invalid`
+/// (~1 process per 1024 paths) to verify every member. If the `.drv` itself is
+/// not in the local store, the requisites query fails and we return `false`.
+async fn drv_closure_available_locally(drv_path: &str) -> anyhow::Result<bool> {
+    let output = match tokio::process::Command::new("nix-store")
+        .arg("--query")
+        .arg("--requisites")
+        .arg(drv_path)
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+
+    if !output.status.success() {
+        // drv not in local store (or unreadable) — closure not available.
+        return Ok(false);
+    }
+
+    let closure: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| l.starts_with("/nix/store/"))
+        .collect();
+
+    let missing = missing_store_paths_batched(&closure).await?;
+    Ok(missing.is_empty())
+}
+
+/// Batch size for `nix-store --check-validity --print-invalid` argument lists.
+/// 1024 paths ≈ 90 KiB of argv, comfortably under Linux ARG_MAX (~2 MiB).
+const VALIDITY_CHECK_BATCH: usize = 1024;
+
+/// Compute which of the given store paths are NOT valid in the local Nix store.
+///
+/// Nix calls: `nix-store --check-validity --print-invalid <paths…>` in chunks
+/// of [`VALIDITY_CHECK_BATCH`] — one process per chunk (a 29 000-path manifest
+/// is ~29 process spawns). `--print-invalid` makes nix print each invalid path
+/// on stdout and exit 0 instead of failing on the first invalid path, so a
+/// single batched call reports the exact missing set reliably. (A plain
+/// batched `--check-validity` without the flag does NOT reliably exit nonzero
+/// for invalid paths in large argument lists, which previously caused missing
+/// paths to be treated as present.)
+async fn missing_store_paths_batched(paths: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut missing = Vec::new();
+
+    for chunk in paths.chunks(VALIDITY_CHECK_BATCH) {
+        let output = match tokio::process::Command::new("nix-store")
+            .arg("--check-validity")
+            .arg("--print-invalid")
+            .args(chunk)
+            .output()
+            .await
+        {
+            Ok(output) => output,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // nix-store binary not found — treat all paths as missing so
+                // the delta import is attempted (consistent with prior behaviour).
+                missing.extend(chunk.iter().cloned());
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let first_line = stderr.lines().next().unwrap_or("unknown error");
+            anyhow::bail!("nix-store --check-validity --print-invalid failed: {first_line}");
+        }
+
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let path = line.trim();
+            if path.starts_with("/nix/store/") {
+                missing.push(path.to_string());
+            }
+        }
+    }
+
+    Ok(missing)
+}
+
+/// Delta materialization: fetch the authorized manifest, compute the locally
+/// missing subset, and request only those paths from the server.
+async fn materialize_derivation_delta(
+    client: &BuilderApiClient,
+    job_id: uuid::Uuid,
+    expected_drv_path: &str,
+) -> std::result::Result<(), crystal_forge::builder::api_client::DeltaError> {
+    use crystal_forge::builder::api_client::DeltaError;
+
+    let manifest = client.get_derivation_manifest(job_id).await?;
+
+    if manifest.drv_path != expected_drv_path {
+        return Err(DeltaError::Fatal(anyhow::anyhow!(
+            "server manifest drv path mismatch: expected {expected_drv_path}, got {}",
+            manifest.drv_path
+        )));
+    }
+
+    let missing = missing_store_paths_batched(&manifest.paths)
+        .await
+        .map_err(DeltaError::Fatal)?;
+
+    if missing.is_empty() {
+        info!(
+            "✅ All {} manifest paths already valid locally; no transfer needed",
+            manifest.paths.len()
+        );
+        return Ok(());
+    }
+
+    info!(
+        "📥 Delta materialization: {} of {} manifest paths missing locally; requesting only those",
+        missing.len(),
+        manifest.paths.len()
+    );
+
+    let chunks = chunk_paths_by_json_size(&missing, DERIVATION_DELTA_ARCHIVE_REQUEST_MAX_BYTES)
+        .map_err(DeltaError::Fatal)?;
+    for (index, chunk) in chunks.iter().enumerate() {
+        info!(
+            "📥 Delta materialization: importing request chunk {}/{} ({} path(s))",
+            index + 1,
+            chunks.len(),
+            chunk.len()
+        );
+        client
+            .stream_derivation_delta_archive_to_import(job_id, chunk)
+            .await?;
+    }
+
+    Ok(())
+}
+
+fn chunk_paths_by_json_size(
+    paths: &[String],
+    max_bytes: usize,
+) -> anyhow::Result<Vec<Vec<String>>> {
+    const EMPTY_REQUEST_BYTES: usize = br#"{"paths":[]}"#.len();
+
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let max_bytes = max_bytes.max(EMPTY_REQUEST_BYTES + 1);
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    let mut current_bytes = EMPTY_REQUEST_BYTES;
+
+    for path in paths {
+        let encoded_path_bytes = serde_json::to_vec(path)
+            .with_context(|| format!("failed to serialize store path for delta request: {path}"))?
+            .len();
+        let separator_bytes = usize::from(!current.is_empty());
+        let candidate_bytes = current_bytes + separator_bytes + encoded_path_bytes;
+
+        if candidate_bytes > max_bytes && !current.is_empty() {
+            chunks.push(std::mem::take(&mut current));
+            current_bytes = EMPTY_REQUEST_BYTES;
+        }
+
+        let separator_bytes = usize::from(!current.is_empty());
+        current_bytes += separator_bytes + encoded_path_bytes;
+        current.push(path.clone());
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    Ok(chunks)
+}
+
 async fn ensure_derivation_available(
     client: &BuilderApiClient,
     job_id: uuid::Uuid,
     drv_path: &str,
 ) -> anyhow::Result<()> {
-    if Path::new(drv_path).exists() {
+    use crystal_forge::builder::api_client::DeltaError;
+
+    if drv_closure_available_locally(drv_path).await? {
         return Ok(());
     }
 
-    info!(
-        "📤 Derivation {} missing locally; asking server to publish closure to cache",
-        drv_path
-    );
-
-    match client.publish_derivation_closure(job_id).await {
-        Ok(()) => {
+    // Preferred: delta materialization — request only the manifest paths that
+    // are missing locally. Falls back to the full closure archive ONLY when
+    // the server does not support the delta endpoints (404/405). Security or
+    // validation failures (403, drv mismatch, malformed responses) are hard
+    // errors and are never masked by the fallback.
+    match materialize_derivation_delta(client, job_id, drv_path).await {
+        Ok(()) => {}
+        Err(DeltaError::Unsupported(reason)) => {
             info!(
-                "✅ Server published derivation closure for {}; continuing with Nix substituters",
-                drv_path
+                "ℹ️  Server does not support delta transport ({}); using full closure archive",
+                reason
             );
-            return Ok(());
+            client
+                .stream_derivation_archive_to_import(job_id, drv_path)
+                .await?;
         }
-        Err(e) => {
-            warn!(
-                "⚠️  Server cache publish unavailable for {}; falling back to archive download: {}",
-                drv_path, e
-            );
+        Err(DeltaError::Fatal(err)) => {
+            return Err(err.context("delta derivation materialization failed"));
         }
     }
 
+    // Verify the full recursive closure is now valid — not just that the
+    // top-level .drv file exists. A truncated or partial import must surface
+    // here as a path_materialization failure, not later inside
+    // nix-store --realise as a confusing build error.
+    if !drv_closure_available_locally(drv_path).await? {
+        anyhow::bail!(
+            "nix-store --import completed but derivation closure is still incomplete: {drv_path}"
+        );
+    }
     info!(
-        "📥 Derivation {} missing locally; downloading archive from server",
+        "✅ .drv closure fully materialized and valid for {}",
         drv_path
     );
-    let archive = client.download_derivation_archive(job_id).await?;
 
-    let mut child = tokio::process::Command::new("nix-store")
-        .arg("--import")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to spawn nix-store --import: {e}"))?;
+    // Fire-and-forget: ask the server to publish the closure to the binary cache
+    // in the background so future builds (or other builders) can pull it via
+    // normal Nix substituters.  Failures here are non-fatal — the build will
+    // proceed with the already-imported .drv and outputs will be pushed post-build
+    // through the normal cache_push job path.
+    let client_bg = client.clone();
+    let job_id_bg = job_id;
+    tokio::spawn(async move {
+        match client_bg.publish_derivation_closure(job_id_bg).await {
+            Ok(()) => info!(
+                "✅ Background: server published .drv closure to cache for job {}",
+                job_id_bg
+            ),
+            Err(e) => warn!(
+                "⚠️  Background cache publish for job {} skipped or failed (non-fatal): {}",
+                job_id_bg, e
+            ),
+        }
+    });
 
-    let Some(mut stdin) = child.stdin.take() else {
-        anyhow::bail!("failed to open stdin for nix-store --import");
-    };
-    stdin.write_all(&archive).await?;
-    drop(stdin);
-
-    let output = child.wait_with_output().await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("nix-store --import failed: {stderr}");
-    }
-
-    if !Path::new(drv_path).exists() {
-        anyhow::bail!("import completed but derivation path is still missing: {drv_path}");
-    }
-
-    info!("✅ Imported derivation archive for {}", drv_path);
     Ok(())
 }
 
@@ -2069,5 +2490,284 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    // ── ServerBundledArchive delivery tests ─────────────────────────────────
+
+    #[test]
+    fn server_bundled_archive_with_url_strips_file_scheme() {
+        // The archive_url returned by the server starts with the API path
+        // (e.g. /api/v1/builders/.../source-archive), NOT a file:// path.
+        // source_flake_ref strips "file://" when present so the path is
+        // usable directly by nix as a flake ref.
+        let mut src = source(Some("file:///tmp/my-source-archive"));
+        src.archive_sha256 = None; // sha256 not checked in source_flake_ref
+        let flake_ref = source_flake_ref(
+            &src,
+            SourceInputDeliveryMode::ServerBundledArchive,
+            std::path::Path::new("/mirrors"),
+            std::path::Path::new("/worktrees"),
+        )
+        .expect("should succeed when archive_url is set");
+        // file:// prefix is stripped so nix can open it as a path
+        assert_eq!(flake_ref, "/tmp/my-source-archive");
+    }
+
+    #[test]
+    fn server_bundled_archive_without_url_is_source_fetch_failure() {
+        let src = source(None);
+        let err = source_flake_ref(
+            &src,
+            SourceInputDeliveryMode::ServerBundledArchive,
+            std::path::Path::new("/mirrors"),
+            std::path::Path::new("/worktrees"),
+        )
+        .expect_err("missing archive_url must produce SourceFetch failure");
+        assert_eq!(err.phase, BuildFailurePhase::SourceFetch);
+        assert!(err.message.contains("archive_url is missing"));
+    }
+
+    #[test]
+    fn path_materialization_failure_phase_serializes_correctly() {
+        use crystal_forge::models::builders::BuildFailurePhase;
+        assert_eq!(
+            BuildFailurePhase::PathMaterialization.to_string(),
+            "path_materialization"
+        );
+    }
+
+    #[test]
+    fn server_bundled_archive_cleanup_is_job_scoped_with_mirror_dir() {
+        // ServerBundledArchive cleanup must include the job-scoped mirror dir
+        // so it is removed after the job completes/fails.
+        let job_id = uuid::Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+            .expect("uuid should parse");
+        let payload = crystal_forge::models::builders::BuildJobDerivation {
+            id: 1,
+            derivation_name: "host".to_string(),
+            derivation_type: "nixos".to_string(),
+            derivation_path: None,
+            store_path: None,
+            execution_strategy: crystal_forge::models::builders::RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            source: Some(source(Some("/api/v1/builders/x/jobs/y/source-archive"))),
+            source_input_delivery: SourceInputDeliveryMode::ServerBundledArchive,
+            expected_drv_path: Some("/nix/store/server-host.drv".to_string()),
+            evaluator: None,
+            cache_push: None,
+        };
+
+        let cleanup = cleanup_candidate_worktree(
+            &payload,
+            std::path::Path::new("/mirrors"),
+            std::path::Path::new("/worktrees"),
+            job_id,
+        )
+        .expect("ServerBundledArchive job under configured root should be cleaned");
+
+        // Job-scoped mirror path
+        assert_eq!(
+            cleanup.mirror_path,
+            std::path::PathBuf::from(
+                "/mirrors/server-bundled/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/repo-test.git"
+            )
+        );
+        // Worktree is still job-scoped under the standard worktree root
+        assert_eq!(
+            cleanup.worktree_path,
+            std::path::PathBuf::from(
+                "/worktrees/repo-test/0123456789abcdef/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            )
+        );
+        // job_mirror_dir is set and points at the job-scoped subdirectory
+        let job_mirror_dir = cleanup
+            .job_mirror_dir
+            .expect("job_mirror_dir must be Some for ServerBundledArchive");
+        assert_eq!(
+            job_mirror_dir,
+            std::path::PathBuf::from(
+                "/mirrors/server-bundled/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            )
+        );
+    }
+
+    #[test]
+    fn local_git_worktree_cleanup_has_no_job_mirror_dir() {
+        // LocalGitWorktree shares the mirror across jobs so job_mirror_dir must be None.
+        let job_id = uuid::Uuid::new_v4();
+        let payload = crystal_forge::models::builders::BuildJobDerivation {
+            id: 1,
+            derivation_name: "host".to_string(),
+            derivation_type: "nixos".to_string(),
+            derivation_path: None,
+            store_path: None,
+            execution_strategy: crystal_forge::models::builders::RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            source: Some(source(None)),
+            source_input_delivery: SourceInputDeliveryMode::LocalGitWorktree,
+            expected_drv_path: None,
+            evaluator: None,
+            cache_push: None,
+        };
+
+        let cleanup = cleanup_candidate_worktree(
+            &payload,
+            std::path::Path::new("/mirrors"),
+            std::path::Path::new("/worktrees"),
+            job_id,
+        )
+        .expect("LocalGitWorktree job should be cleaned");
+
+        assert!(
+            cleanup.job_mirror_dir.is_none(),
+            "LocalGitWorktree must not set job_mirror_dir"
+        );
+    }
+
+    // ── drv_closure_available_locally tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn drv_closure_available_locally_returns_false_for_nonexistent_path() {
+        // A path that does not exist in the Nix store must not be considered valid.
+        let result = super::drv_closure_available_locally(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nonexistent.drv",
+        )
+        .await
+        .expect("nix-store --check-validity should not error even for missing paths");
+        assert!(
+            !result,
+            "nonexistent path must not be reported as locally valid"
+        );
+    }
+
+    #[tokio::test]
+    async fn drv_closure_available_locally_returns_false_for_non_nix_path() {
+        // A path outside /nix/store must not be considered valid — guards against
+        // accidental path confusion that could allow a partially-imported closure
+        // to be skipped.
+        let result = super::drv_closure_available_locally("/tmp/definitely-not-a-nix-path.drv")
+            .await
+            .expect("nix-store --check-validity should not error for arbitrary paths");
+        assert!(
+            !result,
+            "non-nix path must not be reported as locally valid"
+        );
+    }
+
+    // ── delta materialization: missing path computation ─────────────────────
+
+    #[tokio::test]
+    async fn missing_store_paths_batched_reports_all_nonexistent_paths() {
+        // All fake paths are invalid, so the missing set must equal the input.
+        let paths = vec![
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-fake-one.drv".to_string(),
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-fake-two".to_string(),
+        ];
+        let missing = super::missing_store_paths_batched(&paths)
+            .await
+            .expect("batched validity check should not error");
+        assert_eq!(
+            missing, paths,
+            "all nonexistent paths must be reported missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_store_paths_batched_empty_input_is_empty_output() {
+        let missing = super::missing_store_paths_batched(&[])
+            .await
+            .expect("empty input should not error");
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn chunk_paths_by_json_size_limits_serialized_request_size() {
+        let paths = vec![
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-fake-one.drv".to_string(),
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-fake-two.drv".to_string(),
+            "/nix/store/cccccccccccccccccccccccccccccccc-fake-three.drv".to_string(),
+        ];
+        let max_bytes =
+            serde_json::to_vec(&crystal_forge::models::builders::DerivationArchiveRequest {
+                paths: vec![paths[0].clone(), paths[1].clone()],
+            })
+            .expect("test request should serialize")
+            .len();
+
+        let chunks =
+            super::chunk_paths_by_json_size(&paths, max_bytes).expect("chunking should not fail");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], vec![paths[0].clone(), paths[1].clone()]);
+        assert_eq!(chunks[1], vec![paths[2].clone()]);
+
+        for chunk in chunks {
+            let bytes =
+                serde_json::to_vec(&crystal_forge::models::builders::DerivationArchiveRequest {
+                    paths: chunk,
+                })
+                .expect("test request should serialize")
+                .len();
+            assert!(bytes <= max_bytes, "chunk serialized to {bytes} bytes");
+        }
+    }
+
+    #[test]
+    fn chunk_paths_by_json_size_keeps_single_oversized_path() {
+        let path = format!(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-{}",
+            "x".repeat(128)
+        );
+
+        let chunks =
+            super::chunk_paths_by_json_size(&[path.clone()], 32).expect("chunking should not fail");
+
+        assert_eq!(chunks, vec![vec![path]]);
+    }
+
+    /// Regression test: the old batch-then-fallback strategy would call
+    /// `nix-store --check-validity path1 path2 ... pathN` and only do
+    /// per-path checks if the batch exited nonzero.  In practice, nix-store
+    /// exits 0 even when some paths in a large batch are invalid, causing the
+    /// missing path to be silently treated as present.  This test ensures that
+    /// an invalid path mixed into a list alongside valid store paths is
+    /// correctly reported as missing.
+    #[tokio::test]
+    async fn missing_store_paths_batched_detects_invalid_path_among_valid_paths() {
+        // Build a list: some paths that are likely valid on any Nix system
+        // (the nix-store binary itself), plus one that definitely does not exist.
+        let nix_store_bin = which_nix_store_path();
+        let invalid = "/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-definitely-absent".to_string();
+
+        let mut paths = vec![invalid.clone()];
+        if let Some(p) = nix_store_bin {
+            // Prepend a valid path so the list is mixed, not all-invalid.
+            paths.insert(0, p);
+        }
+
+        let missing = super::missing_store_paths_batched(&paths)
+            .await
+            .expect("validity check should not error");
+
+        assert!(
+            missing.contains(&invalid),
+            "invalid path must be reported missing even when other paths in the list are valid; \
+             got missing={missing:?}"
+        );
+    }
+
+    /// Return a store path that is very likely valid on any Nix installation —
+    /// the nix-store binary's own store path.  Returns None if it cannot be
+    /// determined (e.g., nix-store not on PATH).
+    fn which_nix_store_path() -> Option<String> {
+        // /nix/store/<hash>-<name>/bin/nix-store  → take the store path component
+        let output = std::process::Command::new("which")
+            .arg("nix-store")
+            .output()
+            .ok()?;
+        let which_path = String::from_utf8(output.stdout).ok()?;
+        let which_path = which_path.trim();
+        // Extract /nix/store/<hash>-<name> prefix
+        let stripped = which_path.strip_prefix("/nix/store/")?;
+        let component = stripped.split('/').next()?;
+        Some(format!("/nix/store/{component}"))
     }
 }

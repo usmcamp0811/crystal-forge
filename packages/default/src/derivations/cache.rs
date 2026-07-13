@@ -121,6 +121,8 @@ impl Derivation {
         if effective_command == "attic"
             && effective_args.first().map(|s| s.as_str()) == Some("push")
         {
+            ensure_attic_client_available().await?;
+
             let endpoint = std::env::var("ATTIC_SERVER_URL")
                 .ok()
                 .or_else(|| attic_server_url_from_cache_config(cache_config))
@@ -225,9 +227,6 @@ impl Derivation {
                     warn!("Attic push returned 401; clearing login cache and retrying once...");
                     clear_attic_logged(&remote);
 
-                    // Re-login with current env
-                    let endpoint = std::env::var("ATTIC_SERVER_URL")?;
-                    let token = std::env::var("ATTIC_TOKEN")?;
                     ensure_attic_login(&remote, &endpoint, &token).await?;
 
                     // Retry push with streaming
@@ -385,7 +384,9 @@ async fn ensure_attic_login(remote: &str, endpoint: &str, token: &str) -> anyhow
     // If you also want AWS/S3 env available for any follow-up calls attic might make:
     apply_cache_env_to_command(&mut cmd);
 
-    let out = cmd.output().await.context("failed to run 'attic login'")?;
+    let out = cmd.output().await.with_context(|| {
+        "failed to run 'attic login'; attic client must be available in the builder service PATH"
+    })?;
     if !out.status.success() {
         let se = String::from_utf8_lossy(&out.stderr);
         // Treat "already exists/already configured" as success
@@ -399,4 +400,25 @@ async fn ensure_attic_login(remote: &str, endpoint: &str, token: &str) -> anyhow
 
     mark_attic_logged(remote);
     Ok(())
+}
+
+async fn ensure_attic_client_available() -> anyhow::Result<()> {
+    let output = tokio::process::Command::new("attic")
+        .arg("--version")
+        .output()
+        .await;
+
+    match output {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => anyhow::bail!(
+            "attic client is present but failed to execute: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
+            "attic client is not available in PATH; API builders receiving server-supplied \
+             Attic cache-push config must run with attic-client available (current NixOS \
+             module builds add it to crystal-forge-builder.service PATH)"
+        ),
+        Err(e) => Err(e).context("failed to probe attic client availability"),
+    }
 }

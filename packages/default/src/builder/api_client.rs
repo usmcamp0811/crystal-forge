@@ -13,6 +13,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use tokio::io::AsyncWriteExt;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
@@ -23,6 +24,29 @@ use uuid::Uuid;
 const DEFAULT_API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
+
+/// Error type for the delta derivation-transport endpoints that lets callers
+/// distinguish "server doesn't support this yet" (fallback to full archive is
+/// OK) from security/hard failures (fallback must NOT happen silently).
+#[derive(Debug)]
+pub enum DeltaError {
+    /// Endpoint missing on this server (404/405). Full-archive fallback is safe.
+    Unsupported(String),
+    /// Auth, authorization, validation, transport, or import failure.
+    /// Must not be masked by a silent fallback.
+    Fatal(anyhow::Error),
+}
+
+impl std::fmt::Display for DeltaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeltaError::Unsupported(msg) => write!(f, "delta endpoint unsupported: {msg}"),
+            DeltaError::Fatal(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for DeltaError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -634,6 +658,344 @@ impl BuilderApiClient {
             .bytes()
             .await
             .context("Failed to read derivation archive response")
+    }
+
+    /// Stream the derivation archive directly into `nix-store --import` without
+    /// buffering the entire closure in memory.
+    ///
+    /// This avoids the multi-GiB RAM spike that occurs when large NixOS closures
+    /// are downloaded as a single blob before being imported.
+    pub async fn stream_derivation_archive_to_import(
+        &self,
+        job_id: uuid::Uuid,
+        drv_path: &str,
+    ) -> Result<()> {
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/derivation-archive",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let body = Vec::new();
+        let (builder_id, signature, timestamp) = self.sign_request("GET", &path, &body);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .timeout(DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT)
+            .send()
+            .await
+            .context("Failed to request derivation archive for streaming import")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!(
+                "Derivation archive stream request failed with status {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        // Spawn nix-store --import and pipe the HTTP response stream to its stdin.
+        let mut child = tokio::process::Command::new("nix-store")
+            .arg("--import")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to spawn nix-store --import")?;
+
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("Failed to get nix-store --import stdin")?;
+
+        // Stream response body chunks into nix-store --import stdin.
+        let mut byte_stream = response.bytes_stream();
+        use futures::StreamExt;
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk = chunk.context("Error reading derivation archive chunk from server")?;
+            stdin
+                .write_all(&chunk)
+                .await
+                .context("Failed to write derivation archive chunk to nix-store --import")?;
+        }
+        // Close stdin so nix-store knows the stream is done.
+        drop(stdin);
+
+        let output = child
+            .wait_with_output()
+            .await
+            .context("Failed to wait for nix-store --import")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("nix-store --import failed: {stderr}");
+        }
+
+        if !std::path::Path::new(drv_path).exists() {
+            anyhow::bail!(
+                "nix-store --import succeeded but derivation path is still missing: {drv_path}"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Fetch the authorized requisite path manifest for a job's `.drv`.
+    ///
+    /// Returns `DeltaError::Unsupported` for 404/405 so the caller can fall
+    /// back to the full archive endpoint on older servers. All other failures
+    /// (including 403) are `DeltaError::Fatal` and must NOT be silently
+    /// retried through the fallback path.
+    pub async fn get_derivation_manifest(
+        &self,
+        job_id: uuid::Uuid,
+    ) -> std::result::Result<crate::models::builders::DerivationManifestResponse, DeltaError> {
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/derivation-manifest",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let body = Vec::new();
+        let (builder_id, signature, timestamp) = self.sign_request("GET", &path, &body);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .timeout(DEFAULT_API_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| DeltaError::Fatal(anyhow::anyhow!("manifest request failed: {e}")))?;
+
+        match response.status() {
+            s if s.is_success() => response
+                .json::<crate::models::builders::DerivationManifestResponse>()
+                .await
+                .map_err(|e| {
+                    DeltaError::Fatal(anyhow::anyhow!("malformed manifest response: {e}"))
+                }),
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED => {
+                Err(DeltaError::Unsupported(format!(
+                    "derivation-manifest endpoint returned {}",
+                    response.status()
+                )))
+            }
+            status => {
+                let text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "unknown error".to_string());
+                Err(DeltaError::Fatal(anyhow::anyhow!(
+                    "manifest request failed with status {status}: {text}"
+                )))
+            }
+        }
+    }
+
+    /// POST the missing path list to the delta archive endpoint and stream the
+    /// response directly into `nix-store --import`.
+    ///
+    /// `204 No Content` is success only when `paths` is empty. 404/405 map to
+    /// `DeltaError::Unsupported`; 403 and other errors are `DeltaError::Fatal`.
+    pub async fn stream_derivation_delta_archive_to_import(
+        &self,
+        job_id: uuid::Uuid,
+        paths: &[String],
+    ) -> std::result::Result<(), DeltaError> {
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/derivation-archive",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let request = crate::models::builders::DerivationArchiveRequest {
+            paths: paths.to_vec(),
+        };
+        let body = serde_json::to_vec(&request)
+            .map_err(|e| DeltaError::Fatal(anyhow::anyhow!("failed to serialize request: {e}")))?;
+        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .timeout(DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| DeltaError::Fatal(anyhow::anyhow!("delta archive request failed: {e}")))?;
+
+        match response.status() {
+            reqwest::StatusCode::NO_CONTENT => {
+                if paths.is_empty() {
+                    Ok(())
+                } else {
+                    Err(DeltaError::Fatal(anyhow::anyhow!(
+                        "server returned 204 No Content for a non-empty delta request ({} paths)",
+                        paths.len()
+                    )))
+                }
+            }
+            s if s.is_success() => self
+                .pipe_response_to_nix_import(response)
+                .await
+                .map_err(DeltaError::Fatal),
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED => {
+                Err(DeltaError::Unsupported(format!(
+                    "delta derivation-archive endpoint returned {}",
+                    response.status()
+                )))
+            }
+            status => {
+                let text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "unknown error".to_string());
+                Err(DeltaError::Fatal(anyhow::anyhow!(
+                    "delta archive request failed with status {status}: {text}"
+                )))
+            }
+        }
+    }
+
+    /// Pipe an HTTP response body stream into `nix-store --import` without
+    /// buffering the archive in memory.
+    async fn pipe_response_to_nix_import(&self, response: reqwest::Response) -> Result<()> {
+        let mut child = tokio::process::Command::new("nix-store")
+            .arg("--import")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to spawn nix-store --import")?;
+
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("Failed to get nix-store --import stdin")?;
+
+        let mut byte_stream = response.bytes_stream();
+        use futures::StreamExt;
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk = chunk.context("Error reading delta archive chunk from server")?;
+            stdin
+                .write_all(&chunk)
+                .await
+                .context("Failed to write delta archive chunk to nix-store --import")?;
+        }
+        drop(stdin);
+
+        let output = child
+            .wait_with_output()
+            .await
+            .context("Failed to wait for nix-store --import")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("nix-store --import failed: {stderr}");
+        }
+
+        Ok(())
+    }
+
+    /// Stream the source archive (tar.gz of the bare mirror) for a job using
+    /// ServerBundledArchive delivery directly to a temp file, verifying the
+    /// SHA-256 incrementally without buffering the whole archive in RAM.
+    ///
+    /// Returns the path of the downloaded temp file. Callers are responsible
+    /// for extracting it and removing it afterwards.
+    pub async fn stream_source_archive_to_tempfile(
+        &self,
+        job_id: uuid::Uuid,
+        expected_sha256: Option<&str>,
+        dest_dir: &std::path::Path,
+    ) -> Result<std::path::PathBuf> {
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncWriteExt;
+
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/source-archive",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let body = Vec::new();
+        let (builder_id, signature, timestamp) = self.sign_request("GET", &path, &body);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .timeout(DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT)
+            .send()
+            .await
+            .context("Failed to request source archive")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!(
+                "Download source archive failed with status {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        // Stream to a temp file, computing SHA-256 on the fly.
+        tokio::fs::create_dir_all(dest_dir)
+            .await
+            .context("Failed to create source archive temp directory")?;
+        let tmp_path = dest_dir.join(format!("source-archive-{job_id}.tar.gz.tmp"));
+        let mut file = tokio::fs::File::create(&tmp_path)
+            .await
+            .context("Failed to create source archive temp file")?;
+
+        let mut hasher = Sha256::new();
+        let mut byte_stream = response.bytes_stream();
+        use futures::StreamExt;
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk = chunk.context("Error reading source archive chunk from server")?;
+            hasher.update(&chunk);
+            file.write_all(&chunk)
+                .await
+                .context("Failed to write source archive chunk to temp file")?;
+        }
+        file.flush()
+            .await
+            .context("Failed to flush source archive temp file")?;
+        drop(file);
+
+        // Verify SHA-256 if the server provided one.
+        if let Some(expected) = expected_sha256 {
+            let actual = format!("{:x}", hasher.finalize());
+            if actual != expected {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                anyhow::bail!("source archive SHA-256 mismatch: expected {expected}, got {actual}");
+            }
+            info!("✅ Source archive SHA-256 verified: {}", actual);
+        }
+
+        Ok(tmp_path)
     }
 
     /// Ask the server to publish the job's derivation closure to the configured

@@ -548,7 +548,17 @@ pub enum SourceInputDeliveryMode {
     /// Not applicable for the current job strategy.
     #[default]
     None,
-    /// Server provides a self-contained source/input archive or NAR.
+    /// Server packages the top-level flake repository as a tar.gz of its
+    /// bare Git mirror and serves it via an authenticated API endpoint.
+    /// The builder downloads, verifies (SHA-256), and extracts the archive
+    /// into a job-scoped bare mirror, then evaluates the flake from a
+    /// detached worktree.
+    ///
+    /// **Scope:** only the top-level repository is bundled. Locked flake
+    /// inputs that are NOT already in the builder's Nix store or reachable
+    /// via configured substituters may still require network access during
+    /// `nix eval`. Private flake inputs must be publicly accessible, cached,
+    /// or pre-seeded on the builder for air-gapped operation.
     ServerBundledArchive,
     /// Builder uses or creates a detached local Git worktree from a local mirror
     /// at the authorized commit. Colocated server/builder deployments may share
@@ -622,6 +632,31 @@ impl std::fmt::Display for BuildFailurePhase {
 pub struct NextJobResponse {
     pub job: BuildJob,
     pub derivation: BuildJobDerivation,
+}
+
+/// Response for GET /api/v1/builders/:id/jobs/:job_id/derivation-manifest.
+///
+/// The authorized requisite path manifest for a job's server-evaluated `.drv`.
+/// The builder compares this list against its local store validity to compute
+/// the missing set, then requests only those paths via the delta archive
+/// endpoint. The server is the sole authority for this list — it is computed
+/// from persisted job state, never from builder-supplied input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DerivationManifestResponse {
+    pub job_id: Uuid,
+    pub drv_path: String,
+    /// Sorted, deduplicated requisite store paths for `drv_path`.
+    pub paths: Vec<String>,
+}
+
+/// Request body for POST /api/v1/builders/:id/jobs/:job_id/derivation-archive.
+///
+/// The builder lists the store paths (a subset of the job's authorized
+/// manifest) it is missing locally. The server validates set membership and
+/// streams `nix-store --export` for exactly those paths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DerivationArchiveRequest {
+    pub paths: Vec<String>,
 }
 
 /// Build progress report sent by API builders (HTTP fallback for the WS frame).

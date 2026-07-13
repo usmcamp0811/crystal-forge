@@ -156,6 +156,7 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
             .builder_name
             .clone()
             .unwrap_or_else(|| "unassigned".to_string()),
+        queued_at: item.queued_at,
         queued_for,
         runtime: item.elapsed_secs.map(format_human_duration),
         duration_secs: item.elapsed_secs,
@@ -196,6 +197,15 @@ pub fn BuildsView() -> Element {
 
     let mut workers = use_signal(Vec::<WorkerItem>::new);
     let mut refresh_trigger = use_signal(|| 0_u64);
+
+    // Auto-refresh: bump refresh_trigger every 5 s so active builds, queue
+    // positions, and live log snapshots stay current without user interaction.
+    use_future(move || async move {
+        loop {
+            gloo_timers::future::TimeoutFuture::new(5_000).await;
+            refresh_trigger.set(refresh_trigger() + 1);
+        }
+    });
 
     // --- Active queue state ---
     let mut queue_page = use_signal(|| 1_i64);
@@ -346,6 +356,7 @@ pub fn BuildsView() -> Element {
                             .builder_name
                             .clone()
                             .unwrap_or_else(|| "unassigned".to_string()),
+                        queued_at: item.queued_at,
                         queued_for: finished_for,
                         runtime: item.elapsed_secs.map(format_human_duration),
                         duration_secs: item.elapsed_secs,
@@ -385,9 +396,15 @@ pub fn BuildsView() -> Element {
     let mut selected_build = use_signal(|| None::<i32>);
     let mut log_open = use_signal(|| false);
     let mut active_view = use_signal(|| BuildsTab::ActiveQueue);
-    let mut active_tab = use_signal(|| DetailTab::Logs);
+    let mut active_tab = use_signal(|| DetailTab::Details);
     let mut completed_status_filter = use_signal(|| CompletedStatusFilter::All);
     let mut completed_sort_order = use_signal(|| CompletedSortOrder::NewestFirst);
+
+    // Search/filter state (JSX: query)
+    let mut search_query = use_signal(String::new);
+    // Attention flash for failed rows on first Completed tab open (JSX: flashHistRows)
+    let mut acked_hist = use_signal(|| false);
+    let mut flash_hist_rows = use_signal(|| false);
 
     let follow_logs = use_signal(|| true);
     let pause_logs = use_signal(|| false);
@@ -400,6 +417,14 @@ pub fn BuildsView() -> Element {
 
     let queue_data = builds.read().clone();
     let worker_data = workers.read().clone();
+
+    // JSX: const hasFailed = HISTORY_BUILDS.some(b => b.status === "failed");
+    //      const flashTab = hasFailed && !ackedHist;
+    let has_failed = build_history
+        .read()
+        .iter()
+        .any(|b| b.status == BuildStatus::Failed);
+    let flash_tab = has_failed && !acked_hist();
 
     let mut completed_rows = build_history.read().clone();
     completed_rows.retain(|item| {
@@ -428,6 +453,48 @@ pub fn BuildsView() -> Element {
         completed_rows.clone()
     };
     let selected = selected_build_data(selected_build.read().to_owned(), &visible_rows);
+
+    // Search filter: matches system, flake, commit, worker, arch, status label.
+    let search_q = search_query.read().trim().to_lowercase();
+    let match_build = |b: &BuildItem| -> bool {
+        if search_q.is_empty() {
+            return true;
+        }
+        [
+            Some(extract_system_name(&b.hostname).to_lowercase()),
+            Some(b.flake.to_lowercase()),
+            Some(b.commit.to_lowercase()),
+            if b.worker_id == "unassigned" {
+                None
+            } else {
+                Some(b.worker_id.to_lowercase())
+            },
+            Some(b.arch.to_lowercase()),
+            Some(b.status.label().to_lowercase()),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|v| v.contains(&search_q))
+    };
+
+    let (base_list, filtered_list): (Vec<BuildItem>, Vec<BuildItem>) =
+        if active_view() == BuildsTab::ActiveQueue {
+            let f: Vec<BuildItem> = queue_data
+                .iter()
+                .filter(|b| match_build(b))
+                .cloned()
+                .collect();
+            (queue_data.clone(), f)
+        } else {
+            let f: Vec<BuildItem> = completed_rows
+                .iter()
+                .filter(|b| match_build(b))
+                .cloned()
+                .collect();
+            (completed_rows.clone(), f)
+        };
+    let base_len = base_list.len();
+    let filtered_len = filtered_list.len();
 
     let total_pages = {
         let t = queue_total();
@@ -483,9 +550,9 @@ pub fn BuildsView() -> Element {
             // JSX: <div className="card" style={{ overflow:"hidden" }}>
             div {
                 class: "card overflow-hidden",
-                // JSX: <div className="sd-tabs" style={{ padding:"0 16px", borderBottom:"1px solid var(--cf-card-border)" }}>
+                // JSX: <div className="sd-tabs q-tabbar" style={{ padding:"0 16px", borderBottom:"1px solid var(--cf-card-border)" }}>
                 div {
-                    class: "sd-tabs",
+                    class: "sd-tabs q-tabbar",
                     style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border);",
                     button {
                         class: if active_view() == BuildsTab::ActiveQueue {
@@ -497,108 +564,222 @@ pub fn BuildsView() -> Element {
                             active_view.set(BuildsTab::ActiveQueue);
                             selected_build.set(None);
                             log_open.set(false);
+                            search_query.set(String::new());
                         },
-                        "Active ({queue_data.len()})"
+                        "Active "
+                        span { class: "sd-tab-badge", "{queue_data.len()}" }
                     }
                     button {
-                        class: if active_view() == BuildsTab::Completed {
-                            "sd-tab focus-ring active"
-                        } else {
-                            "sd-tab focus-ring"
+                        // JSX: `sd-tab focus-ring${tab===t.k?" active":""}${flashTab && t.k==="history"?" attention-flash-tab":""}`
+                        class: match (active_view() == BuildsTab::Completed, flash_tab) {
+                            (true, true) => "sd-tab focus-ring active attention-flash-tab",
+                            (true, false) => "sd-tab focus-ring active",
+                            (false, true) => "sd-tab focus-ring attention-flash-tab",
+                            (false, false) => "sd-tab focus-ring",
                         },
                         onclick: move |_| {
+                            let prev = active_view();
                             active_view.set(BuildsTab::Completed);
                             selected_build.set(None);
                             log_open.set(false);
+                            search_query.set(String::new());
+                            // JSX: flash failed rows on first history open
+                            if prev != BuildsTab::Completed && !acked_hist() {
+                                acked_hist.set(true);
+                                flash_hist_rows.set(true);
+                                let mut fh = flash_hist_rows;
+                                spawn(async move {
+                                    gloo_timers::future::TimeoutFuture::new(3_200).await;
+                                    fh.set(false);
+                                });
+                            }
                         },
-                        "Completed ({build_history.read().len()})"
+                        "Completed "
+                        span { class: "sd-tab-badge", "{build_history.read().len()}" }
                     }
-                    // JSX: {tab==="active" && cancellable.length > 0 && <MultiSelectHint />}
-                    if active_view() == BuildsTab::ActiveQueue
-                        && queue_data.iter().any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building | BuildStatus::Stopping))
-                    {
-                        div {
-                            style: "display: inline-flex; align-items: center; gap: 10px; margin-left: auto;",
+                    // JSX: {selectableIds.length > 0 && <MultiSelectHint />}
+                    // selectableIds = cancellable builds on Active, filteredList on Completed.
+                    if if active_view() == BuildsTab::ActiveQueue {
+                        queue_data.iter().any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building | BuildStatus::Stopping))
+                    } else {
+                        filtered_len > 0
+                    } {
+                        // JSX: <span className="ms-hint" title="⌘/Ctrl-click to toggle rows · Shift-click to select a range">
+                        //        <kbd>⌘</kbd>/<kbd>⇧</kbd>-click to select
+                        //      </span>
+                        span {
+                            class: "ms-hint",
+                            title: "⌘/Ctrl-click to toggle rows · Shift-click to select a range",
+                            kbd { "⌘" }
+                            "/"
+                            kbd { "⇧" }
+                            "-click to select"
+                        }
+                    }
+                    // JSX: search bar
+                    div {
+                        class: "q-search",
+                        // search icon
+                        svg {
+                            width: "13", height: "13",
+                            view_box: "0 0 24 24",
+                            fill: "none", stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round", stroke_linejoin: "round",
+                            circle { cx: "11", cy: "11", r: "8" }
+                            line { x1: "21", y1: "21", x2: "16.65", y2: "16.65" }
+                        }
+                        input {
+                            class: "q-search-input",
+                            placeholder: if active_view() == BuildsTab::ActiveQueue {
+                                "Search active builds\u{2026}"
+                            } else {
+                                "Search completed builds\u{2026}"
+                            },
+                            value: "{search_query}",
+                            oninput: move |evt| search_query.set(evt.value()),
+                        }
+                        if !search_query.read().is_empty() {
                             span {
-                                class: "ms-hint",
-                                title: "Shift-click to toggle cancellable rows",
-                                kbd { "⇧" }
-                                "-click to select"
+                                class: "q-search-count",
+                                "{filtered_len} of {base_len}"
+                            }
+                            button {
+                                class: "btn-icon xs focus-ring",
+                                title: "Clear search",
+                                onclick: move |_| search_query.set(String::new()),
+                                svg {
+                                    width: "13", height: "13",
+                                    view_box: "0 0 24 24",
+                                    fill: "none", stroke: "currentColor",
+                                    stroke_width: "2",
+                                    line { x1: "18", y1: "6", x2: "6", y2: "18" }
+                                    line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                                }
                             }
                         }
                     }
                 }
-                BuildQueuePane {
-                    builds: if active_view() == BuildsTab::ActiveQueue {
-                        queue_data.clone()
-                    } else {
-                        completed_rows.clone()
-                    },
-                    selected_id: selected_build,
-                    can_requeue,
-                    on_build_action: move |(build_id, action)| {
-                        match action {
-                            BuildAction::MoveUp | BuildAction::MoveDown => {
-                                let queue_snapshot = builds.read().clone();
+                // JSX: {filteredList.length === 0 ? <EmptyState/> : <BuildQueueTable .../>}
+                if !search_q.is_empty() && filtered_list.is_empty() {
+                    div {
+                        class: "q-empty",
+                        svg {
+                            width: "20", height: "20",
+                            view_box: "0 0 24 24",
+                            fill: "none", stroke: "currentColor",
+                            stroke_width: "2",
+                            circle { cx: "11", cy: "11", r: "8" }
+                            line { x1: "21", y1: "21", x2: "16.65", y2: "16.65" }
+                        }
+                        div { "No builds match \"{search_q}\"." }
+                        button {
+                            class: "btn btn-ghost xs focus-ring",
+                            onclick: move |_| search_query.set(String::new()),
+                            "Clear search"
+                        }
+                    }
+                } else {
+                    BuildQueuePane {
+                        builds: filtered_list.clone(),
+                        selected_id: selected_build,
+                        flash_failed: flash_hist_rows(),
+                        can_requeue,
+                        on_build_action: move |(build_id, action)| {
+                            match action {
+                                BuildAction::MoveUp | BuildAction::MoveDown => {
+                                    let queue_snapshot = builds.read().clone();
+                                    let mut action_error = action_error;
+                                    let mut last_action_note = last_action_note;
+                                    let mut refresh_trigger = refresh_trigger;
+                                    spawn(async move {
+                                        let selected = queue_snapshot.iter().find(|b| b.id == build_id);
+                                        let Some(selected) = selected else {
+                                            action_error.set(Some(format!("Build row #{} not found", build_id)));
+                                            return;
+                                        };
+                                        let Some(job_id) = selected.job_id else {
+                                            action_error.set(Some("Queue item has no job id; cannot reorder".to_string()));
+                                            return;
+                                        };
+
+                                        let result = if action == BuildAction::MoveUp {
+                                            move_build_job_up(&job_id).await
+                                        } else {
+                                            move_build_job_down(&job_id).await
+                                        };
+
+                                        match result {
+                                            Ok(_) => {
+                                                action_error.set(None);
+                                                last_action_note.set(Some(
+                                                    if action == BuildAction::MoveUp {
+                                                        format!("Moved job {} up", job_id)
+                                                    } else {
+                                                        format!("Moved job {} down", job_id)
+                                                    },
+                                                ));
+                                                refresh_trigger.set(refresh_trigger() + 1);
+                                            }
+                                            Err(e) => action_error.set(Some(format!("Failed to reorder: {}", e))),
+                                        }
+                                    });
+                                }
+                                _ => pending_action.set(Some(PendingAction::Build { build_id, action })),
+                            }
+                        },
+                        on_log: move |build_id| {
+                            // JSX parity: open the tray on its Log tab (not a separate modal).
+                            selected_build.set(Some(build_id));
+                            active_tab.set(DetailTab::Logs);
+                            log_open.set(false);
+                        },
+                        on_bulk_rerun: {
+                            move |build_ids: Vec<i32>| {
                                 let mut action_error = action_error;
                                 let mut last_action_note = last_action_note;
                                 let mut refresh_trigger = refresh_trigger;
+                                let filtered = filtered_list.clone();
                                 spawn(async move {
-                                    let selected = queue_snapshot.iter().find(|b| b.id == build_id);
-                                    let Some(selected) = selected else {
-                                        action_error.set(Some(format!("Build row #{} not found", build_id)));
-                                        return;
-                                    };
-                                    let Some(job_id) = selected.job_id else {
-                                        action_error.set(Some("Queue item has no job id; cannot reorder".to_string()));
-                                        return;
-                                    };
-
-                                    let result = if action == BuildAction::MoveUp {
-                                        move_build_job_up(&job_id).await
-                                    } else {
-                                        move_build_job_down(&job_id).await
-                                    };
-
-                                    match result {
-                                        Ok(_) => {
-                                            action_error.set(None);
-                                            last_action_note.set(Some(
-                                                if action == BuildAction::MoveUp {
-                                                    format!("Moved job {} up", job_id)
-                                                } else {
-                                                    format!("Moved job {} down", job_id)
-                                                },
-                                            ));
-                                            refresh_trigger.set(refresh_trigger() + 1);
+                                    let count = build_ids.len();
+                                    for id in &build_ids {
+                                        if let Some(build) = filtered.iter().find(|b| b.id == *id) {
+                                            if let Some(jid) = build.job_id {
+                                                let _ = api::client::requeue_build_job(&jid).await;
+                                            }
                                         }
-                                        Err(e) => action_error.set(Some(format!("Failed to reorder: {}", e))),
                                     }
+                                    action_error.set(None);
+                                    let suffix = if count == 1 { "" } else { "s" };
+                                    last_action_note.set(Some(format!("Re-queued {count} build{suffix}")));
+                                    refresh_trigger.set(refresh_trigger() + 1);
                                 });
                             }
-                            _ => pending_action.set(Some(PendingAction::Build { build_id, action })),
-                        }
-                    },
-                    on_log: move |build_id| {
-                        // Open log modal immediately when Logs button clicked (JSX parity)
-                        selected_build.set(Some(build_id));
-                        log_open.set(true);
-                    },
+                        },
+                        on_bulk_download_logs: move |_build_ids| {
+                            // TODO: Download logs as a single archive
+                            action_error.set(Some("Download logs not yet implemented".to_string()));
+                        },
+                        on_bulk_delete: move |_build_ids| {
+                            // TODO: Delete build history entries
+                            action_error.set(Some("Delete builds not yet implemented".to_string()));
+                        },
+                    }
                 }
             }
 
-            if selected.is_some() && !log_open() {
-                // JSX: <div className="side-panel-backdrop" onClick={onClose} />
+            if selected.is_some() {
+                // JSX: <div className="fl-tray-backdrop" onClick={onClose} />
                 div {
-                    class: "side-panel-backdrop",
+                    class: "fl-tray-backdrop",
                     onclick: move |_| {
                         selected_build.set(None);
                         log_open.set(false);
                     },
                 }
-                // JSX: <aside className="side-panel">
+                // JSX: <aside className="fl-tray build-log-tray">
                 aside {
-                    class: "side-panel",
+                    class: "fl-tray build-log-tray",
                     onclick: |evt| evt.stop_propagation(),
                     {
                         let selected_for_action = selected.clone();
@@ -612,7 +793,7 @@ pub fn BuildsView() -> Element {
                         },
                         on_log: move |_| {
                             active_tab.set(DetailTab::Logs);
-                            log_open.set(true);
+                            log_open.set(false);
                         },
                         on_build_action: move |action| {
                             if let Some(build) = selected_for_action.clone() {
@@ -691,6 +872,17 @@ pub fn BuildsView() -> Element {
                                     }
                                 } else {
                                     div { class: "text-gray-500 italic", "No logs available" }
+                                }
+                                // If the job is actively building, show a live status line so
+                                // the user knows the build is running and not hung. The queue
+                                // auto-refreshes every 5 s so this will update with real log
+                                // output as it arrives from the builder.
+                                if matches!(build.status, BuildStatus::Building | BuildStatus::Stopping) {
+                                    div {
+                                        style: "margin-top: 6px; font-size: 11px; color: var(--cf-text-muted); display: flex; align-items: center; gap: 6px;",
+                                        span { class: "ed-pulse", style: "position: static; margin: 0;" }
+                                        span { "Build running on {build.worker_id} · log refreshes every 5 s" }
+                                    }
                                 }
                             }
                             // JSX: <div className="sd-log-caret">▍</div>

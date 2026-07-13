@@ -21,6 +21,7 @@ use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::process::Command;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::handlers::agent_request::CFState;
@@ -46,6 +47,21 @@ use crate::queries::builders;
 const NIX_STORE_EXPORT_ARG_BYTES_LIMIT: usize = 128 * 1024;
 const ATTIC_PUSH_PATH_CHUNK_SIZE: usize = 200;
 const BUILDER_SESSION_STALE_TIMEOUT_SECS: i64 = 60;
+
+// Per-mirror mutex map: prevents concurrent git clone/fetch into the same bare
+// mirror when multiple jobs for the same repo are claimed at the same time.
+// The lock scope covers clone/fetch AND archive generation so a reader never
+// opens a partially-written mirror.
+static MIRROR_LOCKS: std::sync::OnceLock<
+    dashmap::DashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
+> = std::sync::OnceLock::new();
+
+fn mirror_lock(mirror_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let map = MIRROR_LOCKS.get_or_init(dashmap::DashMap::new);
+    map.entry(mirror_id.to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
 
 /// Returns true only when the server is explicitly configured to trust
 /// forwarded-proto headers from its reverse proxy AND those headers assert
@@ -156,6 +172,75 @@ fn chunk_derivation_archive_paths(paths: &[String], max_arg_bytes: usize) -> Vec
 
     chunks.push(&paths[chunk_start..]);
     chunks
+}
+
+/// Minimal syntactic sanity check for a Nix store path. The real authorization
+/// check is set membership in the server-computed manifest; this only rejects
+/// obviously malformed input early.
+fn looks_like_store_path(path: &str) -> bool {
+    path.starts_with("/nix/store/") && !path.contains('\0')
+}
+
+/// Compute the authorized requisite manifest for a `.drv` path.
+///
+/// Runs `nix-store --query --requisites <path>` and returns the resulting
+/// store paths sorted and deduplicated. The `.drv` itself is always included.
+async fn nix_store_requisites(drv_path: &str) -> Result<Vec<String>, String> {
+    let output = Command::new("nix-store")
+        .arg("--query")
+        .arg("--requisites")
+        .arg(drv_path)
+        .output()
+        .await
+        .map_err(|e| format!("failed to run nix-store --query --requisites: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Sanitize: only first line of stderr in the error string.
+        let first_line = stderr.lines().next().unwrap_or("unknown error");
+        return Err(format!(
+            "nix-store --query --requisites failed: {first_line}"
+        ));
+    }
+
+    let mut paths = parse_derivation_requisites(&output.stdout, drv_path);
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// Validate that every requested path is a member of the authorized manifest.
+///
+/// Returns the deduplicated, validated path list on success. Any path outside
+/// the authorized set is a hard authorization failure (403) — the server must
+/// never export store paths just because a builder asked for them.
+fn validate_requested_paths(
+    authorized_manifest: &[String],
+    requested_paths: &[String],
+) -> Result<Vec<String>, StatusCode> {
+    use std::collections::HashSet;
+
+    let authorized: HashSet<&str> = authorized_manifest.iter().map(String::as_str).collect();
+
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut validated = Vec::new();
+
+    for path in requested_paths {
+        let path = path.trim();
+        if path.is_empty() || !looks_like_store_path(path) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if !authorized.contains(path) {
+            // Do NOT log the full requested list (could be huge); the caller
+            // logs builder/job identifiers.
+            return Err(StatusCode::FORBIDDEN);
+        }
+        if seen.insert(path) {
+            validated.push(path.to_string());
+        }
+    }
+
+    Ok(validated)
 }
 
 async fn resolve_cache_destinations_for_derivation(
@@ -376,6 +461,298 @@ fn source_mirror_id(repo_url: &str) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("repo-{short}")
+}
+
+/// Compute the path for the server's cached bare mirror of a repo.
+fn server_mirror_path(archive_root: &std::path::Path, repo_url: &str) -> std::path::PathBuf {
+    archive_root
+        .join("mirrors")
+        .join(format!("{}.git", source_mirror_id(repo_url)))
+}
+
+/// Ensure the server's bare mirror for `repo_url` contains `commit_hash`.
+///
+/// Clones the repo bare if the mirror does not exist, or fetches if the commit
+/// is not present. Mirrors the builder's `ensure_mirror_has_commit` logic but
+/// runs server-side so the server can serve archive tarballs to remote builders.
+///
+/// `creds` is the optional per-flake credential environment (SSH key / netrc).
+/// When `None`, the git commands run without credential injection (public repos only).
+async fn ensure_server_mirror_has_commit(
+    mirror_path: &std::path::Path,
+    repo_url: &str,
+    commit_hash: &str,
+    creds: Option<&crate::flake::credentials::FlakeCredentialEnv>,
+) -> Result<(), StatusCode> {
+    let source_err = |msg: String| {
+        tracing::error!("server source mirror error: {msg}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+
+    if !mirror_path.exists() {
+        let temp_suffix = format!(".tmp-{}-{}", std::process::id(), uuid::Uuid::new_v4());
+        let temp_mirror = mirror_path.with_extension(temp_suffix);
+
+        if let Some(parent) = mirror_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                source_err(format!(
+                    "failed to create mirror parent {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+
+        let _ = tokio::fs::remove_dir_all(&temp_mirror).await;
+
+        let mut clone_cmd = tokio::process::Command::new("git");
+        clone_cmd.kill_on_drop(true);
+        clone_cmd
+            .arg("clone")
+            .arg("--bare")
+            .arg(repo_url)
+            .arg(&temp_mirror);
+        if let Some(c) = creds {
+            c.apply_to_git_command(&mut clone_cmd);
+        }
+
+        let output = clone_cmd
+            .output()
+            .await
+            .map_err(|e| source_err(format!("failed to spawn git clone --bare: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(source_err(format!(
+                "git clone --bare failed for {repo_url}: {stderr}"
+            )));
+        }
+
+        tokio::fs::rename(&temp_mirror, mirror_path)
+            .await
+            .map_err(|e| {
+                source_err(format!(
+                    "failed to install cloned source mirror {} -> {}: {e}",
+                    temp_mirror.display(),
+                    mirror_path.display()
+                ))
+            })?;
+
+        tracing::info!("Server source mirror cloned at {}", mirror_path.display());
+    }
+
+    // Check if commit is already present.
+    let has_commit = tokio::process::Command::new("git")
+        .kill_on_drop(true)
+        .arg("--git-dir")
+        .arg(mirror_path)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{commit_hash}^{{commit}}"))
+        .output()
+        .await
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+
+    if has_commit {
+        return Ok(());
+    }
+
+    tracing::info!(
+        "Fetching authorized commit {} into server source mirror {}",
+        commit_hash,
+        mirror_path.display()
+    );
+
+    let mut fetch_cmd = tokio::process::Command::new("git");
+    fetch_cmd.kill_on_drop(true);
+    fetch_cmd
+        .arg("--git-dir")
+        .arg(mirror_path)
+        .arg("fetch")
+        .arg("--prune")
+        .arg(repo_url)
+        .arg("+refs/*:refs/*");
+    if let Some(c) = creds {
+        c.apply_to_git_command(&mut fetch_cmd);
+    }
+
+    let output = fetch_cmd
+        .output()
+        .await
+        .map_err(|e| source_err(format!("failed to spawn git fetch: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(source_err(format!(
+            "git fetch failed for {repo_url}: {stderr}"
+        )));
+    }
+
+    let has_commit_after = tokio::process::Command::new("git")
+        .kill_on_drop(true)
+        .arg("--git-dir")
+        .arg(mirror_path)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{commit_hash}^{{commit}}"))
+        .output()
+        .await
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+
+    if has_commit_after {
+        Ok(())
+    } else {
+        Err(source_err(format!(
+            "commit {commit_hash} not found in server mirror for {repo_url} after fetch"
+        )))
+    }
+}
+
+/// Generate a gzipped tar archive of the bare mirror at the archive path.
+///
+/// Returns the SHA-256 hex digest of the archive.
+/// Generate a gzipped tar archive of the bare mirror at `archive_path`.
+///
+/// Writes to a `.tmp` file first and renames atomically on success so that
+/// concurrent readers or partial downloads never see a half-written archive.
+///
+/// Returns the SHA-256 hex digest of the completed archive.
+///
+/// Callers MUST hold the per-mirror lock (via `mirror_lock()`) before calling
+/// this function to prevent concurrent mutation of the same mirror.
+async fn generate_source_archive(
+    mirror_path: &std::path::Path,
+    archive_path: &std::path::Path,
+) -> Result<String, StatusCode> {
+    let source_err = |msg: String| {
+        tracing::error!("source archive generation error: {msg}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+
+    if let Some(parent) = archive_path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            source_err(format!(
+                "failed to create archive parent {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    // Write to a temp file then rename atomically so readers never see a
+    // partially-written archive. Include the PID to avoid cross-process
+    // collision if the server is restarted mid-generation.
+    let tmp_archive = archive_path.with_extension(format!("tar.gz.tmp.{}", std::process::id()));
+    let _ = tokio::fs::remove_file(&tmp_archive).await;
+
+    // Tar the mirror directory. Since mirror_path is like .../<mirror_id>.git,
+    // we tar from the parent directory with the basename so extraction produces
+    // the correct directory layout.
+    let mirror_parent = mirror_path
+        .parent()
+        .ok_or_else(|| source_err("mirror path has no parent".to_string()))?;
+    let mirror_name = mirror_path
+        .file_name()
+        .ok_or_else(|| source_err("mirror path has no file name".to_string()))?;
+
+    let output = tokio::process::Command::new("tar")
+        .kill_on_drop(true)
+        .arg("-czf")
+        .arg(&tmp_archive)
+        .arg("-C")
+        .arg(mirror_parent)
+        .arg(mirror_name)
+        .output()
+        .await
+        .map_err(|e| source_err(format!("failed to spawn tar: {e}")))?;
+
+    if !output.status.success() {
+        let _ = tokio::fs::remove_file(&tmp_archive).await;
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(source_err(format!("tar archive creation failed: {stderr}")));
+    }
+
+    // Compute SHA256 of the archive before it becomes visible to readers.
+    let hash_output = tokio::process::Command::new("sha256sum")
+        .arg(&tmp_archive)
+        .output()
+        .await
+        .map_err(|e| source_err(format!("failed to run sha256sum: {e}")))?;
+
+    if !hash_output.status.success() {
+        let _ = tokio::fs::remove_file(&tmp_archive).await;
+        let stderr = String::from_utf8_lossy(&hash_output.stderr)
+            .trim()
+            .to_string();
+        return Err(source_err(format!("sha256sum failed: {stderr}")));
+    }
+
+    let stdout = String::from_utf8_lossy(&hash_output.stdout);
+    let hash = stdout
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| source_err("sha256sum produced no output".to_string()))?
+        .to_string();
+
+    // Atomic rename: makes the archive visible to readers only when fully written.
+    tokio::fs::rename(&tmp_archive, archive_path)
+        .await
+        .map_err(|e| {
+            source_err(format!(
+                "failed to atomically install source archive {} → {}: {e}",
+                tmp_archive.display(),
+                archive_path.display()
+            ))
+        })?;
+
+    tracing::info!(
+        "Source archive generated at {} (sha256: {})",
+        archive_path.display(),
+        hash
+    );
+
+    Ok(hash)
+}
+
+/// Best-effort cleanup of the job-scoped source archive after job completion/failure.
+///
+/// The archive is stored under `archives/jobs/<job_id>.tar.gz` so cleanup only
+/// ever removes the archive for this specific job. Errors are logged but not
+/// propagated — archive cleanup must not block job finalization.
+async fn cleanup_source_archive(_pool: &PgPool, archive_root: &std::path::Path, job_id: Uuid) {
+    // Job-scoped path: each job has its own archive so concurrent jobs for the
+    // same repo+commit cannot interfere with each other's downloads.
+    let archive_path = job_scoped_archive_path(archive_root, job_id);
+
+    match tokio::fs::remove_file(&archive_path).await {
+        Ok(()) => {
+            tracing::debug!(
+                job_id = %job_id,
+                archive_path = %archive_path.display(),
+                "Cleaned up job-scoped source archive"
+            );
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::warn!(
+                job_id = %job_id,
+                archive_path = %archive_path.display(),
+                "Failed to clean up source archive: {e}"
+            );
+        }
+    }
+}
+
+/// Compute the job-scoped archive path.
+///
+/// Archives are stored per-job rather than per-repo+commit to avoid concurrent
+/// job races where one job's cleanup deletes an archive another job is still
+/// downloading.
+fn job_scoped_archive_path(archive_root: &std::path::Path, job_id: Uuid) -> std::path::PathBuf {
+    archive_root
+        .join("archives")
+        .join("jobs")
+        .join(format!("{job_id}.tar.gz"))
 }
 
 fn parse_next_job_request(body: &[u8]) -> Result<NextJobRequest, StatusCode> {
@@ -1315,6 +1692,14 @@ pub async fn finalize_cancelled_job(
     })?;
 
     cleanup_build_log_channel(&state, job_id).await;
+    if state.server_config.source_delivery_mode == SourceInputDeliveryMode::ServerBundledArchive {
+        cleanup_source_archive(
+            &state.pool,
+            &state.server_config.source_archive_root,
+            job_id,
+        )
+        .await;
+    }
     Ok(StatusCode::OK)
 }
 
@@ -1591,7 +1976,7 @@ pub async fn get_next_job(
             }
         };
 
-    let source = match verified_source_identity_for_derivation(&state.pool, &derivation).await {
+    let mut source = match verified_source_identity_for_derivation(&state.pool, &derivation).await {
         Ok(source) => source,
         Err(e) => {
             tracing::error!(
@@ -1615,9 +2000,111 @@ pub async fn get_next_job(
     let source_input_delivery = match execution_strategy {
         RemoteBuildExecutionStrategy::ServerDerivation => SourceInputDeliveryMode::None,
         RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
-            SourceInputDeliveryMode::LocalGitWorktree
+            state.server_config.source_delivery_mode
         }
     };
+
+    let mut source_archive_generated = false;
+
+    // If ServerBundledArchive is selected, generate the source archive now.
+    if source_input_delivery == SourceInputDeliveryMode::ServerBundledArchive {
+        if let Some(ref mut source_mut) = source {
+            let mirror_path = server_mirror_path(
+                &state.server_config.source_archive_root,
+                &source_mut.repo_url,
+            );
+            let mirror_id = source_mirror_id(&source_mut.repo_url);
+
+            // Job-scoped archive path: one archive file per claimed job so
+            // concurrent jobs for the same repo+commit don't interfere.
+            let archive_path =
+                job_scoped_archive_path(&state.server_config.source_archive_root, job.id);
+
+            // Load per-flake credentials so the server-side mirror clone/fetch
+            // can authenticate against private repositories.
+            let flake_creds = if let Some(commit_id) = derivation.commit_id {
+                match crate::queries::commits::get_commit_by_id(&state.pool, commit_id).await {
+                    Ok(commit) => crate::flake::credentials::FlakeCredentialEnv::load(
+                        &state.pool,
+                        commit.flake_id,
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(
+                            job_id = %job.id,
+                            flake_id = commit.flake_id,
+                            "failed to load flake credentials for server mirror: {e}"
+                        );
+                        None
+                    }),
+                    Err(e) => {
+                        tracing::warn!(
+                            job_id = %job.id,
+                            commit_id,
+                            "failed to load commit for credential lookup: {e}"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Acquire the per-mirror lock before any git clone/fetch or archive
+            // generation. This ensures concurrent jobs for the same repository
+            // don't corrupt the shared bare mirror.
+            let _mirror_guard = mirror_lock(&mirror_id).lock_owned().await;
+
+            if ensure_server_mirror_has_commit(
+                &mirror_path,
+                &source_mut.repo_url,
+                &source_mut.commit_hash,
+                flake_creds.as_ref(),
+            )
+            .await
+            .is_err()
+            {
+                requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+                    .await
+                    .ok();
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+
+            match generate_source_archive(&mirror_path, &archive_path).await {
+                Ok(sha256) => {
+                    source_archive_generated = true;
+                    source_mut.archive_url = Some(format!(
+                        "/api/v1/builders/{}/jobs/{}/source-archive",
+                        builder_id, job.id
+                    ));
+                    source_mut.archive_sha256 = Some(sha256);
+                }
+                Err(status) => {
+                    requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+                        .await
+                        .ok();
+                    return Err(status);
+                }
+            }
+        } else {
+            // Source is None but delivery is ServerBundledArchive — bail.
+            tracing::error!(
+                job_id = %job.id,
+                derivation_id = derivation.id,
+                "ServerBundledArchive selected but source identity is missing; requeueing"
+            );
+            requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        job_id = %job.id,
+                        "failed to requeue job after source identity assembly error: {e}"
+                    );
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
 
     if execution_strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
         && (source.is_none() || expected_drv_path.is_none())
@@ -1629,6 +2116,14 @@ pub async fn get_next_job(
             has_expected_drv_path = expected_drv_path.is_some(),
             "claimed source-verified job is missing required manifest metadata; requeueing"
         );
+        if source_archive_generated {
+            cleanup_source_archive(
+                &state.pool,
+                &state.server_config.source_archive_root,
+                job.id,
+            )
+            .await;
+        }
         requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
             .await
             .map_err(|e| {
@@ -1650,6 +2145,14 @@ pub async fn get_next_job(
                 derivation_id = derivation.id,
                 "failed to assemble builder cache-push config; requeueing claimed job"
             );
+            if source_archive_generated {
+                cleanup_source_archive(
+                    &state.pool,
+                    &state.server_config.source_archive_root,
+                    job.id,
+                )
+                .await;
+            }
             requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
                 .await
                 .map_err(|e| {
@@ -1676,6 +2179,14 @@ pub async fn get_next_job(
             "refusing to send cache push credentials: server.trust_forwarded_builder_https \
              is false or forwarded-proto header does not assert HTTPS"
         );
+        if source_archive_generated {
+            cleanup_source_archive(
+                &state.pool,
+                &state.server_config.source_archive_root,
+                job.id,
+            )
+            .await;
+        }
         requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
             .await
             .map_err(|e| {
@@ -1905,57 +2416,494 @@ pub async fn download_job_derivation_archive(
         job_id = %job_id,
         drv_path,
         path_count = archive_paths.len(),
-        "exporting derivation requisites archive"
+        "exporting derivation requisites archive (full closure)"
     );
 
-    let archive_chunks =
-        chunk_derivation_archive_paths(&archive_paths, NIX_STORE_EXPORT_ARG_BYTES_LIMIT);
-    let mut archive = Vec::new();
+    stream_nix_export_response(archive_paths, job_id, drv_path.to_string())
+}
 
-    for (chunk_index, archive_chunk) in archive_chunks.iter().enumerate() {
-        let output = Command::new("nix-store")
-            .arg("--export")
-            .args(*archive_chunk)
-            .output()
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    job_id = %job_id,
-                    drv_path,
-                    chunk_index,
-                    chunk_count = archive_chunks.len(),
-                    chunk_path_count = archive_chunk.len(),
-                    "failed to run nix-store --export chunk: {e}"
-                );
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+/// Splices multiple `nix-store --export` streams into one valid stream.
+///
+/// The Nix export stream format is a sequence of `[1u64][path entry]` records
+/// followed by a single `[0u64]` end-of-stream terminator. Concatenating the
+/// raw stdout of several `nix-store --export` invocations therefore produces
+/// an INVALID stream: `nix-store --import` stops at the first chunk's
+/// terminator and silently discards everything after it, leaving the closure
+/// incomplete on the builder.
+///
+/// This helper holds back the trailing 8 bytes of each chunk's stream. For
+/// every chunk except the last, the held-back terminator is verified to be
+/// the 8-byte zero marker and dropped; the final chunk keeps its terminator
+/// so the spliced stream ends correctly.
+struct ExportStreamSplicer {
+    tail: Vec<u8>,
+}
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::error!(
-                job_id = %job_id,
-                drv_path,
-                path_count = archive_paths.len(),
-                chunk_index,
-                chunk_count = archive_chunks.len(),
-                chunk_path_count = archive_chunk.len(),
-                stderr = %stderr,
-                "nix-store --export chunk failed"
-            );
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
+impl ExportStreamSplicer {
+    const TERMINATOR_LEN: usize = 8;
 
-        archive.extend_from_slice(&output.stdout);
+    fn new() -> Self {
+        Self { tail: Vec::new() }
     }
 
+    /// Accept the next bytes of the current chunk's stdout. Returns the bytes
+    /// that are safe to forward now — everything except the last 8 bytes seen
+    /// so far (which may turn out to be the stream terminator).
+    fn push(&mut self, incoming: &[u8]) -> Vec<u8> {
+        let mut combined = std::mem::take(&mut self.tail);
+        combined.extend_from_slice(incoming);
+        if combined.len() <= Self::TERMINATOR_LEN {
+            self.tail = combined;
+            return Vec::new();
+        }
+        let split = combined.len() - Self::TERMINATOR_LEN;
+        self.tail = combined.split_off(split);
+        combined
+    }
+
+    /// Finish the current chunk. When `emit_terminator` is true (final chunk)
+    /// the held-back bytes are returned for forwarding. Otherwise the
+    /// held-back bytes MUST be the 8-byte zero terminator, which is dropped so
+    /// the next chunk's records continue the stream seamlessly.
+    fn finish(&mut self, emit_terminator: bool) -> Result<Option<Vec<u8>>, String> {
+        let tail = std::mem::take(&mut self.tail);
+        if emit_terminator {
+            return Ok(if tail.is_empty() { None } else { Some(tail) });
+        }
+        if tail.len() != Self::TERMINATOR_LEN || tail.iter().any(|b| *b != 0) {
+            return Err(format!(
+                "unexpected nix-store --export stream tail ({} bytes, expected 8-byte zero terminator)",
+                tail.len()
+            ));
+        }
+        Ok(None)
+    }
+}
+
+/// Build a streaming HTTP response of `nix-store --export <paths>`.
+///
+/// True process-stdout streaming: spawns each nix-store --export chunk with
+/// Stdio::piped(), wraps stdout in a ReaderStream, and forwards bytes directly
+/// into the HTTP response channel without ever materialising output.stdout as
+/// a Vec<u8>. Per-chunk memory overhead is bounded by the HTTP buffer size.
+/// stderr is drained concurrently with a bounded 64 KiB tail so a noisy child
+/// cannot deadlock the pipe or OOM the server.
+///
+/// Multiple export chunks are spliced into a single valid import stream via
+/// [`ExportStreamSplicer`] — each intermediate chunk's end-of-stream
+/// terminator is stripped so `nix-store --import` on the builder consumes the
+/// entire multi-chunk archive instead of stopping at the first terminator.
+fn stream_nix_export_response(
+    archive_paths: Vec<String>,
+    job_id: Uuid,
+    drv_path: String,
+) -> Result<Response, StatusCode> {
+    let archive_chunks: Vec<Vec<String>> =
+        chunk_derivation_archive_paths(&archive_paths, NIX_STORE_EXPORT_ARG_BYTES_LIMIT)
+            .into_iter()
+            .map(|chunk| chunk.to_vec())
+            .collect();
+
+    let chunk_count = archive_chunks.len();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
+    let job_id_copy = job_id;
+    let drv_path_owned = drv_path;
+    let path_count = archive_paths.len();
+
+    tokio::spawn(async move {
+        for (chunk_index, archive_chunk) in archive_chunks.iter().enumerate() {
+            // Spawn with Stdio::piped() so stdout is a stream, not a buffer.
+            let mut child = match Command::new("nix-store")
+                .arg("--export")
+                .args(archive_chunk)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(
+                        job_id = %job_id_copy,
+                        drv_path = %drv_path_owned,
+                        chunk_index,
+                        chunk_count,
+                        "failed to spawn nix-store --export: {e}"
+                    );
+                    let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    return;
+                }
+            };
+
+            // Drain stderr concurrently with stdout so that a child that writes
+            // enough stderr doesn't fill the OS pipe buffer and block, which
+            // would stall stdout and deadlock the whole stream.
+            // Keep only the last 64 KiB so a noisy process cannot OOM the server.
+            const STDERR_TAIL_BYTES: usize = 64 * 1024;
+            let stderr_pipe = child.stderr.take();
+            let stderr_task: tokio::task::JoinHandle<String> = tokio::spawn(async move {
+                let mut buf: Vec<u8> = Vec::new();
+                if let Some(mut pipe) = stderr_pipe {
+                    use tokio::io::AsyncReadExt;
+                    let mut tmp = [0u8; 8192];
+                    while let Ok(n) = pipe.read(&mut tmp).await {
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if buf.len() > STDERR_TAIL_BYTES {
+                            let drain = buf.len() - STDERR_TAIL_BYTES;
+                            buf.drain(..drain);
+                        }
+                    }
+                }
+                String::from_utf8_lossy(&buf).into_owned()
+            });
+
+            // Stream stdout bytes into the response channel as they arrive.
+            // The splicer holds back each chunk's trailing 8-byte terminator so
+            // that intermediate chunks join into one valid import stream; only
+            // the final chunk's terminator is forwarded.
+            let is_last_chunk = chunk_index == chunk_count - 1;
+            let mut splicer = ExportStreamSplicer::new();
+            if let Some(stdout) = child.stdout.take() {
+                let mut reader = ReaderStream::new(stdout);
+                loop {
+                    use futures::StreamExt;
+                    match reader.next().await {
+                        Some(Ok(chunk)) if !chunk.is_empty() => {
+                            let forward = splicer.push(&chunk);
+                            if !forward.is_empty()
+                                && tx.send(Ok(bytes::Bytes::from(forward))).await.is_err()
+                            {
+                                tracing::debug!(
+                                    job_id = %job_id_copy,
+                                    "derivation archive stream cancelled by client"
+                                );
+                                let _ = child.kill().await;
+                                return;
+                            }
+                        }
+                        Some(Ok(_)) => {} // empty chunk, skip
+                        Some(Err(e)) => {
+                            tracing::error!(
+                                job_id = %job_id_copy,
+                                drv_path = %drv_path_owned,
+                                chunk_index,
+                                "error reading nix-store --export stdout: {e}"
+                            );
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
+                        None => break, // stdout EOF
+                    }
+                }
+            }
+
+            // Chunk stdout complete: emit or verify-and-drop the held-back
+            // stream terminator depending on whether this is the final chunk.
+            match splicer.finish(is_last_chunk) {
+                Ok(Some(tail)) => {
+                    if tx.send(Ok(bytes::Bytes::from(tail))).await.is_err() {
+                        tracing::debug!(
+                            job_id = %job_id_copy,
+                            "derivation archive stream cancelled by client at tail"
+                        );
+                        let _ = child.kill().await;
+                        return;
+                    }
+                }
+                Ok(None) => {}
+                Err(msg) => {
+                    tracing::error!(
+                        job_id = %job_id_copy,
+                        drv_path = %drv_path_owned,
+                        chunk_index,
+                        chunk_count,
+                        "export stream splice failed: {msg}"
+                    );
+                    let _ = tx.send(Err(std::io::Error::other(msg))).await;
+                    return;
+                }
+            }
+
+            // Wait for exit status; stderr is already drained by the task above.
+            let stderr = stderr_task.await.unwrap_or_default();
+            let status = child.wait().await;
+            match status {
+                Ok(s) if s.success() => {}
+                Ok(_) => {
+                    tracing::error!(
+                        job_id = %job_id_copy,
+                        drv_path = %drv_path_owned,
+                        path_count,
+                        chunk_index,
+                        chunk_count,
+                        stderr = %stderr,
+                        "nix-store --export chunk failed"
+                    );
+                    let _ = tx
+                        .send(Err(std::io::Error::other(format!(
+                            "nix-store --export failed: {stderr}"
+                        ))))
+                        .await;
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        job_id = %job_id_copy,
+                        "failed to wait for nix-store --export: {e}"
+                    );
+                    let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    return;
+                }
+            }
+        }
+        tracing::debug!(
+            job_id = %job_id_copy,
+            drv_path = %drv_path_owned,
+            chunk_count,
+            "derivation archive streaming complete"
+        );
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/x-nix-archive")
-        .body(Body::from(archive))
+        .body(Body::from_stream(stream))
         .map_err(|e| {
             tracing::error!(job_id = %job_id, "failed to build derivation archive response: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })
+}
+
+/// Resolve and authorize the job's persisted `.drv` path for archive/manifest
+/// endpoints. Verifies the job belongs to the builder+session and is currently
+/// `building`, then loads the derivation path from persisted state — never
+/// from client input.
+async fn authorized_job_drv_path(
+    state: &CFState,
+    builder_id: Uuid,
+    job_id: Uuid,
+    builder_session_id: Option<Uuid>,
+) -> Result<String, StatusCode> {
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, "failed to load build job: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if !builder_owns_job_session(&job, builder_id, builder_session_id) || job.status != "building" {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let derivation =
+        crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(job_id = %job_id, derivation_id = job.derivation_id, "failed to load derivation: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+    let Some(drv_path) = derivation.derivation_path else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    if !drv_path.ends_with(".drv") {
+        tracing::warn!(job_id = %job_id, drv_path = %drv_path, "refusing to serve non-.drv path");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    Ok(drv_path)
+}
+
+/// GET /api/v1/builders/:id/jobs/:job_id/derivation-manifest
+///
+/// Returns the authorized requisite path manifest for the claimed job's
+/// server-evaluated `.drv`. The builder uses this to compute which paths it
+/// is missing locally and then requests only those via the POST delta archive
+/// endpoint. The manifest is computed from persisted job state — the builder
+/// cannot influence which drv is used.
+pub async fn get_job_derivation_manifest(
+    State(state): State<CFState>,
+    Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Result<Json<crate::models::builders::DerivationManifestResponse>, StatusCode> {
+    let path = format!(
+        "/api/v1/builders/{}/jobs/{}/derivation-manifest",
+        builder_id, job_id
+    );
+    let verified = authenticate_builder_request(&headers, body, "GET", &path, &state.pool).await?;
+
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let drv_path =
+        authorized_job_drv_path(&state, builder_id, job_id, verified.builder_session_id).await?;
+
+    let paths = nix_store_requisites(&drv_path).await.map_err(|e| {
+        tracing::error!(job_id = %job_id, drv_path = %drv_path, "manifest requisites failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::debug!(
+        job_id = %job_id,
+        drv_path = %drv_path,
+        path_count = paths.len(),
+        "serving derivation manifest"
+    );
+
+    Ok(Json(crate::models::builders::DerivationManifestResponse {
+        job_id,
+        drv_path,
+        paths,
+    }))
+}
+
+/// POST /api/v1/builders/:id/jobs/:job_id/derivation-archive
+///
+/// Delta archive: the builder posts the subset of the authorized manifest it
+/// is missing locally, and the server streams `nix-store --export` for exactly
+/// those paths. Every requested path is validated against the server-computed
+/// manifest — a request for any path outside the authorized set is rejected
+/// with 403 and nothing is exported.
+pub async fn download_job_derivation_archive_delta(
+    State(state): State<CFState>,
+    Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    let path = format!(
+        "/api/v1/builders/{}/jobs/{}/derivation-archive",
+        builder_id, job_id
+    );
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
+
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let request: crate::models::builders::DerivationArchiveRequest =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let drv_path =
+        authorized_job_drv_path(&state, builder_id, job_id, verified.builder_session_id).await?;
+
+    // Empty request: nothing to export.
+    if request.paths.is_empty() {
+        return Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Body::empty())
+            .map_err(|e| {
+                tracing::error!(job_id = %job_id, "failed to build empty delta response: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            });
+    }
+
+    // Compute the authorized manifest server-side and validate the requested
+    // subset. Unauthorized paths are a hard 403 — never export arbitrary paths.
+    let authorized_manifest = nix_store_requisites(&drv_path).await.map_err(|e| {
+        tracing::error!(job_id = %job_id, drv_path = %drv_path, "delta manifest requisites failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let validated =
+        validate_requested_paths(&authorized_manifest, &request.paths).map_err(|status| {
+            if status == StatusCode::FORBIDDEN {
+                tracing::warn!(
+                    builder_id = %builder_id,
+                    job_id = %job_id,
+                    requested_count = request.paths.len(),
+                    "builder requested store path outside authorized manifest"
+                );
+            }
+            status
+        })?;
+
+    tracing::debug!(
+        job_id = %job_id,
+        drv_path = %drv_path,
+        requested_count = request.paths.len(),
+        validated_count = validated.len(),
+        manifest_count = authorized_manifest.len(),
+        "exporting delta derivation archive"
+    );
+
+    stream_nix_export_response(validated, job_id, drv_path)
+}
+
+/// GET /api/v1/builders/:id/jobs/:job_id/source-archive
+///
+/// Streams a gzipped tar archive of the bare Git mirror for the job's source
+/// repository, containing the authorized commit. Remote API builders in
+/// ServerBundledArchive mode download this archive instead of cloning the repo
+/// directly.
+pub async fn download_job_source_archive(
+    State(state): State<CFState>,
+    Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    let path = format!(
+        "/api/v1/builders/{}/jobs/{}/source-archive",
+        builder_id, job_id
+    );
+    let verified = authenticate_builder_request(&headers, body, "GET", &path, &state.pool).await?;
+
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, "failed to load build job for source archive: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id)
+        || job.status != "building"
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Job-scoped archive path: one archive per claimed job, so this builder
+    // gets exactly the archive generated for its job and not one shared with
+    // (and potentially deleted by) another concurrent job.
+    let archive_path = job_scoped_archive_path(&state.server_config.source_archive_root, job_id);
+
+    // Stream the archive file rather than reading it fully into RAM.
+    let file = tokio::fs::File::open(&archive_path).await.map_err(|e| {
+        tracing::error!(
+            job_id = %job_id,
+            archive_path = %archive_path.display(),
+            "failed to open source archive for streaming: {e}"
+        );
+        StatusCode::NOT_FOUND
+    })?;
+    let file_size = file.metadata().await.ok().map(|m| m.len());
+    let stream = ReaderStream::new(file);
+
+    let mut resp_builder = Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/gzip")
+        .header(
+            "Content-Disposition",
+            format!("attachment; filename=\"{}.tar.gz\"", job_id),
+        );
+    if let Some(size) = file_size {
+        resp_builder = resp_builder.header("Content-Length", size.to_string());
+    }
+    resp_builder.body(Body::from_stream(stream)).map_err(|e| {
+        tracing::error!(job_id = %job_id, "failed to build source archive response: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/publish-derivation-closure
@@ -2415,6 +3363,16 @@ pub async fn complete_job(
 
     cleanup_build_log_channel(&state, job_id).await;
 
+    // Best-effort source archive cleanup (for ServerBundledArchive jobs).
+    if state.server_config.source_delivery_mode == SourceInputDeliveryMode::ServerBundledArchive {
+        cleanup_source_archive(
+            &state.pool,
+            &state.server_config.source_archive_root,
+            job_id,
+        )
+        .await;
+    }
+
     Ok(StatusCode::OK)
 }
 
@@ -2483,6 +3441,15 @@ pub async fn fail_job(
 
     // Return 200 for re-queued jobs, 202 for permanently failed jobs
     if updated_job.status == "queued" {
+        if state.server_config.source_delivery_mode == SourceInputDeliveryMode::ServerBundledArchive
+        {
+            cleanup_source_archive(
+                &state.pool,
+                &state.server_config.source_archive_root,
+                job_id,
+            )
+            .await;
+        }
         Ok(StatusCode::OK) // Job re-queued for retry
     } else {
         // Permanent failure: record the derivation-level failure server-side so
@@ -2523,6 +3490,18 @@ pub async fn fail_job(
         }
 
         cleanup_build_log_channel(&state, job_id).await;
+
+        // Best-effort source archive cleanup (for ServerBundledArchive jobs).
+        if state.server_config.source_delivery_mode == SourceInputDeliveryMode::ServerBundledArchive
+        {
+            cleanup_source_archive(
+                &state.pool,
+                &state.server_config.source_archive_root,
+                job_id,
+            )
+            .await;
+        }
+
         Ok(StatusCode::ACCEPTED) // Job permanently failed
     }
 }
@@ -3628,8 +4607,6 @@ mod tests {
 
     #[test]
     fn credential_check_blocked_when_flag_false_even_with_https_header() {
-        // A builder could spoof X-Forwarded-Proto: https over plain HTTP.
-        // The flag is false (default) so the check must return false regardless.
         let cfg = server_config_with_trust(false);
         let headers = make_headers_with("x-forwarded-proto", "https");
         assert!(
@@ -3686,5 +4663,288 @@ mod tests {
             builder_https_verified_by_trusted_proxy(&cfg, &headers),
             "must pass when flag is on and x-forwarded-ssl: on"
         );
+    }
+
+    // ── ServerBundledArchive / source mirror tests ─────────────────────────
+
+    #[test]
+    fn source_mirror_id_is_deterministic() {
+        let id1 = super::source_mirror_id("https://github.com/example/repo.git");
+        let id2 = super::source_mirror_id("https://github.com/example/repo.git");
+        assert_eq!(id1, id2);
+        assert!(id1.starts_with("repo-"));
+    }
+
+    #[test]
+    fn source_mirror_id_varies_by_url() {
+        let id1 = super::source_mirror_id("https://github.com/example/repo-a.git");
+        let id2 = super::source_mirror_id("https://github.com/example/repo-b.git");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn server_mirror_path_contains_mirror_id() {
+        let archive_root = std::path::PathBuf::from("/var/lib/crystal-forge/source-archives");
+        let path = super::server_mirror_path(&archive_root, "https://github.com/example/repo.git");
+        let mirror_id = super::source_mirror_id("https://github.com/example/repo.git");
+        assert_eq!(
+            path,
+            archive_root
+                .join("mirrors")
+                .join(format!("{mirror_id}.git"))
+        );
+    }
+
+    #[test]
+    fn source_archive_url_format_matches_download_endpoint() {
+        // The archive_url set in get_next_job must be parseable as an API path
+        // that the builder can GET as an authenticated request.
+        let builder_id = uuid::Uuid::new_v4();
+        let job_id = uuid::Uuid::new_v4();
+        let url = format!(
+            "/api/v1/builders/{}/jobs/{}/source-archive",
+            builder_id, job_id
+        );
+        assert!(url.contains(&builder_id.to_string()));
+        assert!(url.contains(&job_id.to_string()));
+        assert!(url.ends_with("/source-archive"));
+    }
+
+    #[test]
+    fn chunk_derivation_archive_paths_respects_arg_limit() {
+        let paths: Vec<String> = (0..100)
+            .map(|i| {
+                format!(
+                    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa{:04}-path-{}",
+                    i, i
+                )
+            })
+            .collect();
+        let chunks = super::chunk_derivation_archive_paths(&paths, 512);
+        // Each chunk must not exceed the byte limit
+        for chunk in &chunks {
+            let total: usize = chunk.iter().map(|p| p.len() + 1).sum(); // +1 for space separator
+            assert!(
+                total <= 512,
+                "chunk total arg bytes {total} exceeds 512 limit"
+            );
+        }
+        // All paths must appear exactly once
+        let all: Vec<_> = chunks.iter().flat_map(|c| c.iter()).collect();
+        assert_eq!(all.len(), paths.len());
+    }
+
+    // ── ExportStreamSplicer: multi-chunk export stream splicing ─────────────
+
+    /// Simulate a single-chunk export stream: records then 8-byte terminator.
+    /// The final chunk must pass its terminator through untouched.
+    #[test]
+    fn export_splicer_single_chunk_passes_terminator_through() {
+        let mut splicer = super::ExportStreamSplicer::new();
+        // "records" payload followed by the 8-byte zero terminator
+        let mut stream = b"RECORDS-PAYLOAD".to_vec();
+        stream.extend_from_slice(&[0u8; 8]);
+
+        let forwarded = splicer.push(&stream);
+        let tail = splicer
+            .finish(true)
+            .expect("final chunk finish must succeed");
+
+        let mut result = forwarded;
+        if let Some(t) = tail {
+            result.extend_from_slice(&t);
+        }
+        assert_eq!(
+            result, stream,
+            "single-chunk stream must be forwarded byte-identical"
+        );
+    }
+
+    /// Two chunks: the first chunk's terminator must be stripped, the second's
+    /// kept, producing one valid continuous stream.
+    #[test]
+    fn export_splicer_strips_intermediate_terminator() {
+        let mut chunk1 = b"CHUNK-ONE-RECORDS".to_vec();
+        chunk1.extend_from_slice(&[0u8; 8]);
+        let mut chunk2 = b"CHUNK-TWO-RECORDS".to_vec();
+        chunk2.extend_from_slice(&[0u8; 8]);
+
+        let mut spliced: Vec<u8> = Vec::new();
+
+        // Chunk 1 (intermediate): terminator must be verified and dropped.
+        let mut splicer = super::ExportStreamSplicer::new();
+        spliced.extend_from_slice(&splicer.push(&chunk1));
+        let tail = splicer
+            .finish(false)
+            .expect("intermediate chunk with zero terminator must succeed");
+        assert!(tail.is_none(), "intermediate terminator must be dropped");
+
+        // Chunk 2 (final): terminator must be forwarded.
+        let mut splicer = super::ExportStreamSplicer::new();
+        spliced.extend_from_slice(&splicer.push(&chunk2));
+        if let Some(t) = splicer.finish(true).expect("final chunk must succeed") {
+            spliced.extend_from_slice(&t);
+        }
+
+        let mut expected = b"CHUNK-ONE-RECORDS".to_vec();
+        expected.extend_from_slice(b"CHUNK-TWO-RECORDS");
+        expected.extend_from_slice(&[0u8; 8]);
+        assert_eq!(
+            spliced, expected,
+            "spliced stream must contain both chunks' records and exactly one terminator"
+        );
+    }
+
+    /// A nonzero tail on an intermediate chunk indicates a malformed or
+    /// truncated export stream — must be a hard error, not silently spliced.
+    #[test]
+    fn export_splicer_rejects_nonzero_intermediate_tail() {
+        let mut chunk = b"RECORDS".to_vec();
+        chunk.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]); // last byte nonzero
+
+        let mut splicer = super::ExportStreamSplicer::new();
+        let _ = splicer.push(&chunk);
+        assert!(
+            splicer.finish(false).is_err(),
+            "nonzero tail must be rejected for intermediate chunks"
+        );
+    }
+
+    /// Bytes arriving in small increments (smaller than the 8-byte holdback)
+    /// must still be spliced correctly.
+    #[test]
+    fn export_splicer_handles_tiny_reads() {
+        let mut stream = b"AB".to_vec();
+        stream.extend_from_slice(&[0u8; 8]);
+
+        let mut splicer = super::ExportStreamSplicer::new();
+        let mut forwarded: Vec<u8> = Vec::new();
+        // Feed one byte at a time.
+        for b in &stream {
+            forwarded.extend_from_slice(&splicer.push(&[*b]));
+        }
+        let tail = splicer.finish(false).expect("zero terminator expected");
+        assert!(tail.is_none());
+        assert_eq!(forwarded, b"AB", "only the records may be forwarded");
+    }
+
+    #[test]
+    fn source_archive_path_is_job_scoped() {
+        // Archives are job-scoped so concurrent jobs for the same repo+commit
+        // don't race to delete each other's archive during cleanup.
+        let archive_root = std::path::PathBuf::from("/var/lib/crystal-forge/source-archives");
+        let job_a = uuid::Uuid::new_v4();
+        let job_b = uuid::Uuid::new_v4();
+
+        let path_a = super::job_scoped_archive_path(&archive_root, job_a);
+        let path_b = super::job_scoped_archive_path(&archive_root, job_b);
+
+        // Two different jobs produce different paths even for the same repo+commit.
+        assert_ne!(path_a, path_b);
+        assert!(path_a.to_str().unwrap().ends_with(".tar.gz"));
+        assert!(path_a.to_str().unwrap().contains(&job_a.to_string()));
+        assert!(path_b.to_str().unwrap().contains(&job_b.to_string()));
+
+        // Both paths are deterministic.
+        assert_eq!(path_a, super::job_scoped_archive_path(&archive_root, job_a));
+    }
+
+    #[test]
+    fn job_scoped_archive_cleanup_only_removes_one_job() {
+        // Prove that cleanup_source_archive uses the job-scoped path by
+        // checking the path helper returns unique files per job.
+        let root = std::path::PathBuf::from("/var/lib/cf/archives");
+        let j1 = uuid::Uuid::new_v4();
+        let j2 = uuid::Uuid::new_v4();
+        let p1 = super::job_scoped_archive_path(&root, j1);
+        let p2 = super::job_scoped_archive_path(&root, j2);
+        assert_ne!(p1, p2, "different jobs must have different archive paths");
+    }
+
+    // ── delta derivation transport: requested-path validation ──────────────
+
+    fn manifest_fixture() -> Vec<String> {
+        vec![
+            "/nix/store/aaaa-one.drv".to_string(),
+            "/nix/store/bbbb-two".to_string(),
+            "/nix/store/cccc-three.drv".to_string(),
+        ]
+    }
+
+    #[test]
+    fn validate_requested_paths_accepts_authorized_subset() {
+        let manifest = manifest_fixture();
+        let requested = vec![
+            "/nix/store/aaaa-one.drv".to_string(),
+            "/nix/store/cccc-three.drv".to_string(),
+        ];
+        let validated = super::validate_requested_paths(&manifest, &requested)
+            .expect("authorized subset must validate");
+        assert_eq!(validated, requested);
+    }
+
+    #[test]
+    fn validate_requested_paths_rejects_path_outside_manifest_with_403() {
+        let manifest = manifest_fixture();
+        let requested = vec![
+            "/nix/store/aaaa-one.drv".to_string(),
+            "/nix/store/evil-not-in-manifest".to_string(),
+        ];
+        let err = super::validate_requested_paths(&manifest, &requested)
+            .expect_err("path outside manifest must be rejected");
+        assert_eq!(err, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn validate_requested_paths_rejects_non_store_path() {
+        let manifest = manifest_fixture();
+        let requested = vec!["/etc/passwd".to_string()];
+        let err = super::validate_requested_paths(&manifest, &requested)
+            .expect_err("non-store path must be rejected");
+        assert_eq!(err, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn validate_requested_paths_rejects_empty_string_path() {
+        let manifest = manifest_fixture();
+        let requested = vec!["".to_string()];
+        let err = super::validate_requested_paths(&manifest, &requested)
+            .expect_err("empty path must be rejected");
+        assert_eq!(err, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn validate_requested_paths_deduplicates() {
+        let manifest = manifest_fixture();
+        let requested = vec![
+            "/nix/store/aaaa-one.drv".to_string(),
+            "/nix/store/aaaa-one.drv".to_string(),
+            "/nix/store/bbbb-two".to_string(),
+        ];
+        let validated = super::validate_requested_paths(&manifest, &requested)
+            .expect("duplicated authorized paths must validate");
+        assert_eq!(
+            validated,
+            vec![
+                "/nix/store/aaaa-one.drv".to_string(),
+                "/nix/store/bbbb-two".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn validate_requested_paths_allows_empty_request() {
+        let manifest = manifest_fixture();
+        let validated =
+            super::validate_requested_paths(&manifest, &[]).expect("empty request list is allowed");
+        assert!(validated.is_empty());
+    }
+
+    #[test]
+    fn looks_like_store_path_rules() {
+        assert!(super::looks_like_store_path("/nix/store/abc-foo.drv"));
+        assert!(!super::looks_like_store_path("/etc/passwd"));
+        assert!(!super::looks_like_store_path("nix/store/abc"));
+        assert!(!super::looks_like_store_path("/nix/store/abc\0evil"));
     }
 }

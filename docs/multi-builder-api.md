@@ -1,42 +1,77 @@
 # Multi-Builder API Documentation
 
+> **See also:** [`builder-security-architecture.md`](./builder-security-architecture.md) for the
+> complete security architecture, trust boundary diagrams, threat model, and per-strategy
+> firewall rules.
+
 ## Overview
 
-The Multi-Builder API enables distributed builder deployments with centralized management through the Crystal Forge server. Builders authenticate via Ed25519 signatures and communicate exclusively through REST API endpoints.
+The Multi-Builder API enables distributed builder deployments with centralized management through the Crystal Forge server. Builders authenticate via Ed25519 signatures and communicate exclusively through REST API endpoints. Builders never access the database directly and never hold repository credentials. When builder-side cache push is enabled, builders may receive narrowly scoped per-job cache push credentials from the server as described in the security boundary notes below.
 
 ## Remote Build Execution Strategies
 
 Crystal Forge remote builders use explicit execution strategies. The scheduler must not silently fall back between strategies; a builder only receives jobs for strategies it is configured to support.
 
-`server_derivation` remains the default strategy. `source_re_evaluate_verified` is explicit opt-in until source archive/scoped credential delivery is available for private flakes.
+### Recommended Default
 
-Default builder configuration:
-
-```toml
-[builder]
-supported_execution_strategies = ["server_derivation"]
-source_mirror_root = "/var/lib/crystal-forge/flake-mirrors"
-source_worktree_root = "/var/lib/crystal-forge/flake-worktrees"
-cleanup_source_worktrees = true
-```
-
-To enable verified source jobs, configure both the server strategy and builder capability explicitly, and ensure the builder has safe source access:
+**Use `source_re_evaluate_verified` + `server_bundled_archive` for all new deployments:**
 
 ```toml
+# /etc/crystal-forge/server.toml
 [server]
 remote_build_execution_strategy = "source_re_evaluate_verified"
+source_delivery_mode             = "server_bundled_archive"
+source_archive_root              = "/var/lib/crystal-forge/source-archives"
 
+# /etc/crystal-forge/builder.toml
 [builder]
-supported_execution_strategies = ["server_derivation", "source_re_evaluate_verified"]
+supported_execution_strategies = ["source_re_evaluate_verified"]
+source_mirror_root              = "/var/lib/crystal-forge/flake-mirrors"
+source_worktree_root            = "/var/lib/crystal-forge/flake-worktrees"
+cleanup_source_worktrees        = true
 ```
 
-The builder self-manages its local mirror: if the bare mirror is missing it is created with `git clone --bare` from the repository URL, and if the authorized commit is not present the mirror is fetched. A fresh builder therefore does not require a pre-seeded mirror, but it does need read access to the repository URL. Colocated server/builder deployments may still share the same mirror root to avoid duplicate clones. Per-job worktrees are created below the configured worktree root and cleaned independently.
+This is the most reliable and fastest startup path because:
+- The builder evaluates the flake locally, so there is no dependency on Attic or any binary cache before the build starts.
+- The builder checks the evaluated `.drvPath` against the server's expected value before building — giving a build-plan integrity check (`derivation_mismatch` hard failure).
+- No Git credentials or direct Git remote access needed on the builder.
+
+Cache publication note: remote builders may perform the post-build cache push themselves. If the selected cache destination requires credentials, the server sends credential-bearing cache push config in the signed next-job response only when `server.trust_forwarded_builder_https` is enabled and the request is verified as HTTPS by the trusted reverse proxy.
+
+### `server_derivation` — when to use it
+
+`server_derivation` is simpler and appropriate when you trust the server's evaluation completely and do not need the builder-side re-evaluation check. It is also the only option if the builder cannot run `nix eval` for some reason.
+
+**Materialization:** When the `.drv` is not already in the builder's local Nix store, the builder streams the `.drv` closure archive directly from the CF server into `nix-store --import` — no Attic or binary cache required. In the background, the server pushes the closure to the configured cache so future builds can pull via normal Nix substituters.
+
+**Source delivery modes for `source_re_evaluate_verified`** are configured server-side via `source_delivery_mode`:
+
+- **`local_git_worktree`** (default): Builder manages its own bare mirror. On first use it clones with `git clone --bare` from the repository URL; if the authorized commit is absent it fetches. The builder needs read access to the repository URL and credentials for private repos. Colocated server/builder deployments may share the same mirror root.
+
+- **`server_bundled_archive`**: Server packages the top-level flake repository as a `tar.gz` (from its own server-side bare mirror) and serves it via an authenticated API endpoint. The builder downloads, verifies SHA-256 incrementally while streaming to disk, extracts to a **job-scoped** directory, and evaluates without contacting the Git remote. Each job gets an isolated mirror directory so concurrent builds for the same repo do not interfere. Use this for air-gapped or GovCloud builders. Note: only the top-level repo is bundled; locked flake inputs not in the builder's Nix store or substituters may still require network during `nix eval`.
+
+Job-scoped mirror layout for `server_bundled_archive`:
+
+```
+<source_mirror_root>/server-bundled/<job_id>/<mirror_id>.git   ← deleted after build
+<source_worktree_root>/<mirror_id>/<commit_hash>/<job_id>/     ← deleted after build
+```
 
 ### `server_derivation`
 
-`server_derivation` keeps evaluation fully server-authoritative on the server side. The server evaluates the flake, records the authoritative `.drv` path, and sends that derivation identity to the API-only builder. The builder realizes/builds the supplied `.drv` and reports logs, progress, completion, or failure through the builder API. Builders do not access Postgres directly.
+The server evaluates the flake, records the authoritative `.drv` path, and sends that derivation identity to the builder.
 
-This mode keeps evaluation fully server-authoritative, but it requires the builder to materialize the server-evaluated `.drv` and its input closure through configured substituters or Crystal Forge transport before the real build can start. Materialization failures should be reported as `path_materialization` failures rather than leaving the job stuck in `building`.
+**Materialization** uses a **delta-aware protocol** by default:
+
+1. Builder checks whether the `.drv` recursive closure is already valid locally via `nix-store --check-validity`.
+2. If not, it requests the derivation **manifest** — the server computes `nix-store --query --requisites` from the job's *persisted* drv_path (never a builder-supplied path) and returns the sorted, deduplicated list of store paths.
+3. Builder checks local validity of each manifest path (chunked 256/batch with per-path fallback within failed chunks) and requests **only the missing subset** via `POST /derivation-archive { "paths": [...] }`.
+4. Server validates every requested path against the authorized manifest and streams `nix-store --export` for exactly that subset. The builder pipes the response into `nix-store --import`.
+5. If the server does not support delta endpoints (404/405), the builder transparently falls back to the full closure archive GET.
+
+All streaming is piped stdout with bounded stderr drain — no full closure is buffered in RAM on either side.
+
+Build inputs (nixpkgs, dependencies) are pulled from configured Nix substituters during `nix-store --realise`. Materialization failures are reported as `path_materialization` failures. Builders do not access Postgres directly.
 
 ### `source_re_evaluate_verified`
 
@@ -468,6 +503,104 @@ Mark job as started (no-op, included for API consistency).
 
 **Note**: Job is already marked as "building" when assigned via `next-job`.
 
+#### GET /api/v1/builders/:id/jobs/:job_id/derivation-manifest
+
+Fetch the derivation manifest (sorted, deduplicated list of requisite store
+paths for the job's drv_path).  Used as the authorization baseline for delta
+materialization.
+
+**Authentication**: Required (Ed25519 builder signature)
+
+**Authorization**: Builder must own the job (job.status = "building") with a
+matching session ID.
+
+**Response**: `200 OK`
+```json
+{
+  "job_id": "job-uuid",
+  "drv_path": "/nix/store/abc123...-hostname.drv",
+  "paths": [
+    "/nix/store/abc123...-hostname.drv",
+    "/nix/store/def456...-source.drv",
+    "/nix/store/ghi789...-nixos.drv"
+  ]
+}
+```
+
+**Security**: The manifest is computed server-side from the job's persisted
+drv_path.  The builder never supplies the drv_path — this prevents a malicious
+or compromised builder from requesting a manifest for a different derivation.
+
+#### POST /api/v1/builders/:id/jobs/:job_id/derivation-archive (delta)
+
+Upload a `nix-store --export` archive for a **subset** of the authorized
+manifest paths into the builder's local Nix store.
+
+**Authentication**: Required (Ed25519 builder signature)
+
+**Authorization**: Builder must own the job (job.status = "building") with a
+matching session ID.
+
+**Request Body**:
+```json
+{
+  "paths": [
+    "/nix/store/abc123...-hostname.drv",
+    "/nix/store/def456...-source.drv"
+  ]
+}
+```
+
+**Validation**:
+- Every path must be in the authorized manifest (computed server-side from the
+  job's persisted drv_path).  A path outside the manifest → **403 FORBIDDEN**
+  (logged with builder/job IDs; path list is NOT logged to avoid leaking which
+  paths a builder was not authorized for).
+- Every path must match the pattern `/nix/store/<32-char-hash>-<name>`.  A
+  malformed path → **400 BAD REQUEST**.
+- Duplicates are silently deduplicated.
+- An empty `paths` array → **204 No Content** (all paths are already valid
+  locally).
+
+**Response**: `200 OK` — streaming binary body (`application/octet-stream`)
+containing the `nix-store --export` output for exactly the validated paths.
+
+**Response**: `204 No Content` — all requested paths already valid locally;
+nothing to export.
+
+**Response**: `403 Forbidden` — one or more requested paths are not in the
+authorized manifest.  The entire request is rejected; no partial export is ever
+served.
+
+**Fallback note from the builder side**: If this endpoint returns 404 (server
+too old to support delta protocol), the builder transparently falls back to the
+full-archive GET on the same path (see below).  A 403 is never silently
+retried as a full archive — that would bypass the authorization check.
+
+#### GET /api/v1/builders/:id/jobs/:job_id/derivation-archive (full closure, fallback)
+
+Stream the full `.drv` closure archive into the builder's local Nix store.
+This is the **fallback** path used when the server does not support the delta
+protocol (always available for backward compatibility).
+
+**Authentication**: Required (Ed25519 builder signature)
+
+**Authorization**: Builder must own the job (job.status = "building") with a
+matching session ID.
+
+**Response**: `200 OK` — streaming binary body (`application/octet-stream`)
+containing `nix-store --export` of the job's `.drv` recursive closure.  The
+response is piped directly into `nix-store --import` on the builder; neither
+side buffers the full closure in RAM.
+
+**Use by the builder**:
+- Preferred for cold materialization when delta is unavailable.
+- The builder should always try the delta POST first; 404/405 causes a
+  transparent fallback to this GET.
+- A background cache publish (`POST /publish-derivation-closure`) is triggered
+  after successful materialization so subsequent builds of the same derivation
+  can pull from the binary cache instead.
+
 #### POST /api/v1/builders/:id/jobs/:job_id/complete
 
 Mark job as successfully completed.
@@ -706,28 +839,55 @@ Default: Keep all metrics (no auto-pruning yet)
 
 ## Security
 
+> For the complete trust model, threat analysis, data-in-transit classification,
+> and per-strategy firewall rules, see
+> [`builder-security-architecture.md`](./builder-security-architecture.md).
+
 ### Authentication
 
-- **Ed25519 signatures**: Industry-standard, secure, stateless
-- **No sessions/tokens**: Each request independently authenticated
+- **Ed25519 signatures**: Per-request, stateless, replay-protected (±5 min timestamp window)
+- **Session scoping**: `X-Builder-Session-ID` scopes job operations to the current process lifetime; job ownership is double-checked on every API call
 - **Public key storage**: Stored in database, used for signature verification
 
 ### Authorization
 
 - **Admin endpoints**: Require authenticated user with admin role
 - **Builder endpoints**: Require valid builder signature (active status)
-- **Job ownership**: Builders can only operate on jobs assigned to them
+- **Job ownership**: Builders can only operate on jobs they hold in `building` state with a matching session ID
+
+### Network Boundaries
+
+Builders only need outbound access to:
+1. The Crystal Forge server (HTTPS, typically 443)
+2. Configured Nix binary cache substituters (HTTPS)
+
+Builders never need access to:
+- The PostgreSQL database
+- Git remotes (when `server_bundled_archive` delivery is configured)
+- Other builder hosts
+- Managed NixOS hosts (agents and builders are completely separate)
+
+### Builder Credential Boundary
+
+- Database credentials
+- Git repository SSH keys or netrc tokens (server holds these)
+- OIDC client secrets
+- Deployment authorization or keys for managed hosts
+
+Builders may receive narrowly scoped cache push credentials (for example Attic tokens or S3 access/session keys) only for jobs that require builder-side cache publication. Credential-bearing cache config is included in the signed next-job response only when trusted HTTPS forwarding is explicitly configured; otherwise the server rejects the job claim before sending those credentials. Operators must ensure builders cannot bypass the trusted HTTPS reverse proxy and reach the backend service over plaintext.
 
 ### Key Management
 
 **Builder Private Keys**:
-- Store securely with restricted file permissions (chmod 600)
-- Never commit to version control
-- Rotate periodically for security
+- Auto-generated by `cf-keygen` on first start at `/var/lib/crystal-forge/builder-api.key`
+- File permissions: 600, owned by the `crystal-forge` service user
+- Never committed to version control
+- Rotate by generating a new keypair and updating via `PUT /api/v1/builders/:id/public-key`
 
 **Public Keys**:
-- Stored in database (can be updated via API)
-- Validated on builder registration
+- Stored in database (updatable via API)
+- Used only to verify Ed25519 request signatures
+- Registering a new public key immediately invalidates requests signed with the old key
 
 ## Troubleshooting
 

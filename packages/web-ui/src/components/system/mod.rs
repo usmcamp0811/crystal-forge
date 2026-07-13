@@ -14,7 +14,6 @@ pub mod system_card_v2;
 pub mod tabs;
 
 pub use cards::{AgentCard, HardwareCard, NetworkCard, SecurityCard, SystemInfoCard};
-pub use deploy_system_modal::DeploySystemModal;
 pub use edit_system_modal::EditSystemModal;
 pub use helpers::{
     EnvStyle, deployment_policy_label, deployment_state_label, environment_style, format_memory,
