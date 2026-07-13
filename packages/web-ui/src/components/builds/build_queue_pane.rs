@@ -5,7 +5,26 @@
 
 use dioxus::prelude::*;
 
-use super::helpers::{BuildAction, BuildItem, BuildStatus, extract_system_name, short_commit};
+use super::helpers::{extract_system_name, short_commit, BuildAction, BuildItem, BuildStatus};
+
+fn queue_drag_reorder_actions(
+    queued_ids: &[i32],
+    dragged_id: i32,
+    target_id: i32,
+) -> Vec<BuildAction> {
+    let from_pos = queued_ids.iter().position(|id| *id == dragged_id);
+    let to_pos = queued_ids.iter().position(|id| *id == target_id);
+
+    match (from_pos, to_pos) {
+        (Some(from_pos), Some(to_pos)) if from_pos < to_pos => {
+            (from_pos..to_pos).map(|_| BuildAction::MoveDown).collect()
+        }
+        (Some(from_pos), Some(to_pos)) if from_pos > to_pos => {
+            (to_pos..from_pos).map(|_| BuildAction::MoveUp).collect()
+        }
+        _ => Vec::new(),
+    }
+}
 
 /// Public entry point — wraps the inner table and bulk action bar.
 /// Matches BuildsView.jsx BuildQueueTable with flash, drag-to-reorder,
@@ -38,15 +57,19 @@ pub fn BuildQueuePane(
 
     let bulk_count = selected_ids.read().len();
 
-    // Drag-to-reorder state (JSX: dragId, dragOverId)
+    // Drag-to-reorder state (JSX: dragId, overIdx). IDs identify backend
+    // jobs, but movement must be calculated from queue positions because IDs
+    // are not positional and completed rows may use negative IDs.
     let mut dragged_id: Signal<Option<i32>> = use_signal(|| None);
     let mut drag_over_id: Signal<Option<i32>> = use_signal(|| None);
 
     // Detect Completed tab: all entries are terminal statuses
-    let is_completed = builds.iter().all(|b| matches!(
-        b.status,
-        BuildStatus::Complete | BuildStatus::Failed | BuildStatus::Cancelled
-    ));
+    let is_completed = builds.iter().all(|b| {
+        matches!(
+            b.status,
+            BuildStatus::Complete | BuildStatus::Failed | BuildStatus::Cancelled
+        )
+    });
 
     rsx! {
         // JSX: <table className="sys-table q-queue-table">
@@ -84,43 +107,71 @@ pub fn BuildQueuePane(
                             if flash_failed && matches!(build.status, BuildStatus::Failed) {
                                 row_class.push_str(" attention-flash");
                             }
+                            let dragged_queue_pos = dragged_id
+                                .read()
+                                .and_then(|id| queued_ids.iter().position(|queued_id| *queued_id == id));
+                            let show_drop_before = reorderable
+                                && dragged_queue_pos.is_some()
+                                && queued_pos.is_some()
+                                && drag_over_id.read().as_ref() == Some(&build.id)
+                                && dragged_queue_pos > queued_pos;
+                            let show_drop_after = reorderable
+                                && dragged_queue_pos.is_some()
+                                && queued_pos.is_some()
+                                && drag_over_id.read().as_ref() == Some(&build.id)
+                                && dragged_queue_pos < queued_pos;
+                            let can_drag_reorder = reorderable && queued_pos.is_some();
+                            let queued_ids_for_drop = queued_ids.clone();
                             // Drag visual states
                             if dragged_id.read().as_ref() == Some(&build.id) {
                                 row_class.push_str(" q-dragging");
                             }
-                            if !matches!(build.status, BuildStatus::Complete | BuildStatus::Failed | BuildStatus::Cancelled)
-                                && drag_over_id.read().as_ref() == Some(&build.id)
-                            {
-                                row_class.push_str(" q-drop-target");
-                            }
+                            if show_drop_before { row_class.push_str(" q-drop-before"); }
+                            if show_drop_after { row_class.push_str(" q-drop-after"); }
 
                             rsx! {
                                 tr {
                                     key: "{build.id}",
                                     class: "{row_class}",
                                     "data-testid": "build-queue-row",
+                                    draggable: if can_drag_reorder { "true" } else { "false" },
                                     // HTML5 drag-and-drop events for reorder
-                                    ondragover: {
+                                    ondragstart: {
                                         let bid = build.id;
-                                        move |_| drag_over_id.set(Some(bid))
-                                    },
-                                    ondrop: move |_| {
-                                        let from = dragged_id();
-                                        let to = drag_over_id();
-                                        if let (Some(f), Some(t)) = (from, to) {
-                                            // Emit simple MoveDown/MoveUp for each position difference
-                                            if f < t {
-                                                let n = (t - f) as usize;
-                                                for _ in 0..n {
-                                                    on_build_action.call((f, BuildAction::MoveDown));
-                                                }
-                                            } else if f > t {
-                                                let n = (f - t) as usize;
-                                                for _ in 0..n {
-                                                    on_build_action.call((f, BuildAction::MoveUp));
-                                                }
+                                        move |evt| {
+                                            if can_drag_reorder {
+                                                evt.data_transfer().set_data("text/plain", &bid.to_string()).ok();
+                                                dragged_id.set(Some(bid));
                                             }
                                         }
+                                    },
+                                    ondragover: {
+                                        let bid = build.id;
+                                        move |evt| {
+                                            if can_drag_reorder && dragged_id().is_some() {
+                                                evt.prevent_default();
+                                                drag_over_id.set(Some(bid));
+                                            }
+                                        }
+                                    },
+                                    ondrop: move |evt| {
+                                        if can_drag_reorder {
+                                            evt.prevent_default();
+                                        }
+                                        let from = dragged_id();
+                                        if let Some(f) = from {
+                                            for action in queue_drag_reorder_actions(
+                                                &queued_ids_for_drop,
+                                                f,
+                                                build.id,
+                                            ) {
+                                                on_build_action.call((f, action));
+                                            }
+                                        }
+                                        dragged_id.set(None);
+                                        drag_over_id.set(None);
+                                    },
+                                    ondragend: move |_| {
                                         dragged_id.set(None);
                                         drag_over_id.set(None);
                                     },
@@ -154,12 +205,7 @@ pub fn BuildQueuePane(
                                                 button {
                                                     class: "q-grip focus-ring",
                                                     title: "Drag to reorder",
-                                                    draggable: "true",
-                                                    ondragstart: move |_| dragged_id.set(Some(build.id)),
-                                                    ondragend: move |_| {
-                                                        dragged_id.set(None);
-                                                        drag_over_id.set(None);
-                                                    },
+                                                    draggable: if can_drag_reorder { "true" } else { "false" },
                                                     svg {
                                                         width: "14", height: "14",
                                                         view_box: "0 0 24 24",
@@ -587,5 +633,31 @@ fn status_chip_class(status: BuildStatus) -> &'static str {
         BuildStatus::Failed => "chip-critical",
         BuildStatus::Complete => "chip-success",
         BuildStatus::Cancelled => "chip-unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drag_reorder_uses_positions_not_id_values() {
+        let actions = queue_drag_reorder_actions(&[40, 10, 30], 40, 30);
+
+        assert_eq!(actions, vec![BuildAction::MoveDown, BuildAction::MoveDown]);
+    }
+
+    #[test]
+    fn drag_reorder_moves_up_by_position() {
+        let actions = queue_drag_reorder_actions(&[40, 10, 30], 30, 40);
+
+        assert_eq!(actions, vec![BuildAction::MoveUp, BuildAction::MoveUp]);
+    }
+
+    #[test]
+    fn drag_reorder_ignores_non_queued_rows() {
+        let actions = queue_drag_reorder_actions(&[40, 10, 30], -1, 10);
+
+        assert!(actions.is_empty());
     }
 }
