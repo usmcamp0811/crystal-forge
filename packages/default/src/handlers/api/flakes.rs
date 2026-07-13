@@ -1085,6 +1085,7 @@ pub async fn put_flake_credentials(
         )
             .into_response(),
         Err(err) => {
+            error!("Failed to save flake credentials for flake {flake_id}: {err:#}");
             let message = err.to_string();
             let status = if message.contains("require") || message.contains("invalid") {
                 StatusCode::BAD_REQUEST
@@ -1102,6 +1103,8 @@ pub async fn put_flake_credentials(
                     },
                     message: if status == StatusCode::BAD_REQUEST {
                         message
+                    } else if message.contains("missing cache encryption key") {
+                        "Server is not configured to encrypt stored credentials (missing CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY or CRYSTAL_FORGE_SECRET_KEY). Contact your administrator.".to_string()
                     } else {
                         "Failed to save flake credentials".to_string()
                     },
@@ -1142,6 +1145,7 @@ pub async fn patch_flake_credentials(
         )
             .into_response(),
         Err(err) => {
+            error!("Failed to update flake credentials for flake {flake_id}: {err:#}");
             let message = err.to_string();
             let status = if message.contains("require") || message.contains("invalid") {
                 StatusCode::BAD_REQUEST
@@ -1158,6 +1162,8 @@ pub async fn patch_flake_credentials(
                     },
                     message: if status == StatusCode::BAD_REQUEST {
                         message
+                    } else if message.contains("missing cache encryption key") {
+                        "Server is not configured to encrypt stored credentials (missing CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY or CRYSTAL_FORGE_SECRET_KEY). Contact your administrator.".to_string()
                     } else {
                         "Failed to update flake credentials".to_string()
                     },
