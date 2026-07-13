@@ -6,7 +6,7 @@
 
 ## Overview
 
-The Multi-Builder API enables distributed builder deployments with centralized management through the Crystal Forge server. Builders authenticate via Ed25519 signatures and communicate exclusively through REST API endpoints. Builders never access the database directly and never hold repository credentials.
+The Multi-Builder API enables distributed builder deployments with centralized management through the Crystal Forge server. Builders authenticate via Ed25519 signatures and communicate exclusively through REST API endpoints. Builders never access the database directly and never hold repository credentials. When builder-side cache push is enabled, builders may receive narrowly scoped per-job cache push credentials from the server as described in the security boundary notes below.
 
 ## Remote Build Execution Strategies
 
@@ -35,6 +35,8 @@ This is the most reliable and fastest startup path because:
 - The builder evaluates the flake locally, so there is no dependency on Attic or any binary cache before the build starts.
 - The builder checks the evaluated `.drvPath` against the server's expected value before building — giving a build-plan integrity check (`derivation_mismatch` hard failure).
 - No Git credentials or direct Git remote access needed on the builder.
+
+Cache publication note: remote builders may perform the post-build cache push themselves. If the selected cache destination requires credentials, the server sends credential-bearing cache push config in the signed next-job response only when `server.trust_forwarded_builder_https` is enabled and the request is verified as HTTPS by the trusted reverse proxy.
 
 ### `server_derivation` — when to use it
 
@@ -865,13 +867,14 @@ Builders never need access to:
 - Other builder hosts
 - Managed NixOS hosts (agents and builders are completely separate)
 
-### What Builders Never Hold
+### Builder Credential Boundary
 
 - Database credentials
 - Git repository SSH keys or netrc tokens (server holds these)
 - OIDC client secrets
-- Nix cache push credentials (server pushes; builder only pulls)
 - Deployment authorization or keys for managed hosts
+
+Builders may receive narrowly scoped cache push credentials (for example Attic tokens or S3 access/session keys) only for jobs that require builder-side cache publication. Credential-bearing cache config is included in the signed next-job response only when trusted HTTPS forwarding is explicitly configured; otherwise the server rejects the job claim before sending those credentials. Operators must ensure builders cannot bypass the trusted HTTPS reverse proxy and reach the backend service over plaintext.
 
 ### Key Management
 

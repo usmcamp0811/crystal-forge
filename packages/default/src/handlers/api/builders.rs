@@ -1692,6 +1692,14 @@ pub async fn finalize_cancelled_job(
     })?;
 
     cleanup_build_log_channel(&state, job_id).await;
+    if state.server_config.source_delivery_mode == SourceInputDeliveryMode::ServerBundledArchive {
+        cleanup_source_archive(
+            &state.pool,
+            &state.server_config.source_archive_root,
+            job_id,
+        )
+        .await;
+    }
     Ok(StatusCode::OK)
 }
 
@@ -1996,6 +2004,8 @@ pub async fn get_next_job(
         }
     };
 
+    let mut source_archive_generated = false;
+
     // If ServerBundledArchive is selected, generate the source archive now.
     if source_input_delivery == SourceInputDeliveryMode::ServerBundledArchive {
         if let Some(ref mut source_mut) = source {
@@ -2062,6 +2072,7 @@ pub async fn get_next_job(
 
             match generate_source_archive(&mirror_path, &archive_path).await {
                 Ok(sha256) => {
+                    source_archive_generated = true;
                     source_mut.archive_url = Some(format!(
                         "/api/v1/builders/{}/jobs/{}/source-archive",
                         builder_id, job.id
@@ -2105,6 +2116,14 @@ pub async fn get_next_job(
             has_expected_drv_path = expected_drv_path.is_some(),
             "claimed source-verified job is missing required manifest metadata; requeueing"
         );
+        if source_archive_generated {
+            cleanup_source_archive(
+                &state.pool,
+                &state.server_config.source_archive_root,
+                job.id,
+            )
+            .await;
+        }
         requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
             .await
             .map_err(|e| {
@@ -2126,6 +2145,14 @@ pub async fn get_next_job(
                 derivation_id = derivation.id,
                 "failed to assemble builder cache-push config; requeueing claimed job"
             );
+            if source_archive_generated {
+                cleanup_source_archive(
+                    &state.pool,
+                    &state.server_config.source_archive_root,
+                    job.id,
+                )
+                .await;
+            }
             requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
                 .await
                 .map_err(|e| {
@@ -2152,6 +2179,14 @@ pub async fn get_next_job(
             "refusing to send cache push credentials: server.trust_forwarded_builder_https \
              is false or forwarded-proto header does not assert HTTPS"
         );
+        if source_archive_generated {
+            cleanup_source_archive(
+                &state.pool,
+                &state.server_config.source_archive_root,
+                job.id,
+            )
+            .await;
+        }
         requeue_claimed_job_after_manifest_error(&state.pool, &job.id, &builder_id)
             .await
             .map_err(|e| {
@@ -3406,6 +3441,15 @@ pub async fn fail_job(
 
     // Return 200 for re-queued jobs, 202 for permanently failed jobs
     if updated_job.status == "queued" {
+        if state.server_config.source_delivery_mode == SourceInputDeliveryMode::ServerBundledArchive
+        {
+            cleanup_source_archive(
+                &state.pool,
+                &state.server_config.source_archive_root,
+                job_id,
+            )
+            .await;
+        }
         Ok(StatusCode::OK) // Job re-queued for retry
     } else {
         // Permanent failure: record the derivation-level failure server-side so

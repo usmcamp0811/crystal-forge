@@ -46,6 +46,7 @@ A Crystal Forge **builder** is a host that performs Nix builds. It never talks t
 1. Polling the Crystal Forge server for work.
 2. Pulling build inputs from authorized Nix binary caches.
 3. Reporting build results back to the Crystal Forge server.
+4. Optionally pushing completed build outputs to a configured cache using narrowly scoped per-job cache push credentials sent by the server.
 
 Everything else — evaluation, policy enforcement, secret management, deployment authorization — stays on the server or on the agent running on the managed NixOS host.
 
@@ -78,7 +79,7 @@ graph TB
 • No Git credentials
 • No deployment secrets
 • Nix build sandbox enforced
-• Holds only its own private key"]
+• May receive scoped cache push creds"]
 
             B_DETAIL["• Polls CF server for jobs
 • Downloads source archives
@@ -128,13 +129,14 @@ graph TB
 | Database access | **None.** Zero DB credentials. Zero DB network access required. |
 | Git access | **None** when `ServerBundledArchive` is configured (recommended for GovCloud) |
 | Network outbound | CF server HTTPS; Nix binary cache HTTPS (configurable substituters) |
-| Secrets held | **Only** its own Ed25519 private key (`/var/lib/crystal-forge/builder-api.key`) |
+| Secrets held | Its own Ed25519 private key (`/var/lib/crystal-forge/builder-api.key`). When builder-side cache push is enabled, the next-job response may also include narrowly scoped cache push credentials. |
 | Authentication | Per-request Ed25519 signature on all API calls to the CF server |
 | Session scope | Builder session ID scoped to process lifetime; server validates ownership per job |
 | Build isolation | Nix sandbox enabled; `--restrict-eval`, no impure by default |
 
 **A builder that is compromised gives an attacker:**
 - The builder's Ed25519 private key (allows claiming build jobs only)
+- Per-job cache push credentials, when builder-side cache push is enabled and the server has authorized credential transport for that job
 - Access to build job outputs before they reach the cache
 - No DB access, no deployment credentials, no Git credentials, no other builders' keys
 
@@ -356,12 +358,13 @@ The builder private key authorizes exactly:
 |---|---|
 | **Builder → Server** *(all requests)* | Ed25519 signature (public key material, not secret), Builder ID (UUID, not secret), Session ID (process-lifetime, not a credential), Timestamp, Request body (job poll: strategy list; complete: store path, cache reference) |
 | **Builder → Server** *(log streaming)* | Build log text (stdout/stderr of nix build), CPU/RAM metrics, WebSocket or HTTP POST |
-| **Server → Builder** *(next-job response)* | Job manifest: job_id, derivation name, drv_path, execution strategy, source identity (repo URL, commit hash, mirror_id), archive_url (relative path), archive_sha256, expected_drv_path. **NOTE:** No repository credentials. No DB passwords. archive_url is a CF server path, not a Git URL. |
+| **Server → Builder** *(next-job response)* | Job manifest: job_id, derivation name, drv_path, execution strategy, source identity (repo URL, commit hash, mirror_id), archive_url (relative path), archive_sha256, expected_drv_path. **NOTE:** No repository credentials. No DB passwords. archive_url is a CF server path, not a Git URL. When remote builder-side cache push is enabled, this response may include narrowly scoped cache push config/credentials for the selected cache destination. |
 | **Server → Builder** *(source-archive)* | Binary tar.gz of bare Git mirror (top-level repo only). Streamed per-job; per-chunk RAM on server is bounded. Builder verifies sha256 before unpacking. |
 | **Server → Builder** *(drv manifest)* | `GET /derivation-manifest` — JSON list of store paths (sorted, deduplicated requisite closure of the job's persisted drv_path). Server-computed, not builder-supplied. Used as authorization baseline for delta. |
 | **Server → Builder** *(drv archive)* | nix-store export binary format (full OR delta subset). **PREFERRED:** `POST /derivation-archive` with JSON `{"paths": [missing...]}` — server validates each requested path against the authorized manifest; 403 if any path is NOT in the manifest. Streams nix-store --export for exactly the validated subset. **FALLBACK:** `GET /derivation-archive` — streams full recursive closure (for servers that do not support the delta protocol). Both paths are streamed per argv chunk; no full-closure server buffer. |
 | **Server → Git** *(mirror clone)* | SSH private key (from DB, used by server only). Applied via `GIT_SSH_COMMAND` env var to git process. Never leaves server; never sent to builder. |
-| **Server → Cache** *(push)* | `nix copy --to <attic/S3 endpoint>`. Attic token / AWS credentials (server-held). Called when builder reports publish-derivation-closure OR during server-side cache push worker. |
+| **Server → Cache** *(push)* | `nix copy --to <attic/S3 endpoint>`. Attic token / AWS credentials remain server-held for server-side cache push worker flows. |
+| **Builder → Cache** *(optional push)* | `attic push` or equivalent cache push command using credential-bearing cache config from the signed next-job response. Only used when builder-side cache push is enabled and credential transport is explicitly allowed. |
 | **Builder → Cache** *(substituter pull)* | Standard Nix substituter pulls (narinfo / .nar). Cache URL + optional auth token (configured on builder). Builder only pulls paths listed in job manifest. |
 
 ---
@@ -405,7 +408,7 @@ graph LR
 - Per-job worktrees are removed via `git worktree remove --force` after the build completes or fails.
 - Per-job server-bundled mirror dirs (`server-bundled/<job_id>/`) are deleted after worktree removal.
 - Temp archive files are deleted immediately after extraction regardless of success or failure.
-- Server-side job-scoped archives (`archives/jobs/<job_id>.tar.gz`) are deleted on job `complete` or `fail` via `cleanup_source_archive()`.
+- Server-side job-scoped archives (`archives/jobs/<job_id>.tar.gz`) are deleted on job `complete`, `fail`, cancellation finalization, or claimed-job requeue after manifest/source/cache-config preparation errors via `cleanup_source_archive()`.
 
 ---
 
@@ -473,6 +476,7 @@ If an attacker compromises a builder host and exfiltrates everything on it, they
 | Obtained | Impact |
 |---|---|
 | `builder-api.key` | Can impersonate the builder: claim jobs, complete/fail them. **Cannot** access other builders' jobs, the database, or deployment credentials. |
+| Per-job cache push credentials (conditional) | Can push to the configured cache destination within the permissions granted by the cache token/key. Only present when builder-side cache push is enabled and trusted HTTPS forwarding is configured. |
 | Nix build artifacts in `/nix/store` | Build outputs that were already pushed to the cache. |
 | Job-scoped source archive (if present during extraction) | A tar.gz of the top-level flake repo at one specific commit, already public via Git. |
 | Build log content | Text output from `nix build` of potentially sensitive derivations. |
@@ -483,10 +487,10 @@ If an attacker compromises a builder host and exfiltrates everything on it, they
 - Git SSH keys for any repository
 - OIDC client secrets
 - Deployment credentials or authorized SSH keys for managed hosts
-- Nix binary cache push credentials (server holds these)
-- Attic / S3 credentials (server pushes; builder only pulls via configured substituters)
 - Other builders' private keys
 - The CF server's internal evaluation state
+
+**Conditional cache credential boundary:** Builders do not receive database, deploy-target, OIDC, or Git credentials. When remote builder-side cache push is enabled, builders may receive narrowly scoped cache push credentials in the signed next-job response. Credential-bearing cache config is only sent when the server is explicitly configured to trust HTTPS forwarded by a reverse proxy and the request is marked as HTTPS by that trusted proxy. Operators must ensure the backend service is not directly reachable over plaintext by builders or untrusted clients.
 
 ### 9.2 Malicious Job Claim
 
