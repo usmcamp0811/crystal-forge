@@ -3087,9 +3087,17 @@ pub fn FlakesListViewNew() -> Element {
         use_effect(move || {
             let current = selected_flake.read().clone();
             if let Some(active) = current {
-                let still_exists = all_flakes.iter().any(|flake| flake.id == active.id);
-                if !still_exists {
-                    selected_flake.set(None);
+                match all_flakes.iter().find(|flake| flake.id == active.id) {
+                    // Keep the open tray's sync_status/error/commit fields in sync with
+                    // the latest fetch (e.g. after a "Retry sync" completes and
+                    // reload_nonce refetches flakes). Without this, the tray kept
+                    // showing a stale "Sync failed" banner until the user closed and
+                    // reopened it, even after the sync had actually succeeded.
+                    Some(fresh) if fresh != &active => {
+                        selected_flake.set(Some(fresh.clone()));
+                    }
+                    Some(_) => {}
+                    None => selected_flake.set(None),
                 }
             }
         });
