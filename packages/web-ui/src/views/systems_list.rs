@@ -850,6 +850,7 @@ pub fn SystemsListView() -> Element {
                             attention_class: attention_classes.get(&system.id).cloned().unwrap_or_default(),
                             flash: flash_global && matches!(system.health_status, HealthStatus::Critical | HealthStatus::Offline),
                             on_open: move |_| {
+                                dismiss_attention_item("systems", &system.id.to_string());
                                 let mut preview_system = preview_system.clone();
                                 spawn(async move {
                                     let detail = load_system_detail_with_fallback(&system.id.to_string()).await;
@@ -911,6 +912,7 @@ pub fn SystemsListView() -> Element {
                         }
                     },
                     on_open: move |id: uuid::Uuid| {
+                        dismiss_attention_item("systems", &id.to_string());
                         let mut preview_system = preview_system.clone();
                         spawn(async move {
                             let detail = load_system_detail_with_fallback(&id.to_string()).await;
