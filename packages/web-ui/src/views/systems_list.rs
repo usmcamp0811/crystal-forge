@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 
-use crate::alerts::{acknowledge, set_attention_count};
+use crate::alerts::acknowledge;
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
@@ -204,7 +204,6 @@ pub fn SystemsListView() -> Element {
                 )
             })
             .count() as i64;
-        set_attention_count("systems", attention_count);
         acknowledge("systems", attention_count);
     });
 

@@ -18,9 +18,7 @@ use wasm_bindgen::prelude::Closure;
 use web_sys::console;
 use web_sys::{Node, window};
 
-use crate::alerts::{
-    acknowledge, attention_row_class, dismiss_attention_item, set_attention_count, should_flash,
-};
+use crate::alerts::{acknowledge, attention_row_class, dismiss_attention_item, should_flash};
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
     delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_environments,
@@ -3049,9 +3047,6 @@ pub fn FlakesListViewNew() -> Element {
     let flash_flakes = should_flash("flakes", has_flake_errors);
     use_effect(move || {
         acknowledge("flakes", error_count as i64);
-    });
-    use_effect(move || {
-        set_attention_count("flakes", error_count as i64);
     });
 
     let selected_flake_value = selected_flake.read().clone();

@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use crate::alerts::{acknowledge, set_attention_count, should_flash};
+use crate::alerts::{acknowledge, should_flash};
 
 use crate::components::environments::{
     EnvironmentCard, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentFormModal,
@@ -111,7 +111,6 @@ pub fn EnvironmentsListView() -> Element {
     let mut flash_signal = use_signal(|| false);
     let flash_global = flash_signal();
     use_effect(move || {
-        set_attention_count("environments", attention_count);
         if should_flash("environments", attention_count > 0) {
             flash_signal.set(true);
             spawn(async move {

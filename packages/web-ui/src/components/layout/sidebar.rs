@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::{NAV_BADGES, attention_count};
+use crate::alerts::NAV_BADGES;
 use crate::api::client::get_navigation_badges;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
@@ -95,21 +95,21 @@ pub fn SidebarNav() -> Element {
             gloo_timers::future::TimeoutFuture::new(30_000).await;
         }
     });
-    // NAV_BADGES is the sole source of truth for badge visibility (server-
-    // computed "new since last acknowledgment" per category); reading it here
-    // is what makes the sidebar re-render both on poll and on the optimistic
-    // zero-out that alerts::acknowledge() performs immediately on click/visit.
+    // NAV_BADGES is the sole source of truth for badge visibility and counts
+    // (server-computed "new since last acknowledgment" per category); reading
+    // it here is what makes the sidebar re-render both on poll and on the
+    // optimistic zero-out that alerts::acknowledge() performs immediately on
+    // click/visit. All six categories read directly from it — no local
+    // raw-count reconciliation, which previously could re-surface a badge
+    // the server had already zeroed after acknowledgment (a locally
+    // published raw count would always be >= the server's post-ack value).
     let badges = NAV_BADGES();
-    let systems_attention = badges.systems_attention.max(attention_count("systems"));
-    let flakes_errored = badges.flakes_errored.max(attention_count("flakes"));
-    let environments_attention = badges
-        .environments_attention
-        .max(attention_count("environments"));
-    // Builds/Evals badges are fully server-driven (delta counts persisted via
-    // acknowledge()); no local raw-count reconciliation needed here.
+    let systems_attention = badges.systems_attention;
+    let flakes_errored = badges.flakes_errored;
+    let environments_attention = badges.environments_attention;
     let builds_failed = badges.builds_failed_new;
     let evals_failed = badges.evals_failed_new;
-    let cves_critical = badges.cves_critical_new.max(attention_count("cves"));
+    let cves_critical = badges.cves_critical_new;
 
     // Get user data for profile section
     let user_initials = if let Some(name) = auth::user_short_name(&auth_context) {

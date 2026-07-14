@@ -29,7 +29,7 @@
 use crate::api::client::{acknowledge_navigation_category, get_navigation_badges};
 use crate::api::models::NavigationBadges;
 use dioxus::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Shared alert state.  Hold in a `GlobalSignal` initialised in `main.rs`.
 #[derive(Debug, Clone, Default)]
@@ -40,8 +40,6 @@ pub struct AlertState {
     pub flashed: HashSet<String>,
     /// Individual attention rows/cards dismissed after the user opens/clicks them.
     pub dismissed_items: HashSet<String>,
-    /// View-local attention counts published by pages that already loaded alert data.
-    pub attention_counts: HashMap<String, i64>,
 }
 
 /// Global singleton.  Initialised to default (empty) on startup.
@@ -132,28 +130,6 @@ pub fn should_flash(view_key: &str, has_attention: bool) -> bool {
     }
     state.flashed.insert(view_key.to_string());
     true
-}
-
-/// Publish a view-local attention count for the sidebar.
-///
-/// This complements the backend aggregate endpoint so the sidebar can show the
-/// same alert number the currently-loaded view is already rendering, even while
-/// the aggregate endpoint is polling or if its semantics lag a view-specific API.
-pub fn set_attention_count(view_key: &str, count: i64) {
-    let mut state = ALERT_STATE.write();
-    state
-        .attention_counts
-        .insert(view_key.to_string(), count.max(0));
-}
-
-/// Return the latest view-local attention count published for `view_key`.
-pub fn attention_count(view_key: &str) -> i64 {
-    ALERT_STATE
-        .read()
-        .attention_counts
-        .get(view_key)
-        .copied()
-        .unwrap_or(0)
 }
 
 /// Dismiss a specific attention row/card after the user clicks or opens it.

@@ -9,7 +9,7 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::{acknowledge, set_attention_count, should_flash};
+use crate::alerts::{acknowledge, should_flash};
 
 use crate::api::client;
 use crate::api::models::{
@@ -195,7 +195,6 @@ pub fn CvesView() -> Element {
     use_effect(move || {
         if let Some(Ok(s)) = stats.read().as_ref() {
             let crit_count = s.critical as i64;
-            set_attention_count("cves", crit_count);
             if should_flash("cves", crit_count > 0) {
                 flash_crit_signal.set(true);
                 spawn(async move {
