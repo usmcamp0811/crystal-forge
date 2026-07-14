@@ -1,5 +1,7 @@
 //! Systems table component with sorting.
 
+use std::collections::HashMap;
+
 use dioxus::prelude::*;
 use uuid::Uuid;
 
@@ -53,6 +55,10 @@ pub fn SystemsTable(
     /// Optional flake context tuples (flake_id, name, branch, latest_commit)
     #[props(default)]
     flake_context: Vec<(i32, String, String, Option<String>)>,
+    /// Per-system attention class strings keyed by system ID.
+    /// Populated by the caller via `attention_row_class()`.
+    #[props(default)]
+    attention_classes: HashMap<Uuid, String>,
 ) -> Element {
     let mut sort_column = use_signal(|| None::<SystemsSortColumn>);
     let mut sort_direction = use_signal(|| SortDirection::Asc);
@@ -140,10 +146,18 @@ pub fn SystemsTable(
                     tbody {
                         for system in sorted_systems {
                             tr {
-                                class: if selected_id == Some(system.id) {
-                                    "cursor-pointer selected"
-                                } else {
-                                    "cursor-pointer"
+                                class: {
+                                    // Compute row class including attention state.
+                                    let base = if selected_id == Some(system.id) {
+                                        "cursor-pointer selected"
+                                    } else {
+                                        "cursor-pointer"
+                                    };
+                                    attention_classes
+                                        .get(&system.id)
+                                        .filter(|s| !s.is_empty())
+                                        .map(|ac| format!("{base} {ac}"))
+                                        .unwrap_or_else(|| base.to_string())
                                 },
                                 onclick: move |_| {
                                     on_open.call(system.id);

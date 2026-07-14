@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use crate::alerts::{acknowledge, should_flash};
+use crate::alerts::{acknowledge, attention_row_class, dismiss_attention_item, should_flash};
 
 use crate::components::environments::{
     EnvironmentCard, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentFormModal,
@@ -128,6 +128,17 @@ pub fn EnvironmentsListView() -> Element {
         .map(|env| flash_global && env_needs_attention(env))
         .collect();
 
+    // Pre-compute per-item attention class strings for persistent red highlighting.
+    let attention_classes: Vec<String> = filtered
+        .iter()
+        .map(|env| {
+            let env_key = env.id.to_string();
+            let is_attention = env_needs_attention(env);
+            let flash_now = flash_global && is_attention;
+            attention_row_class("", "environments", &env_key, is_attention, flash_now)
+        })
+        .collect();
+
     rsx! {
         div { style: "display:flex; flex-direction:column; gap:16px;",
             if from_setup() {
@@ -227,12 +238,13 @@ pub fn EnvironmentsListView() -> Element {
                 div { class: "empty", style: "margin:24px;", "No environments match." }
             } else if view_mode() == ViewMode::Cards {
                 div { class: "cards-grid",
-                    for env in filtered.iter() {
+                    for (env, attention_class) in filtered.iter().zip(attention_classes.iter()) {
                         EnvironmentCard {
                             key: "{env.id}",
                             environment: env.clone(),
                             policy_library: policy_library_state.read().clone(),
                             flash: flash_global && env_needs_attention(env),
+                            attention_class: attention_class.clone(),
                             on_edit: move |env| {
                                 form_error.set(None);
                                 form_draft.set(Some(form_draft_from_environment(&env)));
@@ -245,6 +257,7 @@ pub fn EnvironmentsListView() -> Element {
                     environments: filtered.clone(),
                     policy_library: policy_library_state.read().clone(),
                     flashes: flashes.clone(),
+                    attention_classes: attention_classes.clone(),
                     on_edit: move |env| {
                         form_error.set(None);
                         form_draft.set(Some(form_draft_from_environment(&env)));

@@ -14,6 +14,10 @@ pub struct EnvironmentCardProps {
     pub on_edit: EventHandler<EnvironmentItem>,
     /// Whether the card should show the attention-flash pulse animation.
     pub flash: bool,
+    /// Persistent attention-row class(es) — e.g. "attention-row".
+    /// Applied alongside the flash class to keep the card highlighted.
+    #[props(default)]
+    pub attention_class: String,
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -23,6 +27,9 @@ pub struct EnvironmentTableProps {
     pub on_edit: EventHandler<EnvironmentItem>,
     /// Per-item flash booleans, one per environment in the same order.
     pub flashes: Vec<bool>,
+    /// Per-item attention class strings, one per environment in the same order.
+    #[props(default)]
+    pub attention_classes: Vec<String>,
 }
 
 #[component]
@@ -33,9 +40,15 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
     let total = env.health.total().max(env.system_count).max(1);
 
     let card_class = if props.flash {
-        "env-card attention-flash"
+        if props.attention_class.is_empty() {
+            "env-card attention-flash".to_string()
+        } else {
+            format!("env-card attention-flash {}", props.attention_class)
+        }
+    } else if props.attention_class.is_empty() {
+        "env-card".to_string()
     } else {
-        "env-card"
+        format!("env-card {}", props.attention_class)
     };
 
     rsx! {
@@ -154,13 +167,20 @@ pub fn EnvironmentTable(props: EnvironmentTableProps) -> Element {
                     }
                 }
                 tbody {
-                    for (env, flash) in props.environments.iter().zip(props.flashes.iter()) {
+                    for (env, flash, attention_class) in props
+                        .environments
+                        .iter()
+                        .zip(props.flashes.iter())
+                        .zip(props.attention_classes.iter().chain(std::iter::repeat(&String::new())))
+                        .map(|((e, f), a)| (e, f, a))
+                    {
                         EnvironmentRow {
                             key: "{env.id}",
                             environment: env.clone(),
                             policy_library: props.policy_library.clone(),
                             on_edit: props.on_edit,
                             flash: *flash,
+                            attention_class: attention_class.clone(),
                         }
                     }
                 }
@@ -175,6 +195,8 @@ struct EnvironmentRowProps {
     policy_library: Vec<PolicyOption>,
     on_edit: EventHandler<EnvironmentItem>,
     flash: bool,
+    #[props(default)]
+    attention_class: String,
 }
 
 #[component]
@@ -184,7 +206,15 @@ fn EnvironmentRow(props: EnvironmentRowProps) -> Element {
     let env_for_button = env.clone();
     let total = env.health.total().max(env.system_count).max(1);
 
-    let row_class = if props.flash { "attention-flash" } else { "" };
+    let row_class = if props.flash {
+        if props.attention_class.is_empty() {
+            "attention-flash".to_string()
+        } else {
+            format!("attention-flash {}", props.attention_class)
+        }
+    } else {
+        props.attention_class.clone()
+    };
 
     rsx! {
         tr { class: "{row_class}", onclick: move |_| props.on_edit.call(env_for_row.clone()),

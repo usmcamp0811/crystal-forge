@@ -1,9 +1,12 @@
 //! Systems list view with table/card toggle.
 
+use std::collections::HashMap;
+
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
+use uuid::Uuid;
 
-use crate::alerts::acknowledge;
+use crate::alerts::{acknowledge, attention_row_class, dismiss_attention_item, should_flash};
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
@@ -346,6 +349,33 @@ pub fn SystemsListView() -> Element {
 
     let from_setup = use_signal(came_from_setup);
     let mut dismiss_add_target_callout = use_signal(|| false);
+
+    // Attention/flash state for alerting systems (TASK-385 follow-up).
+    let has_attention_systems = filtered_systems.iter().any(|s| {
+        matches!(
+            s.health_status,
+            HealthStatus::Critical | HealthStatus::Offline
+        )
+    });
+    let flash_global = should_flash("systems", has_attention_systems);
+    let mut attention_classes: HashMap<Uuid, String> = HashMap::new();
+    for system in &filtered_systems {
+        let is_attention = matches!(
+            system.health_status,
+            HealthStatus::Critical | HealthStatus::Offline
+        );
+        let system_key = system.id.to_string();
+        let ac = attention_row_class(
+            "",
+            "systems",
+            &system_key,
+            is_attention,
+            is_attention && flash_global,
+        );
+        if !ac.is_empty() {
+            attention_classes.insert(system.id, ac);
+        }
+    }
 
     rsx! {
         div {
@@ -817,6 +847,8 @@ pub fn SystemsListView() -> Element {
                             selected: selected_preview_id == Some(system.id),
                             environment_colors: environment_color_pairs.clone(),
                             flake_context: flake_context.clone(),
+                            attention_class: attention_classes.get(&system.id).cloned().unwrap_or_default(),
+                            flash: flash_global && matches!(system.health_status, HealthStatus::Critical | HealthStatus::Offline),
                             on_open: move |_| {
                                 let mut preview_system = preview_system.clone();
                                 spawn(async move {
@@ -857,6 +889,7 @@ pub fn SystemsListView() -> Element {
                     compact: *is_compact.read(),
                     environment_colors: environment_color_pairs.clone(),
                     flake_context: flake_context.clone(),
+                    attention_classes: attention_classes.clone(),
                     on_remove: move |id| remove_system_by_id(local_systems, pending_remove, id),
                     on_update_key: move |id| update_key_for_system(local_systems, pending_update_key, id),
                      on_edit: move |id: uuid::Uuid| {
