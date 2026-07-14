@@ -55,8 +55,8 @@ pub static ALERT_STATE: GlobalSignal<AlertState> = Signal::global(AlertState::de
 /// correctly reflects the persisted, delta-based semantics.
 pub static NAV_BADGES: GlobalSignal<NavigationBadges> = Signal::global(NavigationBadges::default);
 
-/// Acknowledge a view — hides its attention badge for this page load AND
-/// persists the acknowledgment server-side (per authenticated user) so it
+/// Acknowledge a view — optimistically hides its attention badge immediately
+/// AND persists the acknowledgment server-side (per authenticated user) so it
 /// stays hidden across page refresh, browser restart, and re-login until a
 /// new failure appears for that category.
 ///
@@ -67,6 +67,14 @@ pub static NAV_BADGES: GlobalSignal<NavigationBadges> = Signal::global(Navigatio
 /// acknowledgment's `NOW()` as their cutoff instead — pass the best count you
 /// have available regardless.
 ///
+/// NOTE: [`NAV_BADGES`] (not `ALERT_STATE.acknowledged`) is the source of
+/// truth callers should read for badge visibility. This function zeroes the
+/// relevant `NAV_BADGES` field immediately for a snappy UI, then the async
+/// refetch below reconciles it with the server. A category must never be
+/// masked indefinitely for the rest of the page load once acknowledged — if
+/// a genuinely new failure arrives afterwards, the next poll (or this
+/// function's own refetch) must be able to show it again.
+///
 /// Call this when entering the view (on mount). For Builds/Evals, call only
 /// when the failures tab is opened.
 pub fn acknowledge(view_key: &str, current_count: i64) {
@@ -74,6 +82,7 @@ pub fn acknowledge(view_key: &str, current_count: i64) {
         let mut state = ALERT_STATE.write();
         state.acknowledged.insert(view_key.to_string());
     }
+    zero_nav_badge_field(view_key);
     let view_key = view_key.to_string();
     spawn(async move {
         if acknowledge_navigation_category(&view_key, current_count)
@@ -81,12 +90,31 @@ pub fn acknowledge(view_key: &str, current_count: i64) {
             .is_ok()
         {
             // Refresh immediately so the sidebar/tab badges reflect the new
-            // baseline without waiting for the next scheduled 30s poll.
+            // baseline without waiting for the next scheduled 30s poll. This
+            // also corrects the optimistic zero above if something genuinely
+            // new arrived in the meantime (server remains the source of
+            // truth).
             if let Ok(fresh) = get_navigation_badges().await {
                 *NAV_BADGES.write() = fresh;
             }
         }
     });
+}
+
+/// Optimistically zero the `NAV_BADGES` field for `view_key` so the badge
+/// hides immediately on acknowledge, without waiting for the network
+/// round-trip. See [`acknowledge`].
+fn zero_nav_badge_field(view_key: &str) {
+    let mut badges = NAV_BADGES.write();
+    match view_key {
+        "systems" => badges.systems_attention = 0,
+        "flakes" => badges.flakes_errored = 0,
+        "environments" => badges.environments_attention = 0,
+        "builds" => badges.builds_failed_new = 0,
+        "evals" => badges.evals_failed_new = 0,
+        "cves" => badges.cves_critical_new = 0,
+        _ => {}
+    }
 }
 
 /// Returns `true` exactly once per page load for a view that has attention

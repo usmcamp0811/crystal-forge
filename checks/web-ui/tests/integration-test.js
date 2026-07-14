@@ -1385,9 +1385,9 @@ async function routeNavigationBadges(page, overrides = {}) {
     flakes_total: 2,
     environments_attention: 1,
     environments_total: 4,
-    builds_failed_24h: 2,
-    evals_failed_24h: 1,
-    cves_critical: 3,
+    builds_failed_new: 2,
+    evals_failed_new: 1,
+    cves_critical_new: 3,
     ...overrides,
   };
 

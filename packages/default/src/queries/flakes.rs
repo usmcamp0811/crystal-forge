@@ -201,7 +201,17 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
     Ok(rows
         .into_iter()
         .map(
-            |(id, name, repo_url, branch, build_scope, system_count, sync_status, last_sync_at, last_sync_error)| FlakeRegistryItem {
+            |(
+                id,
+                name,
+                repo_url,
+                branch,
+                build_scope,
+                system_count,
+                sync_status,
+                last_sync_at,
+                last_sync_error,
+            )| FlakeRegistryItem {
                 id,
                 name,
                 repo_url,

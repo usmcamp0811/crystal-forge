@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tokio::time::{Duration, sleep, timeout};
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 use url::Url;
 
 const GIT_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
@@ -418,7 +418,11 @@ fn redact_sensitive_tokens(input: &str) -> String {
             continue;
         }
         if remaining.starts_with("NETRC=") || remaining.starts_with("NETRC_FILE=") {
-            let key = if remaining.starts_with("NETRC_FILE=") { "NETRC_FILE" } else { "NETRC" };
+            let key = if remaining.starts_with("NETRC_FILE=") {
+                "NETRC_FILE"
+            } else {
+                "NETRC"
+            };
             out.push_str(key);
             out.push_str("=[REDACTED]");
             if let Some(pos) = remaining.find(char::is_whitespace) {

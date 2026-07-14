@@ -11,8 +11,11 @@ use serde::Deserialize;
 
 use crate::api::models::{ApiError, NavigationBadges};
 use crate::handlers::agent_request::CFState;
-use crate::handlers::api::rbac::require_viewer_or_above;
+use crate::handlers::api::rbac::{
+    authenticated_user_roles, has_admin_role, has_viewer_or_above_role, require_viewer_or_above,
+};
 use crate::queries::navigation::{fetch_navigation_badges, upsert_user_alert_acknowledgment};
+use crate::queries::systems::get_user_environment_membership_ids;
 
 const VALID_CATEGORIES: &[&str] = &[
     "systems",
@@ -29,15 +32,39 @@ const VALID_CATEGORIES: &[&str] = &[
 /// to the requesting user's last acknowledgment of each category. Requires
 /// viewer-or-above access, matching the summarized surfaces. The UI should
 /// poll this endpoint approximately every 30 seconds.
+///
+/// Systems and Environments counts are scoped to the requesting user's
+/// environment memberships (admins see the fleet-wide total), matching the
+/// same visibility rule as `GET /api/v1/systems` and `GET /api/v1/environments`
+/// — otherwise a non-admin operator/viewer could see an attention badge for
+/// systems/environments they cannot actually see in those views.
 pub async fn get_navigation_badges(
     State(state): State<CFState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let Some(user_id) = require_viewer_or_above(&state.pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
         return forbidden_viewer();
     };
+    if !has_viewer_or_above_role(&roles) {
+        return forbidden_viewer();
+    }
 
-    match fetch_navigation_badges(&state.pool, user_id).await {
+    let is_admin = has_admin_role(&roles);
+    let member_environment_ids = if is_admin {
+        Vec::new()
+    } else {
+        match get_user_environment_membership_ids(&state.pool, user_id).await {
+            Ok(ids) => ids.into_iter().collect(),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load environment memberships for navigation badges (user {user_id}): {e:#}"
+                );
+                Vec::new()
+            }
+        }
+    };
+
+    match fetch_navigation_badges(&state.pool, user_id, is_admin, &member_environment_ids).await {
         Ok(badges) => (StatusCode::OK, Json(badges)).into_response(),
         Err(e) => {
             tracing::error!("Failed to fetch navigation badges: {e:#}");

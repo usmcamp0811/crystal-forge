@@ -583,10 +583,7 @@ async fn seed_flakes(pool: &PgPool, registry: &[FixtureFlakeRegistry]) -> Result
             .to_string();
         let branch = flake.branch.as_deref().unwrap_or("main");
         let sync_status = flake.status.as_deref().unwrap_or("unknown");
-        let last_sync_at = flake
-            .last_sync_at
-            .as_deref()
-            .and_then(parse_relative_time);
+        let last_sync_at = flake.last_sync_at.as_deref().and_then(parse_relative_time);
         let last_sync_error = flake.error_msg.as_deref();
 
         // We need the flake ID for the FK map, so INSERT ... RETURNING id

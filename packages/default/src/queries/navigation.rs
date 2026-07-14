@@ -109,25 +109,37 @@ fn new_since_by_count(current_total: i64, baseline: Option<&AckBaseline>) -> i64
 ///
 /// Each sub-count is a separate scalar query; the implementation deliberately
 /// avoids a complex JOIN so each count stays cheap and independently correct.
-pub async fn fetch_navigation_badges(pool: &PgPool, user_id: Uuid) -> Result<NavigationBadges> {
+pub async fn fetch_navigation_badges(
+    pool: &PgPool,
+    user_id: Uuid,
+    is_admin: bool,
+    member_environment_ids: &[Uuid],
+) -> Result<NavigationBadges> {
     let acks = fetch_user_acknowledgments(pool, user_id)
         .await
         .unwrap_or_default();
 
     // ── Systems: critical or offline ──────────────────────────────────────────
-    // Mirrors the health_status column from view_system_deployment_status which
-    // the Systems list already uses. No discrete "became critical at"
+    // Mirrors the health_status column from view_system_list (already
+    // filtered to active systems) which the Systems list uses. Scoped to the
+    // requesting user's environment memberships — admins see the fleet-wide
+    // total, non-admin operators/viewers only see systems in environments
+    // they belong to, matching GET /api/v1/systems's visibility rule
+    // (Role::can_access_system_environment). No discrete "became critical at"
     // timestamp exists (health is derived from heartbeat staleness), so this
     // uses the count-diff baseline.
     let (systems_attention_total, systems_total): (i64, i64) = match sqlx::query_as(
         r#"
         SELECT
-            COUNT(*) FILTER (WHERE health_status IN ('critical', 'offline'))::bigint,
+            COUNT(*) FILTER (WHERE vsl.health_status IN ('critical', 'offline'))::bigint,
             COUNT(*)::bigint
-        FROM view_system_deployment_status
-        WHERE is_active = true
+        FROM view_system_list vsl
+        JOIN systems s ON s.id = vsl.id
+        WHERE $1 OR s.environment_id = ANY($2)
         "#,
     )
+    .bind(is_admin)
+    .bind(member_environment_ids)
     .fetch_one(pool)
     .await
     {
@@ -139,14 +151,27 @@ pub async fn fetch_navigation_badges(pool: &PgPool, user_id: Uuid) -> Result<Nav
     };
     let systems_attention = new_since_by_count(systems_attention_total, acks.get("systems"));
 
-    // ── Flakes: sync_status = error, new since last_sync_at baseline ─────────
+    // ── Flakes: sync_status = error (or stale 'syncing'), new since
+    // last_sync_at baseline ───────────────────────────────────────────────
+    // Mirrors the effective-status predicate in queries::flakes::
+    // list_flake_registry: a flake stuck in 'syncing' for >30 minutes with no
+    // completion is treated as errored there (surfaced with a "Sync appears
+    // stale" message), so the badge count must use the same predicate or it
+    // will silently under-count relative to what /flakes actually shows.
     let flakes_since = acks.get("flakes").map(|b| b.last_seen_at);
     let (flakes_errored, flakes_total): (i64, i64) = match sqlx::query_as(
         r#"
         SELECT
             COUNT(*) FILTER (
-                WHERE sync_status = 'error'
-                  AND ($1::timestamptz IS NULL OR last_sync_at > $1)
+                WHERE (
+                    sync_status = 'error'
+                    OR (
+                        sync_status = 'syncing'
+                        AND last_sync_at IS NOT NULL
+                        AND last_sync_at < now() - interval '30 minutes'
+                    )
+                )
+                AND ($1::timestamptz IS NULL OR last_sync_at > $1)
             )::bigint,
             COUNT(*)::bigint
         FROM flakes
@@ -165,14 +190,21 @@ pub async fn fetch_navigation_badges(pool: &PgPool, user_id: Uuid) -> Result<Nav
     };
 
     // ── Environments: contain ≥1 attention system (count-diff baseline) ──────
+    // Scoped to the requesting user's environment memberships — admins see
+    // every environment, non-admin operators/viewers only see environments
+    // they belong to, matching GET /api/v1/environments's visibility rule
+    // (list_environments_for_user / user_environment_memberships).
     let (environments_attention_total, environments_total): (i64, i64) = match sqlx::query_as(
         r#"
         SELECT
             COUNT(*) FILTER (WHERE critical_count > 0 OR offline_count > 0)::bigint,
             COUNT(*)::bigint
         FROM view_environment_rollups
+        WHERE $1 OR environment_id = ANY($2)
         "#,
     )
+    .bind(is_admin)
+    .bind(member_environment_ids)
     .fetch_one(pool)
     .await
     {
@@ -305,7 +337,9 @@ mod tests {
         .expect("Failed to connect");
 
         let user_id = uuid::Uuid::new_v4();
-        let badges = fetch_navigation_badges(&pool, user_id)
+        // is_admin=true exercises the unscoped fleet-wide path without
+        // requiring a real users/user_environment_memberships fixture row.
+        let badges = fetch_navigation_badges(&pool, user_id, true, &[])
             .await
             .expect("fetch_navigation_badges failed");
 
@@ -319,6 +353,91 @@ mod tests {
         assert!(badges.builds_failed_new >= 0);
         assert!(badges.evals_failed_new >= 0);
         assert!(badges.cves_critical_new >= 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_environments_total_scoped_to_user_membership() {
+        // Regression test: fetch_navigation_badges previously counted
+        // systems/environments fleet-wide regardless of the requesting
+        // user's environment memberships, so a non-admin operator/viewer
+        // could see an attention badge for environments they cannot
+        // actually see in the Environments view (reported as "alert pill
+        // on environments with a 2 but I don't see anything that would
+        // cause it").
+        let pool = sqlx::PgPool::connect(
+            &std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"),
+        )
+        .await
+        .expect("Failed to connect");
+
+        let user_id = uuid::Uuid::new_v4();
+        let short_id = user_id.simple().to_string()[..12].to_string();
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email, user_type) VALUES ($1, $2, 'Test', 'User', $3, 'human')",
+        )
+        .bind(user_id)
+        .bind(format!("nst-{short_id}"))
+        .bind(format!("nst-{short_id}@example.com"))
+        .execute(&pool)
+        .await
+        .expect("failed to insert throwaway test user");
+
+        let member_env_id = uuid::Uuid::new_v4();
+        let other_env_id = uuid::Uuid::new_v4();
+        let member_short = member_env_id.simple().to_string()[..12].to_string();
+        let other_short = other_env_id.simple().to_string()[..12].to_string();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2), ($3, $4)")
+            .bind(member_env_id)
+            .bind(format!("nsm-{member_short}"))
+            .bind(other_env_id)
+            .bind(format!("nso-{other_short}"))
+            .execute(&pool)
+            .await
+            .expect("failed to insert throwaway test environments");
+
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id) VALUES ($1, $2)",
+        )
+        .bind(user_id)
+        .bind(member_env_id)
+        .execute(&pool)
+        .await
+        .expect("failed to insert throwaway membership");
+
+        // Non-admin, scoped to only member_env_id: environments_total must
+        // not include other_env_id.
+        let scoped = fetch_navigation_badges(&pool, user_id, false, &[member_env_id])
+            .await
+            .expect("scoped fetch_navigation_badges failed");
+        let scoped_before = scoped.environments_total;
+
+        // Admin (or a member of both): environments_total must be at least
+        // 2 higher than the single-environment scoped view, proving the
+        // WHERE $1 OR environment_id = ANY($2) predicate actually narrows
+        // results rather than being a no-op.
+        let admin = fetch_navigation_badges(&pool, user_id, true, &[])
+            .await
+            .expect("admin fetch_navigation_badges failed");
+
+        assert!(
+            admin.environments_total >= scoped_before + 1,
+            "admin total ({}) should include at least the extra unscoped environment beyond the member-scoped total ({})",
+            admin.environments_total,
+            scoped_before
+        );
+
+        // Cleanup (cascades memberships via ON DELETE CASCADE).
+        sqlx::query("DELETE FROM environments WHERE id = ANY($1)")
+            .bind([member_env_id, other_env_id])
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 
     #[tokio::test]

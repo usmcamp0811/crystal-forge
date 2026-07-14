@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::{ALERT_STATE, NAV_BADGES, attention_count};
+use crate::alerts::{NAV_BADGES, attention_count};
 use crate::api::client::get_navigation_badges;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
@@ -95,10 +95,11 @@ pub fn SidebarNav() -> Element {
             gloo_timers::future::TimeoutFuture::new(30_000).await;
         }
     });
+    // NAV_BADGES is the sole source of truth for badge visibility (server-
+    // computed "new since last acknowledgment" per category); reading it here
+    // is what makes the sidebar re-render both on poll and on the optimistic
+    // zero-out that alerts::acknowledge() performs immediately on click/visit.
     let badges = NAV_BADGES();
-    // Subscribe to ALERT_STATE so re-renders happen when badges are acknowledged.
-    let alert_state = ALERT_STATE.read();
-    let acked = alert_state.acknowledged.clone();
     let systems_attention = badges.systems_attention.max(attention_count("systems"));
     let flakes_errored = badges.flakes_errored.max(attention_count("flakes"));
     let environments_attention = badges
@@ -224,7 +225,7 @@ pub fn SidebarNav() -> Element {
                     label: "Systems",
                     badge_count: if systems_attention > 0 { Some(systems_attention) } else { None },
                     badge_attention: systems_attention > 0,
-                    badge_hidden: systems_attention == 0 || (systems_attention > 0 && acked.contains("systems")),
+                    badge_hidden: systems_attention == 0,
                     badge_title: Some(format!("{} of {} systems need attention (critical or offline)", systems_attention, badges.systems_total)),
                     icon: rsx!(
                         svg {
@@ -245,7 +246,7 @@ pub fn SidebarNav() -> Element {
                     label: "Flakes",
                     badge_count: if flakes_errored > 0 { Some(flakes_errored) } else { None },
                     badge_attention: flakes_errored > 0,
-                    badge_hidden: flakes_errored == 0 || (flakes_errored > 0 && acked.contains("flakes")),
+                    badge_hidden: flakes_errored == 0,
                     badge_title: Some(if flakes_errored > 0 {
                         format!("{} of {} flakes failing to sync", flakes_errored, badges.flakes_total)
                     } else {
@@ -270,7 +271,7 @@ pub fn SidebarNav() -> Element {
                     label: "Environments",
                     badge_count: if environments_attention > 0 { Some(environments_attention) } else { None },
                     badge_attention: environments_attention > 0,
-                    badge_hidden: environments_attention == 0 || (environments_attention > 0 && acked.contains("environments")),
+                    badge_hidden: environments_attention == 0,
                     badge_title: Some(if environments_attention > 0 {
                         format!("{} of {} environments have critical or offline systems", environments_attention, badges.environments_total)
                     } else {
@@ -300,7 +301,7 @@ pub fn SidebarNav() -> Element {
                     // The view itself calls acknowledge("builds") when the completed/failed tab opens.
                     badge_count: if builds_failed > 0 { Some(builds_failed) } else { None },
                     badge_attention: builds_failed > 0,
-                    badge_hidden: builds_failed == 0 || (builds_failed > 0 && acked.contains("builds")),
+                    badge_hidden: builds_failed == 0,
                     badge_title: Some(format!("{} new failed build{} since you last checked", builds_failed, if builds_failed == 1 { "" } else { "s" })),
                     icon: rsx!(
                         svg {
@@ -320,7 +321,7 @@ pub fn SidebarNav() -> Element {
                     // Evals badge is acknowledged only when the failures tab is opened (not on mount).
                     badge_count: if evals_failed > 0 { Some(evals_failed) } else { None },
                     badge_attention: evals_failed > 0,
-                    badge_hidden: evals_failed == 0 || (evals_failed > 0 && acked.contains("evals")),
+                    badge_hidden: evals_failed == 0,
                     badge_title: Some(format!("{} new failed evaluation{} since you last checked", evals_failed, if evals_failed == 1 { "" } else { "s" })),
                     icon: rsx!(
                         svg {
@@ -362,7 +363,7 @@ pub fn SidebarNav() -> Element {
                         label: "CVEs",
                         badge_count: if cves_critical > 0 { Some(cves_critical) } else { None },
                         badge_attention: cves_critical > 0,
-                        badge_hidden: cves_critical == 0 || (cves_critical > 0 && acked.contains("cves")),
+                        badge_hidden: cves_critical == 0,
                         badge_title: Some(format!("{} new critical CVE{} since you last checked", cves_critical, if cves_critical == 1 { "" } else { "s" })),
                         icon: rsx!(
                             svg {
