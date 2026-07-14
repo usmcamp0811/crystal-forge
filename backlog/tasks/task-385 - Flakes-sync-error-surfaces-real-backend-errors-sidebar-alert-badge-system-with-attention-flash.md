@@ -160,4 +160,14 @@ Reviewer found one more real bug: `badge_hidden` no longer checked `acked.contai
 **[Fixed]** All six categories now read directly from `NAV_BADGES` with zero local override. Since `attention_count()`'s only remaining reader was this now-removed reconciliation, removed the now fully-dead `set_attention_count`/`attention_count` functions from `alerts/mod.rs` (and the `attention_counts` field from `AlertState`) along with their call sites in `systems_list.rs`/`flakes_list.rs`/`environments_list.rs`/`cves.rs`. Confirmed via code inspection that `should_flash`'s row-flash triggers in those views use their own local booleans (not this plumbing), so row/tab flash behavior is unaffected.
 
 Verified: `cargo check` — 0 errors, no dangling references to the removed functions (confirmed via targeted grep of the warning output); `packages/web-ui` `cargo test` — 104 passed, 0 failed, including all 8 existing `alerts::` unit tests; `cargo fmt`/clippy clean on all touched files.
+
+## UX Follow-up: Environments alert clarity (2026-07-13, user-reported)
+
+After the badge-scoping fixes, user reported: "its still unclear what the alert is for the environments view" — clarified via follow-up question: "the environments the alerts are on don't get highlighted and its not clear what the alert is."
+
+Investigation found the only existing indicators on `EnvironmentCard`/`EnvironmentRow` were: (1) a one-shot `attention-flash` CSS pulse (~3.2s, fires once per page load via `should_flash`) with nothing left to see once it fires/fades or if the user already visited the page earlier in the session, and (2) `HealthBar`'s proportional-width colored segments, which can be visually subtle (a thin red/gray sliver among many healthy systems).
+
+**[Fixed]** Added a persistent `chip chip-critical` badge (matching the identical pattern already used throughout Systems/CVEs/Flakes/Evaluations) to both `EnvironmentCard`'s title row and `EnvironmentTable`'s row name cell, reading "{n} critical" / "{n} offline" whenever `env.health.critical`/`offline > 0`. Unlike the flash, this persists for as long as the condition holds.
+
+Verified: `cargo check`/`test` (104 passed) / `fmt`/`clippy` clean — Tier 0 only (rendering-only change, no new state/queries). Did not add a dedicated Playwright screenshot assertion (existing environments fixture data would need extending to reliably exercise the critical/offline chip path) and no live browser/screenshot capture was available in this session — **recommend a manual visual check against a running dev instance before merge, and/or a follow-up task to add fixture coverage + a web-ui check screenshot for this chip.**
 <!-- SECTION:NOTES:END -->
