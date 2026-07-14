@@ -49,6 +49,25 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
                         if env.is_production.unwrap_or(false) {
                             span { class: "env-prod-badge", Icon { name: IconName::Shield, size: 9 } " PROD" }
                         }
+                        // Persistent "needs attention" indicator (TASK-385 follow-up).
+                        // The one-shot attention-flash pulse alone wasn't enough to
+                        // identify WHICH environment(s) triggered the sidebar badge
+                        // once the flash had already fired/faded, so this stays
+                        // visible for as long as the condition holds.
+                        if env.health.critical > 0 {
+                            span {
+                                class: "chip chip-critical",
+                                title: "{env.health.critical} system(s) reporting critical health",
+                                "{env.health.critical} critical"
+                            }
+                        }
+                        if env.health.offline > 0 {
+                            span {
+                                class: "chip chip-critical",
+                                title: "{env.health.offline} system(s) offline",
+                                "{env.health.offline} offline"
+                            }
+                        }
                     }
                     if let Some(description) = env.description.clone() {
                         div { class: "env-card-desc", "{description}" }
@@ -177,6 +196,23 @@ fn EnvironmentRow(props: EnvironmentRowProps) -> Element {
                             "{env.name}"
                             if env.is_production.unwrap_or(false) {
                                 span { class: "env-prod-badge", Icon { name: IconName::Shield, size: 9 } " PROD" }
+                            }
+                            // Persistent "needs attention" indicator — see EnvironmentCard.
+                            if env.health.critical > 0 {
+                                span {
+                                    class: "chip chip-critical",
+                                    style: "font-size:10px;",
+                                    title: "{env.health.critical} system(s) reporting critical health",
+                                    "{env.health.critical} critical"
+                                }
+                            }
+                            if env.health.offline > 0 {
+                                span {
+                                    class: "chip chip-critical",
+                                    style: "font-size:10px;",
+                                    title: "{env.health.offline} system(s) offline",
+                                    "{env.health.offline} offline"
+                                }
                             }
                         }
                         if let Some(description) = env.description.clone() {
