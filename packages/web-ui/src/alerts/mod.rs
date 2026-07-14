@@ -29,7 +29,14 @@
 use crate::api::client::{acknowledge_navigation_category, get_navigation_badges};
 use crate::api::models::NavigationBadges;
 use dioxus::prelude::*;
+use gloo_storage::{LocalStorage, Storage};
 use std::collections::HashSet;
+use std::sync::OnceLock;
+
+/// LocalStorage key under which per-item dismissals are persisted across
+/// page loads so the `.attention-row` highlighting stays hidden after the
+/// user has interacted with the item, even after refresh.
+const DISMISSED_STORAGE_KEY: &str = "cf.alert.dismissed";
 
 /// Shared alert state.  Hold in a `GlobalSignal` initialised in `main.rs`.
 #[derive(Debug, Clone, Default)]
@@ -132,12 +139,42 @@ pub fn should_flash(view_key: &str, has_attention: bool) -> bool {
     true
 }
 
+/// True once persisted dismissals have been loaded from LocalStorage into
+/// [`ALERT_STATE`].  The `OnceLock` is cheaper than checking a flag on
+/// `AlertState` on every access — it compiles to a single atomic load after
+/// the first write.
+static DISMISSED_LOADED: OnceLock<()> = OnceLock::new();
+
+/// Load persisted dismissed-item keys from LocalStorage into [`ALERT_STATE`]
+/// exactly once, the first time any public function needs them.
+fn ensure_dismissed_loaded() {
+    DISMISSED_LOADED.get_or_init(|| {
+        if let Ok(stored) = LocalStorage::get::<Vec<String>>(DISMISSED_STORAGE_KEY) {
+            let mut state = ALERT_STATE.write();
+            state.dismissed_items.extend(stored);
+        }
+    });
+}
+
 /// Dismiss a specific attention row/card after the user clicks or opens it.
+///
+/// The dismissal is persisted to LocalStorage so it survives page refresh.
+/// The highlight will only reappear if the underlying cause resolves and
+/// returns (a genuinely new event).
 pub fn dismiss_attention_item(view_key: &str, item_key: &str) {
-    let mut state = ALERT_STATE.write();
-    state
-        .dismissed_items
-        .insert(attention_item_key(view_key, item_key));
+    ensure_dismissed_loaded();
+    let key = attention_item_key(view_key, item_key);
+    {
+        let mut state = ALERT_STATE.write();
+        state.dismissed_items.insert(key.clone());
+    }
+    // Persist to LocalStorage — best-effort, ignore storage errors silently.
+    if let Ok(mut stored) = LocalStorage::get::<Vec<String>>(DISMISSED_STORAGE_KEY) {
+        stored.push(key);
+        let _ = LocalStorage::set(DISMISSED_STORAGE_KEY, stored);
+    } else {
+        let _ = LocalStorage::set(DISMISSED_STORAGE_KEY, vec![key]);
+    }
 }
 
 /// Returns true while a specific row/card should remain highlighted.
@@ -145,6 +182,7 @@ pub fn attention_item_active(view_key: &str, item_key: &str, has_attention: bool
     if !has_attention {
         return false;
     }
+    ensure_dismissed_loaded();
     let state = ALERT_STATE.read();
     !state
         .dismissed_items
