@@ -31,6 +31,7 @@ use crate::api::models::NavigationBadges;
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// LocalStorage key prefix for per-item dismissals.  The current user's ID
 /// is appended (e.g. `"cf.alert.dismissed.abc123"`) so dismissals are
@@ -50,6 +51,10 @@ pub struct AlertState {
     /// signal feedback loops from repeatedly POSTing the same acknowledgement
     /// and hammering user_alert_acknowledgments.
     pub last_ack_payloads: HashMap<String, String>,
+    /// Unix-second timestamp of the last optimistic zero for each view key.
+    /// Used by the sidebar poll to skip overwriting a recently zeroed badge
+    /// field even if `acknowledged` was populated concurrently with the GET.
+    pub zeroed_at: HashMap<String, u64>,
     /// LocalStorage key currently loaded into `dismissed_items`.
     pub dismissed_storage_key: Option<String>,
 }
@@ -230,10 +235,25 @@ fn acknowledgement_payload_key(
     )
 }
 
+/// Returns the current unix-second timestamp, or 0 if unavailable (WASM
+/// `SystemTime` may not be available in all runtimes).
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs()
+}
+
 /// Optimistically zero the `NAV_BADGES` field for `view_key` so the badge
 /// hides immediately on acknowledge, without waiting for the network
-/// round-trip. See [`acknowledge`].
+/// round-trip. Also records the zero timestamp so the sidebar poll can skip
+/// overwriting this field during a brief grace window.
+/// See [`acknowledge`].
 fn zero_nav_badge_field(view_key: &str) {
+    {
+        let mut state = ALERT_STATE.write();
+        state.zeroed_at.insert(view_key.to_string(), now_unix_secs());
+    }
     let mut badges = NAV_BADGES.write();
     match view_key {
         "systems" => badges.systems_attention = 0,
@@ -243,6 +263,17 @@ fn zero_nav_badge_field(view_key: &str) {
         "evals" => badges.evals_failed_new = 0,
         "cves" => badges.cves_critical_new = 0,
         _ => {}
+    }
+}
+
+/// Returns `true` if the badge for `view_key` was zeroed within the last
+/// `grace_secs` seconds.  Used by the sidebar poll to avoid overwriting a
+/// recently hidden badge before the POST /acknowledge round-trip completes.
+pub fn badge_recently_zeroed(view_key: &str, grace_secs: u64) -> bool {
+    let state = ALERT_STATE.read();
+    match state.zeroed_at.get(view_key) {
+        Some(&ts) => now_unix_secs().saturating_sub(ts) < grace_secs,
+        None => false,
     }
 }
 

@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::{ALERT_STATE, NAV_BADGES};
+use crate::alerts::{badge_recently_zeroed, NAV_BADGES};
 use crate::api::client::get_navigation_badges;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
@@ -90,30 +90,30 @@ pub fn SidebarNav() -> Element {
     use_future(move || async move {
         loop {
             if let Ok(fresh) = get_navigation_badges().await {
-                // Merge fresh badge counts, but preserve any fields that have
-                // already been optimistically zeroed by an in-flight
-                // acknowledgement. Without this guard the first GET response
-                // (which arrives before the POST /acknowledge round-trip
-                // completes) would overwrite the optimistic zero and
-                // re-surface the badge immediately after the view hid it.
+                // Merge fresh badge counts, but skip any field that was
+                // optimistically zeroed within the last 10 seconds.  This
+                // prevents the GET response from overwriting the optimistic
+                // zero before the POST /acknowledge round-trip completes.
+                // After the grace window the server returns 0 for that
+                // category anyway, so normal polling resumes transparently.
+                const GRACE: u64 = 10;
                 let mut badges = NAV_BADGES.write();
-                let acked = ALERT_STATE.read();
-                if !acked.acknowledged.contains("flakes") {
+                if !badge_recently_zeroed("flakes", GRACE) {
                     badges.flakes_errored = fresh.flakes_errored;
                 }
-                if !acked.acknowledged.contains("systems") {
+                if !badge_recently_zeroed("systems", GRACE) {
                     badges.systems_attention = fresh.systems_attention;
                 }
-                if !acked.acknowledged.contains("environments") {
+                if !badge_recently_zeroed("environments", GRACE) {
                     badges.environments_attention = fresh.environments_attention;
                 }
-                if !acked.acknowledged.contains("builds") {
+                if !badge_recently_zeroed("builds", GRACE) {
                     badges.builds_failed_new = fresh.builds_failed_new;
                 }
-                if !acked.acknowledged.contains("evals") {
+                if !badge_recently_zeroed("evals", GRACE) {
                     badges.evals_failed_new = fresh.evals_failed_new;
                 }
-                if !acked.acknowledged.contains("cves") {
+                if !badge_recently_zeroed("cves", GRACE) {
                     badges.cves_critical_new = fresh.cves_critical_new;
                 }
                 // Always update cursor/fingerprint/total fields from fresh poll.
