@@ -43,6 +43,8 @@ struct AckBaseline {
     /// (systems/environments only). `None` if this row was written before the
     /// fingerprint column was added.
     last_seen_fingerprint: Option<String>,
+    /// Alerting item IDs acknowledged by the user (systems/environments).
+    last_seen_alert_ids: Option<Vec<String>>,
 }
 
 /// Fetch a user's acknowledgment baseline for every category in one query.
@@ -50,9 +52,15 @@ async fn fetch_user_acknowledgments(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<HashMap<String, AckBaseline>> {
-    let rows: Vec<(String, DateTime<Utc>, i64, Option<String>)> = sqlx::query_as(
+    let rows: Vec<(
+        String,
+        DateTime<Utc>,
+        i64,
+        Option<String>,
+        Option<Vec<String>>,
+    )> = sqlx::query_as(
         r#"
-        SELECT category, last_seen_at, last_seen_count, last_seen_fingerprint
+        SELECT category, last_seen_at, last_seen_count, last_seen_fingerprint, last_seen_alert_ids
         FROM user_alert_acknowledgments
         WHERE user_id = $1
         "#,
@@ -64,13 +72,20 @@ async fn fetch_user_acknowledgments(
     Ok(rows
         .into_iter()
         .map(
-            |(category, last_seen_at, last_seen_count, last_seen_fingerprint)| {
+            |(
+                category,
+                last_seen_at,
+                last_seen_count,
+                last_seen_fingerprint,
+                last_seen_alert_ids,
+            )| {
                 (
                     category,
                     AckBaseline {
                         last_seen_at,
                         last_seen_count,
                         last_seen_fingerprint,
+                        last_seen_alert_ids,
                     },
                 )
             },
@@ -97,16 +112,18 @@ pub async fn upsert_user_alert_acknowledgment(
     observed_at: DateTime<Utc>,
     current_count: i64,
     fingerprint: Option<&str>,
+    alert_ids: Option<&[String]>,
 ) -> Result<()> {
     sqlx::query(
         r#"
         INSERT INTO user_alert_acknowledgments
-            (user_id, category, last_seen_at, last_seen_count, last_seen_fingerprint, updated_at)
-        VALUES ($1, $2, $3, $4, $5, NOW())
+            (user_id, category, last_seen_at, last_seen_count, last_seen_fingerprint, last_seen_alert_ids, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
         ON CONFLICT (user_id, category) DO UPDATE
         SET last_seen_at = EXCLUDED.last_seen_at,
             last_seen_count = EXCLUDED.last_seen_count,
             last_seen_fingerprint = EXCLUDED.last_seen_fingerprint,
+            last_seen_alert_ids = EXCLUDED.last_seen_alert_ids,
             updated_at = NOW()
         WHERE EXCLUDED.last_seen_at >= user_alert_acknowledgments.last_seen_at
         "#,
@@ -116,6 +133,7 @@ pub async fn upsert_user_alert_acknowledgment(
     .bind(observed_at)
     .bind(current_count)
     .bind(fingerprint)
+    .bind(alert_ids)
     .execute(pool)
     .await?;
 
@@ -155,6 +173,28 @@ fn new_since_by_count(
     }
 }
 
+fn new_since_by_alert_ids(
+    current_total: i64,
+    current_ids: &[String],
+    current_fingerprint: Option<&str>,
+    baseline: Option<&AckBaseline>,
+) -> i64 {
+    match baseline {
+        Some(b) => {
+            if let Some(previous_ids) = &b.last_seen_alert_ids {
+                let previous: std::collections::HashSet<&str> =
+                    previous_ids.iter().map(String::as_str).collect();
+                return current_ids
+                    .iter()
+                    .filter(|id| !previous.contains(id.as_str()))
+                    .count() as i64;
+            }
+            new_since_by_count(current_total, current_fingerprint, Some(b))
+        }
+        None => current_total,
+    }
+}
+
 /// Fetch all sidebar badge counts in one round-trip, computed relative to
 /// `user_id`'s last acknowledgment of each category.
 ///
@@ -185,9 +225,13 @@ pub async fn fetch_navigation_badges(
     // uses the fingerprint+count-diff baseline. The fingerprint is an MD5 of
     // the sorted set of alerting system IDs so replacement failures (A
     // recovers while B goes critical — same count, different set) re-surface.
-    let (systems_attention_total, systems_total, systems_fingerprint): (i64, i64, Option<String>) =
-        match sqlx::query_as(
-            r#"
+    let (systems_attention_total, systems_total, systems_fingerprint, systems_alert_ids): (
+        i64,
+        i64,
+        Option<String>,
+        Vec<String>,
+    ) = match sqlx::query_as(
+        r#"
         SELECT
             COUNT(*) FILTER (WHERE vsl.health_status IN ('critical', 'offline'))::bigint,
             COUNT(*)::bigint,
@@ -198,25 +242,31 @@ pub async fn fetch_navigation_badges(
                     ORDER BY vsl.id
                 ) FILTER (WHERE vsl.health_status IN ('critical', 'offline'))),
                 ''
+            ),
+            COALESCE(
+                array_agg(vsl.id::text ORDER BY vsl.id)
+                    FILTER (WHERE vsl.health_status IN ('critical', 'offline')),
+                ARRAY[]::text[]
             )
         FROM view_system_list vsl
         JOIN systems s ON s.id = vsl.id
         WHERE $1 OR s.environment_id = ANY($2)
         "#,
-        )
-        .bind(is_admin)
-        .bind(member_environment_ids)
-        .fetch_one(pool)
-        .await
-        {
-            Ok(counts) => counts,
-            Err(e) => {
-                tracing::warn!("Failed to fetch systems navigation badge counts: {e:#}");
-                (0, 0, None)
-            }
-        };
-    let systems_attention = new_since_by_count(
+    )
+    .bind(is_admin)
+    .bind(member_environment_ids)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(counts) => counts,
+        Err(e) => {
+            tracing::warn!("Failed to fetch systems navigation badge counts: {e:#}");
+            (0, 0, None, Vec::new())
+        }
+    };
+    let systems_attention = new_since_by_alert_ids(
         systems_attention_total,
+        &systems_alert_ids,
         systems_fingerprint.as_deref(),
         acks.get("systems"),
     );
@@ -279,11 +329,12 @@ pub async fn fetch_navigation_badges(
     // (list_environments_for_user / user_environment_memberships).
     // Fingerprint guards against replacement failures (env A clears while env
     // B becomes critical — same total, different set).
-    let (environments_attention_total, environments_total, environments_fingerprint): (
-        i64,
-        i64,
-        Option<String>,
-    ) = match sqlx::query_as(
+    let (
+        environments_attention_total,
+        environments_total,
+        environments_fingerprint,
+        environments_alert_ids,
+    ): (i64, i64, Option<String>, Vec<String>) = match sqlx::query_as(
         r#"
         SELECT
             COUNT(*) FILTER (WHERE critical_count > 0 OR offline_count > 0)::bigint,
@@ -295,6 +346,11 @@ pub async fn fetch_navigation_badges(
                     ORDER BY environment_id
                 ) FILTER (WHERE critical_count > 0 OR offline_count > 0)),
                 ''
+            ),
+            COALESCE(
+                array_agg(environment_id::text ORDER BY environment_id)
+                    FILTER (WHERE critical_count > 0 OR offline_count > 0),
+                ARRAY[]::text[]
             )
         FROM view_environment_rollups
         WHERE $1 OR environment_id = ANY($2)
@@ -308,11 +364,12 @@ pub async fn fetch_navigation_badges(
         Ok(counts) => counts,
         Err(e) => {
             tracing::warn!("Failed to fetch environments navigation badge counts: {e:#}");
-            (0, 0, None)
+            (0, 0, None, Vec::new())
         }
     };
-    let environments_attention = new_since_by_count(
+    let environments_attention = new_since_by_alert_ids(
         environments_attention_total,
+        &environments_alert_ids,
         environments_fingerprint.as_deref(),
         acks.get("environments"),
     );
@@ -419,6 +476,7 @@ mod tests {
             last_seen_at: Utc::now(),
             last_seen_count: 7,
             last_seen_fingerprint: None,
+            last_seen_alert_ids: None,
         };
         assert_eq!(new_since_by_count(7, None, Some(&baseline)), 0);
     }
@@ -429,6 +487,7 @@ mod tests {
             last_seen_at: Utc::now(),
             last_seen_count: 7,
             last_seen_fingerprint: None,
+            last_seen_alert_ids: None,
         };
         // Any change from the acknowledged baseline (up or down) re-surfaces
         // the current total rather than fabricating a delta, since count-diff
@@ -444,6 +503,7 @@ mod tests {
             last_seen_at: Utc::now(),
             last_seen_count: 1,
             last_seen_fingerprint: Some("abc123".to_string()),
+            last_seen_alert_ids: None,
         };
         // Same total, different fingerprint (replacement failure): must resurface.
         assert_eq!(new_since_by_count(1, Some("def456"), Some(&baseline)), 1);
@@ -455,8 +515,42 @@ mod tests {
             last_seen_at: Utc::now(),
             last_seen_count: 1,
             last_seen_fingerprint: Some("abc123".to_string()),
+            last_seen_alert_ids: None,
         };
         assert_eq!(new_since_by_count(1, Some("abc123"), Some(&baseline)), 0);
+    }
+
+    #[test]
+    fn new_since_by_alert_ids_hides_recovery_only_changes() {
+        let baseline = AckBaseline {
+            last_seen_at: Utc::now(),
+            last_seen_count: 2,
+            last_seen_fingerprint: None,
+            last_seen_alert_ids: Some(vec!["A".to_string(), "B".to_string()]),
+        };
+        assert_eq!(
+            new_since_by_alert_ids(1, &["B".to_string()], None, Some(&baseline)),
+            0
+        );
+    }
+
+    #[test]
+    fn new_since_by_alert_ids_counts_new_additions_only() {
+        let baseline = AckBaseline {
+            last_seen_at: Utc::now(),
+            last_seen_count: 1,
+            last_seen_fingerprint: None,
+            last_seen_alert_ids: Some(vec!["A".to_string()]),
+        };
+        assert_eq!(
+            new_since_by_alert_ids(
+                2,
+                &["A".to_string(), "B".to_string()],
+                None,
+                Some(&baseline),
+            ),
+            1
+        );
     }
 
     #[tokio::test]
@@ -597,7 +691,7 @@ mod tests {
         .await
         .expect("failed to insert throwaway test user");
 
-        upsert_user_alert_acknowledgment(&pool, user_id, "builds", Utc::now(), 5, None)
+        upsert_user_alert_acknowledgment(&pool, user_id, "builds", Utc::now(), 5, None, None)
             .await
             .expect("initial upsert should succeed");
 
@@ -609,7 +703,7 @@ mod tests {
 
         // Conflict path: re-acknowledging updates the existing row rather
         // than erroring or duplicating.
-        upsert_user_alert_acknowledgment(&pool, user_id, "builds", Utc::now(), 9, None)
+        upsert_user_alert_acknowledgment(&pool, user_id, "builds", Utc::now(), 9, None, None)
             .await
             .expect("conflict upsert should succeed");
         let acks = fetch_user_acknowledgments(&pool, user_id)

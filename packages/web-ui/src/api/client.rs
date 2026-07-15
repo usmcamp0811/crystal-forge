@@ -1218,6 +1218,7 @@ pub async fn acknowledge_navigation_category(
     observed_at: &str,
     current_count: i64,
     fingerprint: Option<&str>,
+    alert_ids: Option<&[String]>,
 ) -> Result<(), ApiClientError> {
     #[derive(serde::Serialize)]
     struct AcknowledgeRequest<'a> {
@@ -1226,6 +1227,8 @@ pub async fn acknowledge_navigation_category(
         current_count: i64,
         #[serde(skip_serializing_if = "Option::is_none")]
         fingerprint: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alert_ids: Option<&'a [String]>,
     }
     let url = format!("{}/navigation/acknowledge", base_url());
     let body = AcknowledgeRequest {
@@ -1233,6 +1236,7 @@ pub async fn acknowledge_navigation_category(
         observed_at,
         current_count,
         fingerprint,
+        alert_ids,
     };
     let _: serde_json::Value = send_json_with_csrf("POST", &url, Some(&body)).await?;
     Ok(())

@@ -95,6 +95,11 @@ pub struct AcknowledgeNavigationCategoryRequest {
     /// or `.environments_fingerprint` so replacement failures re-surface.
     #[serde(default)]
     pub fingerprint: Option<String>,
+    /// Sorted alerting item IDs the user actually saw for count-derived
+    /// categories (systems/environments). Used to compute current - acknowledged
+    /// so recoveries do not re-surface old alerts.
+    #[serde(default)]
+    pub alert_ids: Option<Vec<String>>,
 }
 
 /// POST /api/v1/navigation/acknowledge
@@ -135,6 +140,7 @@ pub async fn acknowledge_navigation_category(
         payload.observed_at,
         payload.current_count,
         payload.fingerprint.as_deref(),
+        payload.alert_ids.as_deref(),
     )
     .await
     {

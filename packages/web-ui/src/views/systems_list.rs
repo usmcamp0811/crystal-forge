@@ -6,7 +6,10 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use uuid::Uuid;
 
-use crate::alerts::{acknowledge, attention_row_class, dismiss_attention_item, should_flash};
+use crate::alerts::{
+    NAV_BADGES, acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item,
+    should_flash,
+};
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
@@ -216,11 +219,37 @@ pub fn SystemsListView() -> Element {
                     )
                 })
                 .count() as i64;
+            let alert_ids = result
+                .systems
+                .iter()
+                .filter(|s| {
+                    matches!(
+                        s.health_status,
+                        HealthStatus::Critical | HealthStatus::Offline
+                    )
+                })
+                .map(|s| s.id.to_string())
+                .collect::<Vec<_>>();
+            let ack_snapshot = {
+                let badges = NAV_BADGES.read();
+                (
+                    badges.observed_at.clone(),
+                    badges.systems_fingerprint.clone(),
+                )
+            };
             local_systems.set(result.systems.clone());
             load_error.set(result.notice.clone());
             loading.set(false);
             if result.notice.is_none() {
-                acknowledge("systems", attention_count);
+                if let (Some(cursor), fingerprint) = ack_snapshot {
+                    acknowledge_with_cursor_and_ids(
+                        "systems",
+                        attention_count,
+                        cursor,
+                        fingerprint,
+                        Some(alert_ids),
+                    );
+                }
             }
         }
     });

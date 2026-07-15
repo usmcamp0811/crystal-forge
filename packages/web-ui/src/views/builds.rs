@@ -3,7 +3,7 @@
 use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
-use crate::alerts::{NAV_BADGES, acknowledge};
+use crate::alerts::{NAV_BADGES, acknowledge_with_cursor};
 
 use crate::api::{
     self,
@@ -283,6 +283,8 @@ pub fn BuildsView() -> Element {
     });
 
     let mut build_history = use_signal(Vec::<BuildItem>::new);
+    let mut build_history_ack_cursor = use_signal(|| None::<String>);
+    let mut builds_ack_sent = use_signal(|| false);
 
     use_effect(move || {
         if let Some(Ok(builder_list)) = &*builders.read() {
@@ -329,6 +331,7 @@ pub fn BuildsView() -> Element {
 
     use_effect(move || {
         if let Some(Ok(items)) = &*recent_builds.read() {
+            build_history_ack_cursor.set(NAV_BADGES.read().observed_at.clone());
             let mapped = items
                 .iter()
                 .enumerate()
@@ -436,6 +439,17 @@ pub fn BuildsView() -> Element {
         .iter()
         .filter(|item| item.status == BuildStatus::Failed)
         .count();
+    use_effect(move || {
+        if active_view() == BuildsTab::Completed
+            && !builds_ack_sent()
+            && recent_builds.read().as_ref().is_some_and(|r| r.is_ok())
+        {
+            if let Some(cursor) = build_history_ack_cursor.read().clone() {
+                acknowledge_with_cursor("builds", completed_failed_count as i64, cursor);
+                builds_ack_sent.set(true);
+            }
+        }
+    });
     // Server-computed "new failed builds since last acknowledgment" (persists
     // across page refresh/re-login — see alerts::NAV_BADGES). Drives both the
     // Completed tab's badge count and its attention-flash-tab pulse, replacing
@@ -600,9 +614,7 @@ pub fn BuildsView() -> Element {
                             }
                             // Acknowledge the "builds" sidebar/tab badge when this tab is opened
                             // (persists server-side — TASK-385 follow-up).
-                            if recent_builds.read().as_ref().is_some_and(|r| r.is_ok()) {
-                                acknowledge("builds", completed_failed_count as i64);
-                            }
+                            builds_ack_sent.set(false);
                         },
                         "Completed ({build_history.read().len()})"
                         if builds_failed_new > 0 {

@@ -3,7 +3,10 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use crate::alerts::{acknowledge, attention_row_class, dismiss_attention_item, should_flash};
+use crate::alerts::{
+    NAV_BADGES, acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item,
+    should_flash,
+};
 
 use crate::components::environments::{
     EnvironmentCard, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentFormModal,
@@ -71,6 +74,23 @@ pub fn EnvironmentsListView() -> Element {
 
             let mut items = result.environments;
             items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            let attention_items = items
+                .iter()
+                .filter(|env| env.health.critical > 0 || env.health.offline > 0)
+                .collect::<Vec<_>>();
+            let attention_count = attention_items.len() as i64;
+            let alert_ids = attention_items
+                .iter()
+                .map(|env| env.id.to_string())
+                .collect::<Vec<_>>();
+            let ack_snapshot = {
+                let badges = NAV_BADGES.read();
+                (
+                    badges.observed_at.clone(),
+                    badges.environments_fingerprint.clone(),
+                )
+            };
+            let loaded_without_notice = result.notice.is_none() && policies_result.notice.is_none();
             environments.set(items);
             policy_library_state.set(policies_result.policies);
 
@@ -81,6 +101,17 @@ pub fn EnvironmentsListView() -> Element {
                 (None, None) => None,
             });
             loading.set(false);
+            if loaded_without_notice {
+                if let (Some(cursor), fingerprint) = ack_snapshot {
+                    acknowledge_with_cursor_and_ids(
+                        "environments",
+                        attention_count,
+                        cursor,
+                        fingerprint,
+                        Some(alert_ids),
+                    );
+                }
+            }
         });
     });
 
@@ -117,10 +148,6 @@ pub fn EnvironmentsListView() -> Element {
                 gloo_timers::future::TimeoutFuture::new(3200).await;
                 flash_signal.set(false);
             });
-        }
-        // Acknowledge the "environments" sidebar badge on every visit.
-        if !*loading.read() && api_notice.read().is_none() {
-            acknowledge("environments", attention_count);
         }
     });
 

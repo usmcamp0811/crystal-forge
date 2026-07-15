@@ -31,7 +31,6 @@ use crate::api::models::NavigationBadges;
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::collections::HashSet;
-use std::sync::OnceLock;
 
 /// LocalStorage key prefix for per-item dismissals.  The current user's ID
 /// is appended (e.g. `"cf.alert.dismissed.abc123"`) so dismissals are
@@ -47,31 +46,48 @@ pub struct AlertState {
     pub flashed: HashSet<String>,
     /// Individual attention rows/cards dismissed after the user opens/clicks them.
     pub dismissed_items: HashSet<String>,
+    /// LocalStorage key currently loaded into `dismissed_items`.
+    pub dismissed_storage_key: Option<String>,
 }
 
 /// Global singleton.  Initialised to default (empty) on startup.
 pub static ALERT_STATE: GlobalSignal<AlertState> = Signal::global(AlertState::default);
 
-/// The authenticated user's ID, used to namespace the per-user dismissal
-/// LocalStorage key.  Must be set once auth loads via [`set_current_user_id`].
-static CURRENT_USER_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
 /// Register the current user's ID so dismissal storage is isolated per user.
-/// Call this once after authentication completes (e.g. in `init_auth`).
-/// Has no effect if called more than once per page load.
+/// Call this whenever authentication changes. It replaces the in-memory
+/// dismissal set with the target user's stored set so local-login and logout
+/// transitions do not share the anonymous namespace.
 pub fn set_current_user_id(user_id: &str) {
-    // OnceLock: ignore the error if already set (e.g. hot-reload, re-mount).
-    let _ = CURRENT_USER_ID.set(user_id.to_string());
+    load_dismissals_for_storage_key(storage_key_for_user(Some(user_id)));
+}
+
+pub fn clear_current_user_id() {
+    load_dismissals_for_storage_key(storage_key_for_user(None));
 }
 
 /// The LocalStorage key for dismissed items scoped to the current user.
 /// Falls back to the suffix-less key for unauthenticated page loads (e.g.
 /// the login page) so dismissals are at least stored rather than dropped.
 fn dismissed_storage_key() -> String {
-    match CURRENT_USER_ID.get() {
+    ALERT_STATE
+        .read()
+        .dismissed_storage_key
+        .clone()
+        .unwrap_or_else(|| storage_key_for_user(None))
+}
+
+fn storage_key_for_user(user_id: Option<&str>) -> String {
+    match user_id {
         Some(uid) => format!("{DISMISSED_STORAGE_KEY_PREFIX}{uid}"),
         None => format!("{DISMISSED_STORAGE_KEY_PREFIX}anon"),
     }
+}
+
+fn load_dismissals_for_storage_key(storage_key: String) {
+    let stored = LocalStorage::get::<Vec<String>>(&storage_key).unwrap_or_default();
+    let mut state = ALERT_STATE.write();
+    state.dismissed_items = stored.into_iter().collect();
+    state.dismissed_storage_key = Some(storage_key);
 }
 
 /// Latest polled navigation badge counts — server-computed "new since last
@@ -124,6 +140,27 @@ pub fn acknowledge(view_key: &str, current_count: i64) {
         // failures that arrived before the relevant view data was rendered.
         return;
     };
+    acknowledge_with_cursor_and_ids(view_key, current_count, observed_at, fingerprint, None);
+}
+
+/// Acknowledge using a cursor captured from the relevant rendered dataset.
+/// Prefer this over [`acknowledge`] from views that have their own async data
+/// loading; this prevents a later sidebar poll cursor from acknowledging data
+/// that was not present in the rendered view.
+pub fn acknowledge_with_cursor(view_key: &str, current_count: i64, observed_at: String) {
+    acknowledge_with_cursor_and_ids(view_key, current_count, observed_at, None, None);
+}
+
+/// Acknowledge using a view-owned cursor and optional alerting IDs.  The IDs
+/// are used by systems/environments so the server computes `current - seen`
+/// rather than re-surfacing old alerts on recovery-only set changes.
+pub fn acknowledge_with_cursor_and_ids(
+    view_key: &str,
+    current_count: i64,
+    observed_at: String,
+    fingerprint: Option<String>,
+    alert_ids: Option<Vec<String>>,
+) {
     {
         let mut state = ALERT_STATE.write();
         state.acknowledged.insert(view_key.to_string());
@@ -136,15 +173,11 @@ pub fn acknowledge(view_key: &str, current_count: i64) {
             observed_at.as_str(),
             current_count,
             fingerprint.as_deref(),
+            alert_ids.as_deref(),
         )
         .await
         .is_ok()
         {
-            // Refresh immediately so the sidebar/tab badges reflect the new
-            // baseline without waiting for the next scheduled 30s poll. This
-            // also corrects the optimistic zero above if something genuinely
-            // new arrived in the meantime (server remains the source of
-            // truth).
             if let Ok(fresh) = get_navigation_badges().await {
                 *NAV_BADGES.write() = fresh;
             }
@@ -185,22 +218,13 @@ pub fn should_flash(view_key: &str, has_attention: bool) -> bool {
     true
 }
 
-/// True once persisted dismissals have been loaded from LocalStorage into
-/// [`ALERT_STATE`].  The `OnceLock` is cheaper than checking a flag on
-/// `AlertState` on every access — it compiles to a single atomic load after
-/// the first write.
-static DISMISSED_LOADED: OnceLock<()> = OnceLock::new();
-
 /// Load persisted dismissed-item keys from LocalStorage into [`ALERT_STATE`]
-/// exactly once, the first time any public function needs them.
+/// for the current storage namespace if it has not already been loaded.
 fn ensure_dismissed_loaded() {
-    DISMISSED_LOADED.get_or_init(|| {
-        let key = dismissed_storage_key();
-        if let Ok(stored) = LocalStorage::get::<Vec<String>>(&key) {
-            let mut state = ALERT_STATE.write();
-            state.dismissed_items.extend(stored);
-        }
-    });
+    let key = dismissed_storage_key();
+    if ALERT_STATE.read().dismissed_storage_key.as_deref() != Some(key.as_str()) {
+        load_dismissals_for_storage_key(key);
+    }
 }
 
 /// Dismiss a specific attention row/card after the user clicks or opens it.

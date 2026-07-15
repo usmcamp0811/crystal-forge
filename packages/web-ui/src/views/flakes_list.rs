@@ -18,7 +18,9 @@ use wasm_bindgen::prelude::Closure;
 use web_sys::console;
 use web_sys::{Node, window};
 
-use crate::alerts::{acknowledge, attention_row_class, dismiss_attention_item, should_flash};
+use crate::alerts::{
+    NAV_BADGES, acknowledge_with_cursor, attention_row_class, dismiss_attention_item, should_flash,
+};
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
     delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_environments,
@@ -2892,6 +2894,7 @@ pub fn FlakesListViewNew() -> Element {
     });
     let mut rewrite_prompt = use_signal(|| None::<(i32, String, String)>);
     let mut dismissed_rewrite_conflicts = use_signal(HashSet::<String>::new);
+    let mut flakes_ack_cursor = use_signal(|| None::<String>);
 
     let flakes_resource = use_resource(move || {
         let _nonce = *reload_nonce.read();
@@ -2949,6 +2952,11 @@ pub fn FlakesListViewNew() -> Element {
         Some(Err(err)) => (Vec::new(), Some(err.to_string()), false),
         None => (Vec::new(), None, true),
     };
+    use_effect(move || {
+        if matches!(flakes_resource.read().as_ref(), Some(Ok(_))) {
+            flakes_ack_cursor.set(NAV_BADGES.read().observed_at.clone());
+        }
+    });
     let timeline_items = match timelines_resource.read().as_ref() {
         Some(Ok(items)) => items.clone(),
         _ => Vec::new(),
@@ -3048,7 +3056,9 @@ pub fn FlakesListViewNew() -> Element {
     let flakes_loaded_successfully = !loading && load_error.is_none();
     use_effect(move || {
         if flakes_loaded_successfully {
-            acknowledge("flakes", error_count as i64);
+            if let Some(cursor) = flakes_ack_cursor.read().clone() {
+                acknowledge_with_cursor("flakes", error_count as i64, cursor);
+            }
         }
     });
 

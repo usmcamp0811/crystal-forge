@@ -5,7 +5,7 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::alerts::{
-    NAV_BADGES, acknowledge, attention_row_class, dismiss_attention_item, should_flash,
+    NAV_BADGES, acknowledge_with_cursor, attention_row_class, dismiss_attention_item, should_flash,
 };
 
 use crate::api::{
@@ -63,6 +63,8 @@ fn EvaluationsPage() -> Element {
     let mut history_status_filter = use_signal(|| String::from("all"));
     let mut history_flake_filter = use_signal(|| String::from("all"));
     let mut history_auto_selected = use_signal(|| false);
+    let mut history_ack_cursor = use_signal(|| None::<String>);
+    let mut evals_ack_sent = use_signal(|| false);
 
     let history_resource = use_resource(move || async move {
         let _ = refresh();
@@ -119,8 +121,9 @@ fn EvaluationsPage() -> Element {
     // Auto-select all history items on first successful data load.
     use_effect(move || {
         let already = *history_auto_selected.read();
-        if !already {
-            if let Some(Ok(page_data)) = &*history_resource.read() {
+        if let Some(Ok(page_data)) = &*history_resource.read() {
+            history_ack_cursor.set(NAV_BADGES.read().observed_at.clone());
+            if !already {
                 let ids: std::collections::HashSet<i32> =
                     page_data.items.iter().map(|item| item.commit_id).collect();
                 if !ids.is_empty() {
@@ -155,6 +158,28 @@ fn EvaluationsPage() -> Element {
         .filter(|item| item.evaluation_status == "failed")
         .count() as i64;
     let total_count = queue_items.read().len() as i64;
+    use_effect(move || {
+        if active_tab() == EvaluationsTab::History && !evals_ack_sent() {
+            if let (Some(Ok(page_data)), Some(cursor)) = (
+                history_resource.read().as_ref(),
+                history_ack_cursor.read().clone(),
+            ) {
+                let unfiltered_first_page = history_page() == 1
+                    && history_status_filter() == "all"
+                    && history_flake_filter() == "all";
+                let complete_page = page_data.total_count <= page_data.items.len() as i64;
+                if unfiltered_first_page && complete_page {
+                    let history_failed_count = page_data
+                        .items
+                        .iter()
+                        .filter(|item| item.evaluation_status == "failed")
+                        .count() as i64;
+                    acknowledge_with_cursor("evals", history_failed_count, cursor);
+                    evals_ack_sent.set(true);
+                }
+            }
+        }
+    });
     let selected_count = history_selected_ids.read().len();
     let selected_history_rows = history_resource
         .read()
@@ -403,14 +428,7 @@ fn EvaluationsPage() -> Element {
                                 focused_index.set(None);
                                 // Acknowledge the "evals" sidebar/tab badge when History tab
                                 // is opened (persists server-side — TASK-385 follow-up).
-                                if let Some(Ok(page_data)) = history_resource.read().as_ref() {
-                                    let history_failed_count = page_data
-                                        .items
-                                        .iter()
-                                        .filter(|item| item.evaluation_status == "failed")
-                                        .count() as i64;
-                                    acknowledge("evals", history_failed_count);
-                                }
+                                evals_ack_sent.set(false);
                             },
                             "History"
                             if evals_failed_new > 0 {
