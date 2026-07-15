@@ -85,20 +85,24 @@ pub fn SidebarNav() -> Element {
     // the shared NAV_BADGES global so other views (e.g. Builds/Evaluations
     // tab badges) can read the same server-computed "new since last
     // acknowledgment" counts.
-    use_future(move || async move {
-        // Brief initial delay so view mount effects (which run after the first
-        // render) have time to call acknowledge() and zero badges before the
-        // first sidebar GET response can overwrite the optimistic zero.
-        // 150ms is imperceptible to UX; the acknowledge POST+GET refresh
-        // that fires immediately after the view effect runs will correct the
-        // sidebar anyway once it completes.
-        gloo_timers::future::TimeoutFuture::new(150).await;
-        loop {
-            if let Ok(fresh) = get_navigation_badges().await {
-                *NAV_BADGES.write() = fresh;
+    // NOTE: use_effect + spawn deliberately used instead of use_future to avoid
+    // potential re-render restart issues with infinite-loop futures in Dioxus 0.7.
+    use_effect(move || {
+        spawn(async move {
+            // Brief initial delay so view mount effects (which run after the first
+            // render) have time to call acknowledge() and zero badges before the
+            // first sidebar GET response can overwrite the optimistic zero.
+            // 150ms is imperceptible to UX; the acknowledge POST+GET refresh
+            // that fires immediately after the view effect runs will correct the
+            // sidebar anyway once it completes.
+            gloo_timers::future::TimeoutFuture::new(150).await;
+            loop {
+                if let Ok(fresh) = get_navigation_badges().await {
+                    *NAV_BADGES.write() = fresh;
+                }
+                gloo_timers::future::TimeoutFuture::new(30_000).await;
             }
-            gloo_timers::future::TimeoutFuture::new(30_000).await;
-        }
+        });
     });
     // NAV_BADGES is the sole source of truth for badge visibility and counts
     // (server-computed "new since last acknowledgment" per category); reading
