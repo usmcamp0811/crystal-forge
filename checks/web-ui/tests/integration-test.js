@@ -1378,7 +1378,13 @@ function buildFlakeParityFixture() {
 }
 
 async function routeNavigationBadges(page, overrides = {}) {
-  const body = {
+  /// Track which categories have been acknowledged via POST so subsequent
+  /// GET /navigation/badges returns zeroed counts — otherwise the app's
+  /// post-acknowledge refetch would re-populate the badge with the original
+  /// pre-acknowledgment value.
+  const acked = new Set();
+
+  const base = {
     systems_attention: 2,
     systems_total: 6,
     flakes_errored: 1,
@@ -1391,17 +1397,39 @@ async function routeNavigationBadges(page, overrides = {}) {
     ...overrides,
   };
 
+  /// Build a fresh response body, zeroing fields for acknowledged categories.
+  function body() {
+    return {
+      ...base,
+      flakes_errored: acked.has("flakes") ? 0 : base.flakes_errored,
+      systems_attention: acked.has("systems") ? 0 : base.systems_attention,
+      environments_attention: acked.has("environments") ? 0 : base.environments_attention,
+      builds_failed_new: acked.has("builds") ? 0 : base.builds_failed_new,
+      evals_failed_new: acked.has("evals") ? 0 : base.evals_failed_new,
+      cves_critical_new: acked.has("cves") ? 0 : base.cves_critical_new,
+    };
+  }
+
+  // POST /navigation/acknowledge — record the acknowledgment.
+  await page.route("**/api/v1/navigation/acknowledge", async (route) => {
+    const category = route.request().postDataJSON()?.category;
+    if (category) acked.add(category);
+    await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+  });
+
+  // GET /navigation/badges — return zeroed counts for acknowledged categories.
   await page.route("**/api/v1/navigation/badges", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify(body),
+      body: JSON.stringify(body()),
     });
   });
 }
 
 async function unrouteNavigationBadges(page) {
   await page.unroute("**/api/v1/navigation/badges");
+  await page.unroute("**/api/v1/navigation/acknowledge");
 }
 
 async function routeFlakeParityData(page) {
