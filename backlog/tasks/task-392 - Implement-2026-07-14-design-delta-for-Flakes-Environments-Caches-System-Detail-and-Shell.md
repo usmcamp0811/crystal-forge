@@ -15,6 +15,7 @@ dependencies:
   - TASK-384
   - TASK-385
 references:
+  - commit 65a43af1 (`update design`)
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/CachesView.jsx
   - docs/design/CrystalForge/components/EnvironmentsView.jsx
@@ -60,6 +61,20 @@ Shell navigation order, and any required shared web-ui styling/hooks needed to
 support those flows. The shipped web UI should match the updated reference for
 these specific surfaces, while preserving existing real-data behavior and adding
 or updating screenshot/assertion coverage for the changed states.
+
+## Authoritative Commit Delta
+
+- Commit: `65a43af1` (`update design`)
+- Implement from the exact design-file changes in that commit:
+  - `docs/design/CrystalForge/app.jsx`
+  - `docs/design/CrystalForge/components/CachesView.jsx`
+  - `docs/design/CrystalForge/components/EnvironmentsView.jsx`
+  - `docs/design/CrystalForge/components/FlakesView.jsx`
+  - `docs/design/CrystalForge/components/Shell.jsx`
+  - `docs/design/CrystalForge/components/SystemDetail.jsx`
+  - `docs/design/CrystalForge/styles.css`
+- Any work outside those design-file deltas is out of scope unless it is strictly
+  required to make the changed references function in the shipped web UI.
 
 ## Non-Goals
 

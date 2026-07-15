@@ -15,6 +15,7 @@ labels:
 dependencies:
   - TASK-392
 references:
+  - commit 2cc51a2d (`design changes builders`)
   - docs/design/CrystalForge/components/BuildersView.jsx
   - packages/web-ui/src/views/builders.rs
   - packages/web-ui/src/components/builders/
@@ -49,6 +50,15 @@ Bring the Builders surface into parity with the latest 2026-07-14 design delta
 only for the newly changed interaction and layout behavior: click-to-open cards
 and rows, the builder detail side panel, the updated open/edit/register flow,
 and any required screenshot/assertion coverage updates.
+
+## Authoritative Commit Delta
+
+- Commit: `2cc51a2d` (`design changes builders`)
+- Implement from the exact design-file changes in that commit:
+  - `docs/design/CrystalForge/components/BuildersView.jsx`
+- Treat the commit diff as the authoritative source for what changed in scope:
+  click-to-open cards/rows, selected builder state, `BuilderPanel`, and the
+  updated edit/register handoff flow.
 
 ## Non-Goals
 
