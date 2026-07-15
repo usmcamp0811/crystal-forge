@@ -76,6 +76,13 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
   const [rollbackConfirm, setRollbackConfirm] = React.useState(false);
   const [sshOpen, setSshOpen] = React.useState(false);
   const [rollbackOpen, setRollbackOpen] = React.useState(false);
+  const [commitPeek, setCommitPeek] = React.useState(null); // {sha, msg, flake, author, at} | {capture,...}
+  const openCommitPeek = (c) => {
+    const f = FLAKE_REGISTRY.find(x => x.name === c.flake)
+           || FLAKE_REGISTRY.find(x => (FLAKE_COMMITS[x.id] || []).some(k => k.sha === c.sha))
+           || FLAKE_REGISTRY[0];
+    setCommitPeek({ flake: f, sha: c.capture ? null : c.sha, meta: { msg: c.msg, author: c.author, at: c.at } });
+  };
   if (!sys) return null;
 
   return (
@@ -186,9 +193,9 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
 
       {/* Tab panels */}
       <div className="sd-body">
-        {tab === "overview"   && <OverviewTab sys={sys} onViewCves={() => setTab("cves")} onTagFilter={onTagFilter} deployStage={deployStage} pendingCommit={pendingDeploy?.commit} pendingKind={pendingDeploy?.kind} pendingGen={pendingDeploy?.gen} onViewHistory={() => setTab("history")} />}
-        {tab === "deploy"     && <DeployTab sys={sys} onDeploy={onDeploy} />}
-        {tab === "history"    && <HistoryTab sys={sys} onRollback={(sha,gen)=>{ setRollbackTarget({sha,gen}); setRollbackConfirm(true); }} onLogsJump={(id)=>{ setTab("logs"); setLogsJump({ id, nonce: Date.now() }); }} onOpenCommit={onOpenCommit} />}
+        {tab === "overview"   && <OverviewTab sys={sys} onViewCves={() => setTab("cves")} onTagFilter={onTagFilter} deployStage={deployStage} pendingCommit={pendingDeploy?.commit} pendingKind={pendingDeploy?.kind} pendingGen={pendingDeploy?.gen} onViewHistory={() => setTab("history")} onOpenCommit={openCommitPeek} onOpenBuild={() => onNavigate?.("builds")} />}
+        {tab === "deploy"     && <DeployTab sys={sys} onDeploy={onDeploy} onOpenCommit={openCommitPeek} />}
+        {tab === "history"    && <HistoryTab sys={sys} onRollback={(sha,gen)=>{ setRollbackTarget({sha,gen}); setRollbackConfirm(true); }} onLogsJump={(id)=>{ setTab("logs"); setLogsJump({ id, nonce: Date.now() }); }} onOpenCommit={openCommitPeek} />}
         {tab === "logs"       && <LogsTab sys={sys} jump={logsJump} />}
         {tab === "config"     && <ConfigTab sys={sys} />}
         {tab === "cves"       && <CvesTab sys={sys} />}
@@ -197,6 +204,7 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
       </div>
       {sshOpen && <SshConnectModal sys={sys} onClose={() => setSshOpen(false)} />}
       {(rollbackConfirm || rollbackOpen) && <RollbackModal sys={sys} targetGen={rollbackTarget?.gen} targetSha={rollbackTarget?.sha} onClose={() => { setRollbackConfirm(false); setRollbackOpen(false); setRollbackTarget(null); }} onConfirm={(g) => { setRollbackConfirm(false); setRollbackOpen(false); setRollbackTarget(null); setTab("overview"); onStartPending?.({ commit: g.sha.substring(0,7), kind: "rollback", gen: g.id }); }} />}
+      {commitPeek && <FlakeTray flake={commitPeek.flake} focusSha={commitPeek.sha} focusMeta={commitPeek.meta} onClose={() => setCommitPeek(null)} onEdit={() => {}} />}
     </div>
   );
 }
@@ -381,7 +389,7 @@ function buildActivityFeed(sys, deployStage, pendingCommit, pendingKind, pending
   return feed.slice(0, 9);
 }
 
-function OverviewTab({ sys, onViewCves, onTagFilter, deployStage, pendingCommit, pendingKind, pendingGen, onViewHistory }) {
+function OverviewTab({ sys, onViewCves, onTagFilter, deployStage, pendingCommit, pendingKind, pendingGen, onViewHistory, onOpenCommit, onOpenBuild }) {
   const [tags, setTags] = React.useState(sys.tags || []);
   const [adding, setAdding] = React.useState(false);
   const [draft, setDraft] = React.useState("");
@@ -402,7 +410,18 @@ function OverviewTab({ sys, onViewCves, onTagFilter, deployStage, pendingCommit,
         <dl className="kv-grid">
           <dt>Flake</dt><dd className="mono">{sys.flake}</dd>
           <dt>Branch</dt><dd className="mono">{sys.branch}</dd>
-          <dt>Commit</dt><dd className="mono">{sys.commit}</dd>
+          <dt>Commit</dt>
+          <dd className="mono">
+            <button className="tl-commit-link mono focus-ring" title={`Open ${sys.commit} in Flakes`}
+              onClick={() => onOpenCommit?.({ sha: sys.commit, msg: sys.commitMessage, flake: sys.flake, author: sys.deployedBy, at: sys.lastDeployAt })}>
+              <Icon name="git" size={11} /> {sys.commit} <Icon name="arrow-right" size={10} />
+            </button>
+            {" "}
+            <button className="tl-commit-link mono focus-ring" title={`Open the build for ${sys.commit}`}
+              onClick={() => onOpenBuild?.({ sha: sys.commit, flake: sys.flake, generation: sys.generation })}>
+              <Icon name="build" size={11} /> build #{sys.generation} <Icon name="arrow-right" size={10} />
+            </button>
+          </dd>
           <dt>Message</dt><dd style={{ whiteSpace: "normal", fontFamily: "var(--font-sans)" }}>{sys.commitMessage}</dd>
           <dt>Generation</dt><dd className="mono">#{sys.generation}</dd>
           <dt>NixOS</dt><dd className="mono">{sys.nixosVersion}</dd>
@@ -529,7 +548,7 @@ function OverviewTab({ sys, onViewCves, onTagFilter, deployStage, pendingCommit,
 }
 
 /* ---------- Deploy ---------- */
-function DeployTab({ sys, onDeploy }) {
+function DeployTab({ sys, onDeploy, onOpenCommit }) {
   const [mode, setMode] = React.useState("commit"); // 'commit' | 'generation'
   const [target, setTarget] = React.useState(null); // {kind, id, label, sub, sha?}
   const [showDiff, setShowDiff] = React.useState(false);
@@ -615,7 +634,7 @@ function DeployTab({ sys, onDeploy }) {
                   className={`sd-commit-item focus-ring${isSel ? " selected" : ""}`}
                   onClick={() => setTarget({ kind: "commit", id: c.sha, label: c.sha, sub: c.message, sha: c.sha })}
                 >
-                  <span className="mono sd-commit-sha">{c.sha}</span>
+                  <span className="mono sd-commit-sha sd-commit-sha-link" title={`Open ${c.sha} in Flakes`} onClick={ev => { ev.stopPropagation(); onOpenCommit?.({ sha: c.sha, msg: c.message, flake: sys.flake, author: c.author, at: c.when }); }}><Icon name="git" size={10} /> {c.sha}</span>
                   <span className="sd-commit-msg">{c.message}</span>
                   <span className="sd-commit-meta mono">{c.author}</span>
                   <span className="sd-commit-meta">{c.when}</span>
@@ -638,7 +657,7 @@ function DeployTab({ sys, onDeploy }) {
                   ? <span className="chip chip-warning" title={g.driftHint || "Manual nixos-rebuild on host"}><Icon name="warn" size={9}/> local</span>
                   : <span className="chip chip-unknown" title="Closure no longer in cache or metadata stripped">unknown</span>;
               const shaCell = g.sha
-                ? <span className="mono sd-commit-sha">{g.sha}</span>
+                ? <span className="mono sd-commit-sha sd-commit-sha-link" title={`Open ${g.sha} in Flakes`} onClick={ev => { ev.stopPropagation(); onOpenCommit?.({ sha: g.sha, msg: g.msg, flake: g.flake || sys.flake, author: g.by, at: g.at }); }}><Icon name="git" size={10} /> {g.sha}</span>
                 : <span className="mono sd-commit-sha" style={{ color: "var(--cf-text-muted)", fontStyle: "italic" }}>—</span>;
               return (
                 <button key={g.id}
@@ -671,12 +690,15 @@ function DeployTab({ sys, onDeploy }) {
         </div>
         <dl className="kv-grid">
           <dt>Target</dt><dd className="mono">{sys.hostname}</dd>
-          <dt>From</dt><dd className="mono">{sys.commit} · gen #{sys.generation}</dd>
+          <dt>From</dt>
+          <dd className="mono">
+            gen #{sys.generation} · <span className="sd-commit-sha-link" title={`Open ${sys.commit} in Flakes`} onClick={() => onOpenCommit?.({ sha: sys.commit, msg: sys.commitMessage, flake: sys.flake, author: sys.deployedBy, at: sys.lastDeployAt })}><Icon name="git" size={10} /> {sys.commit}</span>
+          </dd>
           <dt>To</dt>
           <dd className="mono">
             {selected.kind === "generation"
-              ? <>gen #{selected.id}{selected.sha ? <> · {selected.sha}</> : <span style={{ color:"var(--cf-text-muted)", fontStyle:"italic" }}> · no commit</span>}</>
-              : selected.sha}
+              ? <>gen #{selected.id}{selected.sha ? <> · <span className="sd-commit-sha-link" title={`Open ${selected.sha} in Flakes`} onClick={() => onOpenCommit?.({ sha: selected.sha, msg: selected.sub, flake: sys.flake })}><Icon name="git" size={10} /> {selected.sha}</span></> : <span style={{ color:"var(--cf-text-muted)", fontStyle:"italic" }}> · no commit</span>}</>
+              : <span className="sd-commit-sha-link" title={`Open ${selected.sha} in Flakes`} onClick={() => onOpenCommit?.({ sha: selected.sha, msg: selected.sub, flake: sys.flake })}><Icon name="git" size={10} /> {selected.sha}</span>}
           </dd>
           {selected.kind === "generation" && selected.origin && (
             <>

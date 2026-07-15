@@ -82,13 +82,14 @@ function FlakesView({ defaultView, focus, onClearFocus }) {
 }
 
 /* ── Side tray: history + diff ─────────────────────────────────────── */
-function FlakeTray({ flake, focusSha, onClose, onEdit }) {
+function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit }) {
   const commits = FLAKE_COMMITS[flake.id] || [];
   // If the deep-linked commit isn't in the tracked list, synthesize a stub so the
-  // tray can still focus it (e.g. a short sha referenced from a deployment).
+  // tray can still focus it (e.g. a short sha referenced from a deployment) — using
+  // whatever real message/author/time the caller already knew about that commit.
   const allCommits = React.useMemo(() => {
     if (focusSha && !commits.some(c => c.sha === focusSha)) {
-      return [{ sha: focusSha, msg: "(deployed commit)", author: "—", at: "deployed", files: 0, add: 0, del: 0, synthetic: true }, ...commits];
+      return [{ sha: focusSha, msg: focusMeta?.msg || "(deployed commit)", author: focusMeta?.author || "—", at: focusMeta?.at || "deployed", files: 0, add: 0, del: 0, synthetic: true }, ...commits];
     }
     return commits;
   }, [flake.id, focusSha]);
@@ -931,4 +932,4 @@ function HttpsCredPicker({ form, set }) {
   );
 }
 
-Object.assign(window, { FlakesView });
+Object.assign(window, { FlakesView, FlakeTray });

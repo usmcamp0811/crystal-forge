@@ -1,9 +1,18 @@
 // Caches view — binary cache destinations registry
 
-function CachesView() {
+function CachesView({ focus, onClearFocus, onOpenSystem }) {
   const [query, setQuery] = React.useState("");
+  const [viewMode, setViewMode] = React.useState("cards");
   const [editCache, setEditCache] = React.useState(null);
+  const [viewCache, setViewCache] = React.useState(null);
   const [addOpen, setAddOpen] = React.useState(false);
+  React.useEffect(() => {
+    if (focus) {
+      const c = CACHE_DESTINATIONS.find(x => x.id === focus || x.name === focus || x.url === focus);
+      if (c) setViewCache(c);
+      onClearFocus?.();
+    }
+  }, [focus]);
 
   const caches = CACHE_DESTINATIONS.filter(c =>
     !query ||
@@ -52,9 +61,18 @@ function CachesView() {
           <Icon name="search"/>
           <input className="input focus-ring" placeholder="Search caches…" value={query} onChange={e=>setQuery(e.target.value)}/>
         </div>
+        <div className="seg">
+          <button className={viewMode==="cards"?"active":""} onClick={()=>setViewMode("cards")}><Icon name="grid" size={12}/> Cards</button>
+          <button className={viewMode==="table"?"active":""} onClick={()=>setViewMode("table")}><Icon name="rows" size={12}/> Table</button>
+        </div>
         <span className="filter-count">{caches.length} caches</span>
       </div>
 
+      {viewMode === "cards" ? (
+        <div className="cards-grid">
+          {caches.map(c => <CacheCard key={c.id} cache={c} onEdit={()=>setViewCache(c)}/>)}
+        </div>
+      ) : (
       <div className="card" style={{ overflow:"hidden" }}>
         <table className="sys-table">
           <thead>
@@ -70,11 +88,15 @@ function CachesView() {
             </tr>
           </thead>
           <tbody>
-            {caches.map(c => <CacheRow key={c.id} cache={c} onEdit={()=>setEditCache(c)}/>)}
+            {caches.map(c => <CacheRow key={c.id} cache={c} onEdit={()=>setViewCache(c)}/>)}
           </tbody>
         </table>
       </div>
+      )}
 
+      {viewCache && (
+        <CachePanel cache={viewCache} onClose={() => setViewCache(null)} onEdit={() => setEditCache(viewCache)} onOpenSystem={onOpenSystem} />
+      )}
       {(editCache || addOpen) && (
         <CacheFormModal
           mode={addOpen ? "add" : "edit"}
@@ -82,6 +104,71 @@ function CachesView() {
           onClose={() => { setEditCache(null); setAddOpen(false); }}
         />
       )}
+    </div>
+  );
+}
+
+// Card view — mirrors EnvCard's layout/rail/foot pattern for cross-view consistency
+function CacheCard({ cache, onEdit }) {
+  const status = {
+    healthy: { cls:"chip-healthy", color:"#34d399", label:"healthy" },
+    warning: { cls:"chip-warning", color:"#fbbf24", label:"warning" },
+    error:   { cls:"chip-critical",color:"#f87171", label:"error" },
+  }[cache.status] || { cls:"chip-unknown", color:"#6b7280", label:cache.status };
+  const typeIcon = { s3:"download", attic:"download", nix:"link" }[cache.type] || "download";
+  const pct = cache.storage ? (cache.storage.used / cache.storage.total) * 100 : null;
+
+  return (
+    <div className="env-card" onClick={onEdit} style={{ cursor:"pointer" }}>
+      <div className="env-card-rail" style={{ background: status.color }}/>
+      <div className="env-card-head">
+        <div>
+          <div className="env-card-title">
+            <Icon name={typeIcon} size={13} style={{ opacity:0.7 }}/>
+            <span>{cache.name}</span>
+            {cache.readonly && <span className="chip chip-info" style={{ fontSize:9 }}>system</span>}
+          </div>
+          <div className="env-card-desc mono">{cache.url}</div>
+        </div>
+        <div style={{ display:"flex", gap:4 }}>
+          <button className="btn-icon focus-ring" title="Edit" onClick={(e)=>{e.stopPropagation();onEdit();}}>
+            <Icon name="gear" size={14}/>
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap", padding:"0 16px" }}>
+        <span className={`chip ${status.cls}`} title={cache.statusReason || status.label}>
+          <span className="chip-dot" style={{ background: status.color }}/>
+          {status.label}
+        </span>
+        <span className="chip chip-unknown mono">{cache.type}</span>
+      </div>
+
+      <div style={{ padding:"12px 16px 0" }}>
+        {cache.storage ? (
+          <>
+            <div style={{ fontSize:11, color:"var(--cf-text-secondary)", marginBottom:4 }}>
+              <span className="mono">{cache.storage.used}/{cache.storage.total} {cache.storage.unit}</span> used
+            </div>
+            <div style={{ height:5, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden" }}>
+              <div style={{ width:`${pct}%`, height:"100%", background: pct > 85 ? "#fbbf24" : "#34d399" }}/>
+            </div>
+          </>
+        ) : <div style={{ fontSize:11, color:"var(--cf-text-muted)" }}>No storage data.</div>}
+      </div>
+
+      <div className="env-card-foot">
+        <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>
+          {cache.paths ? cache.paths.toLocaleString() : "—"} paths · {cache.lastPush || "never pushed"}
+        </span>
+        <div style={{ display:"flex", gap:4, flexWrap:"wrap", justifyContent:"flex-end" }}>
+          {cache.environments.length === 0
+            ? <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>no environments</span>
+            : cache.environments.slice(0, 3).map(env => <EnvBadge key={env} env={env}/>)}
+          {cache.environments.length > 3 && <span className="chip chip-unknown" style={{ fontSize:10 }}>+{cache.environments.length - 3}</span>}
+        </div>
+      </div>
     </div>
   );
 }
@@ -149,6 +236,101 @@ function CacheRow({ cache, onEdit }) {
         </div>
       </td>
     </tr>
+  );
+}
+
+// Side panel — cache reference peek, with Edit handing off to the form modal
+function CachePanel({ cache, onClose, onEdit, onOpenSystem }) {
+  const usingSystems = SYSTEMS.filter(s => cache.environments.includes(s.environment));
+  const status = {
+    healthy: { cls:"chip-healthy", color:"#34d399", label:"healthy" },
+    warning: { cls:"chip-warning", color:"#fbbf24", label:"warning" },
+    error:   { cls:"chip-critical",color:"#f87171", label:"error" },
+  }[cache.status] || { cls:"chip-unknown", color:"#6b7280", label:cache.status };
+  const typeIcon = { s3:"download", attic:"download", nix:"link" }[cache.type] || "download";
+
+  return (
+    <>
+      <div className="side-panel-backdrop" onClick={onClose} />
+      <aside className="side-panel" role="dialog" aria-modal="true">
+        <div className="panel-head">
+          <div className="panel-title">
+            <h2>
+              <Icon name={typeIcon} size={14} style={{ opacity:0.7 }} />
+              {cache.name}
+              {cache.readonly && <span className="chip chip-info" style={{ fontSize:9 }}>system</span>}
+            </h2>
+            <span className="fqdn mono">{cache.url}</span>
+          </div>
+          <button className="btn-icon focus-ring" onClick={onClose} aria-label="Close">
+            <Icon name="x" size={16} />
+          </button>
+        </div>
+        <div className="panel-body">
+          <section className="panel-section">
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+              <span className={`chip ${status.cls}`} title={cache.statusReason || status.label}>
+                <span className="chip-dot" style={{ background: status.color }}/>
+                {status.label}
+              </span>
+              <span className="chip chip-unknown mono">{cache.type}</span>
+            </div>
+          </section>
+
+          <section className="panel-section">
+            <h3>Storage</h3>
+            {cache.storage ? (
+              <>
+                <div style={{ fontSize:12, color:"var(--cf-text-secondary)", marginBottom:6 }}>
+                  <span className="mono">{cache.storage.used}/{cache.storage.total} {cache.storage.unit}</span> used
+                </div>
+                <div style={{ height:6, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden" }}>
+                  <div style={{
+                    width:`${(cache.storage.used / cache.storage.total) * 100}%`,
+                    height:"100%",
+                    background: cache.storage.used / cache.storage.total > 0.85 ? "#fbbf24" : "#34d399"
+                  }}/>
+                </div>
+              </>
+            ) : <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>No storage data.</div>}
+          </section>
+
+          <section className="panel-section">
+            <h3>Details</h3>
+            <dl className="kv-grid">
+              <dt>Paths cached</dt><dd className="mono">{cache.paths ? cache.paths.toLocaleString() : "—"}</dd>
+              <dt>Last push</dt><dd>{cache.lastPush || "—"}</dd>
+              <dt>Auth</dt><dd>{cache.requiresAuth ? (cache.credId || "required") : "not required"}</dd>
+            </dl>
+          </section>
+
+          <section className="panel-section">
+            <h3>Environments ({cache.environments.length})</h3>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+              {cache.environments.length ? cache.environments.map(env => <EnvBadge key={env} env={env}/>) : <span style={{ fontSize:12, color:"var(--cf-text-muted)" }}>none assigned</span>}
+            </div>
+          </section>
+
+          <section className="panel-section">
+            <h3>Systems using this cache ({usingSystems.length})</h3>
+            <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+              {usingSystems.slice(0, 8).map(s => (
+                <div key={s.id} className="sd-commit-sha-link" style={{ display:"flex", alignItems:"center", gap:8, fontSize:12.5, padding:"3px 4px", margin:"-3px -4px" }} onClick={() => onOpenSystem?.(s)}>
+                  <span className="status-dot" style={{ "--status-color": s.statusColor }} />
+                  <span className="mono truncate" style={{ flex:1 }}>{s.hostname}</span>
+                  <EnvBadge env={s.environment} />
+                </div>
+              ))}
+              {usingSystems.length > 8 && <div style={{ fontSize:11, color:"var(--cf-text-muted)" }}>+{usingSystems.length - 8} more</div>}
+              {!usingSystems.length && <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>No systems in an assigned environment yet.</div>}
+            </div>
+          </section>
+        </div>
+        <div className="panel-actions">
+          <button className="btn btn-primary focus-ring" onClick={onEdit}><Icon name="gear" size={12} /> Edit cache</button>
+        </div>
+      </aside>
+    </>
   );
 }
 

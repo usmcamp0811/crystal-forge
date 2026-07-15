@@ -79,11 +79,12 @@ function isProductionEnv(envName) {
 }
 window.isProductionEnv = isProductionEnv;
 
-function EnvironmentsView({ defaultView }) {
+function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle }) {
   const [query, setQuery] = React.useState("");
   const [viewMode, setViewMode] = React.useState(defaultView || "cards");
   React.useEffect(() => { if (defaultView) setViewMode(defaultView); }, [defaultView]);
   const [editEnv, setEditEnv] = React.useState(null);
+  const [viewEnv, setViewEnv] = React.useState(null);
   const [addOpen, setAddOpen] = React.useState(false);
   const envNeedsAttention = (name) => SYSTEMS.some(s => s.environment === name && (s.health === "critical" || s.health === "offline"));
   const flashAttention = useAttentionFlash("environments", ENVIRONMENTS.some(e => envNeedsAttention(e.name)));
@@ -150,7 +151,7 @@ function EnvironmentsView({ defaultView }) {
 
       {viewMode === "cards" ? (
         <div className="cards-grid">
-          {envs.map(env => <EnvCard key={env.name} env={env} flash={flashAttention && envNeedsAttention(env.name)} onEdit={()=>setEditEnv(env)}/>)}
+          {envs.map(env => <EnvCard key={env.name} env={env} flash={flashAttention && envNeedsAttention(env.name)} onEdit={()=>setViewEnv(env)}/>)}
         </div>
       ) : (
         <div className="card" style={{ overflow:"hidden" }}>
@@ -169,12 +170,15 @@ function EnvironmentsView({ defaultView }) {
               </tr>
             </thead>
             <tbody>
-              {envs.map(env => <EnvRow key={env.name} env={env} flash={flashAttention && envNeedsAttention(env.name)} onEdit={()=>setEditEnv(env)}/>)}
+              {envs.map(env => <EnvRow key={env.name} env={env} flash={flashAttention && envNeedsAttention(env.name)} onEdit={()=>setViewEnv(env)}/>)}
             </tbody>
           </table>
         </div>
       )}
 
+      {viewEnv && (
+        <EnvPanel env={viewEnv} onClose={() => setViewEnv(null)} onEdit={() => { setEditEnv(viewEnv); }} onOpenCache={onOpenCache} onOpenSystem={onOpenSystem} onOpenBundle={onOpenBundle} />
+      )}
       {(editEnv || addOpen) && (
         <EnvFormModal
           mode={addOpen ? "add" : "edit"}
@@ -257,7 +261,7 @@ function EnvCard({ env, onEdit, flash }) {
   const offPct    = (env.stats.offline / total) * 100;
 
   return (
-    <div className={`env-card${flash ? " attention-flash" : ""}`}>
+    <div className={`env-card${flash ? " attention-flash" : ""}`} onClick={onEdit} style={{ cursor:"pointer" }}>
       <div className="env-card-rail" style={{ background: env.color }}/>
       <div className="env-card-head">
         <div>
@@ -271,7 +275,7 @@ function EnvCard({ env, onEdit, flash }) {
           )}
         </div>
         <div style={{ display:"flex", gap:4 }}>
-          <button className="btn-icon focus-ring" title="Edit" onClick={onEdit}>
+          <button className="btn-icon focus-ring" title="Edit" onClick={(e)=>{e.stopPropagation();onEdit();}}>
             <Icon name="gear" size={14}/>
           </button>
         </div>
@@ -335,11 +339,111 @@ function EnvCard({ env, onEdit, flash }) {
         <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>
           {Object.values(env.rbac || {}).flat().length} role assignments
         </span>
-        <button className="btn btn-subtle focus-ring" style={{ padding:"4px 10px", fontSize:12 }} onClick={onEdit}>
-          <Icon name="gear" size={12}/> Edit
-        </button>
       </div>
     </div>
+  );
+}
+
+// Side panel — environment reference peek, with Edit handing off to the form modal
+function EnvPanel({ env, onClose, onEdit, onOpenCache, onOpenSystem, onOpenBundle }) {
+  const total = env.stats.total || 1;
+  const sys = SYSTEMS.filter(s => s.environment === env.name);
+  return (
+    <>
+      <div className="side-panel-backdrop" onClick={onClose} />
+      <aside className="side-panel" role="dialog" aria-modal="true">
+        <div className="panel-head">
+          <div className="panel-title">
+            <h2>
+              <span className="env-dot" style={{ background: env.color }} />
+              {env.name}
+              {env.isProduction && <span className="env-prod-badge"><Icon name="shield" size={9}/> PROD</span>}
+            </h2>
+            {env.description && <span className="fqdn">{env.description}</span>}
+          </div>
+          <button className="btn-icon focus-ring" onClick={onClose} aria-label="Close">
+            <Icon name="x" size={16} />
+          </button>
+        </div>
+        <div className="panel-body">
+          <section className="panel-section">
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+              <span className={`chip ${env.defaultPolicy === "manual" ? "chip-warning" : "chip-healthy"}`}>{env.defaultPolicy || "—"}</span>
+              {env.autoSync ? <span className="chip chip-healthy">auto-sync on</span> : <span className="chip chip-unknown">auto-sync off</span>}
+              {env.requiresApproval ? <span className="chip chip-warning">approval required</span> : <span className="chip chip-healthy">no approval needed</span>}
+            </div>
+          </section>
+
+          <section className="panel-section">
+            <h3>Health</h3>
+            <div className="env-health-bar" style={{ marginBottom:8 }}>
+              {env.stats.healthy  > 0 && <div style={{ width: `${(env.stats.healthy/total)*100}%`, background:"#34d399" }} title={`${env.stats.healthy} healthy`}/>}
+              {env.stats.warning  > 0 && <div style={{ width: `${(env.stats.warning/total)*100}%`,   background:"#fbbf24" }} title={`${env.stats.warning} warning`}/>}
+              {env.stats.critical > 0 && <div style={{ width: `${(env.stats.critical/total)*100}%`,   background:"#f87171" }} title={`${env.stats.critical} critical`}/>}
+              {env.stats.offline  > 0 && <div style={{ width: `${(env.stats.offline/total)*100}%`,    background:"#6b7280" }} title={`${env.stats.offline} offline`}/>}
+            </div>
+            <div className="env-health-legend">
+              {env.stats.healthy  > 0 && <span><span className="env-health-sw" style={{background:"#34d399"}}/>{env.stats.healthy} healthy</span>}
+              {env.stats.warning  > 0 && <span><span className="env-health-sw" style={{background:"#fbbf24"}}/>{env.stats.warning} warning</span>}
+              {env.stats.critical > 0 && <span><span className="env-health-sw" style={{background:"#f87171"}}/>{env.stats.critical} critical</span>}
+              {env.stats.offline  > 0 && <span><span className="env-health-sw" style={{background:"#6b7280"}}/>{env.stats.offline} offline</span>}
+              {env.stats.cveTotal > 0 && <span style={{ marginLeft:"auto" }}><Icon name="shield" size={10}/> {env.stats.cveTotal} CVE</span>}
+            </div>
+          </section>
+
+          <section className="panel-section">
+            <h3>Configuration</h3>
+            <dl className="kv-grid">
+              <dt>Cache</dt>
+              <dd className="mono truncate" title={env.cache || "no cache"}>
+                {env.cache
+                  ? <span className="sd-commit-sha-link" title={`Open ${env.cache} in Caches`} onClick={() => onOpenCache?.(env.cache)}><Icon name="download" size={10} /> {env.cache}</span>
+                  : <span style={{ color:"var(--cf-text-muted)", fontStyle:"italic" }}>not configured</span>}
+              </dd>
+              <dt>Enforcement</dt>
+              <dd>
+                <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                  {env.complianceBundleId && (() => {
+                    const b = (typeof COMPLIANCE_BUNDLES !== "undefined" ? COMPLIANCE_BUNDLES : []).find(x => x.id === env.complianceBundleId);
+                    return b ? <span className="chip chip-info sd-commit-sha-link" title={`Open ${b.name} in Compliance`} onClick={() => onOpenBundle?.(b.id)}><Icon name="shield" size={9}/> {b.framework}</span> : null;
+                  })()}
+                  {(env.gatePolicyIds || []).length > 0 && <span className="chip chip-unknown">{env.gatePolicyIds.length} gate{env.gatePolicyIds.length === 1 ? "" : "s"}</span>}
+                  {!env.complianceBundleId && (env.gatePolicyIds || []).length === 0 && <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>none</span>}
+                </div>
+              </dd>
+              <dt>Role assignments</dt>
+              <dd>{Object.values(env.rbac || {}).flat().length}</dd>
+            </dl>
+          </section>
+
+          <section className="panel-section">
+            <h3>Flakes in use</h3>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+              {env.stats.flakes.length ? env.stats.flakes.map(f => (
+                <span key={f} className="chip chip-unknown mono" style={{ fontSize:11 }}>{f}</span>
+              )) : <span style={{ fontSize:12, color:"var(--cf-text-muted)" }}>none deployed</span>}
+            </div>
+          </section>
+
+          <section className="panel-section">
+            <h3>Systems ({sys.length})</h3>
+            <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+              {sys.slice(0, 8).map(s => (
+                <div key={s.id} className="sd-commit-sha-link" style={{ display:"flex", alignItems:"center", gap:8, fontSize:12.5, padding:"3px 4px", margin:"-3px -4px" }} onClick={() => onOpenSystem?.(s)}>
+                  <span className="status-dot" style={{ "--status-color": s.statusColor }} />
+                  <span className="mono truncate" style={{ flex:1 }}>{s.hostname}</span>
+                </div>
+              ))}
+              {sys.length > 8 && <div style={{ fontSize:11, color:"var(--cf-text-muted)" }}>+{sys.length - 8} more</div>}
+              {!sys.length && <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>No systems in this environment yet.</div>}
+            </div>
+          </section>
+        </div>
+        <div className="panel-actions">
+          <button className="btn btn-primary focus-ring" onClick={onEdit}><Icon name="gear" size={12} /> Edit environment</button>
+        </div>
+      </aside>
+    </>
   );
 }
 

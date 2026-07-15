@@ -1284,6 +1284,16 @@ body {
   border-color: var(--cf-brand-purple);
 }
 .tl-commit-link svg:last-child { opacity: 0.6; }
+.sd-commit-sha-link {
+  display: inline-flex; align-items: center; gap: 4px;
+  cursor: pointer; border-radius: 4px; padding: 1px 4px; margin: -1px -4px;
+  transition: background 120ms, color 120ms;
+}
+.sd-commit-sha-link:hover {
+  background: color-mix(in oklab, var(--cf-brand-purple) 16%, transparent);
+  color: var(--cf-brand-purple);
+}
+.sd-commit-sha-link svg { opacity: 0.7; }
 
 /* Local / out-of-band rebuild */
 .tl-untracked {

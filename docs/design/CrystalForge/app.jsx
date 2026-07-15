@@ -305,6 +305,7 @@ function App() {
   const [complianceBundleId, setComplianceBundleId] = React.useState(null);
   const [pendingDeploy, setPendingDeploy] = React.useState(null);
   const [flakeFocus, setFlakeFocus] = React.useState(null);
+  const [cacheFocus, setCacheFocus] = React.useState(null);
   const [detailTab, setDetailTab] = React.useState("overview");
   const [topView, setTopView] = React.useState("dashboard"); // dashboard | systems | builds | evals | flakes | environments | caches | cves
   const coach = useCoach();
@@ -375,8 +376,8 @@ function App() {
           {topView === "builds" && <BuildsView />}
           {topView === "evals" && <EvalsView />}
           {topView === "flakes" && <FlakesView defaultView={defaultView} focus={flakeFocus} onClearFocus={() => setFlakeFocus(null)} />}
-          {topView === "environments" && <EnvironmentsView defaultView={defaultView} />}
-          {topView === "caches" && <CachesView />}
+          {topView === "environments" && <EnvironmentsView defaultView={defaultView} onOpenCache={(c) => { setCacheFocus(c); setTopView("caches"); }} onOpenSystem={(s) => { setTopView("systems"); openDetail(s); }} onOpenBundle={(id) => { setComplianceBundleId(id); setTopView("compliance"); }} />}
+          {topView === "caches" && <CachesView focus={cacheFocus} onClearFocus={() => setCacheFocus(null)} onOpenSystem={(s) => { setTopView("systems"); openDetail(s); }} />}
           {topView === "builders" && <BuildersView defaultView={defaultView} />}
           {topView === "policies" && <PoliciesView onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }}/>}
           {topView === "compliance" && <ComplianceView selectedBundleId={complianceBundleId} onClearBundle={() => setComplianceBundleId(null)} onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }}/>}
@@ -392,7 +393,6 @@ function App() {
             onBack={() => setDetailSystem(null)}
             onNavigate={(view, bundleId) => { setTopView(view); setDetailSystem(null); if (bundleId) setComplianceBundleId(bundleId); }}
             onTagFilter={(t) => { setSysTag(t); setTopView("systems"); setDetailSystem(null); }}
-            onOpenCommit={(c) => { setFlakeFocus(c); setTopView("flakes"); setDetailSystem(null); }}
             onDeploy={(s) => setPendingDeploy({ sysId: detailSystem.id, commit: s.pendingCommit, at: Date.now() })}
             onEdit={(s) => setEditTarget(s)}
             initialTab={detailTab}

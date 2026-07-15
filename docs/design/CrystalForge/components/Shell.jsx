@@ -262,8 +262,8 @@ const _failedBuilds24h = typeof HISTORY_BUILDS !== "undefined" ? _failedWithin(H
 const _failedEvals24h  = typeof HISTORY_EVALS  !== "undefined" ? _failedWithin(HISTORY_EVALS, 24, "completedAt") : 0;
 
 const NAV_OPS = [
-  { key: "builds",   label: "Builds",      icon: "build",  count: _failedBuilds24h || null, attention: _failedBuilds24h > 0, countTitle: `${_failedBuilds24h} failed build${_failedBuilds24h===1?"":"s"} in the last 24h`, route: "builds" },
   { key: "evals",    label: "Evaluations", icon: "eval",   count: _failedEvals24h || null,  attention: _failedEvals24h > 0,  countTitle: `${_failedEvals24h} failed evaluation${_failedEvals24h===1?"":"s"} in the last 24h`, route: "evals" },
+  { key: "builds",   label: "Builds",      icon: "build",  count: _failedBuilds24h || null, attention: _failedBuilds24h > 0, countTitle: `${_failedBuilds24h} failed build${_failedBuilds24h===1?"":"s"} in the last 24h`, route: "builds" },
   { key: "scanning", label: "Scanning",    icon: "shield", count: null, route: "scanning" },
 ];
 
