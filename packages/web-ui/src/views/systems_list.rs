@@ -231,7 +231,7 @@ pub fn SystemsListView() -> Element {
                 .map(|s| s.id.to_string())
                 .collect::<Vec<_>>();
             let ack_snapshot = {
-                let badges = NAV_BADGES.read();
+                let badges = NAV_BADGES.read_unchecked();
                 (
                     badges.observed_at.clone(),
                     badges.systems_fingerprint.clone(),
