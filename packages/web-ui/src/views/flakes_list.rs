@@ -3045,8 +3045,11 @@ pub fn FlakesListViewNew() -> Element {
     // flash on errored rows (TASK-385).
     let has_flake_errors = error_count > 0;
     let flash_flakes = should_flash("flakes", has_flake_errors);
+    let flakes_loaded_successfully = !loading && load_error.is_none();
     use_effect(move || {
-        acknowledge("flakes", error_count as i64);
+        if flakes_loaded_successfully {
+            acknowledge("flakes", error_count as i64);
+        }
     });
 
     let selected_flake_value = selected_flake.read().clone();

@@ -600,7 +600,9 @@ pub fn BuildsView() -> Element {
                             }
                             // Acknowledge the "builds" sidebar/tab badge when this tab is opened
                             // (persists server-side — TASK-385 follow-up).
-                            acknowledge("builds", completed_failed_count as i64);
+                            if recent_builds.read().as_ref().is_some_and(|r| r.is_ok()) {
+                                acknowledge("builds", completed_failed_count as i64);
+                            }
                         },
                         "Completed ({build_history.read().len()})"
                         if builds_failed_new > 0 {

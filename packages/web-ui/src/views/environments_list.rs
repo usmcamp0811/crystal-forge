@@ -119,7 +119,9 @@ pub fn EnvironmentsListView() -> Element {
             });
         }
         // Acknowledge the "environments" sidebar badge on every visit.
-        acknowledge("environments", attention_count);
+        if !*loading.read() && api_notice.read().is_none() {
+            acknowledge("environments", attention_count);
+        }
     });
 
     // Pre-compute per-item flash booleans for cards/table (outside rsx! to avoid parse issues).

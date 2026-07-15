@@ -194,22 +194,6 @@ pub fn SystemsListView() -> Element {
     // Local mutable state for systems (allows client-side add/remove until backend supports it)
     let mut local_systems = use_signal(Vec::<SystemSummary>::new);
 
-    // Sync attention count and acknowledge the "systems" sidebar badge (TASK-385).
-    // Placed after `local_systems` so the closure can capture it.
-    use_effect(move || {
-        let attention_count = local_systems
-            .read()
-            .iter()
-            .filter(|s| {
-                matches!(
-                    s.health_status,
-                    HealthStatus::Critical | HealthStatus::Offline
-                )
-            })
-            .count() as i64;
-        acknowledge("systems", attention_count);
-    });
-
     let mut load_error = use_signal(|| None::<String>);
     let mut api_notice = use_signal(|| None::<String>);
     let mut loading = use_signal(|| true);
@@ -222,9 +206,22 @@ pub fn SystemsListView() -> Element {
                 // Will be handled by early return below
                 return;
             }
+            let attention_count = result
+                .systems
+                .iter()
+                .filter(|s| {
+                    matches!(
+                        s.health_status,
+                        HealthStatus::Critical | HealthStatus::Offline
+                    )
+                })
+                .count() as i64;
             local_systems.set(result.systems.clone());
             load_error.set(result.notice.clone());
             loading.set(false);
+            if result.notice.is_none() {
+                acknowledge("systems", attention_count);
+            }
         }
     });
 

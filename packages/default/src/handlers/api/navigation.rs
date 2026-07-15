@@ -82,10 +82,9 @@ pub struct AcknowledgeNavigationCategoryRequest {
     /// The `observed_at` cursor from the NavigationBadges response the client
     /// was displaying when the user acknowledged. The server uses this as
     /// `last_seen_at` so only failures that arrived *after* the rendered
-    /// snapshot count as new. Falls back to `NOW()` for older clients that
-    /// do not send the field (or if parsing fails), which is less precise but
-    /// still safe.
-    pub observed_at: Option<DateTime<Utc>>,
+    /// snapshot count as new. Required: clients must not acknowledge without
+    /// the cursor from the badge response.
+    pub observed_at: DateTime<Utc>,
     /// Current attention count for this category at acknowledgment time
     /// (used as the count-diff baseline for systems/environments; ignored by
     /// timestamp-based categories which use `observed_at` as their cutoff).
@@ -129,12 +128,11 @@ pub async fn acknowledge_navigation_category(
             .into_response();
     }
 
-    let observed_at = payload.observed_at.unwrap_or_else(Utc::now);
     match upsert_user_alert_acknowledgment(
         &state.pool,
         user_id,
         &payload.category,
-        observed_at,
+        payload.observed_at,
         payload.current_count,
         payload.fingerprint.as_deref(),
     )

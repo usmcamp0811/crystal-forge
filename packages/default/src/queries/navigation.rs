@@ -108,6 +108,7 @@ pub async fn upsert_user_alert_acknowledgment(
             last_seen_count = EXCLUDED.last_seen_count,
             last_seen_fingerprint = EXCLUDED.last_seen_fingerprint,
             updated_at = NOW()
+        WHERE EXCLUDED.last_seen_at >= user_alert_acknowledgments.last_seen_at
         "#,
     )
     .bind(user_id)
@@ -237,6 +238,7 @@ pub async fn fetch_navigation_badges(
                     (
                         sync_status = 'error'
                         AND ($1::timestamptz IS NULL OR last_sync_at > $1)
+                        AND last_sync_at <= $2
                     )
                     OR
                     -- Stale syncing (>30 min): effective error onset is
@@ -250,6 +252,7 @@ pub async fn fetch_navigation_badges(
                         AND last_sync_at < now() - interval '30 minutes'
                         AND ($1::timestamptz IS NULL
                              OR last_sync_at + interval '30 minutes' > $1)
+                        AND last_sync_at + interval '30 minutes' <= $2
                     )
             )::bigint,
             COUNT(*)::bigint
@@ -258,6 +261,7 @@ pub async fn fetch_navigation_badges(
         "#,
     )
     .bind(flakes_since)
+    .bind(observed_at)
     .fetch_one(pool)
     .await
     {
@@ -321,9 +325,11 @@ pub async fn fetch_navigation_badges(
         FROM build_jobs
         WHERE status = 'failed'
           AND ($1::timestamptz IS NULL OR completed_at > $1)
+          AND completed_at <= $2
         "#,
     )
     .bind(builds_since)
+    .bind(observed_at)
     .fetch_one(pool)
     .await
     {
@@ -342,9 +348,11 @@ pub async fn fetch_navigation_badges(
         FROM commits
         WHERE evaluation_status = 'failed'
           AND ($1::timestamptz IS NULL OR evaluation_completed_at > $1)
+          AND evaluation_completed_at <= $2
         "#,
     )
     .bind(evals_since)
+    .bind(observed_at)
     .fetch_one(pool)
     .await
     {
@@ -365,9 +373,11 @@ pub async fn fetch_navigation_badges(
         FROM view_cve_list_with_metadata
         WHERE severity = 'CRITICAL'
           AND ($1::timestamptz IS NULL OR first_seen > $1)
+          AND first_seen <= $2
         "#,
     )
     .bind(cves_since)
+    .bind(observed_at)
     .fetch_one(pool)
     .await
     {

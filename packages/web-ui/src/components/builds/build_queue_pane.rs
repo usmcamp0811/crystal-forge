@@ -109,10 +109,16 @@ pub fn BuildQueuePane(
                             if can_cancel  { row_class.push_str(" selectable"); }
                             let is_failed = build.status == BuildStatus::Failed;
                             // Include completed_at epoch so a build that is
-                            // re-queued and fails again gets a fresh key.
+                            // re-queued and fails again gets a fresh key. Use
+                            // the stable job_id instead of the synthetic row
+                            // index because completed-history rows are
+                            // re-indexed whenever ordering changes.
                             let build_key = format!(
                                 "{}:{}",
-                                build.id,
+                                build
+                                    .job_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_else(|| "missing-job-id".to_string()),
                                 build.completed_at
                                     .map(|t| t.timestamp().to_string())
                                     .unwrap_or_default()

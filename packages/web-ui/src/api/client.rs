@@ -1212,19 +1212,17 @@ pub async fn get_navigation_badges() -> Result<NavigationBadges, ApiClientError>
 ///
 /// `observed_at` must be the `observed_at` field from the `NavigationBadges`
 /// response the user was actually shown, so the server anchors `last_seen_at`
-/// to that snapshot rather than to the POST receive time. If `None` the server
-/// falls back to `NOW()` (older behaviour, slightly less precise).
+/// to that snapshot rather than to the POST receive time.
 pub async fn acknowledge_navigation_category(
     category: &str,
-    observed_at: Option<&str>,
+    observed_at: &str,
     current_count: i64,
     fingerprint: Option<&str>,
 ) -> Result<(), ApiClientError> {
     #[derive(serde::Serialize)]
     struct AcknowledgeRequest<'a> {
         category: &'a str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        observed_at: Option<&'a str>,
+        observed_at: &'a str,
         current_count: i64,
         #[serde(skip_serializing_if = "Option::is_none")]
         fingerprint: Option<&'a str>,

@@ -403,7 +403,14 @@ fn EvaluationsPage() -> Element {
                                 focused_index.set(None);
                                 // Acknowledge the "evals" sidebar/tab badge when History tab
                                 // is opened (persists server-side — TASK-385 follow-up).
-                                acknowledge("evals", failed_count);
+                                if let Some(Ok(page_data)) = history_resource.read().as_ref() {
+                                    let history_failed_count = page_data
+                                        .items
+                                        .iter()
+                                        .filter(|item| item.evaluation_status == "failed")
+                                        .count() as i64;
+                                    acknowledge("evals", history_failed_count);
+                                }
                             },
                             "History"
                             if evals_failed_new > 0 {

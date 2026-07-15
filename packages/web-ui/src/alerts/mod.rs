@@ -105,10 +105,6 @@ pub static NAV_BADGES: GlobalSignal<NavigationBadges> = Signal::global(Navigatio
 /// Call this when entering the view (on mount). For Builds/Evals, call only
 /// when the failures tab is opened.
 pub fn acknowledge(view_key: &str, current_count: i64) {
-    {
-        let mut state = ALERT_STATE.write();
-        state.acknowledged.insert(view_key.to_string());
-    }
     // Capture the observation cursor and fingerprint from the badge snapshot
     // the user was shown before we zero-out the field, so the server anchors
     // last_seen_at to the rendered data (not POST receive time) and records
@@ -122,12 +118,22 @@ pub fn acknowledge(view_key: &str, current_count: i64) {
         };
         (badges.observed_at.clone(), fp)
     };
+    let Some(observed_at) = observed_at else {
+        // New clients must not acknowledge without a server cursor.  Otherwise
+        // the server would have to fall back to NOW(), which can consume
+        // failures that arrived before the relevant view data was rendered.
+        return;
+    };
+    {
+        let mut state = ALERT_STATE.write();
+        state.acknowledged.insert(view_key.to_string());
+    }
     zero_nav_badge_field(view_key);
     let view_key = view_key.to_string();
     spawn(async move {
         if acknowledge_navigation_category(
             &view_key,
-            observed_at.as_deref(),
+            observed_at.as_str(),
             current_count,
             fingerprint.as_deref(),
         )

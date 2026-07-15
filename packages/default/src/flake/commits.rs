@@ -330,8 +330,10 @@ pub async fn sync_flake_recorded(
     // be no-ops rather than corrupting the newer result.
     let attempt_id = Uuid::new_v4();
 
-    // Mark syncing (best-effort — failure is logged but does not block the sync)
-    if let Err(e) = sqlx::query(
+    // Mark syncing and persist the attempt token. This write is required:
+    // final status writes are conditional on sync_attempt_id, so continuing
+    // after this fails would guarantee that completion cannot be recorded.
+    let start_result = sqlx::query(
         "UPDATE flakes \
          SET sync_status = 'syncing', last_sync_at = now(), last_sync_error = NULL, \
              sync_attempt_id = $2 \
@@ -340,16 +342,16 @@ pub async fn sync_flake_recorded(
     .bind(flake_id)
     .bind(attempt_id)
     .execute(pool)
-    .await
-    {
-        warn!("Failed to set sync_status=syncing for flake {flake_id}: {e:#}");
+    .await?;
+    if start_result.rows_affected() != 1 {
+        bail!("flake {flake_id} disappeared before sync could start");
     }
 
     let result = sync_commits_for_flake(pool, repo_url, branch, flake_id).await;
 
     match &result {
         Ok(_) => {
-            if let Err(e) = sqlx::query(
+            match sqlx::query(
                 "UPDATE flakes \
                  SET sync_status = 'synced', last_sync_at = now(), last_sync_error = NULL \
                  WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $2",
@@ -359,12 +361,18 @@ pub async fn sync_flake_recorded(
             .execute(pool)
             .await
             {
-                warn!("Failed to set sync_status=synced for flake {flake_id}: {e:#}");
+                Ok(update) if update.rows_affected() == 0 => {
+                    info!(
+                        "Skipping sync_status=synced for flake {flake_id}: attempt {attempt_id} was superseded"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => warn!("Failed to set sync_status=synced for flake {flake_id}: {e:#}"),
             }
         }
         Err(sync_err) => {
             let truncated = sanitize_and_truncate_sync_error(repo_url, &sync_err.to_string(), 4000);
-            if let Err(e) = sqlx::query(
+            match sqlx::query(
                 "UPDATE flakes \
                  SET sync_status = 'error', last_sync_at = now(), last_sync_error = $2 \
                  WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $3",
@@ -375,7 +383,13 @@ pub async fn sync_flake_recorded(
             .execute(pool)
             .await
             {
-                error!("Failed to set sync_status=error for flake {flake_id}: {e:#}");
+                Ok(update) if update.rows_affected() == 0 => {
+                    info!(
+                        "Skipping sync_status=error for flake {flake_id}: attempt {attempt_id} was superseded"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => error!("Failed to set sync_status=error for flake {flake_id}: {e:#}"),
             }
         }
     }
