@@ -26,7 +26,7 @@
 //! - A `GlobalSignal<AlertState>` is the backing store so any component that
 //!   reads it re-renders when it changes.
 
-use crate::api::client::{acknowledge_navigation_category, get_navigation_badges};
+use crate::api::client::acknowledge_navigation_category;
 use crate::api::models::NavigationBadges;
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
@@ -190,22 +190,14 @@ pub fn acknowledge_with_cursor_and_ids(
     zero_nav_badge_field(view_key);
     let view_key = view_key.to_string();
     spawn(async move {
-        if acknowledge_navigation_category(
+        let _ = acknowledge_navigation_category(
             &view_key,
             observed_at.as_str(),
             current_count,
             fingerprint.as_deref(),
             alert_ids.as_deref(),
         )
-        .await
-        .is_ok()
-        {
-            // Refresh immediately so the sidebar reflects the new baseline
-            // without waiting for the next 30s poll.
-            if let Ok(fresh) = get_navigation_badges().await {
-                *NAV_BADGES.write() = fresh;
-            }
-        }
+        .await;
     });
 }
 

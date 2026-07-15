@@ -84,9 +84,7 @@ pub fn SidebarNav() -> Element {
     // Fetch navigation badge counts and re-poll every 30 seconds, writing into
     // the shared NAV_BADGES global so other views (e.g. Builds/Evaluations
     // tab badges) can read the same server-computed "new since last
-    // acknowledgment" counts. alerts::acknowledge() also refreshes NAV_BADGES
-    // immediately after recording an acknowledgment, so badges clear quickly
-    // without waiting for the next scheduled poll.
+    // acknowledgment" counts.
     use_future(move || async move {
         // Brief initial delay so view mount effects (which run after the first
         // render) have time to call acknowledge() and zero badges before the
