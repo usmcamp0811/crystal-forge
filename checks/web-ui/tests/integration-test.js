@@ -25,6 +25,11 @@ const { execSync } = require("child_process");
 const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
 
+// Diagnostic: write startup marker immediately so the Nix driver can confirm
+// the Node process started executing before any async operation.
+fs.mkdirSync(outputDir, { recursive: true });
+fs.writeFileSync(`${outputDir}/started.marker`, new Date().toISOString());
+
 const MANIFEST = JSON.parse(
   fs.readFileSync(path.join(__dirname, "coverage-manifest.json"), "utf8"),
 );
@@ -6939,7 +6944,15 @@ const steps = [
   console.log(`  Visual themes: ${visualThemes.join(", ")}`);
   console.log("");
 
-  const browser = await chromium.launch();
+  // Diagnostic: write marker before chromium.launch() to isolate hangs.
+  fs.writeFileSync(`${outputDir}/launching.marker`, new Date().toISOString());
+  const browser = await Promise.race([
+    chromium.launch(),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("chromium.launch() timed out after 120s")), 120_000),
+    ),
+  ]);
+  fs.writeFileSync(`${outputDir}/launched.marker`, new Date().toISOString());
   // Use a single browser context to maintain session/cookies across steps.
   // Timezone and locale are pinned by the manifest so rendered timestamps and
   // number formats are reproducible across local Nix and CI runs.
