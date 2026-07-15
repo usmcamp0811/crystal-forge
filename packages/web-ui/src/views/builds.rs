@@ -444,10 +444,12 @@ pub fn BuildsView() -> Element {
             && !builds_ack_sent()
             && recent_builds.read().as_ref().is_some_and(|r| r.is_ok())
         {
-            if let Some(cursor) = build_history_ack_cursor.read().clone() {
-                acknowledge_with_cursor("builds", completed_failed_count as i64, cursor);
-                builds_ack_sent.set(true);
-            }
+            acknowledge_with_cursor(
+                "builds",
+                completed_failed_count as i64,
+                build_history_ack_cursor.read().clone(),
+            );
+            builds_ack_sent.set(true);
         }
     });
     // Server-computed "new failed builds since last acknowledgment" (persists

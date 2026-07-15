@@ -160,10 +160,7 @@ fn EvaluationsPage() -> Element {
     let total_count = queue_items.read().len() as i64;
     use_effect(move || {
         if active_tab() == EvaluationsTab::History && !evals_ack_sent() {
-            if let (Some(Ok(page_data)), Some(cursor)) = (
-                history_resource.read().as_ref(),
-                history_ack_cursor.read().clone(),
-            ) {
+            if let Some(Ok(page_data)) = history_resource.read().as_ref() {
                 let unfiltered_first_page = history_page() == 1
                     && history_status_filter() == "all"
                     && history_flake_filter() == "all";
@@ -174,7 +171,11 @@ fn EvaluationsPage() -> Element {
                         .iter()
                         .filter(|item| item.evaluation_status == "failed")
                         .count() as i64;
-                    acknowledge_with_cursor("evals", history_failed_count, cursor);
+                    acknowledge_with_cursor(
+                        "evals",
+                        history_failed_count,
+                        history_ack_cursor.read().clone(),
+                    );
                     evals_ack_sent.set(true);
                 }
             }

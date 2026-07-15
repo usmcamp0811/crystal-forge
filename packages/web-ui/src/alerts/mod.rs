@@ -151,7 +151,11 @@ pub fn acknowledge(view_key: &str, current_count: i64) {
 /// Prefer this over [`acknowledge`] from views that have their own async data
 /// loading; this prevents a later sidebar poll cursor from acknowledging data
 /// that was not present in the rendered view.
-pub fn acknowledge_with_cursor(view_key: &str, current_count: i64, observed_at: String) {
+pub fn acknowledge_with_cursor(view_key: &str, current_count: i64, observed_at: Option<String>) {
+    let observed_at = observed_at.or_else(|| NAV_BADGES.read_unchecked().observed_at.clone());
+    let Some(observed_at) = observed_at else {
+        return;
+    };
     acknowledge_with_cursor_and_ids(view_key, current_count, observed_at, None, None);
 }
 

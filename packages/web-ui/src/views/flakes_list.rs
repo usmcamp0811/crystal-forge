@@ -3056,9 +3056,7 @@ pub fn FlakesListViewNew() -> Element {
     let flakes_loaded_successfully = !loading && load_error.is_none();
     use_effect(move || {
         if flakes_loaded_successfully {
-            if let Some(cursor) = flakes_ack_cursor.read().clone() {
-                acknowledge_with_cursor("flakes", error_count as i64, cursor);
-            }
+            acknowledge_with_cursor("flakes", error_count as i64, flakes_ack_cursor.read().clone());
         }
     });
 
