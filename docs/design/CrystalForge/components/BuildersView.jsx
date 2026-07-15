@@ -25,6 +25,7 @@ function BuildersView(props) {
   const [viewMode, setViewMode] = React.useState(props.defaultView || "cards");
   React.useEffect(() => { if (props.defaultView) setViewMode(props.defaultView); }, [props.defaultView]);
   const [edit, setEdit] = React.useState(null);
+  const [view, setView] = React.useState(null);
   const [addOpen, setAddOpen] = React.useState(false);
 
   const arches = [...new Set(BUILD_WORKERS.map(w => w.arch))];
@@ -102,7 +103,7 @@ function BuildersView(props) {
 
       {viewMode === "cards" ? (
         <div className="cards-grid">
-          {filtered.map(w => <BuilderCard key={w.id} w={w} onEdit={()=>setEdit(w)}/>)}
+          {filtered.map(w => <BuilderCard key={w.id} w={w} onOpen={()=>setView(w)} onEdit={()=>setEdit(w)}/>)}
         </div>
       ) : (
         <div className="card" style={{ overflow:"hidden" }}>
@@ -120,12 +121,15 @@ function BuildersView(props) {
               </tr>
             </thead>
             <tbody>
-              {filtered.map(w => <BuilderRow key={w.id} w={w} onEdit={()=>setEdit(w)}/>)}
+              {filtered.map(w => <BuilderRow key={w.id} w={w} onOpen={()=>setView(w)} onEdit={()=>setEdit(w)}/>)}
             </tbody>
           </table>
         </div>
       )}
 
+      {view && (
+        <BuilderPanel w={view} onClose={() => setView(null)} onEdit={() => setEdit(view)} />
+      )}
       {(edit || addOpen) && (
         <BuilderFormModal
           mode={addOpen ? "add" : "edit"}
@@ -147,11 +151,11 @@ function builderStatusChip(w) {
   return <span className={`chip ${cfg.cls}`}><span className="chip-dot" style={{ background:cfg.dot }}/>{cfg.label}</span>;
 }
 
-function BuilderCard({ w, onEdit }) {
+function BuilderCard({ w, onOpen, onEdit }) {
   const slotPct = w.slots.total ? Math.round((w.slots.used/w.slots.total)*100) : 0;
   const rail = w.status === "running" ? "#34d399" : w.status === "paused" ? "#fbbf24" : "#f87171";
   return (
-    <div className="sys-card">
+    <div className="sys-card" onClick={onOpen} style={{ cursor:"pointer" }}>
       <div className="status-rail" style={{ "--status-color": rail }}/>
       <div className="sys-card-head">
         <div className="sys-title">
@@ -209,10 +213,10 @@ function BuilderCard({ w, onEdit }) {
   );
 }
 
-function BuilderRow({ w, onEdit }) {
+function BuilderRow({ w, onOpen, onEdit }) {
   const slotPct = w.slots.total ? Math.round((w.slots.used/w.slots.total)*100) : 0;
   return (
-    <tr style={{ cursor:"pointer" }} onClick={onEdit}>
+    <tr style={{ cursor:"pointer" }} onClick={onOpen}>
       <td>
         <div style={{ fontWeight:600, fontSize:13 }}>{w.name}</div>
         <div className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{w.host}</div>
@@ -253,6 +257,85 @@ function BuilderRow({ w, onEdit }) {
         </div>
       </td>
     </tr>
+  );
+}
+
+// Side panel — builder reference peek, with Edit handing off to the form modal
+function BuilderPanel({ w, onClose, onEdit }) {
+  const slotPct = w.slots.total ? Math.round((w.slots.used/w.slots.total)*100) : 0;
+  return (
+    <>
+      <div className="side-panel-backdrop" onClick={onClose} />
+      <aside className="side-panel" role="dialog" aria-modal="true">
+        <div className="panel-head">
+          <div className="panel-title">
+            <h2><Icon name="cpu" size={14} style={{ opacity:0.7 }} />{w.name}</h2>
+            <span className="fqdn mono">{w.host}</span>
+          </div>
+          <button className="btn-icon focus-ring" onClick={onClose} aria-label="Close">
+            <Icon name="x" size={16} />
+          </button>
+        </div>
+        <div className="panel-body">
+          <section className="panel-section">
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+              {builderStatusChip(w)}
+              <span className="chip chip-unknown mono">{w.arch}</span>
+              {w.registered === false && <span className="chip chip-warning">unregistered</span>}
+            </div>
+          </section>
+
+          {w.registered === false && (
+            <section className="panel-section">
+              <div className="builder-pending-banner" style={{ flexDirection:"column", alignItems:"stretch", gap:6 }}>
+                <span style={{ display:"flex", alignItems:"center", gap:7 }}>
+                  <Icon name="warn" size={12}/>
+                  <span>Connected but <strong>not registered</strong> — match this key to recognize it.</span>
+                </span>
+                <BuilderFpChip fp={w.fingerprint}/>
+              </div>
+            </section>
+          )}
+
+          <section className="panel-section">
+            <h3>Slot use</h3>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"var(--cf-text-muted)", marginBottom:4 }}>
+              <span>{w.slots.used}/{w.slots.total} slots</span><span className="mono">{slotPct}%</span>
+            </div>
+            <div style={{ height:6, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden", marginBottom:12 }}>
+              <div style={{ width:`${slotPct}%`, height:"100%", background: slotPct > 85 ? "#fbbf24" : "#34d399" }}/>
+            </div>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"var(--cf-text-muted)", marginBottom:4 }}>
+              <span>Load</span><span className="mono">{Math.round(w.load*100)}%</span>
+            </div>
+            <div style={{ height:6, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden" }}>
+              <div style={{ width:`${w.load*100}%`, height:"100%", background: w.load > 0.85 ? "#f87171" : w.load > 0.6 ? "#fbbf24" : "#60a5fa" }}/>
+            </div>
+          </section>
+
+          <section className="panel-section">
+            <h3>Details</h3>
+            <dl className="kv-grid">
+              <dt>Cores · mem</dt><dd className="mono">{w.cores}c · {w.mem} GiB</dd>
+              <dt>Built 24h</dt><dd className="mono">{w.completed24h.toLocaleString()}{w.failed24h > 0 ? ` · ${w.failed24h} failed` : ""}</dd>
+              <dt>Last seen</dt><dd>{w.lastSeen}</dd>
+            </dl>
+          </section>
+
+          <section className="panel-section">
+            <h3>Environments ({(w.environments || []).length})</h3>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+              {(w.environments || []).length ? w.environments.map(e => <EnvBadge key={e} env={e}/>) : <span style={{ fontSize:12, color:"var(--cf-text-muted)" }}>none assigned</span>}
+            </div>
+          </section>
+        </div>
+        <div className="panel-actions">
+          <button className="btn btn-primary focus-ring" onClick={onEdit}>
+            <Icon name={w.registered === false ? "key" : "gear"} size={12} /> {w.registered === false ? "Register" : "Edit builder"}
+          </button>
+        </div>
+      </aside>
+    </>
   );
 }
 
