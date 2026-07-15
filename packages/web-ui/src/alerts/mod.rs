@@ -152,6 +152,12 @@ pub fn acknowledge(view_key: &str, current_count: i64) {
 /// loading; this prevents a later sidebar poll cursor from acknowledging data
 /// that was not present in the rendered view.
 pub fn acknowledge_with_cursor(view_key: &str, current_count: i64, observed_at: Option<String>) {
+    {
+        let mut state = ALERT_STATE.write();
+        state.acknowledged.insert(view_key.to_string());
+    }
+    zero_nav_badge_field(view_key);
+
     let observed_at = observed_at.or_else(|| NAV_BADGES.read_unchecked().observed_at.clone());
     let Some(observed_at) = observed_at else {
         return;
