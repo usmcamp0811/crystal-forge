@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::NAV_BADGES;
+use crate::alerts::{ALERT_STATE, NAV_BADGES};
 use crate::api::client::get_navigation_badges;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
@@ -90,7 +90,39 @@ pub fn SidebarNav() -> Element {
     use_future(move || async move {
         loop {
             if let Ok(fresh) = get_navigation_badges().await {
-                *NAV_BADGES.write() = fresh;
+                // Merge fresh badge counts, but preserve any fields that have
+                // already been optimistically zeroed by an in-flight
+                // acknowledgement. Without this guard the first GET response
+                // (which arrives before the POST /acknowledge round-trip
+                // completes) would overwrite the optimistic zero and
+                // re-surface the badge immediately after the view hid it.
+                let mut badges = NAV_BADGES.write();
+                let acked = ALERT_STATE.read();
+                if !acked.acknowledged.contains("flakes") {
+                    badges.flakes_errored = fresh.flakes_errored;
+                }
+                if !acked.acknowledged.contains("systems") {
+                    badges.systems_attention = fresh.systems_attention;
+                }
+                if !acked.acknowledged.contains("environments") {
+                    badges.environments_attention = fresh.environments_attention;
+                }
+                if !acked.acknowledged.contains("builds") {
+                    badges.builds_failed_new = fresh.builds_failed_new;
+                }
+                if !acked.acknowledged.contains("evals") {
+                    badges.evals_failed_new = fresh.evals_failed_new;
+                }
+                if !acked.acknowledged.contains("cves") {
+                    badges.cves_critical_new = fresh.cves_critical_new;
+                }
+                // Always update cursor/fingerprint/total fields from fresh poll.
+                badges.observed_at = fresh.observed_at;
+                badges.systems_total = fresh.systems_total;
+                badges.flakes_total = fresh.flakes_total;
+                badges.environments_total = fresh.environments_total;
+                badges.systems_fingerprint = fresh.systems_fingerprint;
+                badges.environments_fingerprint = fresh.environments_fingerprint;
             }
             gloo_timers::future::TimeoutFuture::new(30_000).await;
         }
