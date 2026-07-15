@@ -331,7 +331,7 @@ pub fn BuildsView() -> Element {
 
     use_effect(move || {
         if let Some(Ok(items)) = &*recent_builds.read() {
-            build_history_ack_cursor.set(NAV_BADGES.read().observed_at.clone());
+            build_history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
             let mapped = items
                 .iter()
                 .enumerate()

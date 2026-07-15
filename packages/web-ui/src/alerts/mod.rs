@@ -30,7 +30,7 @@ use crate::api::client::{acknowledge_navigation_category, get_navigation_badges}
 use crate::api::models::NavigationBadges;
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// LocalStorage key prefix for per-item dismissals.  The current user's ID
 /// is appended (e.g. `"cf.alert.dismissed.abc123"`) so dismissals are
@@ -46,6 +46,10 @@ pub struct AlertState {
     pub flashed: HashSet<String>,
     /// Individual attention rows/cards dismissed after the user opens/clicks them.
     pub dismissed_items: HashSet<String>,
+    /// Last acknowledgement payload sent per view key.  This prevents render or
+    /// signal feedback loops from repeatedly POSTing the same acknowledgement
+    /// and hammering user_alert_acknowledgments.
+    pub last_ack_payloads: HashMap<String, String>,
     /// LocalStorage key currently loaded into `dismissed_items`.
     pub dismissed_storage_key: Option<String>,
 }
@@ -126,7 +130,7 @@ pub fn acknowledge(view_key: &str, current_count: i64) {
     // last_seen_at to the rendered data (not POST receive time) and records
     // the exact alerting-ID set for replacement-failure detection.
     let (observed_at, fingerprint) = {
-        let badges = NAV_BADGES.read();
+        let badges = NAV_BADGES.read_unchecked();
         let fp = match view_key {
             "systems" => badges.systems_fingerprint.clone(),
             "environments" => badges.environments_fingerprint.clone(),
@@ -161,9 +165,25 @@ pub fn acknowledge_with_cursor_and_ids(
     fingerprint: Option<String>,
     alert_ids: Option<Vec<String>>,
 ) {
+    let payload_key = acknowledgement_payload_key(
+        current_count,
+        observed_at.as_str(),
+        fingerprint.as_deref(),
+        alert_ids.as_deref(),
+    );
     {
         let mut state = ALERT_STATE.write();
+        if state
+            .last_ack_payloads
+            .get(view_key)
+            .is_some_and(|last| last == &payload_key)
+        {
+            return;
+        }
         state.acknowledged.insert(view_key.to_string());
+        state
+            .last_ack_payloads
+            .insert(view_key.to_string(), payload_key);
     }
     zero_nav_badge_field(view_key);
     let view_key = view_key.to_string();
@@ -183,6 +203,21 @@ pub fn acknowledge_with_cursor_and_ids(
             }
         }
     });
+}
+
+fn acknowledgement_payload_key(
+    current_count: i64,
+    observed_at: &str,
+    fingerprint: Option<&str>,
+    alert_ids: Option<&[String]>,
+) -> String {
+    let mut ids = alert_ids.map(|ids| ids.to_vec()).unwrap_or_default();
+    ids.sort();
+    format!(
+        "count={current_count};cursor={observed_at};fingerprint={};ids={}",
+        fingerprint.unwrap_or(""),
+        ids.join(",")
+    )
 }
 
 /// Optimistically zero the `NAV_BADGES` field for `view_key` so the badge

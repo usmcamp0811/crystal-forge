@@ -84,7 +84,7 @@ pub fn EnvironmentsListView() -> Element {
                 .map(|env| env.id.to_string())
                 .collect::<Vec<_>>();
             let ack_snapshot = {
-                let badges = NAV_BADGES.read();
+                let badges = NAV_BADGES.read_unchecked();
                 (
                     badges.observed_at.clone(),
                     badges.environments_fingerprint.clone(),

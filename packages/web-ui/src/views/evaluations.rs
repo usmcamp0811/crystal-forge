@@ -122,7 +122,7 @@ fn EvaluationsPage() -> Element {
     use_effect(move || {
         let already = *history_auto_selected.read();
         if let Some(Ok(page_data)) = &*history_resource.read() {
-            history_ack_cursor.set(NAV_BADGES.read().observed_at.clone());
+            history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
             if !already {
                 let ids: std::collections::HashSet<i32> =
                     page_data.items.iter().map(|item| item.commit_id).collect();

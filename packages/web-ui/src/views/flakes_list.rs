@@ -2954,7 +2954,7 @@ pub fn FlakesListViewNew() -> Element {
     };
     use_effect(move || {
         if matches!(flakes_resource.read().as_ref(), Some(Ok(_))) {
-            flakes_ack_cursor.set(NAV_BADGES.read().observed_at.clone());
+            flakes_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
         }
     });
     let timeline_items = match timelines_resource.read().as_ref() {
