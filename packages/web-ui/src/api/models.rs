@@ -783,10 +783,19 @@ fn default_sync_status() -> String {
 /// `alerts::acknowledge` for how the frontend records acknowledgment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct NavigationBadges {
+    /// Server-side `NOW()` captured when this response was computed. Must be
+    /// echoed back as `observed_at` in POST /navigation/acknowledge so the
+    /// server anchors `last_seen_at` to exactly the data the user saw, not to
+    /// the (later) POST receive time.
+    #[serde(default)]
+    pub observed_at: Option<String>,
     #[serde(default)]
     pub systems_attention: i64,
     #[serde(default)]
     pub systems_total: i64,
+    /// MD5 of the sorted alerting system IDs. Echo back in acknowledge body.
+    #[serde(default)]
+    pub systems_fingerprint: Option<String>,
     #[serde(default)]
     pub flakes_errored: i64,
     #[serde(default)]
@@ -795,6 +804,9 @@ pub struct NavigationBadges {
     pub environments_attention: i64,
     #[serde(default)]
     pub environments_total: i64,
+    /// MD5 of the sorted alerting environment IDs. Echo back in acknowledge body.
+    #[serde(default)]
+    pub environments_fingerprint: Option<String>,
     #[serde(default)]
     pub builds_failed_new: i64,
     #[serde(default)]

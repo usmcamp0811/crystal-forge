@@ -948,20 +948,35 @@ pub struct FlakeRegistryItem {
 /// GET /api/v1/navigation/badges; polled by the sidebar every 30s.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NavigationBadges {
+    /// Server-side timestamp captured with `NOW()` at the moment this response
+    /// was computed. Clients MUST echo this value back as `observed_at` in the
+    /// POST /navigation/acknowledge body so the acknowledgment baseline is
+    /// anchored to exactly what the client was shown, not to the (later) time
+    /// the POST was received. This prevents a failure that arrives after the
+    /// badge response but before the user clicks acknowledge from being silently
+    /// consumed.
+    #[serde(default)]
+    pub observed_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Systems whose health is "critical" or "offline" — current total shown
-    /// only if it changed since the user's last acknowledgment (systems have
-    /// no discrete per-item "became critical at" timestamp to diff against).
+    /// only if the count or alerting-ID set changed since last acknowledgment.
     pub systems_attention: i64,
     pub systems_total: i64,
+    /// MD5 of the sorted set of alerting system IDs at query time. Clients
+    /// must echo this in the acknowledge body so replacement failures (same
+    /// count, different alerting IDs) resurface after acknowledgment.
+    #[serde(default)]
+    pub systems_fingerprint: Option<String>,
     /// Flakes whose sync_status is "error" and last_sync_at is newer than the
     /// user's last acknowledgment of the flakes category.
     pub flakes_errored: i64,
     pub flakes_total: i64,
     /// Environments containing ≥1 attention system — current total shown only
-    /// if it changed since the user's last acknowledgment (same rationale as
-    /// systems_attention).
+    /// if the count or alerting-ID set changed since last acknowledgment.
     pub environments_attention: i64,
     pub environments_total: i64,
+    /// MD5 of the sorted set of alerting environment IDs at query time.
+    #[serde(default)]
+    pub environments_fingerprint: Option<String>,
     /// Build jobs that failed and completed after the user's last
     /// acknowledgment of the builds category.
     pub builds_failed_new: i64,

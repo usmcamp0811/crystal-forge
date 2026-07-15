@@ -24,11 +24,25 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Capture `NOW()` once at the start of a badge fetch so all sub-queries use
+/// a consistent observation timestamp and the value can be returned to the
+/// client as `observed_at`.
+async fn capture_now(pool: &PgPool) -> DateTime<Utc> {
+    sqlx::query_scalar::<_, DateTime<Utc>>("SELECT NOW()")
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|_| Utc::now())
+}
+
 /// One row of `user_alert_acknowledgments`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct AckBaseline {
     last_seen_at: DateTime<Utc>,
     last_seen_count: i64,
+    /// MD5 of the sorted alerting-ID set at acknowledgment time
+    /// (systems/environments only). `None` if this row was written before the
+    /// fingerprint column was added.
+    last_seen_fingerprint: Option<String>,
 }
 
 /// Fetch a user's acknowledgment baseline for every category in one query.
@@ -36,9 +50,9 @@ async fn fetch_user_acknowledgments(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<HashMap<String, AckBaseline>> {
-    let rows: Vec<(String, DateTime<Utc>, i64)> = sqlx::query_as(
+    let rows: Vec<(String, DateTime<Utc>, i64, Option<String>)> = sqlx::query_as(
         r#"
-        SELECT category, last_seen_at, last_seen_count
+        SELECT category, last_seen_at, last_seen_count, last_seen_fingerprint
         FROM user_alert_acknowledgments
         WHERE user_id = $1
         "#,
@@ -49,58 +63,94 @@ async fn fetch_user_acknowledgments(
 
     Ok(rows
         .into_iter()
-        .map(|(category, last_seen_at, last_seen_count)| {
-            (
-                category,
-                AckBaseline {
-                    last_seen_at,
-                    last_seen_count,
-                },
-            )
-        })
+        .map(
+            |(category, last_seen_at, last_seen_count, last_seen_fingerprint)| {
+                (
+                    category,
+                    AckBaseline {
+                        last_seen_at,
+                        last_seen_count,
+                        last_seen_fingerprint,
+                    },
+                )
+            },
+        )
         .collect())
 }
 
 /// Record a user's acknowledgment of a category's current state.
 ///
+/// `observed_at` must be the `observed_at` cursor from the badge response the
+/// user was actually shown. Using the client-provided cursor rather than
+/// `NOW()` at POST time prevents a failure that arrived between the badge fetch
+/// and the acknowledge POST from being silently consumed — it will still appear
+/// in the next badge response because its event timestamp is newer than the
+/// anchored `observed_at`.
+///
 /// `current_count` is the raw attention count at the moment of acknowledgment
 /// (used as the baseline for count-diff categories like systems/environments;
-/// timestamp categories use `NOW()` as the cutoff going forward).
+/// timestamp categories use `observed_at` as the cutoff going forward).
 pub async fn upsert_user_alert_acknowledgment(
     pool: &PgPool,
     user_id: Uuid,
     category: &str,
+    observed_at: DateTime<Utc>,
     current_count: i64,
+    fingerprint: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO user_alert_acknowledgments (user_id, category, last_seen_at, last_seen_count, updated_at)
-        VALUES ($1, $2, NOW(), $3, NOW())
+        INSERT INTO user_alert_acknowledgments
+            (user_id, category, last_seen_at, last_seen_count, last_seen_fingerprint, updated_at)
+        VALUES ($1, $2, $3, $4, $5, NOW())
         ON CONFLICT (user_id, category) DO UPDATE
         SET last_seen_at = EXCLUDED.last_seen_at,
             last_seen_count = EXCLUDED.last_seen_count,
+            last_seen_fingerprint = EXCLUDED.last_seen_fingerprint,
             updated_at = NOW()
         "#,
     )
     .bind(user_id)
     .bind(category)
+    .bind(observed_at)
     .bind(current_count)
+    .bind(fingerprint)
     .execute(pool)
     .await?;
 
     Ok(())
 }
 
-/// For count-diff categories (no discrete per-item timestamp): show the
-/// current total only if it differs from the last-acknowledged total, so the
-/// badge stays hidden after acknowledgment until something actually changes,
-/// without fabricating a subtraction that could hide a real regression
-/// (e.g. 3 systems recovering while 3 different systems go critical).
-fn new_since_by_count(current_total: i64, baseline: Option<&AckBaseline>) -> i64 {
+/// For count-diff categories (systems/environments — no discrete per-item
+/// event timestamp): show the current total only if either the count changed
+/// OR the set of alerting IDs changed (fingerprint mismatch), so a
+/// replacement failure (system A recovers while system B goes critical, same
+/// count) still surfaces as new.
+///
+/// The fingerprint is an MD5 hash of the sorted newline-joined alerting ID
+/// strings, computed by the caller before this function. If the baseline has
+/// no fingerprint (row written before migration 0161), falls back to count-only
+/// comparison.
+fn new_since_by_count(
+    current_total: i64,
+    current_fingerprint: Option<&str>,
+    baseline: Option<&AckBaseline>,
+) -> i64 {
     match baseline {
         None => current_total,
-        Some(b) if b.last_seen_count != current_total => current_total,
-        Some(_) => 0,
+        Some(b) => {
+            // Fingerprint comparison takes precedence when available on both sides.
+            let fingerprint_changed =
+                match (current_fingerprint, b.last_seen_fingerprint.as_deref()) {
+                    (Some(cur), Some(prev)) => cur != prev,
+                    _ => false, // one or both absent: fall through to count comparison
+                };
+            if fingerprint_changed || b.last_seen_count != current_total {
+                current_total
+            } else {
+                0
+            }
+        }
     }
 }
 
@@ -115,6 +165,10 @@ pub async fn fetch_navigation_badges(
     is_admin: bool,
     member_environment_ids: &[Uuid],
 ) -> Result<NavigationBadges> {
+    // Capture the observation timestamp once so all sub-queries share a
+    // consistent cursor and the client can echo it back on acknowledge.
+    let observed_at = capture_now(pool).await;
+
     let acks = fetch_user_acknowledgments(pool, user_id)
         .await
         .unwrap_or_default();
@@ -127,29 +181,44 @@ pub async fn fetch_navigation_badges(
     // they belong to, matching GET /api/v1/systems's visibility rule
     // (Role::can_access_system_environment). No discrete "became critical at"
     // timestamp exists (health is derived from heartbeat staleness), so this
-    // uses the count-diff baseline.
-    let (systems_attention_total, systems_total): (i64, i64) = match sqlx::query_as(
-        r#"
+    // uses the fingerprint+count-diff baseline. The fingerprint is an MD5 of
+    // the sorted set of alerting system IDs so replacement failures (A
+    // recovers while B goes critical — same count, different set) re-surface.
+    let (systems_attention_total, systems_total, systems_fingerprint): (i64, i64, Option<String>) =
+        match sqlx::query_as(
+            r#"
         SELECT
             COUNT(*) FILTER (WHERE vsl.health_status IN ('critical', 'offline'))::bigint,
-            COUNT(*)::bigint
+            COUNT(*)::bigint,
+            NULLIF(
+                md5(string_agg(
+                    vsl.id::text,
+                    E'\n'
+                    ORDER BY vsl.id
+                ) FILTER (WHERE vsl.health_status IN ('critical', 'offline'))),
+                ''
+            )
         FROM view_system_list vsl
         JOIN systems s ON s.id = vsl.id
         WHERE $1 OR s.environment_id = ANY($2)
         "#,
-    )
-    .bind(is_admin)
-    .bind(member_environment_ids)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(counts) => counts,
-        Err(e) => {
-            tracing::warn!("Failed to fetch systems navigation badge counts: {e:#}");
-            (0, 0)
-        }
-    };
-    let systems_attention = new_since_by_count(systems_attention_total, acks.get("systems"));
+        )
+        .bind(is_admin)
+        .bind(member_environment_ids)
+        .fetch_one(pool)
+        .await
+        {
+            Ok(counts) => counts,
+            Err(e) => {
+                tracing::warn!("Failed to fetch systems navigation badge counts: {e:#}");
+                (0, 0, None)
+            }
+        };
+    let systems_attention = new_since_by_count(
+        systems_attention_total,
+        systems_fingerprint.as_deref(),
+        acks.get("systems"),
+    );
 
     // ── Flakes: sync_status = error (or stale 'syncing'), new since
     // last_sync_at baseline ───────────────────────────────────────────────
@@ -163,15 +232,25 @@ pub async fn fetch_navigation_badges(
         r#"
         SELECT
             COUNT(*) FILTER (
-                WHERE (
-                    sync_status = 'error'
-                    OR (
+                WHERE
+                    -- Explicit sync error: transition time is last_sync_at.
+                    (
+                        sync_status = 'error'
+                        AND ($1::timestamptz IS NULL OR last_sync_at > $1)
+                    )
+                    OR
+                    -- Stale syncing (>30 min): effective error onset is
+                    -- last_sync_at + 30 minutes, not last_sync_at itself.
+                    -- A sync that was already in-flight when the user
+                    -- acknowledged must still resurface once it crosses the
+                    -- staleness threshold.
+                    (
                         sync_status = 'syncing'
                         AND last_sync_at IS NOT NULL
                         AND last_sync_at < now() - interval '30 minutes'
+                        AND ($1::timestamptz IS NULL
+                             OR last_sync_at + interval '30 minutes' > $1)
                     )
-                )
-                AND ($1::timestamptz IS NULL OR last_sync_at > $1)
             )::bigint,
             COUNT(*)::bigint
         FROM flakes
@@ -189,16 +268,30 @@ pub async fn fetch_navigation_badges(
         }
     };
 
-    // ── Environments: contain ≥1 attention system (count-diff baseline) ──────
+    // ── Environments: contain ≥1 attention system (fingerprint+count-diff) ───
     // Scoped to the requesting user's environment memberships — admins see
     // every environment, non-admin operators/viewers only see environments
     // they belong to, matching GET /api/v1/environments's visibility rule
     // (list_environments_for_user / user_environment_memberships).
-    let (environments_attention_total, environments_total): (i64, i64) = match sqlx::query_as(
+    // Fingerprint guards against replacement failures (env A clears while env
+    // B becomes critical — same total, different set).
+    let (environments_attention_total, environments_total, environments_fingerprint): (
+        i64,
+        i64,
+        Option<String>,
+    ) = match sqlx::query_as(
         r#"
         SELECT
             COUNT(*) FILTER (WHERE critical_count > 0 OR offline_count > 0)::bigint,
-            COUNT(*)::bigint
+            COUNT(*)::bigint,
+            NULLIF(
+                md5(string_agg(
+                    environment_id::text,
+                    E'\n'
+                    ORDER BY environment_id
+                ) FILTER (WHERE critical_count > 0 OR offline_count > 0)),
+                ''
+            )
         FROM view_environment_rollups
         WHERE $1 OR environment_id = ANY($2)
         "#,
@@ -211,11 +304,14 @@ pub async fn fetch_navigation_badges(
         Ok(counts) => counts,
         Err(e) => {
             tracing::warn!("Failed to fetch environments navigation badge counts: {e:#}");
-            (0, 0)
+            (0, 0, None)
         }
     };
-    let environments_attention =
-        new_since_by_count(environments_attention_total, acks.get("environments"));
+    let environments_attention = new_since_by_count(
+        environments_attention_total,
+        environments_fingerprint.as_deref(),
+        acks.get("environments"),
+    );
 
     // ── Builds: failed build jobs, new since completed_at baseline ───────────
     let builds_since = acks.get("builds").map(|b| b.last_seen_at);
@@ -283,12 +379,15 @@ pub async fn fetch_navigation_badges(
     };
 
     Ok(NavigationBadges {
+        observed_at: Some(observed_at),
         systems_attention,
         systems_total,
+        systems_fingerprint,
         flakes_errored,
         flakes_total,
         environments_attention,
         environments_total,
+        environments_fingerprint,
         builds_failed_new,
         evals_failed_new,
         cves_critical_new,
@@ -301,7 +400,7 @@ mod tests {
 
     #[test]
     fn new_since_by_count_shows_full_total_when_never_acknowledged() {
-        assert_eq!(new_since_by_count(7, None), 7);
+        assert_eq!(new_since_by_count(7, None, None), 7);
     }
 
     #[test]
@@ -309,22 +408,45 @@ mod tests {
         let baseline = AckBaseline {
             last_seen_at: Utc::now(),
             last_seen_count: 7,
+            last_seen_fingerprint: None,
         };
-        assert_eq!(new_since_by_count(7, Some(&baseline)), 0);
+        assert_eq!(new_since_by_count(7, None, Some(&baseline)), 0);
     }
 
     #[test]
-    fn new_since_by_count_shows_total_when_changed_since_acknowledgment() {
+    fn new_since_by_count_shows_total_when_count_changed_since_acknowledgment() {
         let baseline = AckBaseline {
             last_seen_at: Utc::now(),
             last_seen_count: 7,
+            last_seen_fingerprint: None,
         };
         // Any change from the acknowledged baseline (up or down) re-surfaces
         // the current total rather than fabricating a delta, since count-diff
         // categories have no discrete per-item timestamp to compute a true
         // "new" count from.
-        assert_eq!(new_since_by_count(9, Some(&baseline)), 9);
-        assert_eq!(new_since_by_count(3, Some(&baseline)), 3);
+        assert_eq!(new_since_by_count(9, None, Some(&baseline)), 9);
+        assert_eq!(new_since_by_count(3, None, Some(&baseline)), 3);
+    }
+
+    #[test]
+    fn new_since_by_count_shows_total_when_fingerprint_changed() {
+        let baseline = AckBaseline {
+            last_seen_at: Utc::now(),
+            last_seen_count: 1,
+            last_seen_fingerprint: Some("abc123".to_string()),
+        };
+        // Same total, different fingerprint (replacement failure): must resurface.
+        assert_eq!(new_since_by_count(1, Some("def456"), Some(&baseline)), 1);
+    }
+
+    #[test]
+    fn new_since_by_count_hides_when_fingerprint_and_count_match() {
+        let baseline = AckBaseline {
+            last_seen_at: Utc::now(),
+            last_seen_count: 1,
+            last_seen_fingerprint: Some("abc123".to_string()),
+        };
+        assert_eq!(new_since_by_count(1, Some("abc123"), Some(&baseline)), 0);
     }
 
     #[tokio::test]
@@ -465,7 +587,7 @@ mod tests {
         .await
         .expect("failed to insert throwaway test user");
 
-        upsert_user_alert_acknowledgment(&pool, user_id, "builds", 5)
+        upsert_user_alert_acknowledgment(&pool, user_id, "builds", Utc::now(), 5, None)
             .await
             .expect("initial upsert should succeed");
 
@@ -477,7 +599,7 @@ mod tests {
 
         // Conflict path: re-acknowledging updates the existing row rather
         // than erroring or duplicating.
-        upsert_user_alert_acknowledgment(&pool, user_id, "builds", 9)
+        upsert_user_alert_acknowledgment(&pool, user_id, "builds", Utc::now(), 9, None)
             .await
             .expect("conflict upsert should succeed");
         let acks = fetch_user_acknowledgments(&pool, user_id)

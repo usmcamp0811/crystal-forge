@@ -1385,6 +1385,10 @@ async function routeNavigationBadges(page, overrides = {}) {
   const acked = new Set();
 
   const base = {
+    // observed_at anchors the acknowledge cursor to the snapshot the user
+    // was shown. The exact value doesn't matter for tests but must be present
+    // so the client sends it back in the POST body.
+    observed_at: new Date().toISOString(),
     systems_attention: 2,
     systems_total: 6,
     flakes_errored: 1,

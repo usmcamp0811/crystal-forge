@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use tokio::time::{Duration, sleep, timeout};
 use tracing::{debug, error, info, warn};
 use url::Url;
+use uuid::Uuid;
 
 const GIT_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -311,17 +312,33 @@ pub async fn sync_commits_for_flake(
 ///
 /// This is the preferred entry point for all sync call sites when `flake_id` is
 /// available — it is the only way to persist real sync-failure information.
+///
+/// Concurrent attempts are guarded by a per-attempt UUID written to
+/// `sync_attempt_id`. The final status write (`synced` or `error`) is
+/// conditional on that column still matching — if a newer attempt has already
+/// started (and written its own UUID), the stale attempt's status write is
+/// silently skipped rather than overwriting the newer result.
 pub async fn sync_flake_recorded(
     pool: &PgPool,
     flake_id: i32,
     repo_url: &str,
     branch: &str,
 ) -> Result<usize> {
+    // Generate a unique token for this attempt.  The final status writes below
+    // are conditional on this token, so a concurrent newer attempt that has
+    // already overwritten sync_attempt_id will cause this attempt's writes to
+    // be no-ops rather than corrupting the newer result.
+    let attempt_id = Uuid::new_v4();
+
     // Mark syncing (best-effort — failure is logged but does not block the sync)
     if let Err(e) = sqlx::query(
-        "UPDATE flakes SET sync_status = 'syncing', last_sync_at = now(), last_sync_error = NULL WHERE id = $1 AND deleted_at IS NULL",
+        "UPDATE flakes \
+         SET sync_status = 'syncing', last_sync_at = now(), last_sync_error = NULL, \
+             sync_attempt_id = $2 \
+         WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(flake_id)
+    .bind(attempt_id)
     .execute(pool)
     .await
     {
@@ -333,10 +350,12 @@ pub async fn sync_flake_recorded(
     match &result {
         Ok(_) => {
             if let Err(e) = sqlx::query(
-                "UPDATE flakes SET sync_status = 'synced', last_sync_at = now(), last_sync_error = NULL \
-                 WHERE id = $1 AND deleted_at IS NULL",
+                "UPDATE flakes \
+                 SET sync_status = 'synced', last_sync_at = now(), last_sync_error = NULL \
+                 WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $2",
             )
             .bind(flake_id)
+            .bind(attempt_id)
             .execute(pool)
             .await
             {
@@ -346,11 +365,13 @@ pub async fn sync_flake_recorded(
         Err(sync_err) => {
             let truncated = sanitize_and_truncate_sync_error(repo_url, &sync_err.to_string(), 4000);
             if let Err(e) = sqlx::query(
-                "UPDATE flakes SET sync_status = 'error', last_sync_at = now(), last_sync_error = $2 \
-                 WHERE id = $1 AND deleted_at IS NULL",
+                "UPDATE flakes \
+                 SET sync_status = 'error', last_sync_at = now(), last_sync_error = $2 \
+                 WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $3",
             )
             .bind(flake_id)
             .bind(&truncated)
+            .bind(attempt_id)
             .execute(pool)
             .await
             {

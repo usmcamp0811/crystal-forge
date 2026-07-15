@@ -1209,19 +1209,32 @@ pub async fn get_navigation_badges() -> Result<NavigationBadges, ApiClientError>
 /// Builds/Evaluations). Persists server-side so the corresponding badge stays
 /// hidden across page refresh, browser restart, and re-login until something
 /// new appears — see `alerts::acknowledge`.
+///
+/// `observed_at` must be the `observed_at` field from the `NavigationBadges`
+/// response the user was actually shown, so the server anchors `last_seen_at`
+/// to that snapshot rather than to the POST receive time. If `None` the server
+/// falls back to `NOW()` (older behaviour, slightly less precise).
 pub async fn acknowledge_navigation_category(
     category: &str,
+    observed_at: Option<&str>,
     current_count: i64,
+    fingerprint: Option<&str>,
 ) -> Result<(), ApiClientError> {
     #[derive(serde::Serialize)]
     struct AcknowledgeRequest<'a> {
         category: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        observed_at: Option<&'a str>,
         current_count: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fingerprint: Option<&'a str>,
     }
     let url = format!("{}/navigation/acknowledge", base_url());
     let body = AcknowledgeRequest {
         category,
+        observed_at,
         current_count,
+        fingerprint,
     };
     let _: serde_json::Value = send_json_with_csrf("POST", &url, Some(&body)).await?;
     Ok(())

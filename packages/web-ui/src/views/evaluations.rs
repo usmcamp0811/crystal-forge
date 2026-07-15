@@ -965,7 +965,16 @@ fn EvalHistory(
                                     let is_focused = focused_index() == Some(row_i);
 
                                     let is_failed = ev.evaluation_status == "failed";
-                                    let eval_key = commit_id.to_string();
+                                    // Include evaluation_completed_at epoch so
+                                    // a commit that is re-evaluated and fails
+                                    // again generates a new dismissal key.
+                                    let eval_key = format!(
+                                        "{}:{}",
+                                        commit_id,
+                                        ev.evaluation_completed_at
+                                            .map(|t| t.timestamp().to_string())
+                                            .unwrap_or_default()
+                                    );
                                     let row_class = attention_row_class(
                                         if is_focused { "kbd-focused" } else { "" },
                                         "evals",

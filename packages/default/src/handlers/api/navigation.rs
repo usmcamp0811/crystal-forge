@@ -7,6 +7,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::api::models::{ApiError, NavigationBadges};
@@ -78,11 +79,23 @@ pub async fn get_navigation_badges(
 #[derive(Debug, Deserialize)]
 pub struct AcknowledgeNavigationCategoryRequest {
     pub category: String,
+    /// The `observed_at` cursor from the NavigationBadges response the client
+    /// was displaying when the user acknowledged. The server uses this as
+    /// `last_seen_at` so only failures that arrived *after* the rendered
+    /// snapshot count as new. Falls back to `NOW()` for older clients that
+    /// do not send the field (or if parsing fails), which is less precise but
+    /// still safe.
+    pub observed_at: Option<DateTime<Utc>>,
     /// Current attention count for this category at acknowledgment time
     /// (used as the count-diff baseline for systems/environments; ignored by
-    /// timestamp-based categories which use `NOW()` as their cutoff).
+    /// timestamp-based categories which use `observed_at` as their cutoff).
     #[serde(default)]
     pub current_count: i64,
+    /// MD5 fingerprint of the alerting-ID set from the badge response the
+    /// client was showing. Echoed back from `NavigationBadges.systems_fingerprint`
+    /// or `.environments_fingerprint` so replacement failures re-surface.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 /// POST /api/v1/navigation/acknowledge
@@ -116,11 +129,14 @@ pub async fn acknowledge_navigation_category(
             .into_response();
     }
 
+    let observed_at = payload.observed_at.unwrap_or_else(Utc::now);
     match upsert_user_alert_acknowledgment(
         &state.pool,
         user_id,
         &payload.category,
+        observed_at,
         payload.current_count,
+        payload.fingerprint.as_deref(),
     )
     .await
     {

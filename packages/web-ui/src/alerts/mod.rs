@@ -33,10 +33,10 @@ use gloo_storage::{LocalStorage, Storage};
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-/// LocalStorage key under which per-item dismissals are persisted across
-/// page loads so the `.attention-row` highlighting stays hidden after the
-/// user has interacted with the item, even after refresh.
-const DISMISSED_STORAGE_KEY: &str = "cf.alert.dismissed";
+/// LocalStorage key prefix for per-item dismissals.  The current user's ID
+/// is appended (e.g. `"cf.alert.dismissed.abc123"`) so dismissals are
+/// isolated per user when multiple accounts share the same browser profile.
+const DISMISSED_STORAGE_KEY_PREFIX: &str = "cf.alert.dismissed.";
 
 /// Shared alert state.  Hold in a `GlobalSignal` initialised in `main.rs`.
 #[derive(Debug, Clone, Default)]
@@ -51,6 +51,28 @@ pub struct AlertState {
 
 /// Global singleton.  Initialised to default (empty) on startup.
 pub static ALERT_STATE: GlobalSignal<AlertState> = Signal::global(AlertState::default);
+
+/// The authenticated user's ID, used to namespace the per-user dismissal
+/// LocalStorage key.  Must be set once auth loads via [`set_current_user_id`].
+static CURRENT_USER_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Register the current user's ID so dismissal storage is isolated per user.
+/// Call this once after authentication completes (e.g. in `init_auth`).
+/// Has no effect if called more than once per page load.
+pub fn set_current_user_id(user_id: &str) {
+    // OnceLock: ignore the error if already set (e.g. hot-reload, re-mount).
+    let _ = CURRENT_USER_ID.set(user_id.to_string());
+}
+
+/// The LocalStorage key for dismissed items scoped to the current user.
+/// Falls back to the suffix-less key for unauthenticated page loads (e.g.
+/// the login page) so dismissals are at least stored rather than dropped.
+fn dismissed_storage_key() -> String {
+    match CURRENT_USER_ID.get() {
+        Some(uid) => format!("{DISMISSED_STORAGE_KEY_PREFIX}{uid}"),
+        None => format!("{DISMISSED_STORAGE_KEY_PREFIX}anon"),
+    }
+}
 
 /// Latest polled navigation badge counts — server-computed "new since last
 /// acknowledgment" per category. Populated by the sidebar's 30s poll and
@@ -87,12 +109,30 @@ pub fn acknowledge(view_key: &str, current_count: i64) {
         let mut state = ALERT_STATE.write();
         state.acknowledged.insert(view_key.to_string());
     }
+    // Capture the observation cursor and fingerprint from the badge snapshot
+    // the user was shown before we zero-out the field, so the server anchors
+    // last_seen_at to the rendered data (not POST receive time) and records
+    // the exact alerting-ID set for replacement-failure detection.
+    let (observed_at, fingerprint) = {
+        let badges = NAV_BADGES.read();
+        let fp = match view_key {
+            "systems" => badges.systems_fingerprint.clone(),
+            "environments" => badges.environments_fingerprint.clone(),
+            _ => None,
+        };
+        (badges.observed_at.clone(), fp)
+    };
     zero_nav_badge_field(view_key);
     let view_key = view_key.to_string();
     spawn(async move {
-        if acknowledge_navigation_category(&view_key, current_count)
-            .await
-            .is_ok()
+        if acknowledge_navigation_category(
+            &view_key,
+            observed_at.as_deref(),
+            current_count,
+            fingerprint.as_deref(),
+        )
+        .await
+        .is_ok()
         {
             // Refresh immediately so the sidebar/tab badges reflect the new
             // baseline without waiting for the next scheduled 30s poll. This
@@ -149,7 +189,8 @@ static DISMISSED_LOADED: OnceLock<()> = OnceLock::new();
 /// exactly once, the first time any public function needs them.
 fn ensure_dismissed_loaded() {
     DISMISSED_LOADED.get_or_init(|| {
-        if let Ok(stored) = LocalStorage::get::<Vec<String>>(DISMISSED_STORAGE_KEY) {
+        let key = dismissed_storage_key();
+        if let Ok(stored) = LocalStorage::get::<Vec<String>>(&key) {
             let mut state = ALERT_STATE.write();
             state.dismissed_items.extend(stored);
         }
@@ -169,11 +210,12 @@ pub fn dismiss_attention_item(view_key: &str, item_key: &str) {
         state.dismissed_items.insert(key.clone());
     }
     // Persist to LocalStorage — best-effort, ignore storage errors silently.
-    if let Ok(mut stored) = LocalStorage::get::<Vec<String>>(DISMISSED_STORAGE_KEY) {
+    let storage_key = dismissed_storage_key();
+    if let Ok(mut stored) = LocalStorage::get::<Vec<String>>(&storage_key) {
         stored.push(key);
-        let _ = LocalStorage::set(DISMISSED_STORAGE_KEY, stored);
+        let _ = LocalStorage::set(&storage_key, stored);
     } else {
-        let _ = LocalStorage::set(DISMISSED_STORAGE_KEY, vec![key]);
+        let _ = LocalStorage::set(&storage_key, vec![key]);
     }
 }
 

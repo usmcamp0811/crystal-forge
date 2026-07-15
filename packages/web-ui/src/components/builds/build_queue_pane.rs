@@ -108,7 +108,15 @@ pub fn BuildQueuePane(
                             if is_checked  { row_class.push_str(" row-checked"); }
                             if can_cancel  { row_class.push_str(" selectable"); }
                             let is_failed = build.status == BuildStatus::Failed;
-                            let build_key = build.id.to_string();
+                            // Include completed_at epoch so a build that is
+                            // re-queued and fails again gets a fresh key.
+                            let build_key = format!(
+                                "{}:{}",
+                                build.id,
+                                build.completed_at
+                                    .map(|t| t.timestamp().to_string())
+                                    .unwrap_or_default()
+                            );
                             let mut row_class = attention_row_class(
                                 &row_class,
                                 "builds",

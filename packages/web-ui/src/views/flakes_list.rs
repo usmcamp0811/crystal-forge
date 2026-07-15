@@ -4412,7 +4412,16 @@ fn FlakeTableNew(
                         {
                             let is_selected = selected_id == Some(flake.id);
                             let is_error = flake.status == "error";
-                            let flake_key = flake.id.to_string();
+                            // Include the sync-attempt timestamp in the key so
+                            // a recovered-then-re-failed flake generates a new
+                            // dismissal key (different last_sync_at epoch).
+                            let flake_key = format!(
+                                "{}:{}",
+                                flake.id,
+                                flake.last_sync_at_raw
+                                    .map(|t| t.timestamp().to_string())
+                                    .unwrap_or_default()
+                            );
                             let row_class = attention_row_class(
                                 if is_selected { "selected" } else { "" },
                                 "flakes",
@@ -4607,7 +4616,14 @@ fn FlakeCardsNew(
                     } else {
                         ""
                     };
-                    let flake_key = flake.id.to_string();
+                    // Same versioned key as the table view (id:last_sync_epoch).
+                    let flake_key = format!(
+                        "{}:{}",
+                        flake.id,
+                        flake.last_sync_at_raw
+                            .map(|t| t.timestamp().to_string())
+                            .unwrap_or_default()
+                    );
                     let card_class = attention_row_class(
                         "sys-card compact",
                         "flakes",
