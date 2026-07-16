@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::NAV_BADGES;
+use crate::alerts::{badge_recently_zeroed, NAV_BADGES};
 use crate::api::client::get_navigation_badges;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
@@ -84,25 +84,48 @@ pub fn SidebarNav() -> Element {
     // Fetch navigation badge counts and re-poll every 30 seconds, writing into
     // the shared NAV_BADGES global so other views (e.g. Builds/Evaluations
     // tab badges) can read the same server-computed "new since last
-    // acknowledgment" counts.
-    // NOTE: use_effect + spawn deliberately used instead of use_future to avoid
-    // potential re-render restart issues with infinite-loop futures in Dioxus 0.7.
-    use_effect(move || {
-        spawn(async move {
-            // Brief initial delay so view mount effects (which run after the first
-            // render) have time to call acknowledge() and zero badges before the
-            // first sidebar GET response can overwrite the optimistic zero.
-            // 150ms is imperceptible to UX; the acknowledge POST+GET refresh
-            // that fires immediately after the view effect runs will correct the
-            // sidebar anyway once it completes.
-            gloo_timers::future::TimeoutFuture::new(150).await;
-            loop {
-                if let Ok(fresh) = get_navigation_badges().await {
-                    *NAV_BADGES.write() = fresh;
+    // acknowledgment" counts. alerts::acknowledge() also refreshes NAV_BADGES
+    // immediately after recording an acknowledgment, so badges clear quickly
+    // without waiting for the next scheduled poll.
+    use_future(move || async move {
+        loop {
+            if let Ok(fresh) = get_navigation_badges().await {
+                // Merge fresh badge counts, but skip any field that was
+                // optimistically zeroed within the last 10 seconds.  This
+                // prevents the GET response from overwriting the optimistic
+                // zero before the POST /acknowledge round-trip completes.
+                // After the grace window the server returns 0 for that
+                // category anyway, so normal polling resumes transparently.
+                const GRACE: u64 = 10;
+                let mut badges = NAV_BADGES.write();
+                if !badge_recently_zeroed("flakes", GRACE) {
+                    badges.flakes_errored = fresh.flakes_errored;
                 }
-                gloo_timers::future::TimeoutFuture::new(30_000).await;
+                if !badge_recently_zeroed("systems", GRACE) {
+                    badges.systems_attention = fresh.systems_attention;
+                }
+                if !badge_recently_zeroed("environments", GRACE) {
+                    badges.environments_attention = fresh.environments_attention;
+                }
+                if !badge_recently_zeroed("builds", GRACE) {
+                    badges.builds_failed_new = fresh.builds_failed_new;
+                }
+                if !badge_recently_zeroed("evals", GRACE) {
+                    badges.evals_failed_new = fresh.evals_failed_new;
+                }
+                if !badge_recently_zeroed("cves", GRACE) {
+                    badges.cves_critical_new = fresh.cves_critical_new;
+                }
+                // Always update cursor/fingerprint/total fields from fresh poll.
+                badges.observed_at = fresh.observed_at;
+                badges.systems_total = fresh.systems_total;
+                badges.flakes_total = fresh.flakes_total;
+                badges.environments_total = fresh.environments_total;
+                badges.systems_fingerprint = fresh.systems_fingerprint;
+                badges.environments_fingerprint = fresh.environments_fingerprint;
             }
-        });
+            gloo_timers::future::TimeoutFuture::new(30_000).await;
+        }
     });
     // NAV_BADGES is the sole source of truth for badge visibility and counts
     // (server-computed "new since last acknowledgment" per category); reading

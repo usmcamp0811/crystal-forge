@@ -26,21 +26,17 @@
 //! - A `GlobalSignal<AlertState>` is the backing store so any component that
 //!   reads it re-renders when it changes.
 
-use crate::api::client::acknowledge_navigation_category;
+use crate::api::client::{acknowledge_navigation_category, get_navigation_badges};
 use crate::api::models::NavigationBadges;
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// LocalStorage key prefix for per-item dismissals.  The current user's ID
 /// is appended (e.g. `"cf.alert.dismissed.abc123"`) so dismissals are
 /// isolated per user when multiple accounts share the same browser profile.
 const DISMISSED_STORAGE_KEY_PREFIX: &str = "cf.alert.dismissed.";
-
-/// Legacy key used before per-user scoping was added.  Checked on first load
-/// for migration purposes only.
-const DISMISSED_STORAGE_KEY_LEGACY: &str = "cf.alert.dismissed";
 
 /// Shared alert state.  Hold in a `GlobalSignal` initialised in `main.rs`.
 #[derive(Debug, Clone, Default)]
@@ -51,8 +47,14 @@ pub struct AlertState {
     pub flashed: HashSet<String>,
     /// Individual attention rows/cards dismissed after the user opens/clicks them.
     pub dismissed_items: HashSet<String>,
-    /// Per-view dedup: last payload sent, to avoid repeated identical POSTs.
+    /// Last acknowledgement payload sent per view key.  This prevents render or
+    /// signal feedback loops from repeatedly POSTing the same acknowledgement
+    /// and hammering user_alert_acknowledgments.
     pub last_ack_payloads: HashMap<String, String>,
+    /// Unix-second timestamp of the last optimistic zero for each view key.
+    /// Used by the sidebar poll to skip overwriting a recently zeroed badge
+    /// field even if `acknowledged` was populated concurrently with the GET.
+    pub zeroed_at: HashMap<String, u64>,
     /// LocalStorage key currently loaded into `dismissed_items`.
     pub dismissed_storage_key: Option<String>,
 }
@@ -61,7 +63,9 @@ pub struct AlertState {
 pub static ALERT_STATE: GlobalSignal<AlertState> = Signal::global(AlertState::default);
 
 /// Register the current user's ID so dismissal storage is isolated per user.
-/// Call this whenever authentication changes.
+/// Call this whenever authentication changes. It replaces the in-memory
+/// dismissal set with the target user's stored set so local-login and logout
+/// transitions do not share the anonymous namespace.
 pub fn set_current_user_id(user_id: &str) {
     load_dismissals_for_storage_key(storage_key_for_user(Some(user_id)));
 }
@@ -70,6 +74,9 @@ pub fn clear_current_user_id() {
     load_dismissals_for_storage_key(storage_key_for_user(None));
 }
 
+/// The LocalStorage key for dismissed items scoped to the current user.
+/// Falls back to the suffix-less key for unauthenticated page loads (e.g.
+/// the login page) so dismissals are at least stored rather than dropped.
 fn dismissed_storage_key() -> String {
     ALERT_STATE
         .read()
@@ -86,18 +93,9 @@ fn storage_key_for_user(user_id: Option<&str>) -> String {
 }
 
 fn load_dismissals_for_storage_key(storage_key: String) {
-    let mut items: HashSet<String> = LocalStorage::get::<Vec<String>>(&storage_key)
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-    // Migrate legacy key on first user-scoped load.
-    if let Ok(legacy) = LocalStorage::get::<Vec<String>>(DISMISSED_STORAGE_KEY_LEGACY) {
-        for item in legacy {
-            items.insert(item);
-        }
-    }
+    let stored = LocalStorage::get::<Vec<String>>(&storage_key).unwrap_or_default();
     let mut state = ALERT_STATE.write();
-    state.dismissed_items = items;
+    state.dismissed_items = stored.into_iter().collect();
     state.dismissed_storage_key = Some(storage_key);
 }
 
@@ -114,12 +112,28 @@ pub static NAV_BADGES: GlobalSignal<NavigationBadges> = Signal::global(Navigatio
 /// stays hidden across page refresh, browser restart, and re-login until a
 /// new failure appears for that category.
 ///
-/// Reads the current `NAV_BADGES.observed_at` cursor non-reactively so that
-/// calling this from a use_effect does not create a signal subscription loop.
+/// `current_count` is the view's raw attention count at acknowledgment time.
+/// It is used server-side as the count-diff baseline for categories with no
+/// discrete per-item timestamp (systems, environments); it is ignored for
+/// timestamp-based categories (flakes, builds, evals, cves), which use the
+/// acknowledgment's `NOW()` as their cutoff instead — pass the best count you
+/// have available regardless.
+///
+/// NOTE: [`NAV_BADGES`] (not `ALERT_STATE.acknowledged`) is the source of
+/// truth callers should read for badge visibility. This function zeroes the
+/// relevant `NAV_BADGES` field immediately for a snappy UI, then the async
+/// refetch below reconciles it with the server. A category must never be
+/// masked indefinitely for the rest of the page load once acknowledged — if
+/// a genuinely new failure arrives afterwards, the next poll (or this
+/// function's own refetch) must be able to show it again.
 ///
 /// Call this when entering the view (on mount). For Builds/Evals, call only
 /// when the failures tab is opened.
 pub fn acknowledge(view_key: &str, current_count: i64) {
+    // Capture the observation cursor and fingerprint from the badge snapshot
+    // the user was shown before we zero-out the field, so the server anchors
+    // last_seen_at to the rendered data (not POST receive time) and records
+    // the exact alerting-ID set for replacement-failure detection.
     let (observed_at, fingerprint) = {
         let badges = NAV_BADGES.read_unchecked();
         let fp = match view_key {
@@ -130,23 +144,26 @@ pub fn acknowledge(view_key: &str, current_count: i64) {
         (badges.observed_at.clone(), fp)
     };
     let Some(observed_at) = observed_at else {
-        // No server cursor yet — zero badge optimistically but skip server POST.
-        zero_and_mark_acked(view_key);
+        // New clients must not acknowledge without a server cursor.  Otherwise
+        // the server would have to fall back to NOW(), which can consume
+        // failures that arrived before the relevant view data was rendered.
         return;
     };
     acknowledge_with_cursor_and_ids(view_key, current_count, observed_at, fingerprint, None);
 }
 
-/// Acknowledge using an optional cursor captured from the relevant rendered
-/// dataset (falls back to current NAV_BADGES cursor if None).
-///
+/// Acknowledge using a cursor captured from the relevant rendered dataset.
 /// Prefer this over [`acknowledge`] from views that have their own async data
 /// loading; this prevents a later sidebar poll cursor from acknowledging data
 /// that was not present in the rendered view.
 pub fn acknowledge_with_cursor(view_key: &str, current_count: i64, observed_at: Option<String>) {
+    {
+        let mut state = ALERT_STATE.write();
+        state.acknowledged.insert(view_key.to_string());
+    }
+    zero_nav_badge_field(view_key);
+
     let observed_at = observed_at.or_else(|| NAV_BADGES.read_unchecked().observed_at.clone());
-    // Always zero and mark acknowledged, even if no cursor yet.
-    zero_and_mark_acked(view_key);
     let Some(observed_at) = observed_at else {
         return;
     };
@@ -163,16 +180,12 @@ pub fn acknowledge_with_cursor_and_ids(
     fingerprint: Option<String>,
     alert_ids: Option<Vec<String>>,
 ) {
-    // Dedup: skip POST if we already sent the exact same payload this session.
-    let payload_key = {
-        let mut ids = alert_ids.clone().unwrap_or_default();
-        ids.sort();
-        format!(
-            "count={current_count};cursor={observed_at};fingerprint={};ids={}",
-            fingerprint.as_deref().unwrap_or(""),
-            ids.join(",")
-        )
-    };
+    let payload_key = acknowledgement_payload_key(
+        current_count,
+        observed_at.as_str(),
+        fingerprint.as_deref(),
+        alert_ids.as_deref(),
+    );
     {
         let mut state = ALERT_STATE.write();
         if state
@@ -190,31 +203,57 @@ pub fn acknowledge_with_cursor_and_ids(
     zero_nav_badge_field(view_key);
     let view_key = view_key.to_string();
     spawn(async move {
-        let _ = acknowledge_navigation_category(
+        if acknowledge_navigation_category(
             &view_key,
             observed_at.as_str(),
             current_count,
             fingerprint.as_deref(),
             alert_ids.as_deref(),
         )
-        .await;
+        .await
+        .is_ok()
+        {
+            if let Ok(fresh) = get_navigation_badges().await {
+                *NAV_BADGES.write() = fresh;
+            }
+        }
     });
 }
 
-/// Mark a view acknowledged and zero its badge without sending a server POST.
-/// Used when no cursor is available yet.
-fn zero_and_mark_acked(view_key: &str) {
-    {
-        let mut state = ALERT_STATE.write();
-        state.acknowledged.insert(view_key.to_string());
-    }
-    zero_nav_badge_field(view_key);
+fn acknowledgement_payload_key(
+    current_count: i64,
+    observed_at: &str,
+    fingerprint: Option<&str>,
+    alert_ids: Option<&[String]>,
+) -> String {
+    let mut ids = alert_ids.map(|ids| ids.to_vec()).unwrap_or_default();
+    ids.sort();
+    format!(
+        "count={current_count};cursor={observed_at};fingerprint={};ids={}",
+        fingerprint.unwrap_or(""),
+        ids.join(",")
+    )
+}
+
+/// Returns the current unix-second timestamp, or 0 if unavailable (WASM
+/// `SystemTime` may not be available in all runtimes).
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs()
 }
 
 /// Optimistically zero the `NAV_BADGES` field for `view_key` so the badge
 /// hides immediately on acknowledge, without waiting for the network
-/// round-trip. See [`acknowledge`].
+/// round-trip. Also records the zero timestamp so the sidebar poll can skip
+/// overwriting this field during a brief grace window.
+/// See [`acknowledge`].
 fn zero_nav_badge_field(view_key: &str) {
+    {
+        let mut state = ALERT_STATE.write();
+        state.zeroed_at.insert(view_key.to_string(), now_unix_secs());
+    }
     let mut badges = NAV_BADGES.write();
     match view_key {
         "systems" => badges.systems_attention = 0,
@@ -224,6 +263,17 @@ fn zero_nav_badge_field(view_key: &str) {
         "evals" => badges.evals_failed_new = 0,
         "cves" => badges.cves_critical_new = 0,
         _ => {}
+    }
+}
+
+/// Returns `true` if the badge for `view_key` was zeroed within the last
+/// `grace_secs` seconds.  Used by the sidebar poll to avoid overwriting a
+/// recently hidden badge before the POST /acknowledge round-trip completes.
+pub fn badge_recently_zeroed(view_key: &str, grace_secs: u64) -> bool {
+    let state = ALERT_STATE.read();
+    match state.zeroed_at.get(view_key) {
+        Some(&ts) => now_unix_secs().saturating_sub(ts) < grace_secs,
+        None => false,
     }
 }
 
@@ -244,25 +294,20 @@ pub fn should_flash(view_key: &str, has_attention: bool) -> bool {
     true
 }
 
-/// True once persisted dismissals have been loaded from LocalStorage into
-/// [`ALERT_STATE`].  The `OnceLock` is cheaper than checking a flag on
-/// `AlertState` on every access.
-static DISMISSED_LOADED: OnceLock<()> = OnceLock::new();
-
 /// Load persisted dismissed-item keys from LocalStorage into [`ALERT_STATE`]
-/// exactly once, the first time any public function needs them.
+/// for the current storage namespace if it has not already been loaded.
 fn ensure_dismissed_loaded() {
-    DISMISSED_LOADED.get_or_init(|| {
-        let key = dismissed_storage_key();
-        if ALERT_STATE.read().dismissed_storage_key.as_deref() != Some(key.as_str()) {
-            load_dismissals_for_storage_key(key);
-        }
-    });
+    let key = dismissed_storage_key();
+    if ALERT_STATE.read().dismissed_storage_key.as_deref() != Some(key.as_str()) {
+        load_dismissals_for_storage_key(key);
+    }
 }
 
 /// Dismiss a specific attention row/card after the user clicks or opens it.
 ///
 /// The dismissal is persisted to LocalStorage so it survives page refresh.
+/// The highlight will only reappear if the underlying cause resolves and
+/// returns (a genuinely new event).
 pub fn dismiss_attention_item(view_key: &str, item_key: &str) {
     ensure_dismissed_loaded();
     let key = attention_item_key(view_key, item_key);
@@ -270,6 +315,7 @@ pub fn dismiss_attention_item(view_key: &str, item_key: &str) {
         let mut state = ALERT_STATE.write();
         state.dismissed_items.insert(key.clone());
     }
+    // Persist to LocalStorage — best-effort, ignore storage errors silently.
     let storage_key = dismissed_storage_key();
     if let Ok(mut stored) = LocalStorage::get::<Vec<String>>(&storage_key) {
         stored.push(key);
@@ -326,6 +372,11 @@ fn push_class(classes: &mut String, class_name: &str) {
 }
 
 /// Returns `true` when the badge for a view should be shown.
+///
+/// Current product behavior keeps badges visible while the underlying
+/// condition exists, even after the corresponding view has been opened.
+/// The separate `acknowledged`/`flashed` state is still used to gate the
+/// first-visit in-view highlight pulse.
 pub fn badge_visible(view_key: &str, count: i64, attention: bool) -> bool {
     let _ = (view_key, attention);
     count > 0
@@ -341,8 +392,19 @@ mod tests {
 
     #[test]
     fn badge_visible_hidden_when_count_zero() {
-        assert!(!badge_visible_with_state(&fresh_state(), "systems", 0, true));
-        assert!(!badge_visible_with_state(&fresh_state(), "systems", 0, false));
+        // count=0 → hidden regardless of attention
+        assert!(!badge_visible_with_state(
+            &fresh_state(),
+            "systems",
+            0,
+            true
+        ));
+        assert!(!badge_visible_with_state(
+            &fresh_state(),
+            "systems",
+            0,
+            false
+        ));
     }
 
     #[test]
@@ -382,9 +444,17 @@ mod tests {
     #[test]
     fn attention_item_hidden_after_dismissal() {
         let mut state = fresh_state();
-        assert!(attention_item_active_with_state(&state, "flakes", "42", true));
-        state.dismissed_items.insert(attention_item_key("flakes", "42"));
-        assert!(!attention_item_active_with_state(&state, "flakes", "42", true));
+        assert!(attention_item_active_with_state(
+            &state, "flakes", "42", true
+        ));
+
+        state
+            .dismissed_items
+            .insert(attention_item_key("flakes", "42"));
+
+        assert!(!attention_item_active_with_state(
+            &state, "flakes", "42", true
+        ));
     }
 
     #[test]
@@ -404,6 +474,7 @@ mod tests {
         );
     }
 
+    // Pure helpers for testing (take state explicitly, no GlobalSignal needed)
     fn badge_visible_with_state(
         state: &AlertState,
         view_key: &str,

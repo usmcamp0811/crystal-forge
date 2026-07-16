@@ -470,27 +470,10 @@ in pkgs.testers.runNixOSTest {
           toString CF_TEST_SERVER_PORT
         } /tmp/screenshots > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )
-    import time
-    deadline = time.time() + 1800
-    while time.time() < deadline:
-        if machine.execute("test -f /tmp/screenshots/results.json -o -f /tmp/screenshots/fatal.json")[0] == 0:
-            break
-        # Dump markers every 60s to track progress
-        for marker in ["started.marker", "launching.marker", "launched.marker"]:
-            rc = machine.execute(f"test -f /tmp/screenshots/{marker}")[0]
-            if rc == 0:
-                print(f"  [diag] {marker}: {machine.succeed(f'cat /tmp/screenshots/{marker}').strip()}")
-        time.sleep(60)
-    else:
-        # Timeout — dump diagnostics before failing
-        print("=== DIAG: integration.log ===")
-        print(machine.succeed("timeout 10 cat /tmp/web-ui-tests/integration.log 2>/dev/null || echo '(no log)'"))
-        print("=== DIAG: marker files ===")
-        print(machine.succeed("ls -la /tmp/screenshots/ 2>/dev/null || echo '(no screenshots dir)'"))
-        print("=== DIAG: node processes ===")
-        print(machine.succeed("ps aux | grep -i node || true"))
-        raise Exception("Web UI integration test timed out after 1800 seconds")
-
+    machine.wait_until_succeeds(
+        "test -f /tmp/screenshots/results.json -o -f /tmp/screenshots/fatal.json",
+        timeout=1800,
+    )
     output = machine.succeed("cat /tmp/web-ui-tests/integration.log")
     print(output)
 

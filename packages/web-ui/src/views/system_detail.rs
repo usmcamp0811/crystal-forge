@@ -395,46 +395,37 @@ pub fn SystemDetailView(id: String) -> Element {
         }
     });
 
-    // use_effect + spawn (not use_future) deliberately: this component also
-    // re-renders every second via the now_tick clock above, and use_future can
-    // be re-invoked on every re-render in Dioxus 0.7, which would spawn a new
-    // orphaned polling loop each second without cancelling the previous one —
-    // an unbounded task/memory leak that can crash the tab over time.
-    use_effect(move || {
-        spawn(async move {
-            loop {
-                #[cfg(target_arch = "wasm32")]
-                {
-                    gloo_timers::future::TimeoutFuture::new(4000).await;
-                    deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1);
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                break;
+    use_future(move || async move {
+        loop {
+            #[cfg(target_arch = "wasm32")]
+            {
+                gloo_timers::future::TimeoutFuture::new(4000).await;
+                deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1);
             }
-        });
+            #[cfg(not(target_arch = "wasm32"))]
+            break;
+        }
     });
 
     // History polling tick — only active during a deployment so Recent Activity and the
     // History tab pick up deployment-started/succeeded/failed events as they happen.
+    // Declared `let mut` so the use_future move closure can call .set().
     let mut history_poll_tick = use_signal(|| 0_u64);
     {
         let dep_resource = deployment_progress_resource.clone();
         let mut tick = history_poll_tick.clone();
-        // use_effect + spawn — see comment above.
-        use_effect(move || {
-            spawn(async move {
-                loop {
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        gloo_timers::future::TimeoutFuture::new(4000).await;
-                        if dep_resource.read_unchecked().is_some() {
-                            tick.set(tick() + 1);
-                        }
+        use_future(move || async move {
+            loop {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    gloo_timers::future::TimeoutFuture::new(4000).await;
+                    if dep_resource.read_unchecked().is_some() {
+                        tick.set(tick() + 1);
                     }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    break;
                 }
-            });
+                #[cfg(not(target_arch = "wasm32"))]
+                break;
+            }
         });
     }
 
@@ -473,21 +464,18 @@ pub fn SystemDetailView(id: String) -> Element {
     // a streaming endpoint exists.
     {
         let active_tab_for_events = active_tab;
-        // use_effect + spawn — see comment above (avoids use_future restart-on-rerender leak).
-        use_effect(move || {
-            spawn(async move {
-                loop {
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        gloo_timers::future::TimeoutFuture::new(3000).await;
-                        if *active_tab_for_events.read() == Tab::Logs {
-                            agent_events_poll_tick.set(agent_events_poll_tick() + 1);
-                        }
+        use_future(move || async move {
+            loop {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    gloo_timers::future::TimeoutFuture::new(3000).await;
+                    if *active_tab_for_events.read() == Tab::Logs {
+                        agent_events_poll_tick.set(agent_events_poll_tick() + 1);
                     }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    break;
                 }
-            });
+                #[cfg(not(target_arch = "wasm32"))]
+                break;
+            }
         });
     }
 
@@ -3150,30 +3138,23 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
     // continuously instead of only when the checkbox changes, so newly polled agent
     // events remain visible as they arrive.
     let tail_for_autoscroll = tail.clone();
-    // use_effect + spawn (not use_future) deliberately: this component is a child
-    // of a page that re-renders every second via a live clock, and use_future can
-    // be re-invoked on every re-render in Dioxus 0.7, which would spawn a new
-    // orphaned polling loop each second without cancelling the previous one —
-    // an unbounded task/memory leak that can crash the tab over time.
-    use_effect(move || {
-        spawn(async move {
-            loop {
-                #[cfg(target_arch = "wasm32")]
-                {
-                    gloo_timers::future::TimeoutFuture::new(500).await;
-                    if *tail_for_autoscroll.read() {
-                        if let Some(container) = web_sys::window()
-                            .and_then(|w| w.document())
-                            .and_then(|d| d.get_element_by_id(log_stream_id))
-                        {
-                            container.set_scroll_top(container.scroll_height());
-                        }
+    use_future(move || async move {
+        loop {
+            #[cfg(target_arch = "wasm32")]
+            {
+                gloo_timers::future::TimeoutFuture::new(500).await;
+                if *tail_for_autoscroll.read() {
+                    if let Some(container) = web_sys::window()
+                        .and_then(|w| w.document())
+                        .and_then(|d| d.get_element_by_id(log_stream_id))
+                    {
+                        container.set_scroll_top(container.scroll_height());
                     }
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                break;
             }
-        });
+            #[cfg(not(target_arch = "wasm32"))]
+            break;
+        }
     });
 
     // Auto-scroll to bottom when tailing. Locate the container via its stable DOM id

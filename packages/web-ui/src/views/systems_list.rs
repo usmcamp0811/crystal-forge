@@ -1142,21 +1142,14 @@ fn SystemPreviewPanel(
             load_system_deployment_progress_with_fallback(system_id).await
         }
     });
-    // use_effect + spawn (not use_future) deliberately: this component also
-    // re-renders every second via the now_tick clock above, and use_future can
-    // be re-invoked on every re-render in Dioxus 0.7, which would spawn a new
-    // orphaned 4s polling loop each second without cancelling the previous one
-    // — an unbounded task/memory leak that can crash the tab over time.
-    // use_effect with no reactive signal reads in its body runs its spawn
-    // exactly once per component mount.
-    use_effect(move || {
-        let mut deployment_progress_poll_tick = deployment_progress_poll_tick;
-        spawn(async move {
+    use_future({
+        let mut deployment_progress_poll_tick = deployment_progress_poll_tick.clone();
+        move || async move {
             loop {
                 gloo_timers::future::TimeoutFuture::new(4_000).await;
                 deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1);
             }
-        });
+        }
     });
 
     let history_resource = use_resource({
