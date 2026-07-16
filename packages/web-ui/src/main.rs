@@ -26,6 +26,11 @@ use state::app_state::provide_app_state;
 use state::theme::{UiTheme, apply as apply_theme, persist as persist_theme};
 
 fn main() {
+    // Install a panic hook that logs Rust panic messages to the browser
+    // developer console with full file/line info. Without this, WASM panics
+    // produce only an opaque "RuntimeError: unreachable" trap with no message.
+    console_error_panic_hook::set_once();
+
     dioxus::launch(app);
 }
 
