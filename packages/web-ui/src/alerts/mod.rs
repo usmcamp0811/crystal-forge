@@ -453,13 +453,8 @@ fn push_class(classes: &mut String, class_name: &str) {
 /// The separate `acknowledged`/`flashed` state is still used to gate the
 /// first-visit in-view highlight pulse.
 pub fn badge_visible(view_key: &str, count: i64, attention: bool) -> bool {
-    if count <= 0 {
-        return false;
-    }
-    if attention {
-        ALERT_STATE.write().acknowledged.remove(view_key);
-    }
-    true
+    let _ = (view_key, attention);
+    count > 0
 }
 
 #[cfg(test)]
@@ -483,7 +478,7 @@ mod tests {
         let mut state = fresh_state();
         state.acknowledged.insert("flakes".to_string());
         assert!(badge_visible_with_state(&mut state, "flakes", 3, true));
-        assert!(!state.acknowledged.contains("flakes"));
+        assert!(state.acknowledged.contains("flakes"));
     }
 
     #[test]
@@ -587,13 +582,8 @@ mod tests {
         count: i64,
         attention: bool,
     ) -> bool {
-        if count <= 0 {
-            return false;
-        }
-        if attention {
-            state.acknowledged.remove(view_key);
-        }
-        true
+        let _ = (state, view_key, attention);
+        count > 0
     }
 
     fn should_flash_with_state(
