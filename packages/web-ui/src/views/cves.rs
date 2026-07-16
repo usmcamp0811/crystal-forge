@@ -9,7 +9,7 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::{acknowledge, should_flash};
+use crate::alerts::{NAV_BADGES, acknowledge_with_cursor_and_ids, should_flash};
 
 use crate::api::client;
 use crate::api::models::{
@@ -202,9 +202,6 @@ pub fn CvesView() -> Element {
                     flash_crit_signal.set(false);
                 });
             }
-            // Only acknowledge once stats have actually loaded so we don't
-            // seed the acknowledgment baseline with a premature count of 0.
-            acknowledge("cves", crit_count);
         }
     });
 
@@ -227,6 +224,34 @@ pub fn CvesView() -> Element {
         };
 
         async move { client::fetch_cves(&filters).await }
+    });
+
+    use_effect(move || {
+        if let (Some(Ok(s)), Some(Ok(items))) = (stats.read().as_ref(), cve_list.read().as_ref()) {
+            let Some(cursor) = NAV_BADGES.read_unchecked().observed_at.clone() else {
+                return;
+            };
+            let alert_ids = items
+                .iter()
+                .filter(|item| item.severity.eq_ignore_ascii_case("critical"))
+                .map(|item| {
+                    format!(
+                        "{}:{}",
+                        item.cve_id,
+                        item.first_seen
+                            .map(|at| at.timestamp().to_string())
+                            .unwrap_or_else(|| "unknown".to_string())
+                    )
+                })
+                .collect::<Vec<_>>();
+            acknowledge_with_cursor_and_ids(
+                "cves",
+                s.critical as i64,
+                cursor,
+                None,
+                Some(alert_ids),
+            );
+        }
     });
 
     rsx! {

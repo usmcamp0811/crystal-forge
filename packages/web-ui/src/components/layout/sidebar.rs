@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::{badge_recently_zeroed, NAV_BADGES};
+use crate::alerts::{NAV_BADGES, badge_recently_zeroed};
 use crate::api::client::get_navigation_badges;
 use crate::routes::Route;
 use crate::state::app_state::AppState;

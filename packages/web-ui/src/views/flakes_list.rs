@@ -19,7 +19,8 @@ use web_sys::console;
 use web_sys::{Node, window};
 
 use crate::alerts::{
-    NAV_BADGES, acknowledge_with_cursor, attention_row_class, dismiss_attention_item, should_flash,
+    NAV_BADGES, acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item,
+    should_flash,
 };
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
@@ -3048,6 +3049,21 @@ pub fn FlakesListViewNew() -> Element {
         .iter()
         .filter(|f| f.status == "error")
         .count();
+    let flake_alert_ids = raw_flakes
+        .iter()
+        .filter(|flake| flake.sync_status == "error")
+        .map(|flake| {
+            format!(
+                "{}:{}:{}",
+                flake.id,
+                flake.sync_status,
+                flake
+                    .last_sync_at
+                    .map(|at| at.timestamp().to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )
+        })
+        .collect::<Vec<_>>();
 
     // Acknowledge the "flakes" sidebar badge on first visit and trigger attention
     // flash on errored rows (TASK-385).
@@ -3056,7 +3072,15 @@ pub fn FlakesListViewNew() -> Element {
     let flakes_loaded_successfully = !loading && load_error.is_none();
     use_effect(move || {
         if flakes_loaded_successfully {
-            acknowledge_with_cursor("flakes", error_count as i64, flakes_ack_cursor.read().clone());
+            if let Some(cursor) = flakes_ack_cursor.read().clone() {
+                acknowledge_with_cursor_and_ids(
+                    "flakes",
+                    error_count as i64,
+                    cursor,
+                    None,
+                    Some(flake_alert_ids.clone()),
+                );
+            }
         }
     });
 

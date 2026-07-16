@@ -45,6 +45,13 @@ fn came_from_setup() -> bool {
     false
 }
 
+fn environment_alert_occurrence_id(env: &EnvironmentItem) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        env.id, env.health.critical, env.health.offline, env.cve_critical_high
+    )
+}
+
 #[component]
 pub fn EnvironmentsListView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
@@ -81,7 +88,7 @@ pub fn EnvironmentsListView() -> Element {
             let attention_count = attention_items.len() as i64;
             let alert_ids = attention_items
                 .iter()
-                .map(|env| env.id.to_string())
+                .map(|env| environment_alert_occurrence_id(env))
                 .collect::<Vec<_>>();
             let ack_snapshot = {
                 let badges = NAV_BADGES.read_unchecked();
@@ -161,7 +168,7 @@ pub fn EnvironmentsListView() -> Element {
     let attention_classes: Vec<String> = filtered
         .iter()
         .map(|env| {
-            let env_key = env.id.to_string();
+            let env_key = environment_alert_occurrence_id(env);
             let is_attention = env_needs_attention(env);
             let flash_now = flash_global && is_attention;
             attention_row_class("", "environments", &env_key, is_attention, flash_now)
@@ -275,7 +282,7 @@ pub fn EnvironmentsListView() -> Element {
                             flash: flash_global && env_needs_attention(env),
                             attention_class: attention_class.clone(),
                             on_edit: move |env: EnvironmentItem| {
-                                dismiss_attention_item("environments", &env.id.to_string());
+                                dismiss_attention_item("environments", &environment_alert_occurrence_id(&env));
                                 form_error.set(None);
                                 form_draft.set(Some(form_draft_from_environment(&env)));
                             }
@@ -289,7 +296,7 @@ pub fn EnvironmentsListView() -> Element {
                     flashes: flashes.clone(),
                     attention_classes: attention_classes.clone(),
                     on_edit: move |env: EnvironmentItem| {
-                        dismiss_attention_item("environments", &env.id.to_string());
+                        dismiss_attention_item("environments", &environment_alert_occurrence_id(&env));
                         form_error.set(None);
                         form_draft.set(Some(form_draft_from_environment(&env)));
                     }

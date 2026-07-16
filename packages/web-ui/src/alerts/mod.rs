@@ -48,9 +48,12 @@ pub struct AlertState {
     pub flashed: HashSet<String>,
     /// Individual attention rows/cards dismissed after the user opens/clicks them.
     pub dismissed_items: HashSet<String>,
-    /// Last acknowledgement payload sent per view key.  This prevents render or
-    /// signal feedback loops from repeatedly POSTing the same acknowledgement
-    /// and hammering user_alert_acknowledgments.
+    /// Acknowledgement payload currently in-flight per view key.
+    pub in_flight_payloads: HashMap<String, String>,
+    /// Last acknowledgement payload successfully persisted per view key.  This
+    /// prevents render or signal feedback loops from repeatedly POSTing the
+    /// same acknowledgement after success while still allowing failed requests
+    /// to retry.
     pub last_ack_payloads: HashMap<String, String>,
     /// Unix-second timestamp of the last optimistic zero for each view key.
     /// Used by the sidebar poll to skip overwriting a recently zeroed badge
@@ -68,11 +71,11 @@ pub static ALERT_STATE: GlobalSignal<AlertState> = Signal::global(AlertState::de
 /// dismissal set with the target user's stored set so local-login and logout
 /// transitions do not share the anonymous namespace.
 pub fn set_current_user_id(user_id: &str) {
-    load_dismissals_for_storage_key(storage_key_for_user(Some(user_id)));
+    reset_for_storage_key(storage_key_for_user(Some(user_id)));
 }
 
 pub fn clear_current_user_id() {
-    load_dismissals_for_storage_key(storage_key_for_user(None));
+    reset_for_storage_key(storage_key_for_user(None));
 }
 
 /// The LocalStorage key for dismissed items scoped to the current user.
@@ -98,6 +101,16 @@ fn load_dismissals_for_storage_key(storage_key: String) {
     let mut state = ALERT_STATE.write();
     state.dismissed_items = stored.into_iter().collect();
     state.dismissed_storage_key = Some(storage_key);
+}
+
+fn reset_for_storage_key(storage_key: String) {
+    let stored = LocalStorage::get::<Vec<String>>(&storage_key).unwrap_or_default();
+    *ALERT_STATE.write() = AlertState {
+        dismissed_items: stored.into_iter().collect(),
+        dismissed_storage_key: Some(storage_key),
+        ..AlertState::default()
+    };
+    *NAV_BADGES.write() = NavigationBadges::default();
 }
 
 /// Latest polled navigation badge counts — server-computed "new since last
@@ -171,16 +184,13 @@ pub fn acknowledge_with_cursor(view_key: &str, current_count: i64, observed_at: 
     acknowledge_with_cursor_and_ids(view_key, current_count, observed_at, None, None);
 }
 
-/// Acknowledge using a view-owned cursor and optional alerting IDs.  The IDs
-/// are used by systems/environments so the server computes `current - seen`
-/// rather than re-surfacing old alerts on recovery-only set changes.
-pub fn acknowledge_with_cursor_and_ids(
+pub async fn acknowledge_with_cursor_and_ids_async(
     view_key: &str,
     current_count: i64,
     observed_at: String,
     fingerprint: Option<String>,
     alert_ids: Option<Vec<String>>,
-) {
+) -> bool {
     let payload_key = acknowledgement_payload_key(
         current_count,
         observed_at.as_str(),
@@ -193,31 +203,73 @@ pub fn acknowledge_with_cursor_and_ids(
             .last_ack_payloads
             .get(view_key)
             .is_some_and(|last| last == &payload_key)
+            || state
+                .in_flight_payloads
+                .get(view_key)
+                .is_some_and(|in_flight| in_flight == &payload_key)
         {
-            return;
+            return true;
         }
         state.acknowledged.insert(view_key.to_string());
         state
-            .last_ack_payloads
-            .insert(view_key.to_string(), payload_key);
+            .in_flight_payloads
+            .insert(view_key.to_string(), payload_key.clone());
     }
     zero_nav_badge_field(view_key);
+
+    let success = acknowledge_navigation_category(
+        view_key,
+        observed_at.as_str(),
+        current_count,
+        fingerprint.as_deref(),
+        alert_ids.as_deref(),
+    )
+    .await
+    .is_ok();
+
+    {
+        let mut state = ALERT_STATE.write();
+        if state
+            .in_flight_payloads
+            .get(view_key)
+            .is_some_and(|in_flight| in_flight == &payload_key)
+        {
+            state.in_flight_payloads.remove(view_key);
+        }
+        if success {
+            state
+                .last_ack_payloads
+                .insert(view_key.to_string(), payload_key);
+        }
+    }
+
+    if let Ok(fresh) = get_navigation_badges().await {
+        *NAV_BADGES.write() = fresh;
+    }
+
+    success
+}
+
+/// Acknowledge using a view-owned cursor and optional alerting IDs.  The IDs
+/// are used by systems/environments so the server computes `current - seen`
+/// rather than re-surfacing old alerts on recovery-only set changes.
+pub fn acknowledge_with_cursor_and_ids(
+    view_key: &str,
+    current_count: i64,
+    observed_at: String,
+    fingerprint: Option<String>,
+    alert_ids: Option<Vec<String>>,
+) {
     let view_key = view_key.to_string();
     spawn(async move {
-        if acknowledge_navigation_category(
+        let _ = acknowledge_with_cursor_and_ids_async(
             &view_key,
-            observed_at.as_str(),
             current_count,
-            fingerprint.as_deref(),
-            alert_ids.as_deref(),
+            observed_at,
+            fingerprint,
+            alert_ids,
         )
-        .await
-        .is_ok()
-        {
-            if let Ok(fresh) = get_navigation_badges().await {
-                *NAV_BADGES.write() = fresh;
-            }
-        }
+        .await;
     });
 }
 
@@ -483,6 +535,40 @@ mod tests {
             attention_row_class_with_state(&state, "selected", "builds", "7", false, true),
             "selected"
         );
+    }
+
+    #[test]
+    fn acknowledgement_payload_key_sorts_alert_ids() {
+        let first = acknowledgement_payload_key(
+            2,
+            "2026-07-15T00:00:00Z",
+            None,
+            Some(&["b".to_string(), "a".to_string()]),
+        );
+        let second = acknowledgement_payload_key(
+            2,
+            "2026-07-15T00:00:00Z",
+            None,
+            Some(&["a".to_string(), "b".to_string()]),
+        );
+
+        assert_eq!(first, second);
+        assert!(first.contains("ids=a,b"));
+    }
+
+    #[test]
+    fn acknowledgement_payload_key_includes_cursor_and_fingerprint() {
+        let key = acknowledgement_payload_key(
+            3,
+            "2026-07-15T00:00:00Z",
+            Some("fingerprint-1"),
+            Some(&["alert-1".to_string()]),
+        );
+
+        assert!(key.contains("count=3"));
+        assert!(key.contains("cursor=2026-07-15T00:00:00Z"));
+        assert!(key.contains("fingerprint=fingerprint-1"));
+        assert!(key.contains("ids=alert-1"));
     }
 
     // Pure helpers for testing (take state explicitly, no GlobalSignal needed)

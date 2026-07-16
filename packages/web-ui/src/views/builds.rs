@@ -3,7 +3,7 @@
 use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
-use crate::alerts::{NAV_BADGES, acknowledge_with_cursor};
+use crate::alerts::{NAV_BADGES, acknowledge_with_cursor_and_ids_async};
 
 use crate::api::{
     self,
@@ -444,12 +444,28 @@ pub fn BuildsView() -> Element {
             && !builds_ack_sent()
             && recent_builds.read().as_ref().is_some_and(|r| r.is_ok())
         {
-            acknowledge_with_cursor(
-                "builds",
-                completed_failed_count as i64,
-                build_history_ack_cursor.read().clone(),
-            );
-            builds_ack_sent.set(true);
+            let Some(cursor) = build_history_ack_cursor.read().clone() else {
+                return;
+            };
+            let alert_ids = build_history
+                .read()
+                .iter()
+                .filter(|item| item.status == BuildStatus::Failed)
+                .filter_map(|item| item.job_id.map(|id| id.to_string()))
+                .collect::<Vec<_>>();
+            spawn(async move {
+                if acknowledge_with_cursor_and_ids_async(
+                    "builds",
+                    completed_failed_count as i64,
+                    cursor,
+                    None,
+                    Some(alert_ids),
+                )
+                .await
+                {
+                    builds_ack_sent.set(true);
+                }
+            });
         }
     });
     // Server-computed "new failed builds since last acknowledgment" (persists

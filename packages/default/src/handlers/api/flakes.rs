@@ -18,13 +18,13 @@ use crate::api::models::{
 };
 use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth, RequireOperator};
 use crate::config::CrystalForgeConfig;
+use crate::flake::commits::sync_flake_recorded;
 use crate::flake::commits::{
     GitCommitMetadata, branch_exists, branch_exists_with_creds, get_commit_changed_files,
     get_commit_diff_with_creds, get_commit_metadata, get_commit_nixos_configurations,
     get_recent_branch_commit_hashes_with_creds, infer_default_branch,
     infer_default_branch_with_creds, is_history_rewrite_error,
 };
-use crate::flake::commits::{sync_commits_for_flake, sync_flake_recorded};
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};

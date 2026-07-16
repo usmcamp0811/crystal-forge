@@ -195,6 +195,22 @@ fn new_since_by_alert_ids(
     }
 }
 
+fn new_since_by_occurrence_ids(
+    current_ids: &[String],
+    baseline: Option<&AckBaseline>,
+) -> Option<i64> {
+    baseline.and_then(|b| {
+        b.last_seen_alert_ids.as_ref().map(|previous_ids| {
+            let previous: std::collections::HashSet<&str> =
+                previous_ids.iter().map(String::as_str).collect();
+            current_ids
+                .iter()
+                .filter(|id| !previous.contains(id.as_str()))
+                .count() as i64
+        })
+    })
+}
+
 /// Fetch all sidebar badge counts in one round-trip, computed relative to
 /// `user_id`'s last acknowledgment of each category.
 ///
@@ -244,7 +260,17 @@ pub async fn fetch_navigation_badges(
                 ''
             ),
             COALESCE(
-                array_agg(vsl.id::text ORDER BY vsl.id)
+                array_agg(
+                    concat_ws(
+                        ':',
+                        vsl.id::text,
+                        vsl.health_status,
+                        COALESCE(EXTRACT(EPOCH FROM vsl.last_seen)::bigint::text, 'never'),
+                        COALESCE(vsl.cve_critical_count::text, '0'),
+                        COALESCE(vsl.cve_high_count::text, '0')
+                    )
+                    ORDER BY vsl.id
+                )
                     FILTER (WHERE vsl.health_status IN ('critical', 'offline')),
                 ARRAY[]::text[]
             )
@@ -279,8 +305,48 @@ pub async fn fetch_navigation_badges(
     // stale" message), so the badge count must use the same predicate or it
     // will silently under-count relative to what /flakes actually shows.
     let flakes_since = acks.get("flakes").map(|b| b.last_seen_at);
-    let (flakes_errored, flakes_total): (i64, i64) = match sqlx::query_as(
+    let (flake_alert_ids, flakes_total): (Vec<String>, i64) = match sqlx::query_as(
         r#"
+        SELECT
+            COALESCE(
+                array_agg(
+                    concat_ws(
+                        ':',
+                        id::text,
+                        sync_status,
+                        COALESCE(EXTRACT(EPOCH FROM last_sync_at)::bigint::text, 'unknown')
+                    )
+                    ORDER BY id
+                ) FILTER (
+                    WHERE sync_status = 'error'
+                       OR (
+                           sync_status = 'syncing'
+                           AND last_sync_at IS NOT NULL
+                           AND last_sync_at < now() - interval '30 minutes'
+                       )
+                ),
+                ARRAY[]::text[]
+            ),
+            COUNT(*)::bigint
+        FROM flakes
+        WHERE deleted_at IS NULL
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    {
+        Ok(counts) => counts,
+        Err(e) => {
+            tracing::warn!("Failed to fetch flake alert IDs: {e:#}");
+            (Vec::new(), 0)
+        }
+    };
+    let flakes_errored =
+        if let Some(count) = new_since_by_occurrence_ids(&flake_alert_ids, acks.get("flakes")) {
+            count
+        } else {
+            let (count, _total): (i64, i64) = match sqlx::query_as(
+                r#"
         SELECT
             COUNT(*) FILTER (
                 WHERE
@@ -309,18 +375,20 @@ pub async fn fetch_navigation_badges(
         FROM flakes
         WHERE deleted_at IS NULL
         "#,
-    )
-    .bind(flakes_since)
-    .bind(observed_at)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(counts) => counts,
-        Err(e) => {
-            tracing::warn!("Failed to fetch flakes navigation badge counts: {e:#}");
-            (0, 0)
-        }
-    };
+            )
+            .bind(flakes_since)
+            .bind(observed_at)
+            .fetch_one(pool)
+            .await
+            {
+                Ok(counts) => counts,
+                Err(e) => {
+                    tracing::warn!("Failed to fetch flakes navigation badge counts: {e:#}");
+                    (0, flakes_total)
+                }
+            };
+            count
+        };
 
     // ── Environments: contain ≥1 attention system (fingerprint+count-diff) ───
     // Scoped to the requesting user's environment memberships — admins see
@@ -336,24 +404,51 @@ pub async fn fetch_navigation_badges(
         environments_alert_ids,
     ): (i64, i64, Option<String>, Vec<String>) = match sqlx::query_as(
         r#"
+        WITH alerting_environments AS (
+            SELECT
+                ver.environment_id,
+                ver.critical_count,
+                ver.offline_count,
+                ver.cve_critical_high_count,
+                COALESCE(
+                    array_agg(
+                        concat_ws(
+                            ':',
+                            vsl.id::text,
+                            vsl.health_status,
+                            COALESCE(EXTRACT(EPOCH FROM vsl.last_seen)::bigint::text, 'never'),
+                            COALESCE(vsl.cve_critical_count::text, '0'),
+                            COALESCE(vsl.cve_high_count::text, '0')
+                        )
+                        ORDER BY vsl.id
+                    ) FILTER (WHERE vsl.health_status IN ('critical', 'offline')),
+                    ARRAY[]::text[]
+                ) AS system_occurrences
+            FROM view_environment_rollups ver
+            LEFT JOIN systems s ON s.environment_id = ver.environment_id AND s.is_active = TRUE
+            LEFT JOIN view_system_list vsl ON vsl.id = s.id
+            WHERE $1 OR ver.environment_id = ANY($2)
+            GROUP BY ver.environment_id, ver.critical_count, ver.offline_count, ver.cve_critical_high_count
+        )
         SELECT
             COUNT(*) FILTER (WHERE critical_count > 0 OR offline_count > 0)::bigint,
             COUNT(*)::bigint,
             NULLIF(
                 md5(string_agg(
-                    environment_id::text,
+                    concat_ws(':', environment_id::text, array_to_string(system_occurrences, ',')),
                     E'\n'
                     ORDER BY environment_id
                 ) FILTER (WHERE critical_count > 0 OR offline_count > 0)),
                 ''
             ),
             COALESCE(
-                array_agg(environment_id::text ORDER BY environment_id)
-                    FILTER (WHERE critical_count > 0 OR offline_count > 0),
+                array_agg(
+                    concat_ws(':', environment_id::text, array_to_string(system_occurrences, ','))
+                    ORDER BY environment_id
+                ) FILTER (WHERE critical_count > 0 OR offline_count > 0),
                 ARRAY[]::text[]
             )
-        FROM view_environment_rollups
-        WHERE $1 OR environment_id = ANY($2)
+        FROM alerting_environments
         "#,
     )
     .bind(is_admin)
@@ -376,74 +471,140 @@ pub async fn fetch_navigation_badges(
 
     // ── Builds: failed build jobs, new since completed_at baseline ───────────
     let builds_since = acks.get("builds").map(|b| b.last_seen_at);
-    let builds_failed_new: i64 = match sqlx::query_scalar(
+    let build_alert_ids: Vec<String> = match sqlx::query_scalar(
         r#"
+        SELECT bj.id::text
+        FROM build_jobs bj
+        WHERE bj.status = 'failed'
+        ORDER BY COALESCE(bj.completed_at, bj.updated_at, bj.created_at) DESC, bj.id DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!("Failed to fetch build alert IDs: {e:#}");
+            Vec::new()
+        }
+    };
+    let builds_failed_new: i64 =
+        if let Some(count) = new_since_by_occurrence_ids(&build_alert_ids, acks.get("builds")) {
+            count
+        } else {
+            match sqlx::query_scalar(
+                r#"
         SELECT COUNT(*)::bigint
         FROM build_jobs
         WHERE status = 'failed'
           AND ($1::timestamptz IS NULL OR completed_at > $1)
           AND completed_at <= $2
         "#,
-    )
-    .bind(builds_since)
-    .bind(observed_at)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(count) => count,
-        Err(e) => {
-            tracing::warn!("Failed to fetch builds navigation badge count: {e:#}");
-            0
-        }
-    };
+            )
+            .bind(builds_since)
+            .bind(observed_at)
+            .fetch_one(pool)
+            .await
+            {
+                Ok(count) => count,
+                Err(e) => {
+                    tracing::warn!("Failed to fetch builds navigation badge count: {e:#}");
+                    0
+                }
+            }
+        };
 
     // ── Evals: failed commit evaluations, new since evaluation_completed_at ──
     let evals_since = acks.get("evals").map(|b| b.last_seen_at);
-    let evals_failed_new: i64 = match sqlx::query_scalar(
+    let eval_alert_ids: Vec<String> = match sqlx::query_scalar(
         r#"
+        SELECT c.id::text
+        FROM commits c
+        WHERE c.evaluation_status = 'failed'
+        ORDER BY c.evaluation_completed_at DESC NULLS LAST, c.id DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!("Failed to fetch evaluation alert IDs: {e:#}");
+            Vec::new()
+        }
+    };
+    let evals_failed_new: i64 =
+        if let Some(count) = new_since_by_occurrence_ids(&eval_alert_ids, acks.get("evals")) {
+            count
+        } else {
+            match sqlx::query_scalar(
+                r#"
         SELECT COUNT(*)::bigint
         FROM commits
         WHERE evaluation_status = 'failed'
           AND ($1::timestamptz IS NULL OR evaluation_completed_at > $1)
           AND evaluation_completed_at <= $2
         "#,
-    )
-    .bind(evals_since)
-    .bind(observed_at)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(count) => count,
-        Err(e) => {
-            tracing::warn!("Failed to fetch evaluations navigation badge count: {e:#}");
-            0
-        }
-    };
+            )
+            .bind(evals_since)
+            .bind(observed_at)
+            .fetch_one(pool)
+            .await
+            {
+                Ok(count) => count,
+                Err(e) => {
+                    tracing::warn!("Failed to fetch evaluations navigation badge count: {e:#}");
+                    0
+                }
+            }
+        };
 
     // ── CVEs: critical, new since first_seen baseline ────────────────────────
     // Reuses the same view + severity predicate as /api/v1/cves/stats
     // (view_cve_fleet_stats is itself computed from view_cve_list_with_metadata).
     let cves_since = acks.get("cves").map(|b| b.last_seen_at);
-    let cves_critical_new: i64 = match sqlx::query_scalar(
+    let cve_alert_ids: Vec<String> = match sqlx::query_scalar(
         r#"
+        SELECT DISTINCT concat_ws(':', cve_id, COALESCE(EXTRACT(EPOCH FROM first_seen)::bigint::text, 'unknown'))
+        FROM view_cve_list_with_metadata
+        WHERE severity = 'CRITICAL'
+        ORDER BY concat_ws(':', cve_id, COALESCE(EXTRACT(EPOCH FROM first_seen)::bigint::text, 'unknown'))
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!("Failed to fetch CVE alert IDs: {e:#}");
+            Vec::new()
+        }
+    };
+    let cves_critical_new: i64 =
+        if let Some(count) = new_since_by_occurrence_ids(&cve_alert_ids, acks.get("cves")) {
+            count
+        } else {
+            match sqlx::query_scalar(
+                r#"
         SELECT COUNT(*)::bigint
         FROM view_cve_list_with_metadata
         WHERE severity = 'CRITICAL'
           AND ($1::timestamptz IS NULL OR first_seen > $1)
           AND first_seen <= $2
         "#,
-    )
-    .bind(cves_since)
-    .bind(observed_at)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(count) => count,
-        Err(e) => {
-            tracing::warn!("Failed to fetch CVE navigation badge count: {e:#}");
-            0
-        }
-    };
+            )
+            .bind(cves_since)
+            .bind(observed_at)
+            .fetch_one(pool)
+            .await
+            {
+                Ok(count) => count,
+                Err(e) => {
+                    tracing::warn!("Failed to fetch CVE navigation badge count: {e:#}");
+                    0
+                }
+            }
+        };
 
     Ok(NavigationBadges {
         observed_at: Some(observed_at),
@@ -550,6 +711,43 @@ mod tests {
                 Some(&baseline),
             ),
             1
+        );
+    }
+
+    #[test]
+    fn new_since_by_occurrence_ids_counts_only_unseen_occurrences() {
+        let baseline = AckBaseline {
+            last_seen_at: Utc::now(),
+            last_seen_count: 2,
+            last_seen_fingerprint: None,
+            last_seen_alert_ids: Some(vec!["build-a".to_string(), "build-b".to_string()]),
+        };
+
+        assert_eq!(
+            new_since_by_occurrence_ids(
+                &[
+                    "build-a".to_string(),
+                    "build-b".to_string(),
+                    "build-c".to_string(),
+                ],
+                Some(&baseline),
+            ),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn new_since_by_occurrence_ids_requires_recorded_ids() {
+        let baseline = AckBaseline {
+            last_seen_at: Utc::now(),
+            last_seen_count: 2,
+            last_seen_fingerprint: None,
+            last_seen_alert_ids: None,
+        };
+
+        assert_eq!(
+            new_since_by_occurrence_ids(&["build-a".to_string()], Some(&baseline)),
+            None
         );
     }
 

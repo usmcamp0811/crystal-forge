@@ -5,7 +5,8 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::alerts::{
-    NAV_BADGES, acknowledge_with_cursor, attention_row_class, dismiss_attention_item, should_flash,
+    NAV_BADGES, acknowledge_with_cursor_and_ids_async, attention_row_class, dismiss_attention_item,
+    should_flash,
 };
 
 use crate::api::{
@@ -171,12 +172,28 @@ fn EvaluationsPage() -> Element {
                         .iter()
                         .filter(|item| item.evaluation_status == "failed")
                         .count() as i64;
-                    acknowledge_with_cursor(
-                        "evals",
-                        history_failed_count,
-                        history_ack_cursor.read().clone(),
-                    );
-                    evals_ack_sent.set(true);
+                    let Some(cursor) = history_ack_cursor.read().clone() else {
+                        return;
+                    };
+                    let alert_ids = page_data
+                        .items
+                        .iter()
+                        .filter(|item| item.evaluation_status == "failed")
+                        .map(|item| item.commit_id.to_string())
+                        .collect::<Vec<_>>();
+                    spawn(async move {
+                        if acknowledge_with_cursor_and_ids_async(
+                            "evals",
+                            history_failed_count,
+                            cursor,
+                            None,
+                            Some(alert_ids),
+                        )
+                        .await
+                        {
+                            evals_ack_sent.set(true);
+                        }
+                    });
                 }
             }
         }
