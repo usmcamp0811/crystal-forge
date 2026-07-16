@@ -273,6 +273,18 @@ pub fn acknowledge_with_cursor_and_ids(
     });
 }
 
+/// Hide a category's badge locally when the view has been visited but the
+/// server badge cursor is not available yet. This does not persist an
+/// acknowledgment; the next successful cursored acknowledgment records the
+/// server baseline.
+pub fn acknowledge_locally(view_key: &str) {
+    ALERT_STATE
+        .write()
+        .acknowledged
+        .insert(view_key.to_string());
+    zero_nav_badge_field(view_key);
+}
+
 fn acknowledgement_payload_key(
     current_count: i64,
     observed_at: &str,
@@ -441,8 +453,11 @@ fn push_class(classes: &mut String, class_name: &str) {
 /// The separate `acknowledged`/`flashed` state is still used to gate the
 /// first-visit in-view highlight pulse.
 pub fn badge_visible(view_key: &str, count: i64, attention: bool) -> bool {
-    let _ = (view_key, attention);
-    count > 0
+    if count <= 0 {
+        return false;
+    }
+    let state = ALERT_STATE.read();
+    !(attention && state.acknowledged.contains(view_key))
 }
 
 #[cfg(test)]
@@ -471,10 +486,10 @@ mod tests {
     }
 
     #[test]
-    fn badge_visible_attention_badge_still_shown_after_ack() {
+    fn badge_visible_attention_badge_hidden_after_ack() {
         let mut state = fresh_state();
         state.acknowledged.insert("flakes".to_string());
-        assert!(badge_visible_with_state(&state, "flakes", 3, true));
+        assert!(!badge_visible_with_state(&state, "flakes", 3, true));
     }
 
     #[test]
@@ -581,8 +596,7 @@ mod tests {
         if count <= 0 {
             return false;
         }
-        let _ = (state, view_key, attention);
-        true
+        !(attention && state.acknowledged.contains(view_key))
     }
 
     fn should_flash_with_state(

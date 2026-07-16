@@ -266,8 +266,8 @@ pub async fn fetch_navigation_badges(
                         vsl.id::text,
                         vsl.health_status,
                         COALESCE(EXTRACT(EPOCH FROM vsl.last_seen)::bigint::text, 'never'),
-                        COALESCE(vsl.cve_critical_count::text, '0'),
-                        COALESCE(vsl.cve_high_count::text, '0')
+                        COALESCE(vsl.critical_cve_count::text, '0'),
+                        COALESCE(vsl.high_cve_count::text, '0')
                     )
                     ORDER BY vsl.id
                 )
@@ -417,8 +417,8 @@ pub async fn fetch_navigation_badges(
                             vsl.id::text,
                             vsl.health_status,
                             COALESCE(EXTRACT(EPOCH FROM vsl.last_seen)::bigint::text, 'never'),
-                            COALESCE(vsl.cve_critical_count::text, '0'),
-                            COALESCE(vsl.cve_high_count::text, '0')
+                            COALESCE(vsl.critical_cve_count::text, '0'),
+                            COALESCE(vsl.high_cve_count::text, '0')
                         )
                         ORDER BY vsl.id
                     ) FILTER (WHERE vsl.health_status IN ('critical', 'offline')),

@@ -19,8 +19,8 @@ use web_sys::console;
 use web_sys::{Node, window};
 
 use crate::alerts::{
-    NAV_BADGES, acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item,
-    should_flash,
+    NAV_BADGES, acknowledge_locally, acknowledge_with_cursor_and_ids, attention_row_class,
+    dismiss_attention_item, should_flash,
 };
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
@@ -2896,6 +2896,7 @@ pub fn FlakesListViewNew() -> Element {
     let mut rewrite_prompt = use_signal(|| None::<(i32, String, String)>);
     let mut dismissed_rewrite_conflicts = use_signal(HashSet::<String>::new);
     let mut flakes_ack_cursor = use_signal(|| None::<String>);
+    let mut flakes_ack_sent = use_signal(|| false);
 
     let flakes_resource = use_resource(move || {
         let _nonce = *reload_nonce.read();
@@ -3069,9 +3070,10 @@ pub fn FlakesListViewNew() -> Element {
     // flash on errored rows (TASK-385).
     let has_flake_errors = error_count > 0;
     let flash_flakes = should_flash("flakes", has_flake_errors);
-    let flakes_loaded_successfully = !loading && load_error.is_none();
     use_effect(move || {
-        if flakes_loaded_successfully {
+        let flakes_loaded_successfully = matches!(flakes_resource.read().as_ref(), Some(Ok(_)));
+        if flakes_loaded_successfully && !flakes_ack_sent() {
+            flakes_ack_sent.set(true);
             if let Some(cursor) = flakes_ack_cursor.read().clone() {
                 acknowledge_with_cursor_and_ids(
                     "flakes",
@@ -3080,6 +3082,8 @@ pub fn FlakesListViewNew() -> Element {
                     None,
                     Some(flake_alert_ids.clone()),
                 );
+            } else {
+                acknowledge_locally("flakes");
             }
         }
     });

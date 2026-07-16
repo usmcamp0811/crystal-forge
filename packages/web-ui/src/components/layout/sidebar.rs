@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::{NAV_BADGES, badge_recently_zeroed};
+use crate::alerts::{NAV_BADGES, badge_recently_zeroed, badge_visible};
 use crate::api::client::get_navigation_badges;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
@@ -257,7 +257,7 @@ pub fn SidebarNav() -> Element {
                     label: "Systems",
                     badge_count: if systems_attention > 0 { Some(systems_attention) } else { None },
                     badge_attention: systems_attention > 0,
-                    badge_hidden: systems_attention == 0,
+                    badge_hidden: !badge_visible("systems", systems_attention, systems_attention > 0),
                     badge_title: Some(format!("{} of {} systems need attention (critical or offline)", systems_attention, badges.systems_total)),
                     icon: rsx!(
                         svg {
@@ -278,7 +278,7 @@ pub fn SidebarNav() -> Element {
                     label: "Flakes",
                     badge_count: if flakes_errored > 0 { Some(flakes_errored) } else { None },
                     badge_attention: flakes_errored > 0,
-                    badge_hidden: flakes_errored == 0,
+                    badge_hidden: !badge_visible("flakes", flakes_errored, flakes_errored > 0),
                     badge_title: Some(if flakes_errored > 0 {
                         format!("{} of {} flakes failing to sync", flakes_errored, badges.flakes_total)
                     } else {
@@ -303,7 +303,7 @@ pub fn SidebarNav() -> Element {
                     label: "Environments",
                     badge_count: if environments_attention > 0 { Some(environments_attention) } else { None },
                     badge_attention: environments_attention > 0,
-                    badge_hidden: environments_attention == 0,
+                    badge_hidden: !badge_visible("environments", environments_attention, environments_attention > 0),
                     badge_title: Some(if environments_attention > 0 {
                         format!("{} of {} environments have critical or offline systems", environments_attention, badges.environments_total)
                     } else {
@@ -333,7 +333,7 @@ pub fn SidebarNav() -> Element {
                     // The view itself calls acknowledge("builds") when the completed/failed tab opens.
                     badge_count: if builds_failed > 0 { Some(builds_failed) } else { None },
                     badge_attention: builds_failed > 0,
-                    badge_hidden: builds_failed == 0,
+                    badge_hidden: !badge_visible("builds", builds_failed, builds_failed > 0),
                     badge_title: Some(format!("{} new failed build{} since you last checked", builds_failed, if builds_failed == 1 { "" } else { "s" })),
                     icon: rsx!(
                         svg {
@@ -353,7 +353,7 @@ pub fn SidebarNav() -> Element {
                     // Evals badge is acknowledged only when the failures tab is opened (not on mount).
                     badge_count: if evals_failed > 0 { Some(evals_failed) } else { None },
                     badge_attention: evals_failed > 0,
-                    badge_hidden: evals_failed == 0,
+                    badge_hidden: !badge_visible("evals", evals_failed, evals_failed > 0),
                     badge_title: Some(format!("{} new failed evaluation{} since you last checked", evals_failed, if evals_failed == 1 { "" } else { "s" })),
                     icon: rsx!(
                         svg {
@@ -395,7 +395,7 @@ pub fn SidebarNav() -> Element {
                         label: "CVEs",
                         badge_count: if cves_critical > 0 { Some(cves_critical) } else { None },
                         badge_attention: cves_critical > 0,
-                        badge_hidden: cves_critical == 0,
+                        badge_hidden: !badge_visible("cves", cves_critical, cves_critical > 0),
                         badge_title: Some(format!("{} new critical CVE{} since you last checked", cves_critical, if cves_critical == 1 { "" } else { "s" })),
                         icon: rsx!(
                             svg {
