@@ -2,6 +2,8 @@
 
 use dioxus::prelude::*;
 
+use crate::alerts::{NAV_BADGES, badge_recently_zeroed, badge_visible};
+use crate::api::client::get_navigation_badges;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
@@ -69,6 +71,7 @@ pub fn SidebarNav() -> Element {
     // Get sidebar context
     let sidebar_ctx = use_context::<SidebarContext>();
     let is_collapsed = (sidebar_ctx.is_collapsed)();
+    let mut collapsed_signal = sidebar_ctx.is_collapsed;
 
     // Match design-example sizing for sidebar and rail mode.
     let nav_width = if is_collapsed { "64px" } else { "240px" };
@@ -77,6 +80,68 @@ pub fn SidebarNav() -> Element {
     let show_dev_tools = true;
     #[cfg(not(debug_assertions))]
     let show_dev_tools = false;
+
+    // Fetch navigation badge counts and re-poll every 30 seconds, writing into
+    // the shared NAV_BADGES global so other views (e.g. Builds/Evaluations
+    // tab badges) can read the same server-computed "new since last
+    // acknowledgment" counts. alerts::acknowledge() also refreshes NAV_BADGES
+    // immediately after recording an acknowledgment, so badges clear quickly
+    // without waiting for the next scheduled poll.
+    use_future(move || async move {
+        loop {
+            if let Ok(fresh) = get_navigation_badges().await {
+                // Merge fresh badge counts, but skip any field that was
+                // optimistically zeroed within the last 10 seconds.  This
+                // prevents the GET response from overwriting the optimistic
+                // zero before the POST /acknowledge round-trip completes.
+                // After the grace window the server returns 0 for that
+                // category anyway, so normal polling resumes transparently.
+                const GRACE: u64 = 10;
+                let mut badges = NAV_BADGES.write();
+                if !badge_recently_zeroed("flakes", GRACE) {
+                    badges.flakes_errored = fresh.flakes_errored;
+                }
+                if !badge_recently_zeroed("systems", GRACE) {
+                    badges.systems_attention = fresh.systems_attention;
+                }
+                if !badge_recently_zeroed("environments", GRACE) {
+                    badges.environments_attention = fresh.environments_attention;
+                }
+                if !badge_recently_zeroed("builds", GRACE) {
+                    badges.builds_failed_new = fresh.builds_failed_new;
+                }
+                if !badge_recently_zeroed("evals", GRACE) {
+                    badges.evals_failed_new = fresh.evals_failed_new;
+                }
+                if !badge_recently_zeroed("cves", GRACE) {
+                    badges.cves_critical_new = fresh.cves_critical_new;
+                }
+                // Always update cursor/fingerprint/total fields from fresh poll.
+                badges.observed_at = fresh.observed_at;
+                badges.systems_total = fresh.systems_total;
+                badges.flakes_total = fresh.flakes_total;
+                badges.environments_total = fresh.environments_total;
+                badges.systems_fingerprint = fresh.systems_fingerprint;
+                badges.environments_fingerprint = fresh.environments_fingerprint;
+            }
+            gloo_timers::future::TimeoutFuture::new(30_000).await;
+        }
+    });
+    // NAV_BADGES is the sole source of truth for badge visibility and counts
+    // (server-computed "new since last acknowledgment" per category); reading
+    // it here is what makes the sidebar re-render both on poll and on the
+    // optimistic zero-out that alerts::acknowledge() performs immediately on
+    // click/visit. All six categories read directly from it — no local
+    // raw-count reconciliation, which previously could re-surface a badge
+    // the server had already zeroed after acknowledgment (a locally
+    // published raw count would always be >= the server's post-ack value).
+    let badges = NAV_BADGES();
+    let systems_attention = badges.systems_attention;
+    let flakes_errored = badges.flakes_errored;
+    let environments_attention = badges.environments_attention;
+    let builds_failed = badges.builds_failed_new;
+    let evals_failed = badges.evals_failed_new;
+    let cves_critical = badges.cves_critical_new;
 
     // Get user data for profile section
     let user_initials = if let Some(name) = auth::user_short_name(&auth_context) {
@@ -132,6 +197,37 @@ pub fn SidebarNav() -> Element {
                         }
                     }
                 }
+                // Collapse button matching the design example (Shell.jsx).
+                button {
+                    class: "sidebar-collapse focus-ring",
+                    onclick: move |_| {
+                        let new_state = !collapsed_signal();
+                        collapsed_signal.set(new_state);
+                        if let Some(window) = web_sys::window() {
+                            if let Ok(Some(storage)) = window.local_storage() {
+                                let _ = storage.set_item(
+                                    "cf-sidebar-collapsed",
+                                    if new_state { "true" } else { "false" },
+                                );
+                            }
+                        }
+                    },
+                    title: if is_collapsed { "Expand sidebar" } else { "Collapse sidebar" },
+                    "aria-label": if is_collapsed { "Expand sidebar" } else { "Collapse sidebar" },
+                    svg {
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        if is_collapsed {
+                            // chevron-right
+                            path { d: "M9 18l6-6-6-6" }
+                        } else {
+                            // chevron-left
+                            path { d: "M15 18l-6-6 6-6" }
+                        }
+                    }
+                }
             }
             div {
                 class: "flex-1 px-3 overflow-y-auto",
@@ -159,6 +255,10 @@ pub fn SidebarNav() -> Element {
                     collapsed: is_collapsed,
                     to: Route::SystemsView {},
                     label: "Systems",
+                    badge_count: if systems_attention > 0 { Some(systems_attention) } else { None },
+                    badge_attention: systems_attention > 0,
+                    badge_hidden: !badge_visible("systems", systems_attention, systems_attention > 0),
+                    badge_title: Some(format!("{} of {} systems need attention (critical or offline)", systems_attention, badges.systems_total)),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -176,6 +276,14 @@ pub fn SidebarNav() -> Element {
                     collapsed: is_collapsed,
                     to: Route::FlakesView {},
                     label: "Flakes",
+                    badge_count: if flakes_errored > 0 { Some(flakes_errored) } else { None },
+                    badge_attention: flakes_errored > 0,
+                    badge_hidden: !badge_visible("flakes", flakes_errored, flakes_errored > 0),
+                    badge_title: Some(if flakes_errored > 0 {
+                        format!("{} of {} flakes failing to sync", flakes_errored, badges.flakes_total)
+                    } else {
+                        format!("{} flakes tracked", badges.flakes_total)
+                    }),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -193,6 +301,14 @@ pub fn SidebarNav() -> Element {
                     collapsed: is_collapsed,
                     to: Route::EnvironmentsView {},
                     label: "Environments",
+                    badge_count: if environments_attention > 0 { Some(environments_attention) } else { None },
+                    badge_attention: environments_attention > 0,
+                    badge_hidden: !badge_visible("environments", environments_attention, environments_attention > 0),
+                    badge_title: Some(if environments_attention > 0 {
+                        format!("{} of {} environments have critical or offline systems", environments_attention, badges.environments_total)
+                    } else {
+                        format!("{} deployment environments", badges.environments_total)
+                    }),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -213,6 +329,12 @@ pub fn SidebarNav() -> Element {
                     collapsed: is_collapsed,
                     to: Route::BuildsView {},
                     label: "Builds",
+                    // Builds badge is acknowledged only when the failures tab is opened (not on mount).
+                    // The view itself calls acknowledge("builds") when the completed/failed tab opens.
+                    badge_count: if builds_failed > 0 { Some(builds_failed) } else { None },
+                    badge_attention: builds_failed > 0,
+                    badge_hidden: !badge_visible("builds", builds_failed, builds_failed > 0),
+                    badge_title: Some(format!("{} new failed build{} since you last checked", builds_failed, if builds_failed == 1 { "" } else { "s" })),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -228,6 +350,11 @@ pub fn SidebarNav() -> Element {
                     collapsed: is_collapsed,
                     to: Route::EvaluationsView {},
                     label: "Evaluations",
+                    // Evals badge is acknowledged only when the failures tab is opened (not on mount).
+                    badge_count: if evals_failed > 0 { Some(evals_failed) } else { None },
+                    badge_attention: evals_failed > 0,
+                    badge_hidden: !badge_visible("evals", evals_failed, evals_failed > 0),
+                    badge_title: Some(format!("{} new failed evaluation{} since you last checked", evals_failed, if evals_failed == 1 { "" } else { "s" })),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -266,6 +393,10 @@ pub fn SidebarNav() -> Element {
                         collapsed: is_collapsed,
                         to: Route::CvesView {},
                         label: "CVEs",
+                        badge_count: if cves_critical > 0 { Some(cves_critical) } else { None },
+                        badge_attention: cves_critical > 0,
+                        badge_hidden: !badge_visible("cves", cves_critical, cves_critical > 0),
+                        badge_title: Some(format!("{} new critical CVE{} since you last checked", cves_critical, if cves_critical == 1 { "" } else { "s" })),
                         icon: rsx!(
                             svg {
                                 class: "w-4 h-4",
@@ -776,8 +907,30 @@ pub fn MobileDrawer() -> Element {
 }
 
 /// A sidebar navigation link.
+///
+/// Accepts optional badge props for the alert badge system.  When `badge_count`
+/// is `Some(n)` with `n > 0` (and `badge_hidden` is false), a `.nav-count`
+/// badge is rendered; when `badge_attention` is `true` the badge is red
+/// (`.nav-count-alert`).
 #[component]
-fn NavLink(collapsed: bool, to: Route, label: &'static str, icon: Element) -> Element {
+fn NavLink(
+    collapsed: bool,
+    to: Route,
+    label: &'static str,
+    icon: Element,
+    /// Badge count to display. None or 0 → no badge.
+    #[props(default)]
+    badge_count: Option<i64>,
+    /// When true, the badge is rendered in red (`.nav-count-alert`).
+    #[props(default)]
+    badge_attention: bool,
+    /// Tooltip text for the badge element.
+    #[props(default)]
+    badge_title: Option<String>,
+    /// When true, the badge is hidden (used for acknowledged attention badges).
+    #[props(default)]
+    badge_hidden: bool,
+) -> Element {
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
     let current_route = use_route::<Route>();
@@ -792,6 +945,13 @@ fn NavLink(collapsed: bool, to: Route, label: &'static str, icon: Element) -> El
         "nav-item active focus-ring"
     } else {
         "nav-item focus-ring"
+    };
+
+    let show_badge = badge_count.is_some_and(|c| c > 0) && !badge_hidden;
+    let badge_class = if badge_attention {
+        "nav-count nav-count-alert"
+    } else {
+        "nav-count"
     };
 
     rsx! {
@@ -809,6 +969,13 @@ fn NavLink(collapsed: bool, to: Route, label: &'static str, icon: Element) -> El
                 span {
                     class: "nav-label",
                     "{label}"
+                }
+            }
+            if show_badge {
+                span {
+                    class: "{badge_class}",
+                    title: badge_title.as_deref().unwrap_or(""),
+                    "{badge_count.unwrap_or(0)}"
                 }
             }
         }

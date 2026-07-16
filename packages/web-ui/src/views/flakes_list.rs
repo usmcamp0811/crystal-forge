@@ -1,6 +1,6 @@
 //! Flakes list view with table/card toggle.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
 use dioxus::prelude::*;
@@ -18,6 +18,10 @@ use wasm_bindgen::prelude::Closure;
 use web_sys::console;
 use web_sys::{Node, window};
 
+use crate::alerts::{
+    NAV_BADGES, acknowledge_locally, acknowledge_with_cursor_and_ids_async, attention_row_class,
+    dismiss_attention_item, should_flash,
+};
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
     delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_environments,
@@ -31,6 +35,7 @@ use crate::api::models::{
     EnvironmentSummary, FlakeCommitSystemPath, FlakeRegistryItem, FlakeTimeline, SystemsListParams,
     TestFlakeCredentialRequest, UpdateFlakeRequest,
 };
+use crate::components::flake::FlakeSyncErrorBanner;
 use crate::components::layout::Card;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::routes::Route;
@@ -2538,14 +2543,21 @@ fn extract_history_rewrite_conflict(
             let body_lower = body.to_ascii_lowercase();
             let rewrite_marker = body_lower.contains("history rewrite")
                 || body_lower.contains("history_rewrite_detected");
-            let sync_failure_marker = body_lower.contains("failed to sync")
-                || body_lower.contains("force push")
-                || body_lower.contains("non-fast-forward");
 
-            let looks_like_rewrite_conflict = (*code == 409 && rewrite_marker)
-                || (*code == 500 && (rewrite_marker || sync_failure_marker));
-
-            if !looks_like_rewrite_conflict {
+            // The backend ALWAYS returns 409 with the history_rewrite_detected
+            // marker for a genuine divergence (see is_history_rewrite_error in
+            // flake/commits.rs, which routes to a 409 CONFLICT response).
+            // Generic sync failures (network errors, missing/invalid
+            // credentials, "Failed to initialize commits for <url>", etc.)
+            // return 500 with a message formatted as "Failed to sync {name}
+            // from source: {err}" — that message ALWAYS contains the
+            // substring "failed to sync", so previously matching on it for
+            // any 500 response misclassified every generic sync failure as
+            // a rewrite conflict. That caused the "Accept rewrite and
+            // resync" flow to repeatedly purge good commit history and
+            // re-show the modal in a loop without ever fixing the real
+            // underlying error. Only trust the explicit 409 + marker signal.
+            if *code != 409 || !rewrite_marker {
                 return None;
             }
 
@@ -2749,6 +2761,46 @@ mod tests {
     }
 
     #[test]
+    fn extract_history_rewrite_conflict_matches_genuine_409_marker() {
+        let body = "Git history rewrite detected for boterf-config. Review and accept rewrite before sync.".to_string();
+        let error = ApiClientError::Status {
+            code: 409,
+            body: body.clone(),
+        };
+        assert_eq!(
+            extract_history_rewrite_conflict(&error, Some(4)),
+            Some((4, body))
+        );
+    }
+
+    #[test]
+    fn extract_history_rewrite_conflict_ignores_generic_500_sync_failure() {
+        // Regression test: a generic sync failure (e.g. network/credentials
+        // issue) is always formatted as "Failed to sync {name} from source:
+        // {err}" by the backend, which contains the substring "failed to
+        // sync" but is NOT a real history rewrite. Misclassifying this
+        // caused "Accept rewrite and resync" to loop forever, repeatedly
+        // purging good commit history without ever fixing the real error.
+        let error = ApiClientError::Status {
+            code: 500,
+            body: "Failed to sync boterf-config from source: Failed to initialize commits for https://gitlab.com/michaelboterf/nix-configurations".to_string(),
+        };
+        assert_eq!(extract_history_rewrite_conflict(&error, Some(4)), None);
+    }
+
+    #[test]
+    fn extract_history_rewrite_conflict_ignores_marker_text_on_non_409_status() {
+        // Even if a 500 response happens to mention "history rewrite" in
+        // free text, only the backend's canonical 409 CONFLICT response is
+        // trusted as a genuine divergence signal.
+        let error = ApiClientError::Status {
+            code: 500,
+            body: "unexpected error while checking history rewrite state".to_string(),
+        };
+        assert_eq!(extract_history_rewrite_conflict(&error, Some(4)), None);
+    }
+
+    #[test]
     fn registry_mapping_does_not_fabricate_environment_badges() {
         let item = FlakeRegistryItem {
             id: 7,
@@ -2757,6 +2809,9 @@ mod tests {
             branch: "main".to_string(),
             build_scope: "cf_systems_only".to_string(),
             system_count: 3,
+            sync_status: "synced".to_string(),
+            last_sync_at: None,
+            last_sync_error: None,
         };
 
         let mapped = map_registry_flake_to_view(&item);
@@ -2839,6 +2894,11 @@ pub fn FlakesListViewNew() -> Element {
         credential_ssh_username: String::new(),
     });
     let mut rewrite_prompt = use_signal(|| None::<(i32, String, String)>);
+    let mut dismissed_rewrite_conflicts = use_signal(HashSet::<String>::new);
+    let mut flakes_ack_sent = use_signal(|| false);
+    let mut flakes_ack_in_flight = use_signal(|| false);
+    let mut flakes_last_ack_attempt_cursor = use_signal(|| None::<String>);
+    let mut flakes_local_ack_hidden = use_signal(|| false);
 
     let flakes_resource = use_resource(move || {
         let _nonce = *reload_nonce.read();
@@ -2920,20 +2980,30 @@ pub fn FlakesListViewNew() -> Element {
                     mapped.latest_commit = latest.sha.clone();
                     mapped.latest_message = latest.msg.clone();
                     mapped.latest_author = latest.author.clone();
-                    mapped.last_sync_at = latest.at.clone();
                     mapped.total_commits = commits.len() as i32;
-                    mapped.status = if latest.eval_status.as_deref() == Some("failed")
-                        || latest.build_status.as_deref() == Some("failed")
-                    {
-                        "error".to_string()
-                    } else if matches!(
-                        latest.build_status.as_deref(),
-                        Some("building") | Some("pending")
-                    ) {
-                        "syncing".to_string()
-                    } else {
-                        "synced".to_string()
-                    };
+                    // Enrich last_sync_at from latest commit only if the DB has no timestamp.
+                    if mapped.last_sync_at == "Not synced yet" {
+                        mapped.last_sync_at = latest.at.clone();
+                    }
+                    // Only derive pipeline-based status when the DB reports "unknown" or
+                    // "synced". If the DB reports "error" or "syncing", preserve it — that
+                    // is the actual sync state (TASK-385).
+                    if matches!(mapped.status.as_str(), "unknown" | "synced") {
+                        mapped.status = if latest.eval_status.as_deref() == Some("failed")
+                            || latest.build_status.as_deref() == Some("failed")
+                        {
+                            // Pipeline failure — not a sync failure; leave chip as synced
+                            // but note the pipeline issue. Keep "synced" so the chip is green.
+                            "synced".to_string()
+                        } else if matches!(
+                            latest.build_status.as_deref(),
+                            Some("building") | Some("pending")
+                        ) {
+                            "syncing".to_string()
+                        } else {
+                            "synced".to_string()
+                        };
+                    }
                 }
             }
             mapped
@@ -2977,6 +3047,57 @@ pub fn FlakesListViewNew() -> Element {
         .iter()
         .filter(|f| f.status == "error")
         .count();
+    let flake_alert_ids = raw_flakes
+        .iter()
+        .filter(|flake| flake.sync_status == "error")
+        .map(|flake| {
+            format!(
+                "flake:{}:{}",
+                flake.id,
+                flake
+                    .last_sync_at
+                    .map(|at| at.timestamp().to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )
+        })
+        .collect::<Vec<_>>();
+
+    // Acknowledge the "flakes" sidebar badge on first visit and trigger attention
+    // flash on errored rows (TASK-385).
+    let has_flake_errors = error_count > 0;
+    let flash_flakes = should_flash("flakes", has_flake_errors);
+    use_effect(move || {
+        let flakes_loaded_successfully = matches!(flakes_resource.read().as_ref(), Some(Ok(_)));
+        let observed_at = NAV_BADGES.read().observed_at.clone();
+        if flakes_loaded_successfully && !flakes_ack_sent() && !flakes_ack_in_flight() {
+            if let Some(cursor) = observed_at {
+                if flakes_last_ack_attempt_cursor.read().as_deref() == Some(cursor.as_str()) {
+                    return;
+                }
+                let alert_ids = flake_alert_ids.clone();
+                flakes_ack_in_flight.set(true);
+                flakes_last_ack_attempt_cursor.set(Some(cursor.clone()));
+                spawn(async move {
+                    let success = acknowledge_with_cursor_and_ids_async(
+                        "flakes",
+                        error_count as i64,
+                        cursor,
+                        None,
+                        Some(alert_ids),
+                    )
+                    .await;
+                    flakes_ack_in_flight.set(false);
+                    if success {
+                        flakes_ack_sent.set(true);
+                    }
+                });
+            } else if !flakes_local_ack_hidden() {
+                flakes_local_ack_hidden.set(true);
+                acknowledge_locally("flakes");
+            }
+        }
+    });
+
     let selected_flake_value = selected_flake.read().clone();
     let selected_flake_for_timeline = selected_flake.clone();
     // Use extended commit limit (200) for the tray view
@@ -3010,9 +3131,17 @@ pub fn FlakesListViewNew() -> Element {
         use_effect(move || {
             let current = selected_flake.read().clone();
             if let Some(active) = current {
-                let still_exists = all_flakes.iter().any(|flake| flake.id == active.id);
-                if !still_exists {
-                    selected_flake.set(None);
+                match all_flakes.iter().find(|flake| flake.id == active.id) {
+                    // Keep the open tray's sync_status/error/commit fields in sync with
+                    // the latest fetch (e.g. after a "Retry sync" completes and
+                    // reload_nonce refetches flakes). Without this, the tray kept
+                    // showing a stale "Sync failed" banner until the user closed and
+                    // reopened it, even after the sync had actually succeeded.
+                    Some(fresh) if fresh != &active => {
+                        selected_flake.set(Some(fresh.clone()));
+                    }
+                    Some(_) => {}
+                    None => selected_flake.set(None),
                 }
             }
         });
@@ -3273,7 +3402,7 @@ pub fn FlakesListViewNew() -> Element {
 
                     if mode == "table" {
                         let all_flakes_for_edit = all_flakes.clone();
-                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), flash_errors: flash_flakes, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
                                 let result = request_sync_flake(flake_id).await;
@@ -3287,7 +3416,12 @@ pub fn FlakesListViewNew() -> Element {
                                         if let Some((id, detail)) =
                                             extract_history_rewrite_conflict(&err, Some(flake_id))
                                         {
-                                            rewrite_prompt.set(Some((id, format!("flake #{id}"), detail)));
+                                            maybe_set_rewrite_prompt(
+                                                &mut rewrite_prompt,
+                                                &dismissed_rewrite_conflicts,
+                                                id,
+                                                detail,
+                                            );
                                             action_notice.set(Some("Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string()));
                                         } else {
                                             action_notice.set(Some(format!("Sync failed: {err}")));
@@ -3339,7 +3473,7 @@ pub fn FlakesListViewNew() -> Element {
                         } } }
                     } else {
                         let all_flakes_for_edit = all_flakes.clone();
-                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), flash_errors: flash_flakes, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
                                 let result = request_sync_flake(flake_id).await;
@@ -3353,7 +3487,12 @@ pub fn FlakesListViewNew() -> Element {
                                         if let Some((id, detail)) =
                                             extract_history_rewrite_conflict(&err, Some(flake_id))
                                         {
-                                            rewrite_prompt.set(Some((id, format!("flake #{id}"), detail)));
+                                            maybe_set_rewrite_prompt(
+                                                &mut rewrite_prompt,
+                                                &dismissed_rewrite_conflicts,
+                                                id,
+                                                detail,
+                                            );
                                             action_notice.set(Some("Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string()));
                                         } else {
                                             action_notice.set(Some(format!("Sync failed: {err}")));
@@ -3510,7 +3649,12 @@ pub fn FlakesListViewNew() -> Element {
                                             if let Some((id, detail)) =
                                                 extract_history_rewrite_conflict(&err, Some(flake_id))
                                             {
-                                                rewrite_prompt.set(Some((id, format!("flake #{id}"), detail)));
+                                                maybe_set_rewrite_prompt(
+                                                    &mut rewrite_prompt,
+                                                    &dismissed_rewrite_conflicts,
+                                                    id,
+                                                    detail,
+                                                );
                                                 action_notice.set(Some("Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string()));
                                             } else {
                                                 action_notice
@@ -3521,7 +3665,12 @@ pub fn FlakesListViewNew() -> Element {
                                 });
                             },
                             on_history_rewrite_conflict: move |(flake_id, detail)| {
-                                rewrite_prompt.set(Some((flake_id, format!("flake #{flake_id}"), detail)));
+                                maybe_set_rewrite_prompt(
+                                    &mut rewrite_prompt,
+                                    &dismissed_rewrite_conflicts,
+                                    flake_id,
+                                    detail,
+                                );
                                 action_notice.set(Some("Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string()));
                             },
                             on_close: move |_| selected_flake.set(None)
@@ -3531,35 +3680,54 @@ pub fn FlakesListViewNew() -> Element {
             }
 
             if let Some((flake_id, flake_name, detail)) = rewrite_prompt.read().clone() {
-                HistoryRewriteDialog {
-                    flake_name,
-                    detail,
-                    on_cancel: move |_| rewrite_prompt.set(None),
-                    on_accept: move |_| {
-                        let mut rewrite_prompt = rewrite_prompt.clone();
-                        let mut action_notice = action_notice.clone();
-                        let mut reload_nonce = reload_nonce.clone();
-                        spawn(async move {
-                            match accept_flake_history_rewrite(flake_id).await {
-                                Ok(response) => {
-                                    rewrite_prompt.set(None);
-                                    match request_sync_flake(flake_id).await {
-                                        Ok(_) => {
-                                            action_notice.set(Some(response.message));
-                                            let next = *reload_nonce.read() + 1;
-                                            reload_nonce.set(next);
+                {
+                    let detail_for_cancel = detail.clone();
+                    let detail_for_accept = detail.clone();
+                    rsx! {
+                        HistoryRewriteDialog {
+                            flake_name,
+                            detail,
+                            on_cancel: move |_| {
+                                dismissed_rewrite_conflicts.with_mut(|set| {
+                                    set.insert(rewrite_conflict_key(flake_id, &detail_for_cancel));
+                                });
+                                rewrite_prompt.set(None)
+                            },
+                            on_accept: move |_| {
+                                let mut rewrite_prompt = rewrite_prompt.clone();
+                                let mut action_notice = action_notice.clone();
+                                let mut reload_nonce = reload_nonce.clone();
+                                let mut dismissed_rewrite_conflicts = dismissed_rewrite_conflicts.clone();
+                                let conflict_key = rewrite_conflict_key(flake_id, &detail_for_accept);
+                                spawn(async move {
+                                    match accept_flake_history_rewrite(flake_id).await {
+                                        Ok(response) => {
+                                            dismissed_rewrite_conflicts.with_mut(|set| {
+                                                set.remove(&conflict_key);
+                                            });
+                                            rewrite_prompt.set(None);
+                                            match request_sync_flake(flake_id).await {
+                                                Ok(_) => {
+                                                    action_notice.set(Some(response.message));
+                                                    let next = *reload_nonce.read() + 1;
+                                                    reload_nonce.set(next);
+                                                }
+                                                Err(err) => {
+                                                    action_notice.set(Some(format!(
+                                                        "History rewrite accepted, but sync failed: {err}"
+                                                    )));
+                                                }
+                                            }
                                         }
                                         Err(err) => {
                                             action_notice.set(Some(format!(
-                                                "History rewrite accepted, but sync failed: {err}"
+                                                "Failed to accept rewrite: {err}"
                                             )));
                                         }
                                     }
-                                }
-                                Err(err) => action_notice
-                                    .set(Some(format!("Failed to accept rewrite: {err}"))),
+                                });
                             }
-                        });
+                        }
                     }
                 }
             }
@@ -3676,6 +3844,7 @@ struct MockFlakeItem {
     latest_message: String,
     latest_author: String,
     last_sync_at: String,
+    last_sync_at_raw: Option<DateTime<Utc>>,
     environment: String,
     error_msg: Option<String>,
     total_commits: i32,
@@ -3688,11 +3857,18 @@ fn map_registry_flake_to_view(item: &FlakeRegistryItem) -> MockFlakeItem {
         item.build_scope.trim()
     };
 
+    // Map real sync fields from the API (TASK-385).
+    let last_sync_display = item
+        .last_sync_at
+        .as_ref()
+        .map(|dt| relative_time_label(*dt))
+        .unwrap_or_else(|| "Not synced yet".to_string());
+
     MockFlakeItem {
         id: item.id,
         name: item.name.clone(),
         description: format!("Build scope: {build_scope_label}"),
-        status: "synced".to_string(),
+        status: item.sync_status.clone(),
         url: item.repo_url.clone(),
         branch: item.branch.clone(),
         build_scope: item.build_scope.clone(),
@@ -3700,11 +3876,12 @@ fn map_registry_flake_to_view(item: &FlakeRegistryItem) -> MockFlakeItem {
         latest_commit: "—".to_string(),
         latest_message: "No commits yet".to_string(),
         latest_author: "—".to_string(),
-        last_sync_at: "Not synced yet".to_string(),
+        last_sync_at: last_sync_display,
+        last_sync_at_raw: item.last_sync_at,
         // The current registry API does not expose the environments spanned by a flake.
         // Render this as an explicit unsupported/pending value instead of fabricating one.
         environment: String::new(),
-        error_msg: None,
+        error_msg: item.last_sync_error.clone(),
         total_commits: 0,
     }
 }
@@ -3723,6 +3900,23 @@ fn relative_time_label(ts: DateTime<Utc>) -> String {
     } else {
         format!("{}w ago", (delta.num_days() / 7).max(1))
     }
+}
+
+fn rewrite_conflict_key(flake_id: i32, detail: &str) -> String {
+    format!("{flake_id}:{detail}")
+}
+
+fn maybe_set_rewrite_prompt(
+    rewrite_prompt: &mut Signal<Option<(i32, String, String)>>,
+    dismissed_rewrite_conflicts: &Signal<HashSet<String>>,
+    flake_id: i32,
+    detail: String,
+) {
+    let key = rewrite_conflict_key(flake_id, &detail);
+    if dismissed_rewrite_conflicts.read().contains(&key) {
+        return;
+    }
+    rewrite_prompt.set(Some((flake_id, format!("flake #{flake_id}"), detail)));
 }
 
 fn build_status_token(status: Option<ApiBuildStatus>) -> Option<String> {
@@ -3919,6 +4113,7 @@ fn mock_flakes_data() -> Vec<MockFlakeItem> {
             latest_message: "feat: Add monitoring dashboards".to_string(),
             latest_author: "jdoe".to_string(),
             last_sync_at: "2m ago".to_string(),
+            last_sync_at_raw: None,
             environment: "production".to_string(),
             error_msg: None,
             total_commits: 156,
@@ -3936,6 +4131,7 @@ fn mock_flakes_data() -> Vec<MockFlakeItem> {
             latest_message: "fix: Update container versions".to_string(),
             latest_author: "asmith".to_string(),
             last_sync_at: "5m ago".to_string(),
+            last_sync_at_raw: None,
             environment: "staging".to_string(),
             error_msg: None,
             total_commits: 89,
@@ -3953,6 +4149,7 @@ fn mock_flakes_data() -> Vec<MockFlakeItem> {
             latest_message: "refactor: Optimize network config".to_string(),
             latest_author: "mlee".to_string(),
             last_sync_at: "1h ago".to_string(),
+            last_sync_at_raw: None,
             environment: "edge".to_string(),
             error_msg: Some("Failed to fetch: connection timeout".to_string()),
             total_commits: 234,
@@ -4235,6 +4432,9 @@ fn FlakeTableNew(
     selected_id: Option<i32>,
     is_admin: bool,
     #[props(default)] env_colors: Vec<EnvironmentSummary>,
+    /// When true, error rows receive the attention-flash CSS class (one-shot on first visit).
+    #[props(default)]
+    flash_errors: bool,
     on_select: EventHandler<MockFlakeItem>,
     on_sync: EventHandler<i32>,
     on_edit: EventHandler<i32>,
@@ -4260,7 +4460,24 @@ fn FlakeTableNew(
                     for flake in flakes {
                         {
                             let is_selected = selected_id == Some(flake.id);
-                            let row_class = if is_selected { "selected" } else { "" };
+                            let is_error = flake.status == "error";
+                            // Include the sync-attempt timestamp in the key so
+                            // a recovered-then-re-failed flake generates a new
+                            // dismissal key (different last_sync_at epoch).
+                            let flake_key = format!(
+                                "{}:{}",
+                                flake.id,
+                                flake.last_sync_at_raw
+                                    .map(|t| t.timestamp().to_string())
+                                    .unwrap_or_default()
+                            );
+                            let row_class = attention_row_class(
+                                if is_selected { "selected" } else { "" },
+                                "flakes",
+                                &flake_key,
+                                is_error,
+                                is_error && flash_errors,
+                            );
                             let flake_for_select = flake.clone();
                             let flake_id_for_sync = flake.id;
                             let flake_id_for_edit = flake.id;
@@ -4270,7 +4487,12 @@ fn FlakeTableNew(
                                     key: "{flake.id}",
                                     class: "{row_class}",
                                     style: "cursor: pointer;",
-                                    onclick: move |_| on_select.call(flake_for_select.clone()),
+                                    onclick: move |_| {
+                                        if is_error {
+                                            dismiss_attention_item("flakes", &flake_key);
+                                        }
+                                        on_select.call(flake_for_select.clone());
+                                    },
 
                                     // Flake name and description
                                     td {
@@ -4414,6 +4636,9 @@ fn FlakeCardsNew(
     selected_id: Option<i32>,
     is_admin: bool,
     #[props(default)] env_colors: Vec<EnvironmentSummary>,
+    /// When true, error cards receive the attention-flash CSS class (one-shot on first visit).
+    #[props(default)]
+    flash_errors: bool,
     on_select: EventHandler<MockFlakeItem>,
     on_sync: EventHandler<i32>,
     on_edit: EventHandler<i32>,
@@ -4424,6 +4649,7 @@ fn FlakeCardsNew(
             for flake in flakes {
                 {
                     let is_selected = selected_id == Some(flake.id);
+                    let is_error = flake.status == "error";
                     let flake_for_select = flake.clone();
                     let flake_id_for_sync = flake.id;
                     let flake_id_for_edit = flake.id;
@@ -4439,13 +4665,31 @@ fn FlakeCardsNew(
                     } else {
                         ""
                     };
+                    // Same versioned key as the table view (id:last_sync_epoch).
+                    let flake_key = format!(
+                        "{}:{}",
+                        flake.id,
+                        flake.last_sync_at_raw
+                            .map(|t| t.timestamp().to_string())
+                            .unwrap_or_default()
+                    );
+                    let card_class = attention_row_class(
+                        "sys-card compact",
+                        "flakes",
+                        &flake_key,
+                        is_error,
+                        is_error && flash_errors,
+                    );
 
                     rsx! {
                         div {
                             key: "{flake.id}",
-                            class: "sys-card compact",
+                            class: "{card_class}",
                             style: "{border_style}",
                             onclick: move |_| {
+                                if is_error {
+                                    dismiss_attention_item("flakes", &flake_key);
+                                }
                                 on_select.call(flake_for_select.clone());
                             },
 
@@ -4902,6 +5146,27 @@ fn FlakeTrayNew(
                 div {
                     style: "margin: 0 12px 10px; padding: 8px 10px; border: 1px solid var(--cf-divider); border-radius: 8px; font-size: 12px; color: var(--cf-text-secondary); background: color-mix(in oklab, var(--cf-page-bg) 35%, var(--cf-card-bg));",
                     "{msg}"
+                }
+            }
+
+            // Sync-error banner — shows when sync_status is "error" (TASK-385)
+            if flake.status == "error" {
+                if let Some(ref error_msg) = flake.error_msg {
+                    {
+                        let error_msg = error_msg.clone();
+                        let repo_url = flake.url.clone();
+                        let latest_commit = if flake.latest_commit == "—" { None } else { Some(flake.latest_commit.clone()) };
+                        let flake_id = flake.id;
+                        rsx! {
+                            FlakeSyncErrorBanner {
+                                repo_url,
+                                last_sync_error: error_msg,
+                                last_sync_at: flake.last_sync_at_raw,
+                                latest_commit,
+                                on_retry: move |_| on_sync.call(flake_id),
+                            }
+                        }
+                    }
                 }
             }
 

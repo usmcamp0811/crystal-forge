@@ -3,6 +3,11 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
+use crate::alerts::{
+    NAV_BADGES, acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item,
+    should_flash,
+};
+
 use crate::components::environments::{
     EnvironmentCard, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentFormModal,
     EnvironmentItem, EnvironmentTable, NewEnvironmentDraft, PolicyOption, RemoveEnvironmentDialog,
@@ -40,6 +45,13 @@ fn came_from_setup() -> bool {
     false
 }
 
+fn environment_alert_occurrence_id(env: &EnvironmentItem) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        env.id, env.health.critical, env.health.offline, env.cve_critical_high
+    )
+}
+
 #[component]
 pub fn EnvironmentsListView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
@@ -69,6 +81,23 @@ pub fn EnvironmentsListView() -> Element {
 
             let mut items = result.environments;
             items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            let attention_items = items
+                .iter()
+                .filter(|env| env.health.critical > 0 || env.health.offline > 0)
+                .collect::<Vec<_>>();
+            let attention_count = attention_items.len() as i64;
+            let alert_ids = attention_items
+                .iter()
+                .map(|env| environment_alert_occurrence_id(env))
+                .collect::<Vec<_>>();
+            let ack_snapshot = {
+                let badges = NAV_BADGES.read_unchecked();
+                (
+                    badges.observed_at.clone(),
+                    badges.environments_fingerprint.clone(),
+                )
+            };
+            let loaded_without_notice = result.notice.is_none() && policies_result.notice.is_none();
             environments.set(items);
             policy_library_state.set(policies_result.policies);
 
@@ -79,6 +108,17 @@ pub fn EnvironmentsListView() -> Element {
                 (None, None) => None,
             });
             loading.set(false);
+            if loaded_without_notice {
+                if let (Some(cursor), fingerprint) = ack_snapshot {
+                    acknowledge_with_cursor_and_ids(
+                        "environments",
+                        attention_count,
+                        cursor,
+                        fingerprint,
+                        Some(alert_ids),
+                    );
+                }
+            }
         });
     });
 
@@ -101,6 +141,39 @@ pub fn EnvironmentsListView() -> Element {
     let items = environments.read().clone();
     let filtered = filtered_environments(&items, &query());
     let totals = EnvironmentTotals::from(&items);
+
+    // Attention flash for environments with critical/offline systems (TASK-385).
+    let env_needs_attention =
+        |env: &EnvironmentItem| -> bool { env.health.critical > 0 || env.health.offline > 0 };
+    let attention_count = items.iter().filter(|e| env_needs_attention(e)).count() as i64;
+    let mut flash_signal = use_signal(|| false);
+    let flash_global = flash_signal();
+    use_effect(move || {
+        if should_flash("environments", attention_count > 0) {
+            flash_signal.set(true);
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(3200).await;
+                flash_signal.set(false);
+            });
+        }
+    });
+
+    // Pre-compute per-item flash booleans for cards/table (outside rsx! to avoid parse issues).
+    let flashes: Vec<bool> = filtered
+        .iter()
+        .map(|env| flash_global && env_needs_attention(env))
+        .collect();
+
+    // Pre-compute per-item attention class strings for persistent red highlighting.
+    let attention_classes: Vec<String> = filtered
+        .iter()
+        .map(|env| {
+            let env_key = environment_alert_occurrence_id(env);
+            let is_attention = env_needs_attention(env);
+            let flash_now = flash_global && is_attention;
+            attention_row_class("", "environments", &env_key, is_attention, flash_now)
+        })
+        .collect();
 
     rsx! {
         div { style: "display:flex; flex-direction:column; gap:16px;",
@@ -201,12 +274,15 @@ pub fn EnvironmentsListView() -> Element {
                 div { class: "empty", style: "margin:24px;", "No environments match." }
             } else if view_mode() == ViewMode::Cards {
                 div { class: "cards-grid",
-                    for env in filtered.iter() {
+                    for (env, attention_class) in filtered.iter().zip(attention_classes.iter()) {
                         EnvironmentCard {
                             key: "{env.id}",
                             environment: env.clone(),
                             policy_library: policy_library_state.read().clone(),
-                            on_edit: move |env| {
+                            flash: flash_global && env_needs_attention(env),
+                            attention_class: attention_class.clone(),
+                            on_edit: move |env: EnvironmentItem| {
+                                dismiss_attention_item("environments", &environment_alert_occurrence_id(&env));
                                 form_error.set(None);
                                 form_draft.set(Some(form_draft_from_environment(&env)));
                             }
@@ -217,7 +293,10 @@ pub fn EnvironmentsListView() -> Element {
                 EnvironmentTable {
                     environments: filtered.clone(),
                     policy_library: policy_library_state.read().clone(),
-                    on_edit: move |env| {
+                    flashes: flashes.clone(),
+                    attention_classes: attention_classes.clone(),
+                    on_edit: move |env: EnvironmentItem| {
+                        dismiss_attention_item("environments", &environment_alert_occurrence_id(&env));
                         form_error.set(None);
                         form_draft.set(Some(form_draft_from_environment(&env)));
                     }

@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use crate::alerts::set_current_user_id;
 use crate::api::client::{fetch_whoami, local_login};
 use crate::api::models::AuthMode;
 use crate::state::app_state::AppState;
@@ -33,6 +34,9 @@ pub fn LoginView() -> Element {
 
                 // If already authenticated, update app state and redirect to dashboard
                 if context.is_authenticated {
+                    if let Some(user) = &context.user {
+                        set_current_user_id(&user.id);
+                    }
                     app_state.write().auth = Some(context);
                     nav.push("/");
                     return;
@@ -101,6 +105,9 @@ pub fn LoginView() -> Element {
                 Ok(_response) => {
                     // Refresh auth context
                     if let Ok(auth_context) = fetch_whoami().await {
+                        if let Some(user) = &auth_context.user {
+                            set_current_user_id(&user.id);
+                        }
                         app_state.write().auth = Some(auth_context);
                     }
 

@@ -1198,6 +1198,50 @@ pub async fn accept_flake_history_rewrite(
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Fetch navigation badge counts for the sidebar.
+pub async fn get_navigation_badges() -> Result<NavigationBadges, ApiClientError> {
+    let url = format!("{}/navigation/badges", base_url());
+    fetch_json(&url).await
+}
+
+/// Record that the current user has acknowledged an alert category (e.g. by
+/// visiting Systems/Flakes/Environments/CVEs, or opening the failures tab on
+/// Builds/Evaluations). Persists server-side so the corresponding badge stays
+/// hidden across page refresh, browser restart, and re-login until something
+/// new appears — see `alerts::acknowledge`.
+///
+/// `observed_at` must be the `observed_at` field from the `NavigationBadges`
+/// response the user was actually shown, so the server anchors `last_seen_at`
+/// to that snapshot rather than to the POST receive time.
+pub async fn acknowledge_navigation_category(
+    category: &str,
+    observed_at: &str,
+    current_count: i64,
+    fingerprint: Option<&str>,
+    alert_ids: Option<&[String]>,
+) -> Result<(), ApiClientError> {
+    #[derive(serde::Serialize)]
+    struct AcknowledgeRequest<'a> {
+        category: &'a str,
+        observed_at: &'a str,
+        current_count: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fingerprint: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alert_ids: Option<&'a [String]>,
+    }
+    let url = format!("{}/navigation/acknowledge", base_url());
+    let body = AcknowledgeRequest {
+        category,
+        observed_at,
+        current_count,
+        fingerprint,
+        alert_ids,
+    };
+    let _: serde_json::Value = send_json_with_csrf("POST", &url, Some(&body)).await?;
+    Ok(())
+}
+
 /// Fetch the git diff for a specific commit in a flake.
 pub async fn fetch_commit_diff(
     flake_id: i32,

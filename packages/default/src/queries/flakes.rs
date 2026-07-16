@@ -161,7 +161,10 @@ pub async fn find_flake_by_repo_urls(
 }
 
 pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>> {
-    let rows = sqlx::query_as::<_, (i32, String, String, String, String, i64)>(
+    use chrono::{DateTime, Utc};
+
+    #[allow(clippy::type_complexity)]
+    let rows = sqlx::query_as::<_, (i32, String, String, String, String, i64, String, Option<DateTime<Utc>>, Option<String>)>(
         r#"
         SELECT
             f.id,
@@ -169,11 +172,26 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
             f.repo_url,
             f.branch,
             f.build_scope,
-            COUNT(s.id)::bigint AS system_count
+            COUNT(s.id)::bigint AS system_count,
+            CASE
+                WHEN f.sync_status = 'syncing'
+                 AND f.last_sync_at IS NOT NULL
+                 AND f.last_sync_at < now() - interval '30 minutes'
+                THEN 'error'
+                ELSE f.sync_status
+            END AS sync_status,
+            f.last_sync_at,
+            CASE
+                WHEN f.sync_status = 'syncing'
+                 AND f.last_sync_at IS NOT NULL
+                 AND f.last_sync_at < now() - interval '30 minutes'
+                THEN COALESCE(f.last_sync_error, 'Sync appears stale — previous sync attempt did not finish')
+                ELSE f.last_sync_error
+            END AS last_sync_error
         FROM flakes f
         LEFT JOIN systems s ON s.flake_id = f.id
         WHERE f.deleted_at IS NULL
-        GROUP BY f.id, f.name, f.repo_url, f.branch, f.build_scope
+        GROUP BY f.id, f.name, f.repo_url, f.branch, f.build_scope, f.sync_status, f.last_sync_at, f.last_sync_error
         ORDER BY lower(f.name) ASC
         "#,
     )
@@ -183,13 +201,26 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
     Ok(rows
         .into_iter()
         .map(
-            |(id, name, repo_url, branch, build_scope, system_count)| FlakeRegistryItem {
+            |(
                 id,
                 name,
                 repo_url,
                 branch,
                 build_scope,
                 system_count,
+                sync_status,
+                last_sync_at,
+                last_sync_error,
+            )| FlakeRegistryItem {
+                id,
+                name,
+                repo_url,
+                branch,
+                build_scope,
+                system_count,
+                sync_status,
+                last_sync_at,
+                last_sync_error,
             },
         )
         .collect())

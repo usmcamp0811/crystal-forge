@@ -18,7 +18,7 @@ use crate::api::models::{
 };
 use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth, RequireOperator};
 use crate::config::CrystalForgeConfig;
-use crate::flake::commits::sync_commits_for_flake;
+use crate::flake::commits::sync_flake_recorded;
 use crate::flake::commits::{
     GitCommitMetadata, branch_exists, branch_exists_with_creds, get_commit_changed_files,
     get_commit_diff_with_creds, get_commit_metadata, get_commit_nixos_configurations,
@@ -878,6 +878,9 @@ pub async fn create_flake(
                 branch: flake.branch,
                 build_scope: flake.build_scope,
                 system_count: 0,
+                sync_status: flake.sync_status.unwrap_or_else(|| "unknown".to_string()),
+                last_sync_at: flake.last_sync_at,
+                last_sync_error: flake.last_sync_error,
             }),
         )
             .into_response(),
@@ -950,6 +953,9 @@ pub async fn update_flake_handler(
                 branch: flake.branch,
                 build_scope: flake.build_scope,
                 system_count: count_systems_for_flake(&pool, flake_id).await.unwrap_or(0),
+                sync_status: flake.sync_status.unwrap_or_else(|| "unknown".to_string()),
+                last_sync_at: flake.last_sync_at,
+                last_sync_error: flake.last_sync_error,
             }),
         )
             .into_response(),
@@ -1079,6 +1085,7 @@ pub async fn put_flake_credentials(
         )
             .into_response(),
         Err(err) => {
+            error!("Failed to save flake credentials for flake {flake_id}: {err:#}");
             let message = err.to_string();
             let status = if message.contains("require") || message.contains("invalid") {
                 StatusCode::BAD_REQUEST
@@ -1096,6 +1103,8 @@ pub async fn put_flake_credentials(
                     },
                     message: if status == StatusCode::BAD_REQUEST {
                         message
+                    } else if message.contains("missing cache encryption key") {
+                        "Server is not configured to encrypt stored credentials (missing CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY or CRYSTAL_FORGE_SECRET_KEY). Contact your administrator.".to_string()
                     } else {
                         "Failed to save flake credentials".to_string()
                     },
@@ -1136,6 +1145,7 @@ pub async fn patch_flake_credentials(
         )
             .into_response(),
         Err(err) => {
+            error!("Failed to update flake credentials for flake {flake_id}: {err:#}");
             let message = err.to_string();
             let status = if message.contains("require") || message.contains("invalid") {
                 StatusCode::BAD_REQUEST
@@ -1152,6 +1162,8 @@ pub async fn patch_flake_credentials(
                     },
                     message: if status == StatusCode::BAD_REQUEST {
                         message
+                    } else if message.contains("missing cache encryption key") {
+                        "Server is not configured to encrypt stored credentials (missing CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY or CRYSTAL_FORGE_SECRET_KEY). Contact your administrator.".to_string()
                     } else {
                         "Failed to update flake credentials".to_string()
                     },
@@ -1742,28 +1754,28 @@ pub async fn accept_flake_history_rewrite(
         }
     };
 
-    let inserted =
-        match sync_commits_for_flake(&pool, &flake.repo_url, &flake.branch, flake.id).await {
-            Ok(inserted) => inserted,
-            Err(e) => {
-                error!(
-                    "Failed re-syncing flake {} ({}) after rewrite acceptance: {e:#}",
-                    flake.name, flake.repo_url
-                );
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiError {
-                        error: "history_resync_failed".to_string(),
-                        message: format!("History reset completed but re-sync failed: {}", e),
-                        details: Some(serde_json::json!({
-                            "error": e.to_string(),
-                            "deleted_commits": deleted_commits
-                        })),
-                    }),
-                )
-                    .into_response();
-            }
-        };
+    let inserted = match sync_flake_recorded(&pool, flake.id, &flake.repo_url, &flake.branch).await
+    {
+        Ok(inserted) => inserted,
+        Err(e) => {
+            error!(
+                "Failed re-syncing flake {} ({}) after rewrite acceptance: {e:#}",
+                flake.name, flake.repo_url
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "history_resync_failed".to_string(),
+                    message: format!("History reset completed but re-sync failed: {}", e),
+                    details: Some(serde_json::json!({
+                        "error": e.to_string(),
+                        "deleted_commits": deleted_commits
+                    })),
+                }),
+            )
+                .into_response();
+        }
+    };
 
     info!(
         "history_rewrite_accepted flake_id={} flake_name={} deleted_commits={} inserted_commits={} actor={}",
@@ -1852,7 +1864,7 @@ pub async fn sync_all_flakes_handler(
     let mut inserted = 0usize;
     let mut failed = Vec::new();
     for flake in flakes {
-        match sync_commits_for_flake(&pool, &flake.repo_url, &flake.branch, flake.id).await {
+        match sync_flake_recorded(&pool, flake.id, &flake.repo_url, &flake.branch).await {
             Ok(new_commits) => {
                 synced += 1;
                 inserted += new_commits;
@@ -2004,7 +2016,7 @@ pub async fn sync_flake_handler(
         }
     };
 
-    match sync_commits_for_flake(&pool, &flake.repo_url, &sync_branch, flake.id).await {
+    match sync_flake_recorded(&pool, flake.id, &flake.repo_url, &sync_branch).await {
         Ok(new_commits) => {
             if new_commits > 0 {
                 state.queue_notifier.notify_eval_queue();

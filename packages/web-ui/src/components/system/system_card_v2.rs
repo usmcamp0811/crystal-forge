@@ -112,6 +112,12 @@ pub fn SystemCardV2(
     #[props(default = false)] selected: bool,
     #[props(default)] environment_colors: Vec<(String, String)>,
     #[props(default)] flake_context: Vec<(i32, String, String, Option<String>)>,
+    /// Attention-row class (e.g. "attention-row attention-flash") for alerting state.
+    #[props(default)]
+    attention_class: String,
+    /// Set to true to show the attention-flash pulse animation on this card.
+    #[props(default = false)]
+    flash: bool,
     on_open: EventHandler<()>,
     on_remove: EventHandler<()>,
     on_update_key: EventHandler<()>,
@@ -174,9 +180,20 @@ pub fn SystemCardV2(
     let compact_class = if compact { " compact" } else { "" };
     let selected_class = if selected { " selected" } else { "" };
 
+    // Compose the final class string: base + selected + attention + flash.
+    let card_class = if attention_class.is_empty() {
+        if flash {
+            format!("sys-card{compact_class}{selected_class} attention-flash")
+        } else {
+            format!("sys-card{compact_class}{selected_class}")
+        }
+    } else {
+        format!("sys-card{compact_class}{selected_class} {attention_class}")
+    };
+
     rsx! {
         div {
-            class: "sys-card{compact_class}{selected_class}",
+            class: "{card_class}",
             onclick: move |_| {
                 on_open.call(());
             },

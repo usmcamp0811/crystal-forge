@@ -9,6 +9,8 @@
 
 use dioxus::prelude::*;
 
+use crate::alerts::{NAV_BADGES, acknowledge_with_cursor_and_ids, should_flash};
+
 use crate::api::client;
 use crate::api::models::{
     CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
@@ -155,6 +157,10 @@ pub fn CvesView() -> Element {
     let mut selected_cve_id = use_signal(move || initial_cve.clone());
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None);
 
+    // Attention flash signal for the Critical stat card (set by the use_effect after stats resolves).
+    let mut flash_crit_signal = use_signal(|| false);
+    let flash_crit = flash_crit_signal();
+
     use_effect(move || {
         let severity = severity_filter();
         let fix_status = fix_status_filter();
@@ -183,6 +189,22 @@ pub fn CvesView() -> Element {
 
     // Data resources
     let stats = use_resource(move || async move { client::fetch_cve_fleet_stats().await });
+
+    // Attention flash for the Critical stat card when critical CVEs exist (TASK-385).
+    // Must be placed after `stats` is declared so it can be captured in the closure.
+    use_effect(move || {
+        if let Some(Ok(s)) = stats.read().as_ref() {
+            let crit_count = s.critical as i64;
+            if should_flash("cves", crit_count > 0) {
+                flash_crit_signal.set(true);
+                spawn(async move {
+                    gloo_timers::future::TimeoutFuture::new(3200).await;
+                    flash_crit_signal.set(false);
+                });
+            }
+        }
+    });
+
     let package_names =
         use_resource(move || async move { client::fetch_cve_package_names().await });
 
@@ -202,6 +224,34 @@ pub fn CvesView() -> Element {
         };
 
         async move { client::fetch_cves(&filters).await }
+    });
+
+    use_effect(move || {
+        if let (Some(Ok(s)), Some(Ok(items))) = (stats.read().as_ref(), cve_list.read().as_ref()) {
+            let Some(cursor) = NAV_BADGES.read_unchecked().observed_at.clone() else {
+                return;
+            };
+            let alert_ids = items
+                .iter()
+                .filter(|item| item.severity.eq_ignore_ascii_case("critical"))
+                .map(|item| {
+                    format!(
+                        "{}:{}",
+                        item.cve_id,
+                        item.first_seen
+                            .map(|at| at.timestamp().to_string())
+                            .unwrap_or_else(|| "unknown".to_string())
+                    )
+                })
+                .collect::<Vec<_>>();
+            acknowledge_with_cursor_and_ids(
+                "cves",
+                s.critical as i64,
+                cursor,
+                None,
+                Some(alert_ids),
+            );
+        }
     });
 
     rsx! {
@@ -293,7 +343,7 @@ pub fn CvesView() -> Element {
 
                     // Critical
                     div {
-                        class: "stat",
+                        class: if flash_crit { "stat attention-flash" } else { "stat" },
                         span { class: "stat-accent", style: "--stat-color: #f87171;" }
                         div { class: "stat-label", "Critical" }
                         div { class: "stat-value", style: "color: #f87171;", "{fleet_stats.critical}" }

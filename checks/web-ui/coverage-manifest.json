@@ -600,9 +600,9 @@
     },
     {
       "name": "07-sidebar-desktop-expanded",
-      "description": "Desktop: sidebar expanded — grouped sections with labels visible",
+      "description": "Desktop: sidebar expanded — grouped sections with labels visible and attention badges rendered for alerting views",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
       "profiles": [
         "full"
       ],
@@ -613,7 +613,7 @@
     },
     {
       "name": "08-sidebar-desktop-collapsed",
-      "description": "Desktop: sidebar in icons-only collapsed state with edge toggle",
+      "description": "Desktop: sidebar in icons-only collapsed state with edge toggle while attention badges remain visible in rail mode",
       "route": "/systems",
       "designRef": "docs/design/CrystalForge/components/Shell.jsx",
       "profiles": [
@@ -994,9 +994,9 @@
     },
     {
       "name": "13-flakes",
-      "description": "Flakes registry list/table parity",
-      "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "description": "Flakes registry list/table parity with errored sync chip and sidebar badge acknowledgment after visiting /flakes",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
       "profiles": [
         "ci_fast",
         "full"
@@ -1009,8 +1009,8 @@
     {
       "name": "13a-flakes-cards-parity",
       "description": "Flakes cards mode parity",
-      "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
       "profiles": [
         "ci_fast",
         "full"
@@ -1022,9 +1022,9 @@
     },
     {
       "name": "13aa-flakes-tray-diff-parity",
-      "description": "Flake side tray commit explorer and diff modal parity",
-      "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "description": "Flake side tray commit explorer and diff modal parity including the Sync failed banner for errored flakes",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
       "profiles": [
         "ci_fast",
         "full"
@@ -1037,8 +1037,8 @@
     {
       "name": "13e-flakes-add-modal-credentials",
       "description": "Flake add modal with build scope and credential controls",
-      "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
       "profiles": [
         "ci_fast",
         "full"
