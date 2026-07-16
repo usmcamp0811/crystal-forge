@@ -2895,8 +2895,8 @@ pub fn FlakesListViewNew() -> Element {
     });
     let mut rewrite_prompt = use_signal(|| None::<(i32, String, String)>);
     let mut dismissed_rewrite_conflicts = use_signal(HashSet::<String>::new);
-    let mut flakes_ack_cursor = use_signal(|| None::<String>);
     let mut flakes_ack_sent = use_signal(|| false);
+    let mut flakes_ack_in_flight = use_signal(|| false);
     let mut flakes_local_ack_hidden = use_signal(|| false);
 
     let flakes_resource = use_resource(move || {
@@ -2955,11 +2955,6 @@ pub fn FlakesListViewNew() -> Element {
         Some(Err(err)) => (Vec::new(), Some(err.to_string()), false),
         None => (Vec::new(), None, true),
     };
-    use_effect(move || {
-        if matches!(flakes_resource.read().as_ref(), Some(Ok(_))) {
-            flakes_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
-        }
-    });
     let timeline_items = match timelines_resource.read().as_ref() {
         Some(Ok(items)) => items.clone(),
         _ => Vec::new(),
@@ -3056,9 +3051,8 @@ pub fn FlakesListViewNew() -> Element {
         .filter(|flake| flake.sync_status == "error")
         .map(|flake| {
             format!(
-                "{}:{}:{}",
+                "flake:{}:{}",
                 flake.id,
-                flake.sync_status,
                 flake
                     .last_sync_at
                     .map(|at| at.timestamp().to_string())
@@ -3073,19 +3067,22 @@ pub fn FlakesListViewNew() -> Element {
     let flash_flakes = should_flash("flakes", has_flake_errors);
     use_effect(move || {
         let flakes_loaded_successfully = matches!(flakes_resource.read().as_ref(), Some(Ok(_)));
-        if flakes_loaded_successfully && !flakes_ack_sent() {
-            if let Some(cursor) = flakes_ack_cursor.read().clone() {
+        let observed_at = NAV_BADGES.read().observed_at.clone();
+        if flakes_loaded_successfully && !flakes_ack_sent() && !flakes_ack_in_flight() {
+            if let Some(cursor) = observed_at {
                 let alert_ids = flake_alert_ids.clone();
+                flakes_ack_in_flight.set(true);
                 spawn(async move {
-                    if acknowledge_with_cursor_and_ids_async(
+                    let success = acknowledge_with_cursor_and_ids_async(
                         "flakes",
                         error_count as i64,
                         cursor,
                         None,
                         Some(alert_ids),
                     )
-                    .await
-                    {
+                    .await;
+                    flakes_ack_in_flight.set(false);
+                    if success {
                         flakes_ack_sent.set(true);
                     }
                 });

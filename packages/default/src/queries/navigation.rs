@@ -310,12 +310,7 @@ pub async fn fetch_navigation_badges(
         SELECT
             COALESCE(
                 array_agg(
-                    concat_ws(
-                        ':',
-                        id::text,
-                        sync_status,
-                        COALESCE(EXTRACT(EPOCH FROM last_sync_at)::bigint::text, 'unknown')
-                    )
+                    concat_ws(':', 'flake', id::text, COALESCE(EXTRACT(EPOCH FROM last_sync_at)::bigint::text, 'unknown'))
                     ORDER BY id
                 ) FILTER (
                     WHERE sync_status = 'error'
