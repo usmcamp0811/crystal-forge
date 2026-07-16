@@ -1,12 +1,18 @@
 // Policies view — deployment policies + rule builder
 
-function PoliciesView({ onOpenSystem }) {
+function PoliciesView({ onOpenSystem, focus, onClearFocus }) {
   const [query, setQuery] = React.useState("");
   const [catFilter, setCatFilter] = React.useState("all");
   const [typeFilter, setTypeFilter] = React.useState("all");
   const [editPolicy, setEditPolicy] = React.useState(null);
   const [addOpen, setAddOpen] = React.useState(false);
   const [drawerPolicy, setDrawerPolicy] = React.useState(null);
+  React.useEffect(() => {
+    if (!focus) return;
+    const p = POLICIES.find(x => x.id === focus || x.name === focus);
+    if (p) setDrawerPolicy(p);
+    onClearFocus?.();
+  }, [focus]);
 
   const list = POLICIES.filter(p => {
     if (catFilter !== "all" && (p.category || "deployment") !== catFilter) return false;

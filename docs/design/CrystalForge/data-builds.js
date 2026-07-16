@@ -83,7 +83,7 @@ function mkBuild(i, forceStatus) {
   const status = forceStatus || statuses[i % statuses.length];
   const host = BUILD_SYSTEMS[i % BUILD_SYSTEMS.length];
   const sysName = `nixos-system-${host}`;
-  const flake = ["infrastructure","web-services","edge-gateway","build-farm"][i%4];
+  const flake = ["infrastructure","web-services","edge-gateway","build-farm"][Math.floor(r()*4)];
   const worker = ["building","cache-pushing","stopping"].includes(status) ? BUILD_WORKERS[i%3].name : null;
   const hash = Array.from({length:7},()=>"0123456789abcdef"[Math.floor(r()*16)]).join("");
   const totalDerivs = Math.floor(r()*120)+20;
@@ -137,13 +137,13 @@ const EVAL_STATUS_META = {
 const EVAL_FLAKES = ["infrastructure","web-services","edge-gateway","build-farm","lab-nodes"];
 const EVAL_BRANCHES = ["main","staging","dev","release/0.3"];
 
-function mkEval(i, forceStatus) {
+function mkEval(i, isHistoryFlag) {
   let s = i*6271+13; const r=()=>{s=(s*9301+49297)%233280;return s/233280;};
   const aStatuses=["in_progress","in_progress","pending","pending","cancelling"];
-  const hStatuses=["complete","complete","complete","failed","cancelled"];
-  const isHistory = forceStatus && ["complete","failed","cancelled"].includes(forceStatus);
-  const status = forceStatus||(isHistory?hStatuses:aStatuses)[i%5];
+  const isHistory = !!isHistoryFlag;
   const flake = EVAL_FLAKES[i%EVAL_FLAKES.length];
+  const roll = r();
+  const status = isHistory ? (roll<0.6?"complete":roll<0.85?"failed":"cancelled") : aStatuses[i%5];
   const commit = Array.from({length:8},()=>"0123456789abcdef"[Math.floor(r()*16)]).join("");
   const systems = Math.floor(r()*20+3);
   const passed = Math.floor(systems*(r()*0.4+0.5));
@@ -163,7 +163,7 @@ function mkEval(i, forceStatus) {
 }
 
 const ACTIVE_EVALS  = (typeof __fx === "function" && __fx("evaluations.active")) || [0,1,2,3].map(i => mkEval(i));
-const HISTORY_EVALS = (typeof __fx === "function" && __fx("evaluations.history")) || Array.from({length:50},(_,i)=>mkEval(200+i,"complete").status==="cancelled"?mkEval(200+i):mkEval(200+i,["complete","complete","complete","failed","cancelled"][i%5]));
+const HISTORY_EVALS = (typeof __fx === "function" && __fx("evaluations.history")) || Array.from({length:50},(_,i)=>mkEval(200+i, true));
 
 const EVAL_STATS = {
   active:    ACTIVE_EVALS.length,

@@ -1,6 +1,6 @@
 // Main Systems view + Tweaks panel
 
-function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDetail, coach, tag = "all", onTag }) {
+function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDetail, coach, tag = "all", onTag, initialFlake, onClearInitialFlake }) {
   const [view, setView] = React.useState(defaultView);
   const [env, setEnv] = React.useState("all");
   const [status, setStatus] = React.useState("all");
@@ -11,6 +11,9 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
   const [editTarget, setEditTarget] = React.useState(null);
   const [addOpen, setAddOpen] = React.useState(false);
   const setTag = onTag || (() => {});
+  React.useEffect(() => {
+    if (initialFlake) { setFlake(initialFlake); onClearInitialFlake?.(); }
+  }, [initialFlake]);
   const isAttention = (s) => s.health === "critical" || s.health === "offline";
   const flashAttention = useAttentionFlash("systems", SYSTEMS.some(isAttention));
 
@@ -306,6 +309,10 @@ function App() {
   const [pendingDeploy, setPendingDeploy] = React.useState(null);
   const [flakeFocus, setFlakeFocus] = React.useState(null);
   const [cacheFocus, setCacheFocus] = React.useState(null);
+  const [buildFocus, setBuildFocus] = React.useState(null);
+  const [evalFocus, setEvalFocus] = React.useState(null);
+  const [sysFlake, setSysFlake] = React.useState(null);
+  const [policyFocus, setPolicyFocus] = React.useState(null);
   const [detailTab, setDetailTab] = React.useState("overview");
   const [topView, setTopView] = React.useState("dashboard"); // dashboard | systems | builds | evals | flakes | environments | caches | cves
   const coach = useCoach();
@@ -373,16 +380,16 @@ function App() {
         
         <div className="content" data-screen-label={detailSystem ? `SystemDetail-${detailSystem.hostname}` : topView}>
           <CoachCallout coach={coach} topView={topView} onNavigate={goTo} />
-          {topView === "builds" && <BuildsView />}
-          {topView === "evals" && <EvalsView />}
-          {topView === "flakes" && <FlakesView defaultView={defaultView} focus={flakeFocus} onClearFocus={() => setFlakeFocus(null)} />}
+          {topView === "builds" && <BuildsView focus={buildFocus} onClearFocus={() => setBuildFocus(null)} />}
+          {topView === "evals" && <EvalsView focus={evalFocus} onClearFocus={() => setEvalFocus(null)} onOpenSystem={(s) => { setTopView("systems"); openDetail(s); }} onOpenPolicy={(id) => { setPolicyFocus(id); setTopView("policies"); }} />}
+          {topView === "flakes" && <FlakesView defaultView={defaultView} focus={flakeFocus} onClearFocus={() => setFlakeFocus(null)} onOpenEval={(c) => { setEvalFocus(c); setTopView("evals"); }} onOpenBuild={(c) => { setBuildFocus(c); setTopView("builds"); }} onOpenSystems={(flakeName) => { setSysFlake(flakeName); setTopView("systems"); }} />}
           {topView === "environments" && <EnvironmentsView defaultView={defaultView} onOpenCache={(c) => { setCacheFocus(c); setTopView("caches"); }} onOpenSystem={(s) => { setTopView("systems"); openDetail(s); }} onOpenBundle={(id) => { setComplianceBundleId(id); setTopView("compliance"); }} />}
           {topView === "caches" && <CachesView focus={cacheFocus} onClearFocus={() => setCacheFocus(null)} onOpenSystem={(s) => { setTopView("systems"); openDetail(s); }} />}
           {topView === "builders" && <BuildersView defaultView={defaultView} />}
-          {topView === "policies" && <PoliciesView onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }}/>}
+          {topView === "policies" && <PoliciesView onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }} focus={policyFocus} onClearFocus={() => setPolicyFocus(null)} />}
           {topView === "compliance" && <ComplianceView selectedBundleId={complianceBundleId} onClearBundle={() => setComplianceBundleId(null)} onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }}/>}
           {topView === "cves" && <CvesView onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }}/>}
-          {topView === "dashboard" && <DashboardView onNavigate={(r) => { setTopView(r); setDetailSystem(null); }}/>}
+          {topView === "dashboard" && <DashboardView onNavigate={(r, focus) => { setTopView(r); setDetailSystem(null); if (focus && r === "evals") setEvalFocus(focus); if (focus && r === "builds") setBuildFocus(focus); }}/>}
           {topView === "admin" && <AdminView onNavigate={(r) => { setTopView(r); setDetailSystem(null); }} coach={coach} classif={classif} onClassif={setClassif}/>}
           {topView === "scanning" && <ScanningView onNavigate={(r) => { setTopView(r); setDetailSystem(null); }}/>}
           {topView === "profile" && <ProfileView prefs={{ theme, onTheme: sw.theme, density, onDensity: sw.density, defaultView, onDefaultView: sw.defaultView, sidebarMode, onSidebarMode: sw.sidebarMode }}/>}
@@ -391,7 +398,14 @@ function App() {
           <SystemDetail
             sys={detailSystem}
             onBack={() => setDetailSystem(null)}
-            onNavigate={(view, bundleId) => { setTopView(view); setDetailSystem(null); if (bundleId) setComplianceBundleId(bundleId); }}
+            onNavigate={(view, focusOrBundle, sysFlakeArg) => {
+              setTopView(view);
+              setDetailSystem(null);
+              if (view === "compliance" && focusOrBundle) setComplianceBundleId(focusOrBundle);
+              if (view === "evals" && focusOrBundle) setEvalFocus(focusOrBundle);
+              if (view === "builds" && focusOrBundle) setBuildFocus(focusOrBundle);
+              if (view === "systems" && sysFlakeArg) setSysFlake(sysFlakeArg);
+            }}
             onTagFilter={(t) => { setSysTag(t); setTopView("systems"); setDetailSystem(null); }}
             onDeploy={(s) => setPendingDeploy({ sysId: detailSystem.id, commit: s.pendingCommit, at: Date.now() })}
             onEdit={(s) => setEditTarget(s)}
@@ -409,6 +423,8 @@ function App() {
             coach={coach}
             tag={sysTag}
             onTag={setSysTag}
+            initialFlake={sysFlake}
+            onClearInitialFlake={() => setSysFlake(null)}
             onOpenDetail={(s, tab) => openDetail(s, tab)} />)
 
 

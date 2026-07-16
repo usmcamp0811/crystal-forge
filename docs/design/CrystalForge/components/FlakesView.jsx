@@ -1,6 +1,6 @@
 // Flakes view — registry table/cards + side-tray commit explorer
 
-function FlakesView({ defaultView, focus, onClearFocus }) {
+function FlakesView({ defaultView, focus, onClearFocus, onOpenEval, onOpenBuild, onOpenSystems }) {
   const [viewMode, setViewMode] = React.useState(defaultView || "table");
   React.useEffect(() => { if (defaultView) setViewMode(defaultView); }, [defaultView]);
   const [query, setQuery]       = React.useState("");
@@ -73,7 +73,7 @@ function FlakesView({ defaultView, focus, onClearFocus }) {
       }
 
       {/* Side tray */}
-      {trayFlake && <FlakeTray flake={trayFlake} focusSha={focusSha} onClose={() => { setTrayFlake(null); setFocusSha(null); }} onEdit={() => { setEditFlake(trayFlake); }} />}
+      {trayFlake && <FlakeTray flake={trayFlake} focusSha={focusSha} onClose={() => { setTrayFlake(null); setFocusSha(null); }} onEdit={() => { setEditFlake(trayFlake); }} onOpenEval={onOpenEval} onOpenBuild={onOpenBuild} onOpenSystems={onOpenSystems} />}
 
       {addOpen && <FlakeFormModal mode="add" onClose={()=>setAddOpen(false)}/>}
       {editFlake && <FlakeFormModal mode="edit" flake={editFlake} onClose={()=>setEditFlake(null)}/>}
@@ -82,7 +82,7 @@ function FlakesView({ defaultView, focus, onClearFocus }) {
 }
 
 /* ── Side tray: history + diff ─────────────────────────────────────── */
-function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit }) {
+function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit, onOpenEval, onOpenBuild, onOpenSystems }) {
   const commits = FLAKE_COMMITS[flake.id] || [];
   // If the deep-linked commit isn't in the tracked list, synthesize a stub so the
   // tray can still focus it (e.g. a short sha referenced from a deployment) — using
@@ -259,11 +259,11 @@ function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit }) {
 
                   {/* Pipeline strip — eval / build / rollout */}
                   <div className="fl-pipeline">
-                    <PipelinePill stage="eval"  val={pipe.eval}/>
+                    <PipelinePill stage="eval"  val={pipe.eval}  onClick={() => onOpenEval?.({ sha: selCommit.sha, msg: selCommit.msg, flake: flake.name, author: selCommit.author, at: selCommit.at, status: pipe.eval==="failed"?"failed":pipe.eval==="complete"?"complete":"in_progress" })}/>
                     <PipelineArrow/>
-                    <PipelinePill stage="build" val={pipe.build}/>
+                    <PipelinePill stage="build" val={pipe.build} onClick={() => onOpenBuild?.({ sha: selCommit.sha, msg: selCommit.msg, flake: flake.name, author: selCommit.author, at: selCommit.at, status: pipe.build==="failed"?"failed":pipe.build })}/>
                     <PipelineArrow/>
-                    <RolloutPill on={rolloutOn} total={rolloutTotal} failed={pipe.eval==="failed" || pipe.build==="failed" ? 0 : 0}/>
+                    <RolloutPill on={rolloutOn} total={rolloutTotal} failed={pipe.eval==="failed" || pipe.build==="failed" ? 0 : 0} onClick={() => onOpenSystems?.(flake.name)}/>
                   </div>
                 </div>
 
@@ -465,13 +465,13 @@ function PipelineDot({ kind, val }) {
 }
 
 /* Bigger pill — used in commit detail header */
-function PipelinePill({ stage, val }) {
+function PipelinePill({ stage, val, onClick }) {
   const map = {
     eval:    { complete:["chip-healthy","Eval ✓"], pending:["chip-info","Eval…"], failed:["chip-critical","Eval ✗"] },
     build:   { "cache-pushed":["chip-healthy","Cached"], complete:["chip-healthy","Built"], building:["chip-info","Building"], failed:["chip-critical","Build ✗"], pending:["chip-unknown","Queued"] },
   };
   const [cls, label] = map[stage]?.[val] || ["chip-unknown", String(val)];
-  return <span className={`chip ${cls}`} style={{ fontWeight:600 }}>{label}</span>;
+  return <span className={`chip ${cls} focus-ring`} style={{ fontWeight:600, cursor: onClick ? "pointer" : undefined }} onClick={onClick} title={onClick ? `Open ${stage}` : undefined}>{label}</span>;
 }
 
 function PipelineArrow() {
@@ -479,11 +479,11 @@ function PipelineArrow() {
 }
 
 /* Rollout pill — replaces "deployed" with N/M systems on this commit */
-function RolloutPill({ on, total, failed }) {
+function RolloutPill({ on, total, failed, onClick }) {
   const pct = total > 0 ? on / total : 0;
   const cls = failed > 0 ? "chip-critical" : pct === 1 ? "chip-healthy" : pct === 0 ? "chip-unknown" : "chip-warning";
   return (
-    <span className={`chip ${cls}`} style={{ display:"inline-flex", alignItems:"center", gap:6, fontWeight:600 }}>
+    <span className={`chip ${cls} focus-ring`} style={{ display:"inline-flex", alignItems:"center", gap:6, fontWeight:600, cursor: onClick ? "pointer" : undefined }} onClick={onClick} title={onClick ? "Open in Systems" : undefined}>
       <Icon name="server" size={10}/>
       Rollout {on}/{total}
       <div style={{ width:32, height:3, background:"rgba(255,255,255,0.2)", borderRadius:99, overflow:"hidden" }}>

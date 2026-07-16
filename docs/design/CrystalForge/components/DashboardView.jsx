@@ -379,7 +379,8 @@ function WGitGraph({ onNavigate }) {
       const evaluating = i < 2 ? (seed % 3) : 0;
       const building = i < 3 ? (seed % 4) : 0;
       const failed = (seed % 7 === 0) ? 1 : 0;
-      m[c.sha] = { onCommit, evaluating, building, failed };
+      const failedKind = (seed % 2 === 0) ? "eval" : "build";
+      m[c.sha] = { onCommit, evaluating, building, failed, failedKind };
     });
     return m;
   }, [merged]);
@@ -473,17 +474,17 @@ function WGitGraph({ onNavigate }) {
                     </span>
                   )}
                   {r.building > 0 && (
-                    <span title={`${r.building} systems building`} style={{ display:"inline-flex", alignItems:"center", gap:3, fontSize:10, padding:"1px 6px", borderRadius:99, background:"rgba(96,165,250,0.14)", color:"#60a5fa", fontWeight:600 }}>
+                    <span title={`${r.building} systems building — view builds`} onClick={ev=>{ev.stopPropagation();onNavigate("builds");}} style={{ display:"inline-flex", alignItems:"center", gap:3, fontSize:10, padding:"1px 6px", borderRadius:99, background:"rgba(96,165,250,0.14)", color:"#60a5fa", fontWeight:600, cursor:"pointer" }}>
                       <Icon name="build" size={9}/>{r.building}
                     </span>
                   )}
                   {r.evaluating > 0 && (
-                    <span title={`${r.evaluating} systems evaluating`} style={{ display:"inline-flex", alignItems:"center", gap:3, fontSize:10, padding:"1px 6px", borderRadius:99, background:"rgba(167,139,250,0.16)", color:"#a78bfa", fontWeight:600 }}>
+                    <span title={`${r.evaluating} systems evaluating — view evals`} onClick={ev=>{ev.stopPropagation();onNavigate("evals");}} style={{ display:"inline-flex", alignItems:"center", gap:3, fontSize:10, padding:"1px 6px", borderRadius:99, background:"rgba(167,139,250,0.16)", color:"#a78bfa", fontWeight:600, cursor:"pointer" }}>
                       <Icon name="eval" size={9}/>{r.evaluating}
                     </span>
                   )}
                   {r.failed > 0 && (
-                    <span title={`${r.failed} failed`} style={{ display:"inline-flex", alignItems:"center", gap:3, fontSize:10, padding:"1px 6px", borderRadius:99, background:"rgba(248,113,113,0.14)", color:"#f87171", fontWeight:600 }}>
+                    <span title={`${r.failed} failed — view the failure`} onClick={ev=>{ev.stopPropagation();onNavigate(r.failedKind === "build" ? "builds" : "evals", { sha: c.sha, msg: c.msg, flake: c.flakeName, author: c.author, at: c.at });}} style={{ display:"inline-flex", alignItems:"center", gap:3, fontSize:10, padding:"1px 6px", borderRadius:99, background:"rgba(248,113,113,0.14)", color:"#f87171", fontWeight:600, cursor:"pointer" }}>
                       <Icon name="warn" size={9}/>{r.failed}
                     </span>
                   )}

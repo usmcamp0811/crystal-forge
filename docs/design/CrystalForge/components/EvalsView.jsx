@@ -1,6 +1,6 @@
 // Evaluations view — active queue + history with bulk-select + drawer + toast + keyboard nav
 
-function EvalsView() {
+function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
   const [tab, setTab] = React.useState("active");
   const hasFailed = (typeof HISTORY_EVALS !== "undefined" ? HISTORY_EVALS : []).some(e => e.status === "failed");
   // History tab pulses continuously while there are failures not yet looked at.
@@ -20,6 +20,19 @@ function EvalsView() {
   const [filterFlake, setFilterFlake]   = React.useState("all");
   const [drawerEv, setDrawerEv]   = React.useState(null);
   const [evals, setEvals]         = React.useState(ACTIVE_EVALS);
+  React.useEffect(() => {
+    if (!focus) return;
+    const bySha = (e) => e.commit === focus.sha || e.commit?.startsWith(focus.sha) || focus.sha?.startsWith(e.commit);
+    const byFlakeStatus = (e) => e.flake === focus.flake && (!focus.status || e.status === focus.status);
+    const byFlake = (e) => e.flake === focus.flake;
+    const find = (list) => list.find(bySha) || list.find(byFlakeStatus) || list.find(byFlake);
+    const inHist = find(HISTORY_EVALS);
+    const inActive = !inHist && find(ACTIVE_EVALS);
+    if (inHist) { setTab("history"); setQuery(""); setDrawerEv(inHist); }
+    else if (inActive) { setTab("active"); setQuery(""); setDrawerEv(inActive); }
+    else { setQuery(focus.flake || focus.sha || ""); }
+    onClearFocus?.();
+  }, [focus]);
   const [toast, setToast]         = React.useState(null);
   const [activeIdx, setActiveIdx] = React.useState(0);
   const undoTimer = React.useRef(null);
@@ -239,7 +252,7 @@ function EvalsView() {
         )}
       </div>
 
-      {drawerEv && <EvalDrawer ev={drawerEv} onClose={()=>setDrawerEv(null)} onCancel={cancelEval}/>}
+      {drawerEv && <EvalDrawer ev={drawerEv} onClose={()=>setDrawerEv(null)} onCancel={cancelEval} onOpenSystem={onOpenSystem} onOpenPolicy={onOpenPolicy}/>}
 
       <BulkBar count={activeSel.size} onClear={activeSel.clear}>
         <button className="btn btn-danger xs focus-ring" onClick={bulkCancel}>

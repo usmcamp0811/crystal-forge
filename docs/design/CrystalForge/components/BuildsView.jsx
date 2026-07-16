@@ -19,7 +19,7 @@ function LiveIndicator({ label = "Live" }) {
 }
 window.LiveIndicator = LiveIndicator;
 
-function BuildsView() {
+function BuildsView({ focus, onClearFocus }) {
   const [tab, setTab] = React.useState("active");
   const hasFailed = (typeof HISTORY_BUILDS !== "undefined" ? HISTORY_BUILDS : []).some(b => b.status === "failed");
   // Tab pulses continuously while there are failures the user hasn't looked at yet.
@@ -42,6 +42,21 @@ function BuildsView() {
 
   const [activeList, setActiveList] = React.useState(ACTIVE_BUILDS);
   const historyList = HISTORY_BUILDS;
+  React.useEffect(() => {
+    if (!focus) return;
+    const bySha = (b) => b.commit === focus.sha || b.commit?.startsWith(focus.sha) || focus.sha?.startsWith(b.commit);
+    const byFlakeStatus = (b) => b.flake === focus.flake && (!focus.status || b.status === focus.status);
+    const byFlake = (b) => b.flake === focus.flake;
+    const find = (list) => list.find(bySha) || list.find(byFlakeStatus) || list.find(byFlake);
+    const inHist = find(HISTORY_BUILDS);
+    const inActive = !inHist && find(ACTIVE_BUILDS);
+    // Always filter the table to this commit so any other matching builds are visible,
+    // and open the drawer on the first hit — same list, just no longer hiding siblings.
+    setQuery(focus.sha || focus.flake || "");
+    if (inHist) { setTab("history"); setSelected(inHist); setLogOpen(true); }
+    else if (inActive) { setTab("active"); setSelected(inActive); setLogOpen(true); }
+    onClearFocus?.();
+  }, [focus]);
 
   const moveBuild = (id, dir) => {
     setActiveList(prev => {
@@ -426,6 +441,13 @@ function BuildDetailPanel({ build: b, initialTab = "details", onClose }) {
 
 /* ── Details tab ── */
 function BuildDetailsTab({ b, live }) {
+  // Builds' mock fixture and SYSTEMS are separate namespaces (different hostnames), so
+  // join on the flake instead of the system: which environments run this flake today,
+  // then which cache destinations serve those environments.
+  const flakeEnvs = [...new Set(SYSTEMS.filter(s => s.flake === b.flake).map(s => s.environment))];
+  const relevantCaches = CACHE_DESTINATIONS.filter(c => c.environments.some(e => flakeEnvs.includes(e)));
+  const pushed = ["complete","cache-pushed"].includes(b.status);
+  const pushing = b.status === "cache-pushing";
   return (
     <div className="ed-body" style={{ padding:"14px 16px" }}>
       <dl className="kv-grid">
@@ -455,6 +477,28 @@ function BuildDetailsTab({ b, live }) {
           <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:4 }}>
             {b.builtDerivs} of {b.totalDerivs} derivations · {b.currentPkg && <span className="mono" style={{ color:"#60a5fa" }}>building {b.currentPkg}</span>}
           </div>
+        </section>
+      )}
+      {["complete","cache-pushed","cache-pushing","failed"].includes(b.status) && (
+        <section style={{ marginTop:18 }}>
+          <h3 style={{ fontSize:12, fontWeight:600, margin:"0 0 8px", color:"var(--cf-text-secondary)" }}>Cache push status</h3>
+          {!relevantCaches.length ? (
+            <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>No cache destination configured for this environment.</div>
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+              {relevantCaches.map(c => {
+                const state = b.status === "failed" ? "not pushed" : pushing ? "pushing…" : pushed ? "pushed" : "pending";
+                const color = state === "pushed" ? "#34d399" : state === "pushing…" ? "#22d3ee" : state === "not pushed" ? "var(--cf-text-muted)" : "#fbbf24";
+                return (
+                  <div key={c.id} style={{ display:"flex", alignItems:"center", gap:8, fontSize:12.5 }}>
+                    <Icon name="download" size={12} style={{ opacity:0.7 }}/>
+                    <span className="mono truncate" style={{ flex:1 }}>{c.name}</span>
+                    <span className="mono" style={{ color, fontSize:11 }}>{state}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </section>
       )}
     </div>

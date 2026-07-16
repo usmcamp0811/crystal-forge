@@ -204,7 +204,7 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
       </div>
       {sshOpen && <SshConnectModal sys={sys} onClose={() => setSshOpen(false)} />}
       {(rollbackConfirm || rollbackOpen) && <RollbackModal sys={sys} targetGen={rollbackTarget?.gen} targetSha={rollbackTarget?.sha} onClose={() => { setRollbackConfirm(false); setRollbackOpen(false); setRollbackTarget(null); }} onConfirm={(g) => { setRollbackConfirm(false); setRollbackOpen(false); setRollbackTarget(null); setTab("overview"); onStartPending?.({ commit: g.sha.substring(0,7), kind: "rollback", gen: g.id }); }} />}
-      {commitPeek && <FlakeTray flake={commitPeek.flake} focusSha={commitPeek.sha} focusMeta={commitPeek.meta} onClose={() => setCommitPeek(null)} onEdit={() => {}} />}
+      {commitPeek && <FlakeTray flake={commitPeek.flake} focusSha={commitPeek.sha} focusMeta={commitPeek.meta} onClose={() => setCommitPeek(null)} onEdit={() => {}} onOpenEval={(c) => onNavigate?.("evals", c)} onOpenBuild={(c) => onNavigate?.("builds", c)} onOpenSystems={(flakeName) => onNavigate?.("systems", null, flakeName)} />}
     </div>
   );
 }

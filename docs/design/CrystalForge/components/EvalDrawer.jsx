@@ -1,6 +1,6 @@
 // Eval drawer — live log + policy matrix + dependency graph
 
-function EvalDrawer({ ev, onClose, onCancel }) {
+function EvalDrawer({ ev, onClose, onCancel, onOpenSystem, onOpenPolicy }) {
   const [tab, setTab] = React.useState("log");
   const [confirmForce, setConfirmForce] = React.useState(false);
 
@@ -86,7 +86,7 @@ function EvalDrawer({ ev, onClose, onCancel }) {
         {/* Body */}
         <div className="ed-body">
           {tab === "log"    && <EvalLogTab ev={ev} live={isLive}/>}
-          {tab === "policy" && <EvalPolicyTab ev={ev}/>}
+          {tab === "policy" && <EvalPolicyTab ev={ev} onOpenSystem={onOpenSystem} onOpenPolicy={onOpenPolicy}/>}
           {tab === "graph"  && <EvalGraphTab ev={ev}/>}
         </div>
 
@@ -140,7 +140,25 @@ function EvalLogTab({ ev, live }) {
 }
 
 /* ── Policy matrix tab ────────────────────────────────── */
-function EvalPolicyTab({ ev }) {
+// Short codes used by the mock eval matrix, mapped to a human cause + (when one
+// really exists in the Policies registry) a deep-link target.
+const EVAL_CHECK_INFO = {
+  "stig.audit": { label:"STIG · audit daemon", policyId:"stig-auditd",
+    attr:"config.security.audit", assertion:"auditd rule set does not cover required syscalls (execve, ptrace) per STIG V-230351" },
+  "stig.fw":    { label:"STIG · firewall",
+    attr:"config.networking.firewall", assertion:"host-based firewall is disabled (networking.firewall.enable = false)" },
+  "stig.sshd":  { label:"STIG · sshd hardening", policyId:"stig-sshd",
+    attr:"config.services.openssh.settings", assertion:"PermitRootLogin is not \"no\" as required by STIG V-230501" },
+  "stig.tls":   { label:"STIG · TLS/FIPS", policyId:"stig-fips",
+    attr:"config.boot.kernelParams", assertion:"FIPS-validated crypto is not enabled (missing fips=1 kernel param)" },
+  "cf.hb":      { label:"Heartbeat cadence",
+    attr:"config.services.cf-agent.heartbeatIntervalSec", assertion:"heartbeat interval (900s) exceeds the fleet policy maximum (300s)" },
+  "cf.cve":     { label:"CVE gate", policyId:"cve-gated",
+    attr:"flake.lock » nixpkgs", assertion:"locked nixpkgs input pulls openssl 3.0.11, affected by CVE-2024-6119 (critical)" },
+  "cf.cache":   { label:"Cache push",
+    attr:"config.nix.settings.substituters", assertion:"no cache destination configured for this environment" },
+};
+function EvalPolicyTab({ ev, onOpenSystem, onOpenPolicy }) {
   const matrix = ev.policyMatrix || EVAL_DEFAULT_POLICY(ev);
   const policies = matrix.policies;
   const baseRows = matrix.rows;
@@ -148,6 +166,7 @@ function EvalPolicyTab({ ev }) {
   const [filter, setFilter] = React.useState("all"); // all | fail | warn | clean
   const [sort, setSort]     = React.useState("health"); // health | name
   const [expanded, setExpanded] = React.useState(null); // host name
+  const [openCause, setOpenCause] = React.useState(null); // `${host}::${policyIdx}` when a config detail is expanded
   const [policyFilter, setPolicyFilter] = React.useState(null); // policy name when clicked from summary
 
   // Annotate rows with counts
@@ -307,31 +326,55 @@ function EvalPolicyTab({ ev }) {
                     <tr className="pm-expand-row">
                       <td colSpan={policies.length + 2}>
                         <div className="pm-expand">
-                          <div style={{ display:"flex", gap:14, flexWrap:"wrap" }}>
-                            {r.results.map((res, i) => res === "pass" ? null : (
-                              <button key={i}
-                                className={`pm-failcard pm-failcard-${res} focus-ring`}
-                                title={`Open policy: ${policies[i]}`}
-                                onClick={e => { e.stopPropagation(); /* TODO: navigate to policy detail */ }}
-                              >
-                                <span className={`pm-failcard-glyph pm-${res}`}>{cellGlyph(res)}</span>
-                                <div style={{ minWidth:0, textAlign:"left" }}>
-                                  <div className="mono" style={{ fontWeight:600, fontSize:12 }}>{policies[i]}</div>
-                                  <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>
-                                    {res === "fail" ? "Blocks deployment until resolved" : "Soft warning — deploy will proceed"}
+                          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+                            {r.results.map((res, i) => res === "pass" ? null : (() => {
+                              const info = EVAL_CHECK_INFO[policies[i]];
+                              const key = `${r.host}::${i}`;
+                              const isOpen = openCause === key;
+                              return (
+                              <div key={i} style={{ border:"1px solid var(--cf-divider)", borderRadius:8, overflow:"hidden" }}>
+                                <div className={`pm-failcard pm-failcard-${res}`} style={{ cursor:"pointer", border:"none", borderRadius:0 }}
+                                  title="Show the config line that failed this check"
+                                  onClick={e => { e.stopPropagation(); setOpenCause(isOpen ? null : key); }}
+                                >
+                                  <span className={`pm-failcard-glyph pm-${res}`}>{cellGlyph(res)}</span>
+                                  <div style={{ minWidth:0, textAlign:"left" }}>
+                                    <div className="mono" style={{ fontWeight:600, fontSize:12 }}>{info?.label || policies[i]}</div>
+                                    <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>
+                                      {info?.assertion || (res === "fail" ? "Blocks deployment until resolved" : "Soft warning — deploy will proceed")}
+                                    </div>
                                   </div>
+                                  <Icon name={isOpen ? "chevron-down" : "chevron-right"} size={12} style={{ color:"var(--cf-text-muted)", marginLeft:8, flexShrink:0 }}/>
                                 </div>
-                                <Icon name="arrow-right" size={12} style={{ color:"var(--cf-text-muted)", marginLeft:8 }}/>
-                              </button>
-                            ))}
+                                {isOpen && info?.assertion && (
+                                  <div style={{ padding:"10px 12px", background:"var(--cf-canvas)", borderTop:"1px solid var(--cf-divider)" }}>
+                                    <div className="mono" style={{ fontSize:10.5, color:"var(--cf-text-muted)", marginBottom:6 }}>
+                                      nixosConfigurations.{r.host}.{info.attr}
+                                    </div>
+                                    <div style={{ fontSize:12, color:"#f87171", lineHeight:1.5 }}>
+                                      <span className="mono" style={{ fontWeight:600 }}>assertion failed:</span> {info.assertion}
+                                    </div>
+                                    <div style={{ fontSize:10.5, color:"var(--cf-text-muted)", marginTop:8 }}>
+                                      From nix-eval-jobs — attribute path + assertion message only; eval doesn't report a source line for module assertions.
+                                    </div>
+                                    {info.policyId && (
+                                      <button className="btn btn-ghost focus-ring xs" style={{ marginTop:8 }} onClick={e => { e.stopPropagation(); onOpenPolicy?.(info.policyId); }}>
+                                        <Icon name="file" size={11}/> View policy definition
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                              );
+                            })())}
                             {r.fail === 0 && r.warn === 0 && (
                               <div style={{ fontSize:12, color:"#34d399", display:"flex", alignItems:"center", gap:8 }}>
                                 <Icon name="check" size={14}/> All policies pass for this system.
                               </div>
                             )}
                           </div>
-                          <div style={{ display:"flex", gap:6, marginLeft:"auto", flexShrink:0 }}>
-                            <button className="btn btn-ghost focus-ring xs"><Icon name="arrow-right" size={11}/> Open system</button>
+                          <div style={{ display:"flex", gap:6, marginTop:12 }}>
+                            <button className="btn btn-ghost focus-ring xs" onClick={() => { const s = SYSTEMS.find(x => x.hostname === r.host); if (s) onOpenSystem?.(s); }}><Icon name="arrow-right" size={11}/> Open system</button>
                           </div>
                         </div>
                       </td>
@@ -459,13 +502,14 @@ function ConfirmForceCancel({ ev, onConfirm, onCancel }) {
 /* ── Default mock generators (when entry doesn't define) ── */
 function EVAL_DEFAULT_LOG(ev) {
   const seed = ev.id.split("").reduce((a,c)=>a+c.charCodeAt(0),0);
-  const sysHosts = ["atlas-01","gaia-web-02","orion-db","helios-edge","titan-build"];
+  const sysHosts = SYSTEMS.filter(s => s.flake === ev.flake).map(s => s.hostname);
+  const hosts0 = sysHosts.length ? sysHosts : SYSTEMS.map(s => s.hostname);
   const lines = [
     `evaluating flake ${ev.flake}@${ev.commit}`,
     `loading flake.lock`,
     `resolving inputs… nixpkgs (locked at 24.11.20260401)`,
     `building eval config for ${ev.systemCount} systems`,
-    ...sysHosts.slice(0, Math.min(ev.systemCount, 5)).flatMap(h => [
+    ...hosts0.slice(0, Math.min(ev.systemCount, 5)).flatMap(h => [
       `  ► evaluating ${h}.nix`,
       `    policy: stig.audit_rules ✓`,
       `    policy: stig.firewall ✓`,
@@ -482,7 +526,12 @@ function EVAL_DEFAULT_LOG(ev) {
 function EVAL_DEFAULT_POLICY(ev) {
   const seed = ev.id.split("").reduce((a,c)=>a+c.charCodeAt(0),0);
   const policies = ["stig.audit","stig.fw","stig.sshd","stig.tls","cf.hb","cf.cve","cf.cache"];
-  const hosts = ["atlas-01","gaia-web-02","orion-db","helios-edge","titan-build","artemis-cdn","apollo-net","luna-mon","perseus-vpn"].slice(0, ev.systemCount);
+  // Use real fleet hostnames (not invented ones) so "Open system" always resolves.
+  const hosts = SYSTEMS.filter(s => s.flake === ev.flake).map(s => s.hostname).slice(0, ev.systemCount);
+  const usedHostnames = new Set(hosts);
+  const fallbackPool = SYSTEMS.map(s => s.hostname).filter(h => !usedHostnames.has(h));
+  let fbIdx = 0;
+  while (hosts.length < ev.systemCount && fbIdx < fallbackPool.length) { hosts.push(fallbackPool[fbIdx]); usedHostnames.add(fallbackPool[fbIdx]); fbIdx++; }
   const rows = hosts.map((h, i) => {
     const results = policies.map((_, j) => {
       const r = (seed + i*13 + j*7) % 100;
