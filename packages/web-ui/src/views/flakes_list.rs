@@ -19,7 +19,7 @@ use web_sys::console;
 use web_sys::{Node, window};
 
 use crate::alerts::{
-    NAV_BADGES, acknowledge_locally, acknowledge_with_cursor_and_ids, attention_row_class,
+    NAV_BADGES, acknowledge_locally, acknowledge_with_cursor_and_ids_async, attention_row_class,
     dismiss_attention_item, should_flash,
 };
 use crate::api::client::{
@@ -2897,6 +2897,7 @@ pub fn FlakesListViewNew() -> Element {
     let mut dismissed_rewrite_conflicts = use_signal(HashSet::<String>::new);
     let mut flakes_ack_cursor = use_signal(|| None::<String>);
     let mut flakes_ack_sent = use_signal(|| false);
+    let mut flakes_local_ack_hidden = use_signal(|| false);
 
     let flakes_resource = use_resource(move || {
         let _nonce = *reload_nonce.read();
@@ -3073,16 +3074,23 @@ pub fn FlakesListViewNew() -> Element {
     use_effect(move || {
         let flakes_loaded_successfully = matches!(flakes_resource.read().as_ref(), Some(Ok(_)));
         if flakes_loaded_successfully && !flakes_ack_sent() {
-            flakes_ack_sent.set(true);
             if let Some(cursor) = flakes_ack_cursor.read().clone() {
-                acknowledge_with_cursor_and_ids(
-                    "flakes",
-                    error_count as i64,
-                    cursor,
-                    None,
-                    Some(flake_alert_ids.clone()),
-                );
-            } else {
+                let alert_ids = flake_alert_ids.clone();
+                spawn(async move {
+                    if acknowledge_with_cursor_and_ids_async(
+                        "flakes",
+                        error_count as i64,
+                        cursor,
+                        None,
+                        Some(alert_ids),
+                    )
+                    .await
+                    {
+                        flakes_ack_sent.set(true);
+                    }
+                });
+            } else if !flakes_local_ack_hidden() {
+                flakes_local_ack_hidden.set(true);
                 acknowledge_locally("flakes");
             }
         }

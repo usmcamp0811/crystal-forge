@@ -456,8 +456,10 @@ pub fn badge_visible(view_key: &str, count: i64, attention: bool) -> bool {
     if count <= 0 {
         return false;
     }
-    let state = ALERT_STATE.read();
-    !(attention && state.acknowledged.contains(view_key))
+    if attention {
+        ALERT_STATE.write().acknowledged.remove(view_key);
+    }
+    true
 }
 
 #[cfg(test)]
@@ -470,39 +472,31 @@ mod tests {
 
     #[test]
     fn badge_visible_hidden_when_count_zero() {
+        let mut state = fresh_state();
         // count=0 → hidden regardless of attention
-        assert!(!badge_visible_with_state(
-            &fresh_state(),
-            "systems",
-            0,
-            true
-        ));
-        assert!(!badge_visible_with_state(
-            &fresh_state(),
-            "systems",
-            0,
-            false
-        ));
+        assert!(!badge_visible_with_state(&mut state, "systems", 0, true));
+        assert!(!badge_visible_with_state(&mut state, "systems", 0, false));
     }
 
     #[test]
-    fn badge_visible_attention_badge_hidden_after_ack() {
+    fn badge_visible_attention_badge_reappears_when_server_count_returns() {
         let mut state = fresh_state();
         state.acknowledged.insert("flakes".to_string());
-        assert!(!badge_visible_with_state(&state, "flakes", 3, true));
+        assert!(badge_visible_with_state(&mut state, "flakes", 3, true));
+        assert!(!state.acknowledged.contains("flakes"));
     }
 
     #[test]
     fn badge_visible_attention_badge_shown_before_ack() {
-        let state = fresh_state();
-        assert!(badge_visible_with_state(&state, "flakes", 3, true));
+        let mut state = fresh_state();
+        assert!(badge_visible_with_state(&mut state, "flakes", 3, true));
     }
 
     #[test]
     fn badge_visible_informational_badge_always_shown() {
         let mut state = fresh_state();
         state.acknowledged.insert("flakes".to_string());
-        assert!(badge_visible_with_state(&state, "flakes", 5, false));
+        assert!(badge_visible_with_state(&mut state, "flakes", 5, false));
     }
 
     #[test]
@@ -588,7 +582,7 @@ mod tests {
 
     // Pure helpers for testing (take state explicitly, no GlobalSignal needed)
     fn badge_visible_with_state(
-        state: &AlertState,
+        state: &mut AlertState,
         view_key: &str,
         count: i64,
         attention: bool,
@@ -596,7 +590,10 @@ mod tests {
         if count <= 0 {
             return false;
         }
-        !(attention && state.acknowledged.contains(view_key))
+        if attention {
+            state.acknowledged.remove(view_key);
+        }
+        true
     }
 
     fn should_flash_with_state(

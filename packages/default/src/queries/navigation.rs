@@ -469,14 +469,24 @@ pub async fn fetch_navigation_badges(
         acks.get("environments"),
     );
 
-    // ── Builds: failed build jobs, new since completed_at baseline ───────────
+    // ── Builds: failed build jobs in the same 100-row recent window rendered
+    // by `/build-jobs/recent`, new since completed_at baseline. The explicit
+    // ID snapshot must use the same bounded window the page can acknowledge;
+    // otherwise older failures outside the page would become impossible to
+    // clear from the sidebar.
     let builds_since = acks.get("builds").map(|b| b.last_seen_at);
     let build_alert_ids: Vec<String> = match sqlx::query_scalar(
         r#"
-        SELECT bj.id::text
-        FROM build_jobs bj
-        WHERE bj.status = 'failed'
-        ORDER BY COALESCE(bj.completed_at, bj.updated_at, bj.created_at) DESC, bj.id DESC
+        SELECT recent.id::text
+        FROM (
+            SELECT bj.id, bj.status, bj.completed_at, bj.updated_at, bj.created_at
+            FROM build_jobs bj
+            WHERE bj.status IN ('completed', 'failed', 'cancelled')
+            ORDER BY COALESCE(bj.completed_at, bj.updated_at, bj.created_at) DESC, bj.id DESC
+            LIMIT 100
+        ) recent
+        WHERE recent.status = 'failed'
+        ORDER BY COALESCE(recent.completed_at, recent.updated_at, recent.created_at) DESC, recent.id DESC
         "#,
     )
     .fetch_all(pool)
@@ -495,10 +505,16 @@ pub async fn fetch_navigation_badges(
             match sqlx::query_scalar(
                 r#"
         SELECT COUNT(*)::bigint
-        FROM build_jobs
-        WHERE status = 'failed'
-          AND ($1::timestamptz IS NULL OR completed_at > $1)
-          AND completed_at <= $2
+        FROM (
+            SELECT bj.id, bj.status, bj.completed_at, bj.updated_at, bj.created_at
+            FROM build_jobs bj
+            WHERE bj.status IN ('completed', 'failed', 'cancelled')
+            ORDER BY COALESCE(bj.completed_at, bj.updated_at, bj.created_at) DESC, bj.id DESC
+            LIMIT 100
+        ) recent
+        WHERE recent.status = 'failed'
+          AND ($1::timestamptz IS NULL OR recent.completed_at > $1)
+          AND recent.completed_at <= $2
         "#,
             )
             .bind(builds_since)

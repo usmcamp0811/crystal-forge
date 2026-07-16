@@ -425,7 +425,8 @@ fn redact_sensitive_tokens(input: &str) -> String {
     let mut idx = 0;
     while idx < input.len() {
         let remaining = &input[idx..];
-        if remaining.starts_with("Authorization:") {
+        let remaining_lower = remaining.to_ascii_lowercase();
+        if remaining_lower.starts_with("authorization:") {
             out.push_str("Authorization: [REDACTED]");
             if let Some(pos) = remaining.find('\n') {
                 idx += pos;
@@ -443,7 +444,7 @@ fn redact_sensitive_tokens(input: &str) -> String {
             idx += end;
             continue;
         }
-        if remaining.starts_with("GIT_ASKPASS=") {
+        if remaining_lower.starts_with("git_askpass=") {
             out.push_str("GIT_ASKPASS=[REDACTED]");
             if let Some(pos) = remaining.find(char::is_whitespace) {
                 idx += pos;
@@ -452,8 +453,8 @@ fn redact_sensitive_tokens(input: &str) -> String {
             }
             continue;
         }
-        if remaining.starts_with("NETRC=") || remaining.starts_with("NETRC_FILE=") {
-            let key = if remaining.starts_with("NETRC_FILE=") {
+        if remaining_lower.starts_with("netrc=") || remaining_lower.starts_with("netrc_file=") {
+            let key = if remaining_lower.starts_with("netrc_file=") {
                 "NETRC_FILE"
             } else {
                 "NETRC"
@@ -478,9 +479,11 @@ fn redact_url_credentials(input: &str) -> String {
     let Ok(mut url) = Url::parse(input) else {
         return input.to_string();
     };
+    url.set_query(None);
+    url.set_fragment(None);
     let has_auth = !url.username().is_empty() || url.password().is_some();
     if !has_auth {
-        return input.to_string();
+        return url.to_string();
     }
     let _ = url.set_username("REDACTED");
     let _ = url.set_password(None);
@@ -1455,6 +1458,7 @@ async fn try_get_diff_for_branch(
 mod tests {
     use super::{
         is_history_rewrite_error, is_invalid_revision_range_error, is_remote_head_diverged,
+        redact_sensitive_tokens, redact_url_credentials, sanitize_and_truncate_sync_error,
     };
     use anyhow::Context;
 
@@ -1496,5 +1500,53 @@ mod tests {
     #[test]
     fn does_not_detect_divergence_when_remote_head_missing() {
         assert!(!is_remote_head_diverged("79e33a9", None));
+    }
+
+    #[test]
+    fn redacts_url_credentials_query_strings_and_fragments() {
+        let redacted = redact_url_credentials(
+            "https://user:p%40ss@git.example/repo.git?private_token=secret#access_token=secret2",
+        );
+
+        assert_eq!(redacted, "https://REDACTED@git.example/repo.git");
+        assert!(!redacted.contains("p%40ss"));
+        assert!(!redacted.contains("private_token"));
+        assert!(!redacted.contains("access_token"));
+    }
+
+    #[test]
+    fn strips_query_and_fragment_without_authority_credentials() {
+        let redacted = redact_url_credentials(
+            "https://git.example/repo.git?private_token=secret#access_token=secret2",
+        );
+
+        assert_eq!(redacted, "https://git.example/repo.git");
+    }
+
+    #[test]
+    fn redacts_sensitive_patterns_case_insensitively() {
+        let redacted = redact_sensitive_tokens(
+            "authorization: bearer secret\ngit_askpass=/tmp/askpass netrc=/tmp/netrc NETRC_FILE=/tmp/netrc-file",
+        );
+
+        assert!(redacted.contains("Authorization: [REDACTED]"));
+        assert!(redacted.contains("GIT_ASKPASS=[REDACTED]"));
+        assert!(redacted.contains("NETRC=[REDACTED]"));
+        assert!(redacted.contains("NETRC_FILE=[REDACTED]"));
+        assert!(!redacted.contains("bearer secret"));
+        assert!(!redacted.contains("/tmp/askpass"));
+        assert!(!redacted.contains("/tmp/netrc"));
+    }
+
+    #[test]
+    fn sanitizes_persisted_sync_errors_containing_repo_url_tokens() {
+        let repo_url = "https://git.example/repo.git?private_token=secret#frag";
+        let raw = "git failed for https://git.example/repo.git?private_token=secret#frag with authorization: bearer token";
+        let sanitized = sanitize_and_truncate_sync_error(repo_url, raw, 4000);
+
+        assert!(sanitized.contains("https://git.example/repo.git"));
+        assert!(!sanitized.contains("private_token"));
+        assert!(!sanitized.contains("#frag"));
+        assert!(!sanitized.contains("bearer token"));
     }
 }
