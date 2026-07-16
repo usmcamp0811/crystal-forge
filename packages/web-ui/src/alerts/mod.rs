@@ -243,8 +243,10 @@ pub async fn acknowledge_with_cursor_and_ids_async(
         }
     }
 
-    if let Ok(fresh) = get_navigation_badges().await {
-        *NAV_BADGES.write() = fresh;
+    if success {
+        if let Ok(fresh) = get_navigation_badges().await {
+            *NAV_BADGES.write() = fresh;
+        }
     }
 
     success

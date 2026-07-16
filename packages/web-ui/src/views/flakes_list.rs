@@ -2897,6 +2897,7 @@ pub fn FlakesListViewNew() -> Element {
     let mut dismissed_rewrite_conflicts = use_signal(HashSet::<String>::new);
     let mut flakes_ack_sent = use_signal(|| false);
     let mut flakes_ack_in_flight = use_signal(|| false);
+    let mut flakes_last_ack_attempt_cursor = use_signal(|| None::<String>);
     let mut flakes_local_ack_hidden = use_signal(|| false);
 
     let flakes_resource = use_resource(move || {
@@ -3070,8 +3071,12 @@ pub fn FlakesListViewNew() -> Element {
         let observed_at = NAV_BADGES.read().observed_at.clone();
         if flakes_loaded_successfully && !flakes_ack_sent() && !flakes_ack_in_flight() {
             if let Some(cursor) = observed_at {
+                if flakes_last_ack_attempt_cursor.read().as_deref() == Some(cursor.as_str()) {
+                    return;
+                }
                 let alert_ids = flake_alert_ids.clone();
                 flakes_ack_in_flight.set(true);
+                flakes_last_ack_attempt_cursor.set(Some(cursor.clone()));
                 spawn(async move {
                     let success = acknowledge_with_cursor_and_ids_async(
                         "flakes",
