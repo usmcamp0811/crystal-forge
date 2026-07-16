@@ -246,10 +246,10 @@ fn now_unix_secs() -> u64 {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs()
     }
 }
 
@@ -261,7 +261,9 @@ fn now_unix_secs() -> u64 {
 fn zero_nav_badge_field(view_key: &str) {
     {
         let mut state = ALERT_STATE.write();
-        state.zeroed_at.insert(view_key.to_string(), now_unix_secs());
+        state
+            .zeroed_at
+            .insert(view_key.to_string(), now_unix_secs());
     }
     let mut badges = NAV_BADGES.write();
     match view_key {
