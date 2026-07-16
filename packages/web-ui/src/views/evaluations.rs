@@ -4,6 +4,11 @@ use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use gloo_timers::future::TimeoutFuture;
 
+use crate::alerts::{
+    NAV_BADGES, acknowledge_with_cursor_and_ids_async, attention_row_class, dismiss_attention_item,
+    should_flash,
+};
+
 use crate::api::{
     client::{
         ApiClientError, cancel_commit_evaluation, fetch_eval_dependency_graph, fetch_eval_history,
@@ -58,6 +63,9 @@ fn EvaluationsPage() -> Element {
     let mut history_page = use_signal(|| 1_i64);
     let mut history_status_filter = use_signal(|| String::from("all"));
     let mut history_flake_filter = use_signal(|| String::from("all"));
+    let mut history_auto_selected = use_signal(|| false);
+    let mut history_ack_cursor = use_signal(|| None::<String>);
+    let mut evals_ack_sent = use_signal(|| false);
 
     let history_resource = use_resource(move || async move {
         let _ = refresh();
@@ -111,6 +119,22 @@ fn EvaluationsPage() -> Element {
         }
     });
 
+    // Auto-select all history items on first successful data load.
+    use_effect(move || {
+        let already = *history_auto_selected.read();
+        if let Some(Ok(page_data)) = &*history_resource.read() {
+            history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
+            if !already {
+                let ids: std::collections::HashSet<i32> =
+                    page_data.items.iter().map(|item| item.commit_id).collect();
+                if !ids.is_empty() {
+                    history_selected_ids.set(ids);
+                    history_auto_selected.set(true);
+                }
+            }
+        }
+    });
+
     let active_items = queue_items
         .read()
         .iter()
@@ -135,6 +159,45 @@ fn EvaluationsPage() -> Element {
         .filter(|item| item.evaluation_status == "failed")
         .count() as i64;
     let total_count = queue_items.read().len() as i64;
+    use_effect(move || {
+        if active_tab() == EvaluationsTab::History && !evals_ack_sent() {
+            if let Some(Ok(page_data)) = history_resource.read().as_ref() {
+                let unfiltered_first_page = history_page() == 1
+                    && history_status_filter() == "all"
+                    && history_flake_filter() == "all";
+                let complete_page = page_data.total_count <= page_data.items.len() as i64;
+                if unfiltered_first_page && complete_page {
+                    let history_failed_count = page_data
+                        .items
+                        .iter()
+                        .filter(|item| item.evaluation_status == "failed")
+                        .count() as i64;
+                    let Some(cursor) = history_ack_cursor.read().clone() else {
+                        return;
+                    };
+                    let alert_ids = page_data
+                        .items
+                        .iter()
+                        .filter(|item| item.evaluation_status == "failed")
+                        .map(|item| item.commit_id.to_string())
+                        .collect::<Vec<_>>();
+                    spawn(async move {
+                        if acknowledge_with_cursor_and_ids_async(
+                            "evals",
+                            history_failed_count,
+                            cursor,
+                            None,
+                            Some(alert_ids),
+                        )
+                        .await
+                        {
+                            evals_ack_sent.set(true);
+                        }
+                    });
+                }
+            }
+        }
+    });
     let selected_count = history_selected_ids.read().len();
     let selected_history_rows = history_resource
         .read()
@@ -158,6 +221,26 @@ fn EvaluationsPage() -> Element {
     } else {
         "Compare selected evaluations"
     };
+
+    // Server-computed "new failed evaluations since last acknowledgment"
+    // (persists across page refresh/re-login — see alerts::NAV_BADGES).
+    // Drives both the History tab's badge/attention-flash-tab pulse and the
+    // one-shot row flash below, replacing a raw total that would otherwise
+    // reappear identically on every reload. should_flash still guards the
+    // one-shot-per-page-load timing (safe: reads/writes ALERT_STATE, not a
+    // signal read inside this same effect).
+    let evals_failed_new = NAV_BADGES().evals_failed_new;
+    let mut flash_evals_signal = use_signal(|| false);
+    let flash_evals = flash_evals_signal();
+    use_effect(move || {
+        if should_flash("evals", evals_failed_new > 0) {
+            flash_evals_signal.set(true);
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(3200).await;
+                flash_evals_signal.set(false);
+            });
+        }
+    });
 
     rsx! {
             div {
@@ -353,11 +436,22 @@ fn EvaluationsPage() -> Element {
                         button {
                             class: if active_tab() == EvaluationsTab::History {
                                 "sd-tab focus-ring active"
+                            } else if evals_failed_new > 0 {
+                                "sd-tab focus-ring attention-flash-tab"
                             } else {
                                 "sd-tab focus-ring"
                             },
-                            onclick: move |_| { active_tab.set(EvaluationsTab::History); focused_index.set(None); },
+                            onclick: move |_| {
+                                active_tab.set(EvaluationsTab::History);
+                                focused_index.set(None);
+                                // Acknowledge the "evals" sidebar/tab badge when History tab
+                                // is opened (persists server-side — TASK-385 follow-up).
+                                evals_ack_sent.set(false);
+                            },
                             "History"
+                            if evals_failed_new > 0 {
+                                span { class: "sd-tab-badge", "{evals_failed_new}" }
+                            }
                         }
                     }
 
@@ -446,6 +540,7 @@ fn EvaluationsPage() -> Element {
                             history_selected_ids: history_selected_ids,
                             drawer_target: drawer_target,
                             focused_index: focused_index,
+                            flash_evals: flash_evals,
                         }
                     }
                 }
@@ -794,6 +889,7 @@ fn EvalHistory(
     mut history_selected_ids: Signal<std::collections::HashSet<i32>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
     focused_index: Signal<Option<usize>>,
+    flash_evals: bool,
 ) -> Element {
     let history_snapshot = history_resource.read();
 
@@ -805,7 +901,7 @@ fn EvalHistory(
 
                 div {
                     class: "seg",
-                    for (label, value) in [("all", ""), ("complete", "complete"), ("failed", "failed"), ("cancelled", "cancelled")] {
+                    for (label, value) in [("all", "all"), ("complete", "complete"), ("failed", "failed"), ("cancelled", "cancelled")] {
                         {
                             let value_str = value.to_string();
                             let is_active = history_status_filter() == value;
@@ -911,12 +1007,36 @@ fn EvalHistory(
                                     let ev_for_row = ev.clone();
                                     let is_focused = focused_index() == Some(row_i);
 
+                                    let is_failed = ev.evaluation_status == "failed";
+                                    // Include evaluation_completed_at epoch so
+                                    // a commit that is re-evaluated and fails
+                                    // again generates a new dismissal key.
+                                    let eval_key = format!(
+                                        "{}:{}",
+                                        commit_id,
+                                        ev.evaluation_completed_at
+                                            .map(|t| t.timestamp().to_string())
+                                            .unwrap_or_default()
+                                    );
+                                    let row_class = attention_row_class(
+                                        if is_focused { "kbd-focused" } else { "" },
+                                        "evals",
+                                        &eval_key,
+                                        is_failed,
+                                        is_failed && flash_evals,
+                                    );
+
                                     rsx! {
                                         tr {
                                             key: "{commit_id}",
-                                            class: if is_focused { "kbd-focused" } else { "" },
+                                            class: "{row_class}",
                                             style: "cursor: pointer;",
-                                            onclick: move |_| drawer_target.set(Some(EvalDrawerTarget::History(ev_for_row.clone()))),
+                                            onclick: move |_| {
+                                                if is_failed {
+                                                    dismiss_attention_item("evals", &eval_key);
+                                                }
+                                                drawer_target.set(Some(EvalDrawerTarget::History(ev_for_row.clone())));
+                                            },
                                             td {
                                                 onclick: move |evt| {
                                                     evt.stop_propagation();

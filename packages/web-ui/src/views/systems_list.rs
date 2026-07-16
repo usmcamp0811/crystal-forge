@@ -1,7 +1,15 @@
 //! Systems list view with table/card toggle.
 
+use std::collections::HashMap;
+
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
+use uuid::Uuid;
+
+use crate::alerts::{
+    NAV_BADGES, acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item,
+    should_flash,
+};
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
@@ -130,6 +138,25 @@ fn activity_row_from_history(entry: &SystemHistoryEntry) -> ActivityRow {
     }
 }
 
+fn system_alert_occurrence_id(system: &SystemSummary) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        system.id,
+        match system.health_status {
+            HealthStatus::Healthy => "healthy",
+            HealthStatus::Warning => "warning",
+            HealthStatus::Critical => "critical",
+            HealthStatus::Offline => "offline",
+        },
+        system
+            .last_seen
+            .map(|at| at.timestamp().to_string())
+            .unwrap_or_else(|| "never".to_string()),
+        system.cve_counts.critical,
+        system.cve_counts.high
+    )
+}
+
 /// Systems list with toggles and filters.
 #[component]
 pub fn SystemsListView() -> Element {
@@ -188,6 +215,7 @@ pub fn SystemsListView() -> Element {
 
     // Local mutable state for systems (allows client-side add/remove until backend supports it)
     let mut local_systems = use_signal(Vec::<SystemSummary>::new);
+
     let mut load_error = use_signal(|| None::<String>);
     let mut api_notice = use_signal(|| None::<String>);
     let mut loading = use_signal(|| true);
@@ -200,9 +228,48 @@ pub fn SystemsListView() -> Element {
                 // Will be handled by early return below
                 return;
             }
+            let attention_count = result
+                .systems
+                .iter()
+                .filter(|s| {
+                    matches!(
+                        s.health_status,
+                        HealthStatus::Critical | HealthStatus::Offline
+                    )
+                })
+                .count() as i64;
+            let alert_ids = result
+                .systems
+                .iter()
+                .filter(|s| {
+                    matches!(
+                        s.health_status,
+                        HealthStatus::Critical | HealthStatus::Offline
+                    )
+                })
+                .map(system_alert_occurrence_id)
+                .collect::<Vec<_>>();
+            let ack_snapshot = {
+                let badges = NAV_BADGES.read_unchecked();
+                (
+                    badges.observed_at.clone(),
+                    badges.systems_fingerprint.clone(),
+                )
+            };
             local_systems.set(result.systems.clone());
             load_error.set(result.notice.clone());
             loading.set(false);
+            if result.notice.is_none() {
+                if let (Some(cursor), fingerprint) = ack_snapshot {
+                    acknowledge_with_cursor_and_ids(
+                        "systems",
+                        attention_count,
+                        cursor,
+                        fingerprint,
+                        Some(alert_ids),
+                    );
+                }
+            }
         }
     });
 
@@ -260,7 +327,6 @@ pub fn SystemsListView() -> Element {
     let mut edit_remove_in_progress = use_signal(|| false);
     let mut preview_system = use_signal(|| None::<SystemDetail>);
     let selected_preview_id = preview_system.read().as_ref().map(|d| d.id);
-
 
     let current_systems = local_systems.read().clone();
     let environments = unique_environments(&current_systems);
@@ -328,6 +394,33 @@ pub fn SystemsListView() -> Element {
 
     let from_setup = use_signal(came_from_setup);
     let mut dismiss_add_target_callout = use_signal(|| false);
+
+    // Attention/flash state for alerting systems (TASK-385 follow-up).
+    let has_attention_systems = filtered_systems.iter().any(|s| {
+        matches!(
+            s.health_status,
+            HealthStatus::Critical | HealthStatus::Offline
+        )
+    });
+    let flash_global = should_flash("systems", has_attention_systems);
+    let mut attention_classes: HashMap<Uuid, String> = HashMap::new();
+    for system in &filtered_systems {
+        let is_attention = matches!(
+            system.health_status,
+            HealthStatus::Critical | HealthStatus::Offline
+        );
+        let system_key = system_alert_occurrence_id(system);
+        let ac = attention_row_class(
+            "",
+            "systems",
+            &system_key,
+            is_attention,
+            is_attention && flash_global,
+        );
+        if !ac.is_empty() {
+            attention_classes.insert(system.id, ac);
+        }
+    }
 
     rsx! {
         div {
@@ -799,14 +892,21 @@ pub fn SystemsListView() -> Element {
                             selected: selected_preview_id == Some(system.id),
                             environment_colors: environment_color_pairs.clone(),
                             flake_context: flake_context.clone(),
-                            on_open: move |_| {
-                                let mut preview_system = preview_system.clone();
-                                spawn(async move {
-                                    let detail = load_system_detail_with_fallback(&system.id.to_string()).await;
-                                    if let Some(detail) = detail.system {
-                                        preview_system.set(Some(detail));
-                                    }
-                                });
+                            attention_class: attention_classes.get(&system.id).cloned().unwrap_or_default(),
+                            flash: flash_global && matches!(system.health_status, HealthStatus::Critical | HealthStatus::Offline),
+                            on_open: {
+                                let system_id = system.id;
+                                let alert_key = system_alert_occurrence_id(&system);
+                                move |_| {
+                                    dismiss_attention_item("systems", &alert_key);
+                                    let mut preview_system = preview_system.clone();
+                                    spawn(async move {
+                                        let detail = load_system_detail_with_fallback(&system_id.to_string()).await;
+                                        if let Some(detail) = detail.system {
+                                            preview_system.set(Some(detail));
+                                        }
+                                    });
+                                }
                             },
                             on_remove: move |_| remove_system_by_id(local_systems, pending_remove, system.id),
                             on_update_key: move |_| update_key_for_system(local_systems, pending_update_key, system.id),
@@ -839,6 +939,7 @@ pub fn SystemsListView() -> Element {
                     compact: *is_compact.read(),
                     environment_colors: environment_color_pairs.clone(),
                     flake_context: flake_context.clone(),
+                    attention_classes: attention_classes.clone(),
                     on_remove: move |id| remove_system_by_id(local_systems, pending_remove, id),
                     on_update_key: move |id| update_key_for_system(local_systems, pending_update_key, id),
                      on_edit: move |id: uuid::Uuid| {
@@ -860,6 +961,9 @@ pub fn SystemsListView() -> Element {
                         }
                     },
                     on_open: move |id: uuid::Uuid| {
+                        if let Some(system) = filtered_systems.iter().find(|system| system.id == id) {
+                            dismiss_attention_item("systems", &system_alert_occurrence_id(system));
+                        }
                         let mut preview_system = preview_system.clone();
                         spawn(async move {
                             let detail = load_system_detail_with_fallback(&id.to_string()).await;

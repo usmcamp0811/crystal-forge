@@ -1265,6 +1265,9 @@ function buildFlakeParityFixture() {
       branch: "main",
       build_scope: "cf_systems_only",
       system_count: 12,
+      sync_status: "synced",
+      last_sync_at: new Date(nowMs - 4 * 60 * 1000).toISOString(),
+      last_sync_error: null,
     },
     {
       id: 42,
@@ -1273,6 +1276,10 @@ function buildFlakeParityFixture() {
       branch: "release/2026.06",
       build_scope: "all_configs",
       system_count: 8,
+      sync_status: "error",
+      last_sync_at: new Date(nowMs - 3 * 60 * 60 * 1000).toISOString(),
+      last_sync_error:
+        "SSH key rejected by remote: Permission denied (publickey)\nerror: could not read flake metadata",
     },
   ];
 
@@ -1368,6 +1375,65 @@ function buildFlakeParityFixture() {
       "   };",
     ].join("\n"),
   };
+}
+
+async function routeNavigationBadges(page, overrides = {}) {
+  /// Track which categories have been acknowledged via POST so subsequent
+  /// GET /navigation/badges returns zeroed counts — otherwise the app's
+  /// post-acknowledge refetch would re-populate the badge with the original
+  /// pre-acknowledgment value.
+  const acked = new Set();
+
+  const base = {
+    // observed_at anchors the acknowledge cursor to the snapshot the user
+    // was shown. The exact value doesn't matter for tests but must be present
+    // so the client sends it back in the POST body.
+    observed_at: new Date().toISOString(),
+    systems_attention: 2,
+    systems_total: 6,
+    flakes_errored: 1,
+    flakes_total: 2,
+    environments_attention: 1,
+    environments_total: 4,
+    builds_failed_new: 2,
+    evals_failed_new: 1,
+    cves_critical_new: 3,
+    ...overrides,
+  };
+
+  /// Build a fresh response body, zeroing fields for acknowledged categories.
+  function body() {
+    return {
+      ...base,
+      flakes_errored: acked.has("flakes") ? 0 : base.flakes_errored,
+      systems_attention: acked.has("systems") ? 0 : base.systems_attention,
+      environments_attention: acked.has("environments") ? 0 : base.environments_attention,
+      builds_failed_new: acked.has("builds") ? 0 : base.builds_failed_new,
+      evals_failed_new: acked.has("evals") ? 0 : base.evals_failed_new,
+      cves_critical_new: acked.has("cves") ? 0 : base.cves_critical_new,
+    };
+  }
+
+  // POST /navigation/acknowledge — record the acknowledgment.
+  await page.route("**/api/v1/navigation/acknowledge", async (route) => {
+    const category = route.request().postDataJSON()?.category;
+    if (category) acked.add(category);
+    await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+  });
+
+  // GET /navigation/badges — return zeroed counts for acknowledged categories.
+  await page.route("**/api/v1/navigation/badges", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(body()),
+    });
+  });
+}
+
+async function unrouteNavigationBadges(page) {
+  await page.unroute("**/api/v1/navigation/badges");
+  await page.unroute("**/api/v1/navigation/acknowledge");
 }
 
 async function routeFlakeParityData(page) {
@@ -2617,6 +2683,7 @@ const steps = [
     name: "07-sidebar-desktop-expanded",
     description: "Desktop: sidebar expanded — grouped sections with labels visible",
     action: async (page) => {
+      await routeNavigationBadges(page);
       await page.setViewportSize(VIEWPORTS.desktop);
       // Force expanded state
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
@@ -2642,12 +2709,24 @@ const steps = [
       if (!box || box.width < 200) {
         throw new Error(`Desktop expanded sidebar too narrow: ${box ? box.width : "missing"}`);
       }
+
+      await assertVisible(
+        sidebar.locator(".nav-item", { hasText: "Flakes" }).locator(".nav-count.nav-count-alert").first(),
+        "Expected flakes attention badge to be visible in expanded sidebar",
+      );
+      await assertVisible(
+        sidebar.locator(".nav-item", { hasText: "CVEs" }).locator(".nav-count.nav-count-alert").first(),
+        "Expected CVEs attention badge to be visible in expanded sidebar",
+      );
+
+      await unrouteNavigationBadges(page);
     },
   },
   {
     name: "08-sidebar-desktop-collapsed",
     description: "Desktop: sidebar in icons-only collapsed state with edge toggle",
     action: async (page) => {
+      await routeNavigationBadges(page);
       await page.setViewportSize(VIEWPORTS.desktop);
       await page.evaluate(() => {
         localStorage.setItem("cf-sidebar-collapsed", "true");
@@ -2665,6 +2744,12 @@ const steps = [
       if (!box || box.width > 100) {
         throw new Error(`Desktop collapsed sidebar too wide: ${box ? box.width : "missing"}`);
       }
+      const alertBadges = sidebar.locator(".nav-count.nav-count-alert");
+      const badgeCount = await alertBadges.count();
+      if (badgeCount < 2) {
+        throw new Error(`Expected collapsed sidebar to still show alert badges, found ${badgeCount}`);
+      }
+      await unrouteNavigationBadges(page);
       // Screenshot taken here: collapsed icons-only state
     },
   },
@@ -4130,6 +4215,7 @@ const steps = [
     description: "Flakes registry list/table parity",
     action: async (page) => {
       await routeFlakeParityData(page);
+      await routeNavigationBadges(page);
       try {
         await gotoFlakesAsAdmin(page);
         await page.waitForTimeout(1800);
@@ -4143,9 +4229,23 @@ const steps = [
           await assertVisible(page.locator("table.sys-table th", { hasText: column }).first(), `Expected flakes table column '${column}'`);
         }
         await assertVisible(page.getByText("platform-core").first(), "Expected platform-core flake row");
+        await assertVisible(page.getByText("edge-fleet").first(), "Expected edge-fleet flake row");
+        await assertVisible(page.locator(".chip.chip-critical", { hasText: "error" }).first(), "Expected error sync chip on errored flake");
         await assertVisible(page.getByText("not persisted").first(), "Expected non-fabricated environment badge placeholder");
+
+        // Once /flakes is visited, the flakes attention badge should be acknowledged and hidden.
+        const flakesNavBadgeVisible = await page
+          .locator("[data-testid='sidebar-nav'] .nav-item", { hasText: "Flakes" })
+          .locator(".nav-count.nav-count-alert")
+          .first()
+          .isVisible()
+          .catch(() => false);
+        if (flakesNavBadgeVisible) {
+          throw new Error("Expected flakes sidebar attention badge to hide after visiting /flakes");
+        }
       } finally {
         await unrouteFlakeParityData(page);
+        await unrouteNavigationBadges(page);
       }
     },
   },
@@ -4176,11 +4276,16 @@ const steps = [
       try {
         await gotoFlakesAsAdmin(page);
         await page.waitForTimeout(1800);
-        await page.getByText("platform-core").first().click();
+        await page.getByText("edge-fleet").first().click();
 
         await assertVisible(page.locator(".fl-tray").first(), "Expected flake side tray to open", 10000);
+        await assertVisible(page.getByText(/Sync failed/i).first(), "Expected tray sync-failed banner");
+        await assertVisible(
+          page.getByText(/SSH key rejected by remote: Permission denied \(publickey\)/i).first(),
+          "Expected tray to show persisted flake sync error text",
+        );
         await assertVisible(page.locator(".fl-tray-commits-search").first(), "Expected tray commit search");
-        await assertVisible(page.getByText("feat: add rollout guard rails").first(), "Expected latest commit in tray");
+        await assertVisible(page.getByText("edge: update cache substituters").first(), "Expected latest commit in tray");
         await assertVisible(page.getByText(/Rollout/i).first(), "Expected rollout pill in commit detail");
         await assertVisible(page.locator(".fl-files-grid").first(), "Expected files changed grid");
 

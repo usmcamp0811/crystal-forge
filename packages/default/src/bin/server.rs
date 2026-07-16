@@ -22,8 +22,8 @@ use crystal_forge::{
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
             builders, caches, commits, compliance, config_health, cves, dashboard,
-            deployment_policies, deployments, environments, flakes, hardening, scanning,
-            setup_wizard, systems,
+            deployment_policies, deployments, environments, flakes, hardening, navigation,
+            scanning, setup_wizard, systems,
         },
         status,
         webhook::webhook_handler,
@@ -201,6 +201,14 @@ async fn main() -> anyhow::Result<()> {
             get(dashboard::cve_scan_freshness),
         )
         // Advanced CVE dashboard endpoints (TASK-322)
+        .route(
+            "/api/v1/navigation/badges",
+            get(navigation::get_navigation_badges),
+        )
+        .route(
+            "/api/v1/navigation/acknowledge",
+            post(navigation::acknowledge_navigation_category),
+        )
         .route("/api/v1/cves", get(cves::list_cves))
         .route("/api/v1/cves/grouped", get(cves::list_cves_grouped))
         .route("/api/v1/cves/stats", get(cves::get_fleet_stats))

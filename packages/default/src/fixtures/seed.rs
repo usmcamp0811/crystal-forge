@@ -78,6 +78,7 @@ struct FixtureFlakeRegistry {
     description: Option<String>,
     environment: Option<String>,
     system_count: Option<i32>,
+    #[serde(alias = "lastSyncAt")]
     last_sync_at: Option<String>,
     status: Option<String>,
     latest_commit: Option<String>,
@@ -85,6 +86,8 @@ struct FixtureFlakeRegistry {
     latest_author: Option<String>,
     latest_at: Option<String>,
     total_commits: Option<i32>,
+    #[serde(alias = "errorMsg")]
+    error_msg: Option<String>,
     commits: Option<Vec<FixtureCommit>>,
 }
 
@@ -579,21 +582,30 @@ async fn seed_flakes(pool: &PgPool, registry: &[FixtureFlakeRegistry]) -> Result
             .trim_start_matches("https://")
             .to_string();
         let branch = flake.branch.as_deref().unwrap_or("main");
+        let sync_status = flake.status.as_deref().unwrap_or("unknown");
+        let last_sync_at = flake.last_sync_at.as_deref().and_then(parse_relative_time);
+        let last_sync_error = flake.error_msg.as_deref();
 
         // We need the flake ID for the FK map, so INSERT ... RETURNING id
         let id: i32 = sqlx::query_scalar(
             r#"
-            INSERT INTO flakes (name, repo_url, branch, build_scope)
-            VALUES ($1, $2, $3, 'cf_systems_only')
+            INSERT INTO flakes (name, repo_url, branch, build_scope, sync_status, last_sync_at, last_sync_error)
+            VALUES ($1, $2, $3, 'cf_systems_only', $4, $5, $6)
             ON CONFLICT (repo_url) DO UPDATE SET
                 name = EXCLUDED.name,
-                branch = EXCLUDED.branch
+                branch = EXCLUDED.branch,
+                sync_status = EXCLUDED.sync_status,
+                last_sync_at = EXCLUDED.last_sync_at,
+                last_sync_error = EXCLUDED.last_sync_error
             RETURNING id
             "#,
         )
         .bind(&flake.name)
         .bind(&repo_url)
         .bind(branch)
+        .bind(sync_status)
+        .bind(last_sync_at)
+        .bind(last_sync_error)
         .fetch_one(pool)
         .await
         .with_context(|| format!("Failed to seed flake '{}'", flake.name))?;

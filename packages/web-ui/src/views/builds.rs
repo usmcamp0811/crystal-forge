@@ -3,6 +3,8 @@
 use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
+use crate::alerts::{NAV_BADGES, acknowledge_with_cursor_and_ids_async};
+
 use crate::api::{
     self,
     client::{
@@ -281,6 +283,8 @@ pub fn BuildsView() -> Element {
     });
 
     let mut build_history = use_signal(Vec::<BuildItem>::new);
+    let mut build_history_ack_cursor = use_signal(|| None::<String>);
+    let mut builds_ack_sent = use_signal(|| false);
 
     use_effect(move || {
         if let Some(Ok(builder_list)) = &*builders.read() {
@@ -327,6 +331,7 @@ pub fn BuildsView() -> Element {
 
     use_effect(move || {
         if let Some(Ok(items)) = &*recent_builds.read() {
+            build_history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
             let mapped = items
                 .iter()
                 .enumerate()
@@ -403,7 +408,6 @@ pub fn BuildsView() -> Element {
     // Search/filter state (JSX: query)
     let mut search_query = use_signal(String::new);
     // Attention flash for failed rows on first Completed tab open (JSX: flashHistRows)
-    let mut acked_hist = use_signal(|| false);
     let mut flash_hist_rows = use_signal(|| false);
 
     let follow_logs = use_signal(|| true);
@@ -418,14 +422,6 @@ pub fn BuildsView() -> Element {
     let queue_data = builds.read().clone();
     let worker_data = workers.read().clone();
 
-    // JSX: const hasFailed = HISTORY_BUILDS.some(b => b.status === "failed");
-    //      const flashTab = hasFailed && !ackedHist;
-    let has_failed = build_history
-        .read()
-        .iter()
-        .any(|b| b.status == BuildStatus::Failed);
-    let flash_tab = has_failed && !acked_hist();
-
     let mut completed_rows = build_history.read().clone();
     completed_rows.retain(|item| {
         matches!(
@@ -438,6 +434,45 @@ pub fn BuildsView() -> Element {
             CompletedStatusFilter::Cancelled => item.status == BuildStatus::Cancelled,
         }
     });
+    let completed_failed_count = build_history
+        .read()
+        .iter()
+        .filter(|item| item.status == BuildStatus::Failed)
+        .count();
+    use_effect(move || {
+        if active_view() == BuildsTab::Completed
+            && !builds_ack_sent()
+            && recent_builds.read().as_ref().is_some_and(|r| r.is_ok())
+        {
+            let Some(cursor) = build_history_ack_cursor.read().clone() else {
+                return;
+            };
+            let alert_ids = build_history
+                .read()
+                .iter()
+                .filter(|item| item.status == BuildStatus::Failed)
+                .filter_map(|item| item.job_id.map(|id| id.to_string()))
+                .collect::<Vec<_>>();
+            spawn(async move {
+                if acknowledge_with_cursor_and_ids_async(
+                    "builds",
+                    completed_failed_count as i64,
+                    cursor,
+                    None,
+                    Some(alert_ids),
+                )
+                .await
+                {
+                    builds_ack_sent.set(true);
+                }
+            });
+        }
+    });
+    // Server-computed "new failed builds since last acknowledgment" (persists
+    // across page refresh/re-login — see alerts::NAV_BADGES). Drives both the
+    // Completed tab's badge count and its attention-flash-tab pulse, replacing
+    // a raw total that would otherwise reappear identically on every reload.
+    let builds_failed_new = NAV_BADGES().builds_failed_new;
     completed_rows.sort_by(|left, right| {
         let left_key = left.completed_at.unwrap_or_else(Utc::now);
         let right_key = right.completed_at.unwrap_or_else(Utc::now);
@@ -571,11 +606,12 @@ pub fn BuildsView() -> Element {
                     }
                     button {
                         // JSX: `sd-tab focus-ring${tab===t.k?" active":""}${flashTab && t.k==="history"?" attention-flash-tab":""}`
-                        class: match (active_view() == BuildsTab::Completed, flash_tab) {
-                            (true, true) => "sd-tab focus-ring active attention-flash-tab",
-                            (true, false) => "sd-tab focus-ring active",
-                            (false, true) => "sd-tab focus-ring attention-flash-tab",
-                            (false, false) => "sd-tab focus-ring",
+                        class: if active_view() == BuildsTab::Completed {
+                            "sd-tab focus-ring active"
+                        } else if builds_failed_new > 0 {
+                            "sd-tab focus-ring attention-flash-tab"
+                        } else {
+                            "sd-tab focus-ring"
                         },
                         onclick: move |_| {
                             let prev = active_view();
@@ -583,9 +619,10 @@ pub fn BuildsView() -> Element {
                             selected_build.set(None);
                             log_open.set(false);
                             search_query.set(String::new());
-                            // JSX: flash failed rows on first history open
-                            if prev != BuildsTab::Completed && !acked_hist() {
-                                acked_hist.set(true);
+                            // JSX: flash failed rows on first history open.
+                            // Only flash if there's something genuinely new
+                            // since the user's last acknowledgment of Builds.
+                            if prev != BuildsTab::Completed && builds_failed_new > 0 {
                                 flash_hist_rows.set(true);
                                 let mut fh = flash_hist_rows;
                                 spawn(async move {
@@ -593,9 +630,14 @@ pub fn BuildsView() -> Element {
                                     fh.set(false);
                                 });
                             }
+                            // Acknowledge the "builds" sidebar/tab badge when this tab is opened
+                            // (persists server-side — TASK-385 follow-up).
+                            builds_ack_sent.set(false);
                         },
-                        "Completed "
-                        span { class: "sd-tab-badge", "{build_history.read().len()}" }
+                        "Completed ({build_history.read().len()})"
+                        if builds_failed_new > 0 {
+                            span { class: "sd-tab-badge", "{builds_failed_new}" }
+                        }
                     }
                     // JSX: {selectableIds.length > 0 && <MultiSelectHint />}
                     // selectableIds = cancellable builds on Active, filteredList on Completed.
