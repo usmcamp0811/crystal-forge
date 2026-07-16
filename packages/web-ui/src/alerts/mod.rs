@@ -31,6 +31,7 @@ use crate::api::models::NavigationBadges;
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::collections::{HashMap, HashSet};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// LocalStorage key prefix for per-item dismissals.  The current user's ID
@@ -238,10 +239,18 @@ fn acknowledgement_payload_key(
 /// Returns the current unix-second timestamp, or 0 if unavailable (WASM
 /// `SystemTime` may not be available in all runtimes).
 fn now_unix_secs() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        (js_sys::Date::now() / 1000.0).floor() as u64
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_secs()
+    }
 }
 
 /// Optimistically zero the `NAV_BADGES` field for `view_key` so the badge
