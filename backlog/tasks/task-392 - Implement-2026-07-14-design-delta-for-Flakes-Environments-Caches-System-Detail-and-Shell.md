@@ -3,7 +3,7 @@ id: TASK-392
 title: >-
   Implement the 2026-07-14 design delta for Flakes, Environments, Caches,
   System Detail, and Shell
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-14 00:00'
 updated_date: '2026-07-14 00:00'
@@ -167,6 +167,20 @@ If implementation reveals additional drift outside the files touched by
 `65a43af1`, file a separate Backlog task (or route it to TASK-386 if that task
 is later selected) instead of expanding this task.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-agent on host in /home/mcamp/code/crystal-forge/TASK-392-design-delta-2026-07-14
+
+Branch: TASK-392-design-delta-2026-07-14
+Base: dev (33896898)
+
+### DB Coordination with TASK-385
+TASK-385 (in Review, MR !298) introduces migrations 0158 (flake_sync_status) and 0159 (user_alert_acknowledgments).
+TASK-392 is pure UI work — no new DB migrations required.
+Branch from dev; if TASK-385 merges first, rebase onto the updated dev before opening MR.
+<!-- SECTION:NOTES:END -->
 
 ## Acceptance Criteria
 
