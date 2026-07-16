@@ -1312,7 +1312,6 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
     let mut scope_envs: Signal<Vec<String>> = use_signal(Vec::new);
     let mut save_status = use_signal(|| Option::<String>::None);
     let mut justifications_refresh = use_signal(|| 0_u64);
-    let mut esc_listener_attached = use_signal(|| false);
     let mut show_accept = use_signal(|| false);
     let advisory_cve_id = cve_id.clone();
 
@@ -1341,18 +1340,19 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
     let env_colors =
         use_resource(move || async move { load_environment_colors_with_fallback().await.colors });
 
-    use_effect(move || {
+    // Attach the Escape-key listener exactly once per drawer mount. use_hook (not
+    // use_effect) is used deliberately: it runs its closure a single time and does
+    // not participate in Dioxus's reactive dependency tracking, so it cannot be
+    // re-triggered by unrelated signal writes elsewhere in the app (e.g. the
+    // sidebar's NAV_BADGES poll or alerts::acknowledge calls), unlike a
+    // read-then-write-same-signal guard inside use_effect would be.
+    use_hook(move || {
         use wasm_bindgen::JsCast;
         use wasm_bindgen::closure::Closure;
 
         let Some(window) = web_sys::window() else {
             return;
         };
-
-        if esc_listener_attached() {
-            return;
-        }
-        esc_listener_attached.set(true);
 
         let on_close_for_esc = on_close.clone();
         let handler = Closure::wrap(Box::new(move |event: web_sys::KeyboardEvent| {
