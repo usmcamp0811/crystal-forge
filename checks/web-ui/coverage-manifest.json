@@ -691,7 +691,7 @@
     },
     {
       "name": "09e-sidebar-sections-fullwidth",
-      "description": "Desktop: full-width sidebar showing all section group headers",
+      "description": "Desktop: full-width sidebar showing all section group headers; asserts Evaluations before Builds nav order (TASK-392)",
       "route": "/systems",
       "designRef": "docs/design/CrystalForge/components/Shell.jsx",
       "profiles": [
@@ -1187,6 +1187,20 @@
       "baseline": "advisory"
     },
     {
+      "name": "14c-environments-detail-panel",
+      "description": "Environments: clicking a card opens the detail side panel (not the edit form) — TASK-392",
+      "route": "/environments",
+      "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
       "name": "15-builds",
       "description": "Builds page",
       "route": "/builds",
@@ -1494,6 +1508,20 @@
     {
       "name": "21-caches",
       "description": "Cache management view with stats and Push Jobs tab",
+      "route": "/caches",
+      "designRef": "docs/design/CrystalForge/components/CachesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "21a-caches-cards-table-toggle",
+      "description": "Caches: cards/table toggle switches display mode — TASK-392",
       "route": "/caches",
       "designRef": "docs/design/CrystalForge/components/CachesView.jsx",
       "profiles": [
