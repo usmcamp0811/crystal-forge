@@ -87,7 +87,10 @@ impl BackgroundJobHandle {
     /// Trigger an immediate run cycle.
     pub fn trigger_run_now(&self) {
         let _ = self.run_now_tx.send(true);
-        info!("🔔 Background job '{}' triggered for immediate run", self.id);
+        info!(
+            "🔔 Background job '{}' triggered for immediate run",
+            self.id
+        );
     }
 
     /// Enable or disable the job.
@@ -166,11 +169,6 @@ impl BackgroundJobRegistry {
 
     /// Find a job by id and return a clone of its handle.
     pub async fn find(&self, id: &str) -> Option<BackgroundJobHandle> {
-        self.jobs
-            .read()
-            .await
-            .iter()
-            .find(|j| j.id == id)
-            .cloned()
+        self.jobs.read().await.iter().find(|j| j.id == id).cloned()
     }
 }

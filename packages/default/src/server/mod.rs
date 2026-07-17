@@ -4,7 +4,6 @@ use crate::builder::run_cve_scan_loop;
 use crate::config::{CrystalForgeConfig, FlakeConfig};
 use crate::deployment::spawn_deployment_policy_manager;
 use crate::flake::commits::sync_all_watched_flakes_commits_with_ids;
-use crate::server::jobs::{BackgroundJobHandle, BackgroundJobRegistry};
 use crate::log::log_builder_worker_status;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::DeploymentPolicy;
@@ -13,6 +12,7 @@ use crate::models::evaluate_with_policies::{
 };
 use crate::models::flakes::Flake;
 use crate::queue::QueueNotifier;
+use crate::server::jobs::{BackgroundJobHandle, BackgroundJobRegistry};
 // NOTE: removed increment_commit_list_attempt_count – we now rely on the new evaluation_* fields
 use crate::queries::flakes::get_all_flakes_from_db_with_ids;
 use anyhow::Result;
@@ -439,7 +439,10 @@ pub fn spawn_background_tasks(
         cfg.server.commit_cache_retention_days,
     ));
 
-    tokio::spawn(spawn_deployment_policy_manager(cfg.clone(), deployment_pool));
+    tokio::spawn(spawn_deployment_policy_manager(
+        cfg.clone(),
+        deployment_pool,
+    ));
 
     // --- CVE scan background job ---
     // The job handle is registered in the registry so the Admin Background Jobs

@@ -828,7 +828,7 @@ pub async fn get_targets_needing_cve_rescan(
                 scheduled_at: row.try_get("scheduled_at").ok(),
                 completed_at: row.try_get("completed_at").ok(),
                 started_at: row.try_get("started_at").ok(),
-                attempt_count: row.try_get("attempt_count").ok(),
+                attempt_count: row.try_get("attempt_count").unwrap_or(0),
                 evaluation_duration_ms: row.try_get("evaluation_duration_ms").ok(),
                 error_message: row.try_get("error_message").ok(),
                 pname: row.try_get("pname").ok(),

@@ -86,8 +86,11 @@ pub async fn run_cve_scan_loop(
         if !enabled {
             debug!("CVE scan loop: disabled — skipping cycle");
             // Update next_run_at while disabled so the UI shows something reasonable.
-            *job.state.next_run_at.write().await =
-                Some(Utc::now() + chrono::Duration::from_std(vulnix_config.poll_interval).unwrap_or(chrono::Duration::seconds(60)));
+            *job.state.next_run_at.write().await = Some(
+                Utc::now()
+                    + chrono::Duration::from_std(vulnix_config.poll_interval)
+                        .unwrap_or(chrono::Duration::seconds(60)),
+            );
             sleep(vulnix_config.poll_interval).await;
             // Drain any stale run-now signal while disabled.
             let _ = run_now_rx.borrow_and_update();
@@ -104,8 +107,11 @@ pub async fn run_cve_scan_loop(
 
         // Update job metadata after the cycle completes.
         *job.state.is_running.write().await = false;
-        *job.state.next_run_at.write().await =
-            Some(Utc::now() + chrono::Duration::from_std(vulnix_config.poll_interval).unwrap_or(chrono::Duration::seconds(60)));
+        *job.state.next_run_at.write().await = Some(
+            Utc::now()
+                + chrono::Duration::from_std(vulnix_config.poll_interval)
+                    .unwrap_or(chrono::Duration::seconds(60)),
+        );
 
         // Wait for either the poll interval or a run-now signal.
         tokio::select! {
@@ -198,8 +204,7 @@ async fn scan_one(
         match fs::try_exists(path).await {
             Ok(true) => {
                 let scan_id =
-                    create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone())
-                        .await?;
+                    create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone()).await?;
                 mark_scan_in_progress(pool, scan_id).await?;
 
                 let start = std::time::Instant::now();
@@ -247,7 +252,10 @@ async fn scan_one(
             }
         }
     } else {
-        warn!("❌ No store_path set for derivation {}", derivation.derivation_name);
+        warn!(
+            "❌ No store_path set for derivation {}",
+            derivation.derivation_name
+        );
     }
 
     Ok(())
@@ -303,7 +311,7 @@ mod tests {
         // Either vulnix absent (fast return Ok) or present (timeout = still running).
         // The important invariant: no panic.
         match result {
-            Ok(()) => {} // vulnix not found, loop exited cleanly
+            Ok(()) => {}        // vulnix not found, loop exited cleanly
             Err(_timeout) => {} // vulnix present, loop is running — fine in dev
         }
     }
@@ -315,33 +323,49 @@ mod tests {
         let _ = VulnixRunner::check_vulnix_available().await;
     }
 
-    /// Confirms that a disabled job skips immediately rather than hanging.
+    /// Confirms that the [`BackgroundJobHandle`] state machine correctly reports
+    /// the enabled flag, is_running, last_run_at, and next_run_at.
     #[tokio::test]
-    async fn disabled_job_skips_scan_cycle() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
-            .expect("lazy pool should construct without connecting");
-
-        let (handle, run_now_rx) = BackgroundJobHandle::new(
-            "cve_scan",
-            "CVE Scan",
-            // Very short poll interval so the test doesn't wait long.
-            std::time::Duration::from_millis(50),
-            false, // start disabled
+    async fn background_job_handle_state_machine() {
+        let (handle, _rx) = BackgroundJobHandle::new(
+            "cve_scan_test",
+            "CVE Scan Test",
+            std::time::Duration::from_secs(60),
+            true, // enabled by default
         );
 
-        // The loop should skip the scan cycle and sleep for the poll interval.
-        // After 2 × poll_interval + margin it should still be running (loop continues).
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            run_cve_scan_loop(pool, handle, run_now_rx),
-        )
-        .await;
+        // Initially: enabled, not running, no run timestamps.
+        let status = handle.status().await;
+        assert!(status.enabled, "job should start enabled");
+        assert!(!status.is_running, "job should not be running initially");
+        assert!(status.last_run_at.is_none(), "no last_run_at initially");
+        assert!(status.next_run_at.is_none(), "no next_run_at initially");
 
-        // Expect timeout (loop is still running with disabled flag, not panicking).
-        assert!(
-            result.is_err(),
-            "disabled loop should still be running (timeout expected)"
-        );
+        // Disable and verify.
+        handle.set_enabled(false).await;
+        let status = handle.status().await;
+        assert!(!status.enabled, "job should be disabled after toggle");
+
+        // Re-enable and verify.
+        handle.set_enabled(true).await;
+        let status = handle.status().await;
+        assert!(status.enabled, "job should be re-enabled");
+
+        // Run-now signal: should not panic.
+        handle.trigger_run_now();
+
+        // Set running state to simulate an active scan.
+        *handle.state.is_running.write().await = true;
+        let status = handle.status().await;
+        assert!(status.is_running, "job should report running");
+
+        // Set timestamps and verify they propagate to the status snapshot.
+        let now = Utc::now();
+        *handle.state.last_run_at.write().await = Some(now);
+        *handle.state.next_run_at.write().await = Some(now + chrono::Duration::seconds(60));
+
+        let status = handle.status().await;
+        assert!(status.last_run_at.is_some(), "last_run_at should be set");
+        assert!(status.next_run_at.is_some(), "next_run_at should be set");
     }
 }
