@@ -282,7 +282,10 @@ pub fn EnvironmentsListView() -> Element {
                             policy_library: policy_library_state.read().clone(),
                             flash: flash_global && env_needs_attention(env),
                             attention_class: attention_class.clone(),
-                            on_view: move |env| {
+                            on_view: move |env: EnvironmentItem| {
+                                // Opening the detail panel counts as "visiting" the environment —
+                                // dismiss its persistent attention row (same as edit did in TASK-385).
+                                dismiss_attention_item("environments", &environment_alert_occurrence_id(&env));
                                 view_env.set(Some(env));
                             },
                             on_edit: move |env: EnvironmentItem| {
@@ -299,7 +302,9 @@ pub fn EnvironmentsListView() -> Element {
                     policy_library: policy_library_state.read().clone(),
                     flashes: flashes.clone(),
                     attention_classes: attention_classes.clone(),
-                    on_view: move |env| {
+                    on_view: move |env: EnvironmentItem| {
+                        // Opening the detail panel counts as "visiting" the environment.
+                        dismiss_attention_item("environments", &environment_alert_occurrence_id(&env));
                         view_env.set(Some(env));
                     },
                     on_edit: move |env: EnvironmentItem| {
@@ -315,6 +320,9 @@ pub fn EnvironmentsListView() -> Element {
                     env: env.clone(),
                     on_close: move |_| view_env.set(None),
                     on_edit: move |env: EnvironmentItem| {
+                        // dismiss from within panel too (in case user re-opens edit from panel
+                        // without having clicked the card first).
+                        dismiss_attention_item("environments", &environment_alert_occurrence_id(&env));
                         view_env.set(None);
                         form_error.set(None);
                         form_draft.set(Some(form_draft_from_environment(&env)));
