@@ -4,9 +4,9 @@ use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::api::client;
+use crate::api::client::{self, ApiClientError};
 use crate::api::models::{
-    CacheDestination, CachePushJob, CreateCacheDestination, SortOrder, SystemSummary,
+    CacheDestination, CachePushJob, CreateCacheDestination, EnvironmentSummary, SortOrder, SystemSummary,
     SystemsListParams, UpdateCacheDestination,
 };
 use crate::components::icon::{Icon, IconName};
@@ -529,18 +529,8 @@ fn CacheDestinationsList(
     });
     let mut dismiss_add_target_callout = use_signal(|| false);
 
-    // Fetch available environments for assignment (shared once, not per card/row)
+    // Fetch available environments for assignment and cache-assignment display.
     let environments = use_resource(|| async move { client::fetch_environments().await });
-    let mut env_map: Signal<HashMap<Uuid, (String, String)>> = use_signal(HashMap::new);
-    use_effect(move || {
-        if let Some(Ok(envs)) = environments.read().as_ref() {
-            let map: HashMap<Uuid, (String, String)> = envs
-                .iter()
-                .map(|e| (e.id, (e.name.clone(), e.color_hex.clone())))
-                .collect();
-            env_map.set(map);
-        }
-    });
     let show_add_target_callout = show_onboarding_hint
         && !dismiss_add_target_callout()
         && !show_add_modal()
@@ -681,7 +671,7 @@ fn CacheDestinationsList(
                                     for dest in filtered {
                                         CacheDestinationCardNew {
                                             destination: dest.clone(),
-                                            env_map: env_map,
+                                            environments: environments,
                                             on_view: move |d: CacheDestination| view_destination.set(Some(d)),
                                             on_edit: move |d: CacheDestination| edit_destination.set(Some(d)),
                                         }
@@ -709,7 +699,7 @@ fn CacheDestinationsList(
                                             for dest in filtered {
                                                 CacheDestinationRow {
                                                     destination: dest.clone(),
-                                                    env_map: env_map,
+                                                    environments: environments,
                                                     on_view: move |d: CacheDestination| view_destination.set(Some(d)),
                                                     on_edit: move |d: CacheDestination| edit_destination.set(Some(d)),
                                                 }
@@ -1555,16 +1545,12 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
 #[component]
 fn CacheDestinationCardNew(
     destination: CacheDestination,
-    env_map: Signal<HashMap<Uuid, (String, String)>>,
+    environments: Resource<Result<Vec<EnvironmentSummary>, ApiClientError>>,
     on_view: EventHandler<CacheDestination>,
     on_edit: EventHandler<CacheDestination>,
 ) -> Element {
     let cache_id = destination.id;
-    let env_ids = use_resource(move || async move {
-        client::get_cache_environments(cache_id)
-            .await
-            .unwrap_or_default()
-    });
+    let env_ids = use_resource(move || async move { client::get_cache_environments(cache_id).await });
     let dest_for_view = destination.clone();
     let dest_for_edit = destination.clone();
     let (status_cls, status_color, status_label) = if destination.enabled {
@@ -1621,31 +1607,7 @@ fn CacheDestinationCardNew(
             div { class: "env-card-foot",
                 span { style: "font-size:11px; color:var(--cf-text-muted);", "Updated {destination.updated_at.format(\"%Y-%m-%d\")}" }
                 div { style: "display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end;",
-                    {
-                        let env_map_read = env_map.read();
-                        let ids_opt = env_ids.read();
-                        if let Some(ref ids) = *ids_opt {
-                            let matching: Vec<(String, String)> = ids
-                                .iter()
-                                .filter_map(|id| env_map_read.get(id).cloned())
-                                .collect();
-                            let count = matching.len();
-                            if count > 0 {
-                                rsx! {
-                                    for (name, color_hex) in matching.into_iter().take(3) {
-                                        EnvBadge { env_name: name, color_hex: color_hex }
-                                    }
-                                    if count > 3 {
-                                        span { class: "chip chip-unknown", style: "font-size:10px;", "+{count - 3}" }
-                                    }
-                                }
-                            } else {
-                                rsx! { span { style: "font-size:11px; color:var(--cf-text-muted);", "no environments" } }
-                            }
-                        } else {
-                            rsx! { span { style: "font-size:11px; color:var(--cf-text-muted);", "no environments" } }
-                        }
-                    }
+                    {render_cache_assignment_state(env_ids, environments, "no environments")}
                 }
             }
         }
@@ -1656,7 +1618,7 @@ fn CacheDestinationCardNew(
 #[component]
 fn CacheDestinationRow(
     destination: CacheDestination,
-    env_map: Signal<HashMap<Uuid, (String, String)>>,
+    environments: Resource<Result<Vec<EnvironmentSummary>, ApiClientError>>,
     on_view: EventHandler<CacheDestination>,
     on_edit: EventHandler<CacheDestination>,
 ) -> Element {
@@ -1674,11 +1636,7 @@ fn CacheDestinationRow(
 
     // Fetch environment assignments
     let cache_id = destination.id;
-    let env_ids = use_resource(move || async move {
-        client::get_cache_environments(cache_id)
-            .await
-            .unwrap_or_default()
-    });
+    let env_ids = use_resource(move || async move { client::get_cache_environments(cache_id).await });
 
     let dest_for_click = destination.clone();
     let dest_for_edit_btn = destination.clone();
@@ -1785,35 +1743,7 @@ fn CacheDestinationRow(
             td {
                 div {
                     style: "display:flex; gap:4px; flex-wrap:wrap;",
-                    {
-                        let env_map_read = env_map.read();
-                        let ids_opt = env_ids.read();
-                        if let Some(ref ids) = *ids_opt {
-                            let matching: Vec<(String, String)> = ids
-                                .iter()
-                                .filter_map(|id| env_map_read.get(id).cloned())
-                                .collect();
-                            let count = matching.len();
-                            if count > 0 {
-                                rsx! {
-                                    for (name, color_hex) in matching.into_iter().take(3) {
-                                        EnvBadge { env_name: name, color_hex: color_hex }
-                                    }
-                                    if count > 3 {
-                                        span {
-                                            class: "chip chip-unknown",
-                                            style: "font-size:10px;",
-                                            "+{count - 3}"
-                                        }
-                                    }
-                                }
-                            } else {
-                                rsx! { span { style: "font-size:11px; color:var(--cf-text-muted);", "none" } }
-                            }
-                        } else {
-                            rsx! { span { style: "font-size:11px; color:var(--cf-text-muted);", "none" } }
-                        }
-                    }
+                    {render_cache_assignment_state(env_ids, environments, "none")}
                 }
             }
 
@@ -1847,6 +1777,65 @@ fn CacheDestinationRow(
         }
 
 
+    }
+}
+
+fn render_cache_assignment_state(
+    env_ids: Resource<Result<Vec<Uuid>, ApiClientError>>,
+    environments: Resource<Result<Vec<EnvironmentSummary>, ApiClientError>>,
+    empty_label: &'static str,
+) -> Element {
+    let env_ids_state = env_ids.read();
+    let environments_state = environments.read();
+
+    match (&*env_ids_state, &*environments_state) {
+        (None, _) | (_, None) => rsx! {
+            span { style: "font-size:11px; color:var(--cf-text-muted);", "loading…" }
+        },
+        (Some(Err(err)), _) => rsx! {
+            span {
+                style: "font-size:11px; color:var(--cf-text-muted);",
+                title: "{err}",
+                "failed to load"
+            }
+        },
+        (_, Some(Err(err))) => rsx! {
+            span {
+                style: "font-size:11px; color:var(--cf-text-muted);",
+                title: "{err}",
+                "environment list unavailable"
+            }
+        },
+        (Some(Ok(ids)), Some(Ok(all_envs))) => {
+            if ids.is_empty() {
+                rsx! { span { style: "font-size:11px; color:var(--cf-text-muted);", "{empty_label}" } }
+            } else {
+                let matching: Vec<(String, String)> = all_envs
+                    .iter()
+                    .filter(|env| ids.contains(&env.id))
+                    .map(|env| (env.name.clone(), env.color_hex.clone()))
+                    .collect();
+                let count = ids.len();
+                if matching.is_empty() {
+                    rsx! {
+                        span {
+                            style: "font-size:11px; color:var(--cf-text-muted);",
+                            title: "Assigned environments were returned, but their names are unavailable in the shared environment list.",
+                            "{count} assigned"
+                        }
+                    }
+                } else {
+                    rsx! {
+                        for (name, color_hex) in matching.into_iter().take(3) {
+                            EnvBadge { env_name: name, color_hex: color_hex }
+                        }
+                        if count > 3 {
+                            span { class: "chip chip-unknown", style: "font-size:10px;", "+{count - 3}" }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

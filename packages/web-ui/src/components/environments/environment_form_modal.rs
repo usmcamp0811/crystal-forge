@@ -64,7 +64,13 @@ pub fn EnvironmentFormModal(props: EnvironmentFormModalProps) -> Element {
                         " "
                         if is_edit { "Edit {current.name}" } else { "Add environment" }
                     }
-                    p { if is_edit { "Update environment settings, cache assignment, and deployment policy." } else { "Create a new environment tier." } }
+                    p {
+                        if is_edit {
+                            "Update environment settings and persisted deployment metadata. Some controls are stored now for future automation and approval behavior."
+                        } else {
+                            "Create a new environment tier with persisted deployment metadata for future automation and approval behavior."
+                        }
+                    }
                 }
 
                 div { class: "modal-body", style: "overflow-y:auto; display:flex; flex-direction:column; gap:14px;",
@@ -115,6 +121,9 @@ pub fn EnvironmentFormModal(props: EnvironmentFormModalProps) -> Element {
                             }
                             span { "Require approval before deploy" }
                         }
+                    }
+                    div { class: "help",
+                        "These settings are stored with the environment today. Approval enforcement and flake auto-sync behavior are future server-side automation work."
                     }
 
                     if is_edit {
@@ -259,6 +268,7 @@ fn DeploymentPolicySection(props: DeploymentPolicySectionProps) -> Element {
                     }
                 }
             }
+            div { class: "help", "Stored as environment metadata today; future deployment automation will consume this default mode." }
         }
     }
 }
@@ -353,7 +363,7 @@ fn ProductionToggle(props: ProductionToggleProps) -> Element {
                     "Production environment"
                 }
                 span { style: "display:block; font-size:11.5px; color:var(--cf-text-muted); margin-top:3px; line-height:1.45;",
-                    "Marks this environment as production. Affects how the UI highlights the environment and future policy enforcement."
+                    "Marks this environment as production. It affects UI highlighting now and is stored for future policy and automation behavior."
                 }
             }
         }
