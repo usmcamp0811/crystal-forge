@@ -2165,14 +2165,7 @@ html[data-theme="light"] .sd-nix {
 }
 
 .sidebar.rail .nav-item .nav-count {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  margin-left: 0;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  font-size: 10px;
+  display: none;
 }
 
 .sidebar.rail .nav-section-label {
@@ -5209,18 +5202,6 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
 .nav-item.active .nav-count.nav-count-alert {
   color: #fff;
 }
-/* Rail mode: show attention badges even when collapsed (override hide rule) */
-.sidebar.rail .nav-item .nav-count.nav-count-alert {
-  display: inline-flex;
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  min-width: 14px;
-  height: 14px;
-  font-size: 9px;
-  padding: 0 3px;
-}
-
 /* ─── Attention flash — first-visit pulse on alerting items (TASK-385) ─── */
 @keyframes attention-flash-pulse {
   0%, 100% { box-shadow: 0 0 0 0 transparent; background-color: transparent; }
