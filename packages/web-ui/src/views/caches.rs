@@ -358,13 +358,15 @@ pub fn CachesView() -> Element {
                     h1 { class: "page-title", "Caches" }
                     p {
                         class: "page-subtitle",
-                        // Show totals: X destinations · Y enabled
+                        // Show totals: X destinations · Y enabled. "Paths cached" is not
+                        // shown here because no backend metric exists yet for it —
+                        // see the stat strip below, which renders "—" for that card
+                        // rather than a fabricated number.
                         match destinations.read().as_ref() {
                             Some(Ok(dests)) => {
                                 let total = dests.len();
-                                let healthy = dests.iter().filter(|d| d.enabled).count();
-                                let paths: i64 = dests.iter().map(|d| cache_mock_paths(d.id) as i64).sum();
-                                rsx! { "{total} destinations · {healthy} healthy · {paths} paths cached" }
+                                let enabled = dests.iter().filter(|d| d.enabled).count();
+                                rsx! { "{total} destinations · {enabled} enabled" }
                             },
                             _ => rsx! { "Loading…" }
                         }
@@ -397,9 +399,7 @@ pub fn CachesView() -> Element {
                 match destinations.read().as_ref() {
                     Some(Ok(dests)) => {
                         let total = dests.len();
-                        let healthy_count = dests.iter().filter(|d| d.enabled).count();
-                        let issues_count = total - healthy_count;
-                        let paths_total: i64 = dests.iter().map(|d| cache_mock_paths(d.id) as i64).sum();
+                        let enabled_count = dests.iter().filter(|d| d.enabled).count();
                         rsx! {
                             div {
                                 class: "stat",
@@ -410,20 +410,20 @@ pub fn CachesView() -> Element {
                             div {
                                 class: "stat",
                                 span { class: "stat-accent", style: "--stat-color: #34d399;" }
-                                div { class: "stat-label", "Healthy" }
-                                div { class: "stat-value", "{healthy_count}" }
+                                div { class: "stat-label", "Enabled" }
+                                div { class: "stat-value", "{enabled_count}" }
                             }
                             div {
                                 class: "stat",
                                 span { class: "stat-accent", style: "--stat-color: #fbbf24;" }
-                                div { class: "stat-label", "Issues" }
-                                div { class: "stat-value", "{issues_count}" }
+                                div { class: "stat-label", "Disabled" }
+                                div { class: "stat-value", "{total - enabled_count}" }
                             }
                             div {
                                 class: "stat",
                                 span { class: "stat-accent", style: "--stat-color: #60a5fa;" }
                                 div { class: "stat-label", "Paths cached" }
-                                div { class: "stat-value", "{paths_total}" }
+                                div { class: "stat-value", "—" }
                             }
                         }
                     },
@@ -445,10 +445,6 @@ pub fn CachesView() -> Element {
             }
         }
     }
-}
-
-fn cache_mock_paths(id: i32) -> i32 {
-    ((id * 137) % 9000) + 1200
 }
 
 /// List of cache destinations with CRUD operations
@@ -533,8 +529,18 @@ fn CacheDestinationsList(
     });
     let mut dismiss_add_target_callout = use_signal(|| false);
 
-    // Fetch available environments for assignment
+    // Fetch available environments for assignment (shared once, not per card/row)
     let environments = use_resource(|| async move { client::fetch_environments().await });
+    let mut env_map: Signal<HashMap<Uuid, (String, String)>> = use_signal(HashMap::new);
+    use_effect(move || {
+        if let Some(Ok(envs)) = environments.read().as_ref() {
+            let map: HashMap<Uuid, (String, String)> = envs
+                .iter()
+                .map(|e| (e.id, (e.name.clone(), e.color_hex.clone())))
+                .collect();
+            env_map.set(map);
+        }
+    });
     let show_add_target_callout = show_onboarding_hint
         && !dismiss_add_target_callout()
         && !show_add_modal()
@@ -675,6 +681,7 @@ fn CacheDestinationsList(
                                     for dest in filtered {
                                         CacheDestinationCardNew {
                                             destination: dest.clone(),
+                                            env_map: env_map,
                                             on_view: move |d: CacheDestination| view_destination.set(Some(d)),
                                             on_edit: move |d: CacheDestination| edit_destination.set(Some(d)),
                                         }
@@ -702,6 +709,7 @@ fn CacheDestinationsList(
                                             for dest in filtered {
                                                 CacheDestinationRow {
                                                     destination: dest.clone(),
+                                                    env_map: env_map,
                                                     on_view: move |d: CacheDestination| view_destination.set(Some(d)),
                                                     on_edit: move |d: CacheDestination| edit_destination.set(Some(d)),
                                                 }
@@ -1547,6 +1555,7 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
 #[component]
 fn CacheDestinationCardNew(
     destination: CacheDestination,
+    env_map: Signal<HashMap<Uuid, (String, String)>>,
     on_view: EventHandler<CacheDestination>,
     on_edit: EventHandler<CacheDestination>,
 ) -> Element {
@@ -1556,7 +1565,6 @@ fn CacheDestinationCardNew(
             .await
             .unwrap_or_default()
     });
-    let environments = use_resource(|| async move { client::fetch_environments().await });
     let dest_for_view = destination.clone();
     let dest_for_edit = destination.clone();
     let (status_cls, status_color, status_label) = if destination.enabled {
@@ -1613,17 +1621,29 @@ fn CacheDestinationCardNew(
             div { class: "env-card-foot",
                 span { style: "font-size:11px; color:var(--cf-text-muted);", "Updated {destination.updated_at.format(\"%Y-%m-%d\")}" }
                 div { style: "display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end;",
-                    match (env_ids.read().as_ref(), environments.read().as_ref()) {
-                        (Some(ids), Some(Ok(all_envs))) if !ids.is_empty() => rsx! {
-                            for env in all_envs.iter().filter(|env| ids.contains(&env.id)).take(3) {
-                                EnvBadge { env_name: env.name.clone(), color_hex: env.color_hex.clone() }
+                    {
+                        let env_map_read = env_map.read();
+                        let ids_opt = env_ids.read();
+                        if let Some(ref ids) = *ids_opt {
+                            let matching: Vec<(String, String)> = ids
+                                .iter()
+                                .filter_map(|id| env_map_read.get(id).cloned())
+                                .collect();
+                            let count = matching.len();
+                            if count > 0 {
+                                rsx! {
+                                    for (name, color_hex) in matching.into_iter().take(3) {
+                                        EnvBadge { env_name: name, color_hex: color_hex }
+                                    }
+                                    if count > 3 {
+                                        span { class: "chip chip-unknown", style: "font-size:10px;", "+{count - 3}" }
+                                    }
+                                }
+                            } else {
+                                rsx! { span { style: "font-size:11px; color:var(--cf-text-muted);", "no environments" } }
                             }
-                            if ids.len() > 3 {
-                                span { class: "chip chip-unknown", style: "font-size:10px;", "+{ids.len() - 3}" }
-                            }
-                        },
-                        _ => rsx! {
-                            span { style: "font-size:11px; color:var(--cf-text-muted);", "no environments" }
+                        } else {
+                            rsx! { span { style: "font-size:11px; color:var(--cf-text-muted);", "no environments" } }
                         }
                     }
                 }
@@ -1632,12 +1652,11 @@ fn CacheDestinationCardNew(
     }
 }
 
-/// Individual cache destination card
-#[component]
 /// Cache destination table row matching mockup (JSX lines 89-153)
 #[component]
 fn CacheDestinationRow(
     destination: CacheDestination,
+    env_map: Signal<HashMap<Uuid, (String, String)>>,
     on_view: EventHandler<CacheDestination>,
     on_edit: EventHandler<CacheDestination>,
 ) -> Element {
@@ -1660,7 +1679,6 @@ fn CacheDestinationRow(
             .await
             .unwrap_or_default()
     });
-    let environments = use_resource(|| async move { client::fetch_environments().await });
 
     let dest_for_click = destination.clone();
     let dest_for_edit_btn = destination.clone();
@@ -1738,36 +1756,15 @@ fn CacheDestinationRow(
                 }
             }
 
-            // Storage column with usage bar (mockup lines 115-132)
+            // Storage column — no backend metric yet; show placeholder
             td {
-                div {
-                    style: "min-width:120px; height:30px; display:flex; flex-direction:column; justify-content:center; gap:3px;",
-                    // Mock storage data (TODO: replace with real API data when available)
-                    {
-                        // Generate deterministic mock storage based on cache ID
-                        let used = ((destination.id as f64 * 37.0) % 80.0 + 10.0) as i32;
-                        let total = 100;
-                        let unit = "GB";
-                        let usage_pct = (used as f64 / total as f64) * 100.0;
-                        let bar_color = if usage_pct > 85.0 { "#fbbf24" } else { "#34d399" };
-
-                        rsx! {
-                            div {
-                                style: "font-size:11px; color:var(--cf-text-secondary);",
-                                span { class: "mono", "{used}/{total} {unit}" }
-                            }
-                            div {
-                                style: "height:4px; background:var(--cf-subtle-bg); border-radius:99px; overflow:hidden;",
-                                div {
-                                    style: "width:{usage_pct}%; height:100%; background:{bar_color};"
-                                }
-                            }
-                        }
-                    }
+                span {
+                    style: "font-size:11px; color:var(--cf-text-muted);",
+                    "—"
                 }
             }
 
-            // Paths column (mockup line 133)
+            // Paths column
             td {
                 class: "mono",
                 style: "font-size:12px;",
@@ -1788,31 +1785,33 @@ fn CacheDestinationRow(
             td {
                 div {
                     style: "display:flex; gap:4px; flex-wrap:wrap;",
-                    match (env_ids.read().as_ref(), environments.read().as_ref()) {
-                        (Some(ids), Some(Ok(all_envs))) if !ids.is_empty() => {
-                            let matching_envs: Vec<_> = all_envs.iter()
-                                .filter(|e| ids.contains(&e.id))
-                                .take(3)
+                    {
+                        let env_map_read = env_map.read();
+                        let ids_opt = env_ids.read();
+                        if let Some(ref ids) = *ids_opt {
+                            let matching: Vec<(String, String)> = ids
+                                .iter()
+                                .filter_map(|id| env_map_read.get(id).cloned())
                                 .collect();
-
-                            rsx! {
-                                for env in matching_envs {
-                                    EnvBadge { env_name: env.name.clone(), color_hex: env.color_hex.clone() }
-                                }
-                                if ids.len() > 3 {
-                                    span {
-                                        class: "chip chip-unknown",
-                                        style: "font-size:10px;",
-                                        "+{ids.len() - 3}"
+                            let count = matching.len();
+                            if count > 0 {
+                                rsx! {
+                                    for (name, color_hex) in matching.into_iter().take(3) {
+                                        EnvBadge { env_name: name, color_hex: color_hex }
+                                    }
+                                    if count > 3 {
+                                        span {
+                                            class: "chip chip-unknown",
+                                            style: "font-size:10px;",
+                                            "+{count - 3}"
+                                        }
                                     }
                                 }
+                            } else {
+                                rsx! { span { style: "font-size:11px; color:var(--cf-text-muted);", "none" } }
                             }
-                        },
-                        _ => rsx! {
-                            span {
-                                style: "font-size:11px; color:var(--cf-text-muted);",
-                                "none"
-                            }
+                        } else {
+                            rsx! { span { style: "font-size:11px; color:var(--cf-text-muted);", "none" } }
                         }
                     }
                 }

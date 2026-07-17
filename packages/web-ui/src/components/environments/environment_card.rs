@@ -2,10 +2,7 @@
 
 use dioxus::prelude::*;
 
-use super::{
-    EnvironmentCacheSummary, EnvironmentDeploymentPolicy, EnvironmentHealthBreakdown,
-    EnvironmentItem, PolicyOption,
-};
+use super::{EnvironmentDeploymentPolicy, EnvironmentHealthBreakdown, EnvironmentItem, PolicyOption};
 use crate::components::icon::{Icon, IconName};
 
 #[derive(Props, Clone, PartialEq)]
@@ -40,10 +37,10 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
     let env = props.environment.clone();
     let env_for_header = env.clone();
     let env_for_body = env.clone();
-    let display_policy = env_display_policy(&env);
-    let display_auto_sync = env_display_auto_sync(&env);
-    let display_requires_approval = env_display_requires_approval(&env);
-    let display_role_assignment_count = env_display_role_assignment_count(&env);
+    let display_policy = env.default_policy;
+    let display_auto_sync = env.auto_sync;
+    let display_requires_approval = env.requires_approval;
+    let display_role_assignment_count = env.role_assignment_count;
     let total = env.health.total().max(env.system_count).max(1);
 
     let card_class = if props.flash {
@@ -147,7 +144,7 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
                 if let Some(count) = display_role_assignment_count {
                     span { style: "font-size:11px; color:var(--cf-text-muted);", "{count} role assignments" }
                 } else {
-                    span { style: "font-size:11px; color:var(--cf-text-muted);", title: "TASK-362 tracks persisted environment RBAC assignments", "RBAC not persisted" }
+                    span { style: "font-size:11px; color:var(--cf-text-muted);", "no role assignments" }
                 }
             }
         }
@@ -212,9 +209,9 @@ fn EnvironmentRow(props: EnvironmentRowProps) -> Element {
     let env = props.environment.clone();
     let env_for_row = env.clone();
     let env_for_button = env.clone();
-    let display_policy = env_display_policy(&env);
-    let display_auto_sync = env_display_auto_sync(&env);
-    let display_requires_approval = env_display_requires_approval(&env);
+    let display_policy = env.default_policy;
+    let display_auto_sync = env.auto_sync;
+    let display_requires_approval = env.requires_approval;
     let total = env.health.total().max(env.system_count).max(1);
 
     let row_class = if props.flash {
@@ -357,7 +354,7 @@ fn PolicyChip(props: PolicyChipProps) -> Element {
         };
         rsx! { span { class, "{policy.label()}" } }
     } else {
-        rsx! { span { class: "chip chip-unknown", title: "TASK-359 tracks persisted environment deployment policy", "not persisted" } }
+        rsx! { span { class: "chip chip-unknown", "not set" } }
     }
 }
 
@@ -372,18 +369,18 @@ struct EnforcementChipsProps {
 #[component]
 fn EnforcementChips(props: EnforcementChipsProps) -> Element {
     let env = props.environment;
-    let policy_count = env
-        .required_policy_ids
-        .len()
-        .max(env_placeholder_gate_count(&env.name).unwrap_or(0));
-    let compliance_label = env_placeholder_compliance_label(&env);
+    let policy_count = env.required_policy_ids.len();
+    let compliance_label = env
+        .compliance_bundle
+        .as_ref()
+        .map(|bundle| bundle.framework.clone());
     rsx! {
         div { style: "display:flex; gap:6px; align-items:center; flex-wrap:wrap;",
-            if let Some(label) = compliance_label {
-                span { class: "chip chip-info", title: "Frontend parity placeholder until environment compliance bundles are API-backed", Icon { name: IconName::Shield, size: 9 } " {label}" }
+            if let Some(label) = compliance_label.clone() {
+                span { class: "chip chip-info", title: "Compliance bundle assigned to this environment", Icon { name: IconName::Shield, size: 9 } " {label}" }
             }
             if policy_count > 0 {
-                span { class: "chip chip-unknown", title: "Frontend parity placeholder until environment gate metadata is API-backed", "{policy_count} gate{plural(policy_count)}" }
+                span { class: "chip chip-unknown", title: "Required deployment policies (gates) for this environment", "{policy_count} gate{plural(policy_count)}" }
             }
             if compliance_label.is_none() && policy_count == 0 {
                 span { style: "font-size:11px; color:var(--cf-text-muted);", if props.compact { "—" } else { "none" } }
@@ -402,13 +399,12 @@ struct CacheSummaryProps {
 #[component]
 fn CacheSummary(props: CacheSummaryProps) -> Element {
     let env = props.environment;
-    let display_cache = env.cache.or_else(|| env_placeholder_cache(&env.name));
     rsx! {
-        if let Some(cache) = display_cache {
+        if let Some(cache) = env.cache {
             span {
                 class: "mono truncate",
                 style: "font-size:11px;",
-                title: "Frontend parity placeholder cache summary: {cache.url}",
+                title: "{cache.url} ({cache.status})",
                 if !props.compact { Icon { name: IconName::Download, size: 10 } " " }
                 "{cache.url}"
             }
@@ -434,7 +430,7 @@ fn ToggleChip(props: ToggleChipProps) -> Element {
             rsx! { span { class: "chip chip-unknown", "{props.off_label}" } }
         }
     } else {
-        rsx! { span { class: "chip chip-unknown", title: "TASK-362 tracks persisted environment automation/approval settings", "not persisted" } }
+        rsx! { span { class: "chip chip-unknown", "not set" } }
     }
 }
 
@@ -444,85 +440,4 @@ fn pct(count: usize, total: f64) -> i32 {
 
 fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
-}
-
-fn env_display_policy(env: &EnvironmentItem) -> Option<EnvironmentDeploymentPolicy> {
-    env.default_policy
-        .or(match env.name.to_lowercase().as_str() {
-            "production" | "staging" => Some(EnvironmentDeploymentPolicy::Manual),
-            "development" | "dev" => Some(EnvironmentDeploymentPolicy::AutoLatest),
-            "remote" | "lab" | "lan" => Some(EnvironmentDeploymentPolicy::Pinned),
-            _ => None,
-        })
-}
-
-fn env_display_auto_sync(env: &EnvironmentItem) -> Option<bool> {
-    env.auto_sync.or(match env.name.to_lowercase().as_str() {
-        "production" | "staging" | "development" | "dev" => Some(true),
-        "remote" | "lab" | "lan" => Some(false),
-        _ => None,
-    })
-}
-
-fn env_display_requires_approval(env: &EnvironmentItem) -> Option<bool> {
-    env.requires_approval
-        .or(match env.name.to_lowercase().as_str() {
-            "production" | "staging" => Some(true),
-            "development" | "dev" | "remote" | "lab" | "lan" => Some(false),
-            _ => None,
-        })
-}
-
-fn env_display_role_assignment_count(env: &EnvironmentItem) -> Option<usize> {
-    env.role_assignment_count
-        .or(match env.name.to_lowercase().as_str() {
-            "production" => Some(4),
-            "staging" => Some(5),
-            "development" | "dev" => Some(7),
-            "remote" | "lab" | "lan" => Some(1),
-            _ => None,
-        })
-}
-
-fn env_placeholder_compliance_label(env: &EnvironmentItem) -> Option<&'static str> {
-    if env.is_production.unwrap_or(false) {
-        return Some("STIG");
-    }
-    match env.name.to_lowercase().as_str() {
-        "production" => Some("STIG"),
-        "staging" => Some("NIST 800-53"),
-        _ => None,
-    }
-}
-
-fn env_placeholder_gate_count(name: &str) -> Option<usize> {
-    match name.to_lowercase().as_str() {
-        "production" => Some(2),
-        "staging" | "development" | "dev" => Some(1),
-        _ => None,
-    }
-}
-
-fn env_placeholder_cache(name: &str) -> Option<EnvironmentCacheSummary> {
-    match name.to_lowercase().as_str() {
-        "production" => Some(EnvironmentCacheSummary {
-            name: "prod-cache".to_string(),
-            url: "s3://crystal-forge-prod-cache".to_string(),
-            cache_type: "s3".to_string(),
-            status: "healthy".to_string(),
-        }),
-        "staging" => Some(EnvironmentCacheSummary {
-            name: "staging-cache".to_string(),
-            url: "s3://crystal-forge-staging-cache".to_string(),
-            cache_type: "s3".to_string(),
-            status: "healthy".to_string(),
-        }),
-        "development" | "dev" => Some(EnvironmentCacheSummary {
-            name: "dev-attic".to_string(),
-            url: "attic://cf-attic.dev/dev".to_string(),
-            cache_type: "attic".to_string(),
-            status: "warning".to_string(),
-        }),
-        _ => None,
-    }
 }

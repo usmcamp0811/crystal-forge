@@ -254,13 +254,11 @@ fn DeploymentPolicySection(props: DeploymentPolicySectionProps) -> Element {
                 for (policy, label) in policies {
                     button {
                         class: if current.default_policy == Some(policy) { "active" } else { "" },
-                        disabled: true,
-                        title: "TASK-359 tracks persisted environment deployment policy",
+                        onclick: move |_| update_draft(&mut draft, |next| next.default_policy = Some(policy)),
                         "{label}"
                     }
                 }
             }
-            div { class: "help", "Display-only until TASK-359 persists environment deployment policy." }
         }
     }
 }

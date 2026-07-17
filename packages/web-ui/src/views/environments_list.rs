@@ -605,28 +605,22 @@ struct EnvPanelSystemsProps {
 fn EnvPanel(props: EnvPanelProps) -> Element {
     let env = props.env.clone();
     let env_for_edit = env.clone();
-    let placeholder_meta = env_panel_placeholder_meta(&env.name);
-    let description_text = env
-        .description
-        .clone()
-        .or_else(|| placeholder_meta.description.map(str::to_string));
-    let display_policy = env.default_policy.or(placeholder_meta.default_policy);
-    let display_auto_sync = env.auto_sync.or(placeholder_meta.auto_sync);
-    let display_requires_approval = env.requires_approval.or(placeholder_meta.requires_approval);
-    let display_role_assignment_count = env
-        .role_assignment_count
-        .or(placeholder_meta.role_assignment_count);
-    let display_cache = env.cache.clone().or_else(|| placeholder_meta.cache.clone());
+    let description_text = env.description.clone();
+    let display_policy = env.default_policy;
+    let display_auto_sync = env.auto_sync;
+    let display_requires_approval = env.requires_approval;
+    let display_role_assignment_count = env.role_assignment_count;
+    let display_cache = env.cache.clone();
     let display_gate_count = if env.required_policy_ids.is_empty() {
-        placeholder_meta.gate_count
+        None
     } else {
         Some(env.required_policy_ids.len())
     };
-    let display_compliance_label = placeholder_meta.compliance_label;
-    let is_production = env
-        .is_production
-        .or(placeholder_meta.is_production)
-        .unwrap_or(false);
+    let display_compliance_label = env
+        .compliance_bundle
+        .as_ref()
+        .map(|bundle| bundle.framework.clone());
+    let is_production = env.is_production.unwrap_or(false);
     let total = env.health.total().max(env.system_count).max(1) as f64;
     let no_health = env.health.total() == 0;
     let nav = use_navigator();
@@ -783,7 +777,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                         dt { "Enforcement" }
                         dd {
                             div { style: "display:flex; gap:6px; flex-wrap:wrap; align-items:center;",
-                                if let Some(compliance_label) = display_compliance_label {
+                                if let Some(compliance_label) = display_compliance_label.clone() {
                                     button {
                                         class: "chip chip-info sd-commit-sha-link",
                                         style: "background:unset;",
@@ -809,7 +803,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                             if let Some(count) = display_role_assignment_count {
                                 "{count}"
                             } else {
-                                span { style: "color:var(--cf-text-muted);", title: "TASK-362 tracks persisted environment RBAC assignments", "not persisted" }
+                                span { style: "color:var(--cf-text-muted);", "not set" }
                             }
                         }
                     }
@@ -936,94 +930,6 @@ fn system_status_color(status: &HealthStatus) -> &'static str {
     }
 }
 
-#[derive(Clone)]
-struct EnvPanelPlaceholderMeta {
-    description: Option<&'static str>,
-    compliance_label: Option<&'static str>,
-    default_policy: Option<EnvironmentDeploymentPolicy>,
-    auto_sync: Option<bool>,
-    requires_approval: Option<bool>,
-    is_production: Option<bool>,
-    role_assignment_count: Option<usize>,
-    gate_count: Option<usize>,
-    cache: Option<crate::components::environments::EnvironmentCacheSummary>,
-}
-
-fn env_panel_placeholder_meta(name: &str) -> EnvPanelPlaceholderMeta {
-    match name.trim().to_lowercase().as_str() {
-        "production" => EnvPanelPlaceholderMeta {
-            description: Some("Customer-facing production tier. Strictest deployment policy."),
-            compliance_label: Some("STIG"),
-            default_policy: Some(EnvironmentDeploymentPolicy::Manual),
-            auto_sync: Some(true),
-            requires_approval: Some(true),
-            is_production: Some(true),
-            role_assignment_count: Some(4),
-            gate_count: Some(2),
-            cache: Some(crate::components::environments::EnvironmentCacheSummary {
-                name: "prod-cache".to_string(),
-                url: "s3://crystal-forge-prod-cache".to_string(),
-                cache_type: "s3".to_string(),
-                status: "healthy".to_string(),
-            }),
-        },
-        "staging" => EnvPanelPlaceholderMeta {
-            description: Some("Pre-production validation tier. Mirrors production."),
-            compliance_label: Some("NIST 800-53"),
-            default_policy: Some(EnvironmentDeploymentPolicy::Manual),
-            auto_sync: Some(true),
-            requires_approval: Some(true),
-            is_production: Some(false),
-            role_assignment_count: Some(5),
-            gate_count: Some(1),
-            cache: Some(crate::components::environments::EnvironmentCacheSummary {
-                name: "staging-cache".to_string(),
-                url: "s3://crystal-forge-staging-cache".to_string(),
-                cache_type: "s3".to_string(),
-                status: "healthy".to_string(),
-            }),
-        },
-        "development" | "dev" => EnvPanelPlaceholderMeta {
-            description: Some("Development sandbox. Free-form, faster iteration."),
-            compliance_label: None,
-            default_policy: Some(EnvironmentDeploymentPolicy::AutoLatest),
-            auto_sync: Some(true),
-            requires_approval: Some(false),
-            is_production: Some(false),
-            role_assignment_count: Some(7),
-            gate_count: Some(1),
-            cache: Some(crate::components::environments::EnvironmentCacheSummary {
-                name: "dev-attic".to_string(),
-                url: "attic://cf-attic.dev/dev".to_string(),
-                cache_type: "attic".to_string(),
-                status: "warning".to_string(),
-            }),
-        },
-        "lab" | "remote" | "lan" => EnvPanelPlaceholderMeta {
-            description: Some("Testing and unmanaged systems tier."),
-            compliance_label: None,
-            default_policy: Some(EnvironmentDeploymentPolicy::Pinned),
-            auto_sync: Some(false),
-            requires_approval: Some(false),
-            is_production: Some(false),
-            role_assignment_count: Some(1),
-            gate_count: None,
-            cache: None,
-        },
-        _ => EnvPanelPlaceholderMeta {
-            description: None,
-            compliance_label: None,
-            default_policy: Some(EnvironmentDeploymentPolicy::Manual),
-            auto_sync: Some(true),
-            requires_approval: Some(false),
-            is_production: Some(false),
-            role_assignment_count: None,
-            gate_count: None,
-            cache: None,
-        },
-    }
-}
-
 fn pct_f(count: usize, total: f64) -> i32 {
     ((count as f64 / total) * 100.0).round() as i32
 }
@@ -1053,6 +959,7 @@ mod tests {
             requires_approval: None,
             is_production: None,
             role_assignment_count: None,
+            compliance_bundle: None,
         }
     }
 

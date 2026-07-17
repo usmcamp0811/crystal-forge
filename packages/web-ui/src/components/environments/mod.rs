@@ -44,6 +44,9 @@ pub struct EnvironmentItem {
     /// Real backend data: count of `user_environment_memberships` rows for
     /// this environment.
     pub role_assignment_count: Option<usize>,
+    /// Real backend data: the compliance bundle assigned to this environment
+    /// via `compliance_bundle_environments`, if any.
+    pub compliance_bundle: Option<EnvironmentComplianceSummary>,
 }
 
 /// Health-state counts for active systems in an environment.
@@ -88,13 +91,24 @@ impl EnvironmentDeploymentPolicy {
     }
 }
 
-/// Display-only cache summary placeholder until TASK-360 lands.
+/// Cache summary for an environment's assigned cache destination. `status`
+/// reflects `cache_destinations.enabled` ("enabled"/"disabled"), not a live
+/// reachability probe.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnvironmentCacheSummary {
     pub name: String,
     pub url: String,
     pub cache_type: String,
     pub status: String,
+}
+
+/// Compliance bundle assigned to an environment via
+/// `compliance_bundle_environments`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnvironmentComplianceSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub framework: String,
 }
 
 /// Draft for creating a new environment.
