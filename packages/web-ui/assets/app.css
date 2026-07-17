@@ -3139,6 +3139,8 @@ html[data-theme="light"] .sd-nix {
 }
 
 .panel-body {
+  flex: 1;
+  min-height: 0;
   padding: 18px 22px;
   overflow-y: auto;
   display: flex;

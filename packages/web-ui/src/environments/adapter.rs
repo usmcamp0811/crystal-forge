@@ -348,6 +348,13 @@ pub fn api_to_environment_item(
     env: EnvironmentSummary,
     required_policy_ids: Vec<Uuid>,
 ) -> EnvironmentItem {
+    let default_policy = match env.default_policy.as_deref() {
+        Some("manual") => Some(EnvironmentDeploymentPolicy::Manual),
+        Some("auto_latest") => Some(EnvironmentDeploymentPolicy::AutoLatest),
+        Some("pinned") => Some(EnvironmentDeploymentPolicy::Pinned),
+        _ => None,
+    };
+
     EnvironmentItem {
         id: env.id,
         name: env.name,
@@ -364,15 +371,17 @@ pub fn api_to_environment_item(
         },
         cve_critical_high: env.rollup.cve_critical_high.max(0) as usize,
         flake_names: env.rollup.flakes,
-        // TASK-359..TASK-362 placeholders are intentionally not populated for
-        // successful API responses. Rendering these as Some(..) would fabricate
-        // operational state and make non-persisted edits appear successful.
-        default_policy: None,
-        cache: None,
-        auto_sync: None,
-        requires_approval: None,
-        is_production: None,
-        role_assignment_count: None,
+        default_policy,
+        cache: env.cache.map(|cache| EnvironmentCacheSummary {
+            name: cache.name,
+            url: cache.url,
+            cache_type: cache.cache_type,
+            status: cache.status,
+        }),
+        auto_sync: env.auto_sync,
+        requires_approval: env.requires_approval,
+        is_production: env.is_production,
+        role_assignment_count: env.role_assignment_count.map(|count| count.max(0) as usize),
     }
 }
 
@@ -382,6 +391,10 @@ pub async fn create_environment_via_api(
     description: Option<String>,
     color_hex: String,
     is_active: bool,
+    default_policy: Option<EnvironmentDeploymentPolicy>,
+    auto_sync: Option<bool>,
+    requires_approval: Option<bool>,
+    is_production: Option<bool>,
     default_required_policy: Uuid,
 ) -> Result<EnvironmentItem, String> {
     let request = CreateEnvironmentRequest {
@@ -389,6 +402,10 @@ pub async fn create_environment_via_api(
         description,
         color_hex,
         is_active,
+        default_policy: default_policy.map(|policy| policy.id().to_string()),
+        auto_sync,
+        requires_approval,
+        is_production,
     };
 
     match create_environment(&request).await {
@@ -421,12 +438,20 @@ pub async fn update_environment_via_api(
     name: String,
     description: Option<String>,
     color_hex: String,
+    default_policy: Option<EnvironmentDeploymentPolicy>,
+    auto_sync: Option<bool>,
+    requires_approval: Option<bool>,
+    is_production: Option<bool>,
     default_required_policy: Uuid,
 ) -> Result<EnvironmentItem, String> {
     let request = UpdateEnvironmentRequest {
         name,
         description,
         color_hex,
+        default_policy: default_policy.map(|policy| policy.id().to_string()),
+        auto_sync,
+        requires_approval,
+        is_production,
     };
 
     match update_environment(&environment_id, &request).await {
@@ -548,6 +573,22 @@ mod tests {
                 cve_critical_high: 9,
                 flakes: vec!["infra".to_string(), "edge".to_string()],
             },
+            default_policy: Some("manual".to_string()),
+            auto_sync: Some(true),
+            requires_approval: Some(true),
+            is_production: Some(true),
+            role_assignment_count: Some(4),
+            cache: Some(crate::api::models::EnvironmentCacheSummary {
+                name: "prod-cache".to_string(),
+                url: "s3://crystal-forge-prod-cache".to_string(),
+                cache_type: "s3".to_string(),
+                status: "healthy".to_string(),
+            }),
+            compliance_bundle: Some(crate::api::models::EnvironmentComplianceSummary {
+                id: Uuid::from_u128(777),
+                name: "disa-rhel9-stig".to_string(),
+                framework: "STIG".to_string(),
+            }),
         };
         let item = api_to_environment_item(summary, vec![DEFAULT_POLICY]);
         assert_eq!(item.id, Uuid::from_u128(999));
@@ -560,11 +601,15 @@ mod tests {
         assert_eq!(item.health.critical, 1);
         assert_eq!(item.cve_critical_high, 9);
         assert_eq!(item.flake_names, vec!["infra", "edge"]);
-        assert_eq!(item.cache, None);
-        assert_eq!(item.default_policy, None);
-        assert_eq!(item.auto_sync, None);
-        assert_eq!(item.requires_approval, None);
-        assert_eq!(item.is_production, None);
+        assert!(item.cache.is_some());
+        assert_eq!(
+            item.default_policy,
+            Some(EnvironmentDeploymentPolicy::Manual)
+        );
+        assert_eq!(item.auto_sync, Some(true));
+        assert_eq!(item.requires_approval, Some(true));
+        assert_eq!(item.is_production, Some(true));
+        assert_eq!(item.role_assignment_count, Some(4));
         assert_eq!(item.required_policy_ids, vec![DEFAULT_POLICY]);
     }
 
@@ -578,6 +623,13 @@ mod tests {
             is_active: true,
             system_count: 0,
             rollup: Default::default(),
+            default_policy: None,
+            auto_sync: None,
+            requires_approval: None,
+            is_production: None,
+            role_assignment_count: None,
+            cache: None,
+            compliance_bundle: None,
         };
         let item = api_to_environment_item(summary, vec![DEFAULT_POLICY]);
         assert_eq!(item.color_hex, "#123456");

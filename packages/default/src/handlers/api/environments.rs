@@ -35,6 +35,15 @@ use crate::queries::environments::{
     set_environment_required_policies, update_environment_metadata,
 };
 
+fn normalize_environment_default_policy(value: Option<&str>) -> &'static str {
+    match value.unwrap_or("manual").trim() {
+        "manual" => "manual",
+        "auto_latest" => "auto_latest",
+        "pinned" => "pinned",
+        _ => "manual",
+    }
+}
+
 /// `GET /api/v1/environments`
 ///
 /// Returns all environments visible to the authenticated user.
@@ -128,7 +137,24 @@ pub async fn create_environment(
         return bad_request("Environment color must be a valid #RRGGBB value");
     }
 
-    match create_environment_row(&pool, name, description, color_hex, payload.is_active).await {
+    let default_policy = normalize_environment_default_policy(payload.default_policy.as_deref());
+    let auto_sync = payload.auto_sync.unwrap_or(true);
+    let requires_approval = payload.requires_approval.unwrap_or(false);
+    let is_production = payload.is_production.unwrap_or(false);
+
+    match create_environment_row(
+        &pool,
+        name,
+        description,
+        color_hex,
+        payload.is_active,
+        default_policy,
+        auto_sync,
+        requires_approval,
+        is_production,
+    )
+    .await
+    {
         Ok(env) => (StatusCode::CREATED, Json(env)).into_response(),
         Err(err) => {
             if is_unique_violation(&err) {
@@ -216,7 +242,24 @@ pub async fn update_environment_handler(
         return bad_request("Environment color must be a valid #RRGGBB value");
     }
 
-    match update_environment_metadata(&pool, environment_id, name, description, color_hex).await {
+    let default_policy = normalize_environment_default_policy(payload.default_policy.as_deref());
+    let auto_sync = payload.auto_sync.unwrap_or(true);
+    let requires_approval = payload.requires_approval.unwrap_or(false);
+    let is_production = payload.is_production.unwrap_or(false);
+
+    match update_environment_metadata(
+        &pool,
+        environment_id,
+        name,
+        description,
+        color_hex,
+        default_policy,
+        auto_sync,
+        requires_approval,
+        is_production,
+    )
+    .await
+    {
         Ok(Some(env)) => (StatusCode::OK, Json(env)).into_response(),
         Ok(None) => not_found(),
         Err(err) => {

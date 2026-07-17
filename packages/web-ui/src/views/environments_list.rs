@@ -519,6 +519,10 @@ fn save_environment_form(
                 next.name.trim().to_string(),
                 normalize_optional(&next.description),
                 normalize_color_hex(&next.color_hex),
+                next.default_policy,
+                next.auto_sync,
+                next.requires_approval,
+                next.is_production,
                 default_required_policy,
             )
             .await
@@ -539,6 +543,10 @@ fn save_environment_form(
                 normalize_optional(&next.description),
                 normalize_color_hex(&next.color_hex),
                 true,
+                next.default_policy,
+                next.auto_sync,
+                next.requires_approval,
+                next.is_production,
                 default_required_policy,
             )
             .await
@@ -553,9 +561,6 @@ fn save_environment_form(
                     api_notice.set(Some(message));
                 }
                 saved.required_policy_ids = next.required_policy_ids.clone();
-                // TASK-359/TASK-362 fields are read-only until backend support
-                // lands. Do not copy modal display values into local state;
-                // doing so would make non-persisted changes appear saved.
 
                 let mut values = environments.read().clone();
                 if let Some(target) = values.iter_mut().find(|env| env.id == saved.id) {

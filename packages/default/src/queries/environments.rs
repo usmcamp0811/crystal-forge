@@ -1,6 +1,6 @@
 use crate::api::models::{
-    DeploymentPolicySummary, EnvironmentPolicyMapEntry, EnvironmentRollup, EnvironmentSummary,
-    EnvironmentWithPolicies,
+    DeploymentPolicySummary, EnvironmentCacheSummary, EnvironmentComplianceSummary,
+    EnvironmentPolicyMapEntry, EnvironmentRollup, EnvironmentSummary, EnvironmentWithPolicies,
 };
 use crate::config::EnvironmentConfig;
 use crate::models::environments::Environment;
@@ -27,6 +27,17 @@ pub struct EnvironmentRow {
     pub offline_count: i64,
     pub cve_critical_high_count: i64,
     pub flake_names: Vec<String>,
+    pub default_policy: String,
+    pub auto_sync: bool,
+    pub requires_approval: bool,
+    pub is_production: bool,
+    pub role_assignment_count: i64,
+    pub cache_name: Option<String>,
+    pub cache_url: Option<String>,
+    pub cache_type: Option<String>,
+    pub compliance_bundle_id: Option<Uuid>,
+    pub compliance_bundle_name: Option<String>,
+    pub compliance_bundle_framework: Option<String>,
 }
 
 fn environment_summary_from_row(r: EnvironmentRow) -> EnvironmentSummary {
@@ -46,6 +57,26 @@ fn environment_summary_from_row(r: EnvironmentRow) -> EnvironmentSummary {
             cve_critical_high: r.cve_critical_high_count,
             flakes: r.flake_names,
         },
+        default_policy: Some(r.default_policy),
+        auto_sync: Some(r.auto_sync),
+        requires_approval: Some(r.requires_approval),
+        is_production: Some(r.is_production),
+        role_assignment_count: Some(r.role_assignment_count),
+        cache: r.cache_url.map(|url| EnvironmentCacheSummary {
+            name: r.cache_name.unwrap_or_else(|| "cache".to_string()),
+            url,
+            cache_type: r.cache_type.unwrap_or_else(|| "unknown".to_string()),
+            status: "healthy".to_string(),
+        }),
+        compliance_bundle: r.compliance_bundle_id.map(|id| EnvironmentComplianceSummary {
+            id,
+            name: r
+                .compliance_bundle_name
+                .unwrap_or_else(|| "Compliance bundle".to_string()),
+            framework: r
+                .compliance_bundle_framework
+                .unwrap_or_else(|| "unknown".to_string()),
+        }),
     }
 }
 
@@ -139,11 +170,49 @@ pub async fn list_environments_for_user(
                 COALESCE(er.critical_count, 0)::bigint AS critical_count,
                 COALESCE(er.offline_count, 0)::bigint AS offline_count,
                 COALESCE(er.cve_critical_high_count, 0)::bigint AS cve_critical_high_count,
-                COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names
+                COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names,
+                COALESCE(e.default_policy, 'manual') AS default_policy,
+                COALESCE(e.auto_sync, TRUE) AS auto_sync,
+                COALESCE(e.requires_approval, FALSE) AS requires_approval,
+                COALESCE(e.is_production, FALSE) AS is_production,
+                COALESCE(rbac.role_assignment_count, 0)::bigint AS role_assignment_count,
+                cache.cache_name,
+                cache.cache_url,
+                cache.cache_type,
+                compliance.compliance_bundle_id,
+                compliance.compliance_bundle_name,
+                compliance.compliance_bundle_framework
             FROM environments e
             LEFT JOIN view_environment_rollups er ON er.environment_id = e.id
             LEFT JOIN systems s ON s.environment_id = e.id
-            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::bigint AS role_assignment_count
+                FROM user_environment_memberships uem_all
+                WHERE uem_all.environment_id = e.id
+            ) rbac ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT
+                    cd.name AS cache_name,
+                    cd.push_to AS cache_url,
+                    cd.cache_type AS cache_type
+                FROM cache_destination_environments cde
+                JOIN cache_destinations cd ON cd.id = cde.cache_destination_id
+                WHERE cde.environment_id = e.id
+                ORDER BY cd.name
+                LIMIT 1
+            ) cache ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT
+                    cb.id AS compliance_bundle_id,
+                    cb.name AS compliance_bundle_name,
+                    cb.framework AS compliance_bundle_framework
+                FROM compliance_bundle_environments cbe
+                JOIN compliance_bundles cb ON cb.id = cbe.bundle_id
+                WHERE cbe.environment_id = e.id
+                ORDER BY cb.name
+                LIMIT 1
+            ) compliance ON TRUE
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
             ORDER BY e.name ASC
             "#,
         )
@@ -166,14 +235,52 @@ pub async fn list_environments_for_user(
                 COALESCE(er.critical_count, 0)::bigint AS critical_count,
                 COALESCE(er.offline_count, 0)::bigint AS offline_count,
                 COALESCE(er.cve_critical_high_count, 0)::bigint AS cve_critical_high_count,
-                COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names
+                COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names,
+                COALESCE(e.default_policy, 'manual') AS default_policy,
+                COALESCE(e.auto_sync, TRUE) AS auto_sync,
+                COALESCE(e.requires_approval, FALSE) AS requires_approval,
+                COALESCE(e.is_production, FALSE) AS is_production,
+                COALESCE(rbac.role_assignment_count, 0)::bigint AS role_assignment_count,
+                cache.cache_name,
+                cache.cache_url,
+                cache.cache_type,
+                compliance.compliance_bundle_id,
+                compliance.compliance_bundle_name,
+                compliance.compliance_bundle_framework
             FROM environments e
             JOIN user_environment_memberships uem
               ON uem.environment_id = e.id
              AND uem.user_id = $1
             LEFT JOIN view_environment_rollups er ON er.environment_id = e.id
             LEFT JOIN systems s ON s.environment_id = e.id
-            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::bigint AS role_assignment_count
+                FROM user_environment_memberships uem_all
+                WHERE uem_all.environment_id = e.id
+            ) rbac ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT
+                    cd.name AS cache_name,
+                    cd.push_to AS cache_url,
+                    cd.cache_type AS cache_type
+                FROM cache_destination_environments cde
+                JOIN cache_destinations cd ON cd.id = cde.cache_destination_id
+                WHERE cde.environment_id = e.id
+                ORDER BY cd.name
+                LIMIT 1
+            ) cache ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT
+                    cb.id AS compliance_bundle_id,
+                    cb.name AS compliance_bundle_name,
+                    cb.framework AS compliance_bundle_framework
+                FROM compliance_bundle_environments cbe
+                JOIN compliance_bundles cb ON cb.id = cbe.bundle_id
+                WHERE cbe.environment_id = e.id
+                ORDER BY cb.name
+                LIMIT 1
+            ) compliance ON TRUE
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
             ORDER BY e.name ASC
             "#,
         )
@@ -210,12 +317,50 @@ pub async fn find_environment_for_user(
                 COALESCE(er.critical_count, 0)::bigint AS critical_count,
                 COALESCE(er.offline_count, 0)::bigint AS offline_count,
                 COALESCE(er.cve_critical_high_count, 0)::bigint AS cve_critical_high_count,
-                COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names
+                COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names,
+                COALESCE(e.default_policy, 'manual') AS default_policy,
+                COALESCE(e.auto_sync, TRUE) AS auto_sync,
+                COALESCE(e.requires_approval, FALSE) AS requires_approval,
+                COALESCE(e.is_production, FALSE) AS is_production,
+                COALESCE(rbac.role_assignment_count, 0)::bigint AS role_assignment_count,
+                cache.cache_name,
+                cache.cache_url,
+                cache.cache_type,
+                compliance.compliance_bundle_id,
+                compliance.compliance_bundle_name,
+                compliance.compliance_bundle_framework
             FROM environments e
             LEFT JOIN view_environment_rollups er ON er.environment_id = e.id
             LEFT JOIN systems s ON s.environment_id = e.id
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::bigint AS role_assignment_count
+                FROM user_environment_memberships uem_all
+                WHERE uem_all.environment_id = e.id
+            ) rbac ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT
+                    cd.name AS cache_name,
+                    cd.push_to AS cache_url,
+                    cd.cache_type AS cache_type
+                FROM cache_destination_environments cde
+                JOIN cache_destinations cd ON cd.id = cde.cache_destination_id
+                WHERE cde.environment_id = e.id
+                ORDER BY cd.name
+                LIMIT 1
+            ) cache ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT
+                    cb.id AS compliance_bundle_id,
+                    cb.name AS compliance_bundle_name,
+                    cb.framework AS compliance_bundle_framework
+                FROM compliance_bundle_environments cbe
+                JOIN compliance_bundles cb ON cb.id = cbe.bundle_id
+                WHERE cbe.environment_id = e.id
+                ORDER BY cb.name
+                LIMIT 1
+            ) compliance ON TRUE
             WHERE e.id = $1
-            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
             "#,
         )
         .bind(environment_id)
@@ -237,15 +382,53 @@ pub async fn find_environment_for_user(
                 COALESCE(er.critical_count, 0)::bigint AS critical_count,
                 COALESCE(er.offline_count, 0)::bigint AS offline_count,
                 COALESCE(er.cve_critical_high_count, 0)::bigint AS cve_critical_high_count,
-                COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names
+                COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names,
+                COALESCE(e.default_policy, 'manual') AS default_policy,
+                COALESCE(e.auto_sync, TRUE) AS auto_sync,
+                COALESCE(e.requires_approval, FALSE) AS requires_approval,
+                COALESCE(e.is_production, FALSE) AS is_production,
+                COALESCE(rbac.role_assignment_count, 0)::bigint AS role_assignment_count,
+                cache.cache_name,
+                cache.cache_url,
+                cache.cache_type,
+                compliance.compliance_bundle_id,
+                compliance.compliance_bundle_name,
+                compliance.compliance_bundle_framework
             FROM environments e
             JOIN user_environment_memberships uem
               ON uem.environment_id = e.id
              AND uem.user_id = $1
             LEFT JOIN view_environment_rollups er ON er.environment_id = e.id
             LEFT JOIN systems s ON s.environment_id = e.id
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::bigint AS role_assignment_count
+                FROM user_environment_memberships uem_all
+                WHERE uem_all.environment_id = e.id
+            ) rbac ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT
+                    cd.name AS cache_name,
+                    cd.push_to AS cache_url,
+                    cd.cache_type AS cache_type
+                FROM cache_destination_environments cde
+                JOIN cache_destinations cd ON cd.id = cde.cache_destination_id
+                WHERE cde.environment_id = e.id
+                ORDER BY cd.name
+                LIMIT 1
+            ) cache ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT
+                    cb.id AS compliance_bundle_id,
+                    cb.name AS compliance_bundle_name,
+                    cb.framework AS compliance_bundle_framework
+                FROM compliance_bundle_environments cbe
+                JOIN compliance_bundles cb ON cb.id = cbe.bundle_id
+                WHERE cbe.environment_id = e.id
+                ORDER BY cb.name
+                LIMIT 1
+            ) compliance ON TRUE
             WHERE e.id = $2
-            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
             "#,
         )
         .bind(user_id.unwrap())
@@ -264,11 +447,15 @@ pub async fn create_environment(
     description: Option<&str>,
     color_hex: &str,
     is_active: bool,
+    default_policy: &str,
+    auto_sync: bool,
+    requires_approval: bool,
+    is_production: bool,
 ) -> Result<EnvironmentSummary> {
     let environment_id = sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO environments (name, description, color_hex, is_active)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO environments (name, description, color_hex, is_active, default_policy, auto_sync, requires_approval, is_production)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING id
         "#,
     )
@@ -276,6 +463,10 @@ pub async fn create_environment(
     .bind(description)
     .bind(color_hex)
     .bind(is_active)
+    .bind(default_policy)
+    .bind(auto_sync)
+    .bind(requires_approval)
+    .bind(is_production)
     .fetch_one(pool)
     .await?;
 
@@ -312,6 +503,10 @@ pub async fn update_environment_metadata(
     name: &str,
     description: Option<&str>,
     color_hex: &str,
+    default_policy: &str,
+    auto_sync: bool,
+    requires_approval: bool,
+    is_production: bool,
 ) -> Result<Option<EnvironmentSummary>> {
     let environment_id = sqlx::query_scalar::<_, Uuid>(
         r#"
@@ -319,6 +514,10 @@ pub async fn update_environment_metadata(
         SET name = $2,
             description = $3,
             color_hex = $4,
+            default_policy = $5,
+            auto_sync = $6,
+            requires_approval = $7,
+            is_production = $8,
             updated_at = NOW()
         WHERE e.id = $1
         RETURNING e.id
@@ -328,6 +527,10 @@ pub async fn update_environment_metadata(
     .bind(name)
     .bind(description)
     .bind(color_hex)
+    .bind(default_policy)
+    .bind(auto_sync)
+    .bind(requires_approval)
+    .bind(is_production)
     .fetch_optional(pool)
     .await?;
 
@@ -465,12 +668,50 @@ pub async fn get_environment_with_policies(
             COALESCE(er.critical_count, 0)::bigint AS critical_count,
             COALESCE(er.offline_count, 0)::bigint AS offline_count,
             COALESCE(er.cve_critical_high_count, 0)::bigint AS cve_critical_high_count,
-            COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names
+            COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names,
+            COALESCE(e.default_policy, 'manual') AS default_policy,
+            COALESCE(e.auto_sync, TRUE) AS auto_sync,
+            COALESCE(e.requires_approval, FALSE) AS requires_approval,
+            COALESCE(e.is_production, FALSE) AS is_production,
+            COALESCE(rbac.role_assignment_count, 0)::bigint AS role_assignment_count,
+            cache.cache_name,
+            cache.cache_url,
+            cache.cache_type,
+            compliance.compliance_bundle_id,
+            compliance.compliance_bundle_name,
+            compliance.compliance_bundle_framework
         FROM environments e
         LEFT JOIN view_environment_rollups er ON er.environment_id = e.id
         LEFT JOIN systems s ON s.environment_id = e.id
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*)::bigint AS role_assignment_count
+            FROM user_environment_memberships uem_all
+            WHERE uem_all.environment_id = e.id
+        ) rbac ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT
+                cd.name AS cache_name,
+                cd.push_to AS cache_url,
+                cd.cache_type AS cache_type
+            FROM cache_destination_environments cde
+            JOIN cache_destinations cd ON cd.id = cde.cache_destination_id
+            WHERE cde.environment_id = e.id
+            ORDER BY cd.name
+            LIMIT 1
+        ) cache ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT
+                cb.id AS compliance_bundle_id,
+                cb.name AS compliance_bundle_name,
+                cb.framework AS compliance_bundle_framework
+            FROM compliance_bundle_environments cbe
+            JOIN compliance_bundles cb ON cb.id = cbe.bundle_id
+            WHERE cbe.environment_id = e.id
+            ORDER BY cb.name
+            LIMIT 1
+        ) compliance ON TRUE
         WHERE e.id = $1
-        GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names
+        GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
         "#,
     )
     .bind(environment_id)
