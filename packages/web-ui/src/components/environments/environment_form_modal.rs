@@ -100,20 +100,20 @@ pub fn EnvironmentFormModal(props: EnvironmentFormModalProps) -> Element {
                         label { style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
                             input {
                                 r#type: "checkbox",
-                                checked: current.auto_sync.unwrap_or(false),
-                                disabled: true,
+                                checked: current.auto_sync.unwrap_or(true),
+                                onchange: move |evt| update_draft(&mut draft, |next| next.auto_sync = Some(evt.checked())),
                                 style: "accent-color:var(--cf-brand-purple);",
                             }
-                            span { "Auto-sync flakes (not yet persisted)" }
+                            span { "Auto-sync flakes" }
                         }
                         label { style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
                             input {
                                 r#type: "checkbox",
-                                checked: current.requires_approval.unwrap_or(false),
-                                disabled: true,
+                                checked: current.requires_approval.unwrap_or(true),
+                                onchange: move |evt| update_draft(&mut draft, |next| next.requires_approval = Some(evt.checked())),
                                 style: "accent-color:var(--cf-brand-purple);",
                             }
-                            span { "Require approval before deploy (not yet persisted)" }
+                            span { "Require approval before deploy" }
                         }
                     }
 
@@ -346,7 +346,7 @@ fn ProductionToggle(props: ProductionToggleProps) -> Element {
             input {
                 r#type: "checkbox",
                 checked: current.is_production.unwrap_or(false),
-                disabled: true,
+                onchange: move |evt| update_draft(&mut draft, |next| next.is_production = Some(evt.checked())),
                 style: "accent-color:var(--cf-danger-berry); margin-top:2px;",
             }
             span { style: "min-width:0;",
@@ -355,7 +355,7 @@ fn ProductionToggle(props: ProductionToggleProps) -> Element {
                     "Production environment"
                 }
                 span { style: "display:block; font-size:11.5px; color:var(--cf-text-muted); margin-top:3px; line-height:1.45;",
-                    "Production flag persistence is tracked by TASK-359. This control is read-only until backend support lands."
+                    "Marks this environment as production. Affects how the UI highlights the environment and future policy enforcement."
                 }
             }
         }

@@ -35,12 +35,22 @@ use crate::queries::environments::{
     set_environment_required_policies, update_environment_metadata,
 };
 
-fn normalize_environment_default_policy(value: Option<&str>) -> &'static str {
-    match value.unwrap_or("manual").trim() {
-        "manual" => "manual",
-        "auto_latest" => "auto_latest",
-        "pinned" => "pinned",
-        _ => "manual",
+/// Validates an optional `default_policy` value.
+///
+/// Returns `Ok(None)` when the value is absent so the caller can apply its
+/// own "use default" or "preserve existing" behavior. Returns `Ok(Some(_))`
+/// for a recognized policy identifier. Returns `Err` for any non-empty,
+/// unrecognized value — invalid input must be rejected with 400, not
+/// silently coerced to "manual".
+fn validate_environment_default_policy(
+    value: Option<&str>,
+) -> std::result::Result<Option<&'static str>, &'static str> {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some("manual") => Ok(Some("manual")),
+        Some("auto_latest") => Ok(Some("auto_latest")),
+        Some("pinned") => Ok(Some("pinned")),
+        Some(_) => Err("default_policy must be one of: manual, auto_latest, pinned"),
     }
 }
 
@@ -137,9 +147,15 @@ pub async fn create_environment(
         return bad_request("Environment color must be a valid #RRGGBB value");
     }
 
-    let default_policy = normalize_environment_default_policy(payload.default_policy.as_deref());
+    let default_policy =
+        match validate_environment_default_policy(payload.default_policy.as_deref()) {
+            Ok(value) => value.unwrap_or("manual"),
+            Err(message) => return bad_request(message),
+        };
     let auto_sync = payload.auto_sync.unwrap_or(true);
-    let requires_approval = payload.requires_approval.unwrap_or(false);
+    // Design default: newly created environments require approval before
+    // deploy until an operator explicitly opts out.
+    let requires_approval = payload.requires_approval.unwrap_or(true);
     let is_production = payload.is_production.unwrap_or(false);
 
     match create_environment_row(
@@ -242,10 +258,20 @@ pub async fn update_environment_handler(
         return bad_request("Environment color must be a valid #RRGGBB value");
     }
 
-    let default_policy = normalize_environment_default_policy(payload.default_policy.as_deref());
-    let auto_sync = payload.auto_sync.unwrap_or(true);
-    let requires_approval = payload.requires_approval.unwrap_or(false);
-    let is_production = payload.is_production.unwrap_or(false);
+    // Fields omitted from the request (`None`) must preserve the environment's
+    // existing stored value rather than being silently overwritten with a
+    // default. This keeps older clients that don't yet send these fields from
+    // resetting production/approval flags on every update. See
+    // `update_environment_metadata` for the SQL-side COALESCE that enforces
+    // this contract.
+    let default_policy =
+        match validate_environment_default_policy(payload.default_policy.as_deref()) {
+            Ok(value) => value,
+            Err(message) => return bad_request(message),
+        };
+    let auto_sync = payload.auto_sync;
+    let requires_approval = payload.requires_approval;
+    let is_production = payload.is_production;
 
     match update_environment_metadata(
         &pool,
@@ -580,6 +606,13 @@ mod tests {
             is_active: true,
             system_count: 12,
             rollup: Default::default(),
+            default_policy: None,
+            auto_sync: None,
+            requires_approval: None,
+            is_production: None,
+            role_assignment_count: None,
+            cache: None,
+            compliance_bundle: None,
         };
 
         let json = serde_json::to_value(&summary).unwrap();
@@ -600,10 +633,57 @@ mod tests {
             is_active: true,
             system_count: 0,
             rollup: Default::default(),
+            default_policy: None,
+            auto_sync: None,
+            requires_approval: None,
+            is_production: None,
+            role_assignment_count: None,
+            cache: None,
+            compliance_bundle: None,
         };
 
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["description"], serde_json::Value::Null);
         assert_eq!(json["system_count"], 0);
+    }
+
+    #[test]
+    fn validate_environment_default_policy_accepts_known_values() {
+        assert_eq!(
+            validate_environment_default_policy(Some("manual")),
+            Ok(Some("manual"))
+        );
+        assert_eq!(
+            validate_environment_default_policy(Some("auto_latest")),
+            Ok(Some("auto_latest"))
+        );
+        assert_eq!(
+            validate_environment_default_policy(Some("pinned")),
+            Ok(Some("pinned"))
+        );
+        // Surrounding whitespace is trimmed.
+        assert_eq!(
+            validate_environment_default_policy(Some("  manual  ")),
+            Ok(Some("manual"))
+        );
+    }
+
+    #[test]
+    fn validate_environment_default_policy_treats_absence_as_none_not_a_default() {
+        // Absent/empty input must not be silently coerced to "manual" here —
+        // that decision belongs to the caller (create defaults vs. update
+        // "preserve existing value").
+        assert_eq!(validate_environment_default_policy(None), Ok(None));
+        assert_eq!(validate_environment_default_policy(Some("")), Ok(None));
+        assert_eq!(validate_environment_default_policy(Some("   ")), Ok(None));
+    }
+
+    #[test]
+    fn validate_environment_default_policy_rejects_unknown_values() {
+        // Unrecognized non-empty values must be rejected (400), never
+        // silently coerced to "manual".
+        assert!(validate_environment_default_policy(Some("auto-latest")).is_err());
+        assert!(validate_environment_default_policy(Some("Manual")).is_err());
+        assert!(validate_environment_default_policy(Some("YOLO")).is_err());
     }
 }

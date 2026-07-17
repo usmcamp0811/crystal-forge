@@ -483,10 +483,13 @@ fn new_environment_form_draft(default_required_policy: Uuid) -> EnvironmentFormD
         description: String::new(),
         color_hex: "#2563eb".to_string(),
         required_policy_ids: vec![default_required_policy],
-        default_policy: None,
-        auto_sync: None,
-        requires_approval: None,
-        is_production: None,
+        // Matches the design's declared defaults for a freshly created
+        // environment (docs/design/CrystalForge/components/EnvironmentsView.jsx):
+        // manual deploys, auto-sync on, approval required, not production.
+        default_policy: Some(EnvironmentDeploymentPolicy::Manual),
+        auto_sync: Some(true),
+        requires_approval: Some(true),
+        is_production: Some(false),
     }
 }
 

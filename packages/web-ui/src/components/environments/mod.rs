@@ -29,17 +29,20 @@ pub struct EnvironmentItem {
     pub cve_critical_high: usize,
     /// Real backend data from `EnvironmentSummary.rollup`.
     pub flake_names: Vec<String>,
-    /// Present only for fallback/mock data until TASK-359 persists this value.
+    /// Real backend data persisted on `environments.default_policy` (TASK-392).
     pub default_policy: Option<EnvironmentDeploymentPolicy>,
-    /// Present only for fallback/mock data until TASK-360 persists this value.
+    /// Real backend data derived from the environment's assigned cache
+    /// destination. `status` reflects `cache_destinations.enabled`, not a
+    /// live reachability probe.
     pub cache: Option<EnvironmentCacheSummary>,
-    /// Present only for fallback/mock data until TASK-362 persists this value.
+    /// Real backend data persisted on `environments.auto_sync` (TASK-392).
     pub auto_sync: Option<bool>,
-    /// Present only for fallback/mock data until TASK-362 persists this value.
+    /// Real backend data persisted on `environments.requires_approval` (TASK-392).
     pub requires_approval: Option<bool>,
-    /// Present only for fallback/mock data until TASK-359 persists this value.
+    /// Real backend data persisted on `environments.is_production` (TASK-392).
     pub is_production: Option<bool>,
-    /// Present only for fallback/mock data until TASK-362 persists this value.
+    /// Real backend data: count of `user_environment_memberships` rows for
+    /// this environment.
     pub role_assignment_count: Option<usize>,
 }
 

@@ -35,6 +35,7 @@ pub struct EnvironmentRow {
     pub cache_name: Option<String>,
     pub cache_url: Option<String>,
     pub cache_type: Option<String>,
+    pub cache_enabled: Option<bool>,
     pub compliance_bundle_id: Option<Uuid>,
     pub compliance_bundle_name: Option<String>,
     pub compliance_bundle_framework: Option<String>,
@@ -66,17 +67,28 @@ fn environment_summary_from_row(r: EnvironmentRow) -> EnvironmentSummary {
             name: r.cache_name.unwrap_or_else(|| "cache".to_string()),
             url,
             cache_type: r.cache_type.unwrap_or_else(|| "unknown".to_string()),
-            status: "healthy".to_string(),
+            // Reflects the cache destination's administrative enabled/disabled
+            // state (`cache_destinations.enabled`). This is not a live
+            // reachability/health probe — no such check exists yet — so we
+            // report the one truthful signal we have rather than fabricating
+            // "healthy".
+            status: if r.cache_enabled.unwrap_or(false) {
+                "enabled".to_string()
+            } else {
+                "disabled".to_string()
+            },
         }),
-        compliance_bundle: r.compliance_bundle_id.map(|id| EnvironmentComplianceSummary {
-            id,
-            name: r
-                .compliance_bundle_name
-                .unwrap_or_else(|| "Compliance bundle".to_string()),
-            framework: r
-                .compliance_bundle_framework
-                .unwrap_or_else(|| "unknown".to_string()),
-        }),
+        compliance_bundle: r
+            .compliance_bundle_id
+            .map(|id| EnvironmentComplianceSummary {
+                id,
+                name: r
+                    .compliance_bundle_name
+                    .unwrap_or_else(|| "Compliance bundle".to_string()),
+                framework: r
+                    .compliance_bundle_framework
+                    .unwrap_or_else(|| "unknown".to_string()),
+            }),
     }
 }
 
@@ -179,6 +191,7 @@ pub async fn list_environments_for_user(
                 cache.cache_name,
                 cache.cache_url,
                 cache.cache_type,
+                cache.cache_enabled,
                 compliance.compliance_bundle_id,
                 compliance.compliance_bundle_name,
                 compliance.compliance_bundle_framework
@@ -194,7 +207,8 @@ pub async fn list_environments_for_user(
                 SELECT
                     cd.name AS cache_name,
                     cd.push_to AS cache_url,
-                    cd.cache_type AS cache_type
+                    cd.cache_type AS cache_type,
+                    cd.enabled AS cache_enabled
                 FROM cache_destination_environments cde
                 JOIN cache_destinations cd ON cd.id = cde.cache_destination_id
                 WHERE cde.environment_id = e.id
@@ -212,7 +226,7 @@ pub async fn list_environments_for_user(
                 ORDER BY cb.name
                 LIMIT 1
             ) compliance ON TRUE
-            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, cache.cache_enabled, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
             ORDER BY e.name ASC
             "#,
         )
@@ -244,6 +258,7 @@ pub async fn list_environments_for_user(
                 cache.cache_name,
                 cache.cache_url,
                 cache.cache_type,
+                cache.cache_enabled,
                 compliance.compliance_bundle_id,
                 compliance.compliance_bundle_name,
                 compliance.compliance_bundle_framework
@@ -262,7 +277,8 @@ pub async fn list_environments_for_user(
                 SELECT
                     cd.name AS cache_name,
                     cd.push_to AS cache_url,
-                    cd.cache_type AS cache_type
+                    cd.cache_type AS cache_type,
+                    cd.enabled AS cache_enabled
                 FROM cache_destination_environments cde
                 JOIN cache_destinations cd ON cd.id = cde.cache_destination_id
                 WHERE cde.environment_id = e.id
@@ -280,7 +296,7 @@ pub async fn list_environments_for_user(
                 ORDER BY cb.name
                 LIMIT 1
             ) compliance ON TRUE
-            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, cache.cache_enabled, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
             ORDER BY e.name ASC
             "#,
         )
@@ -326,6 +342,7 @@ pub async fn find_environment_for_user(
                 cache.cache_name,
                 cache.cache_url,
                 cache.cache_type,
+                cache.cache_enabled,
                 compliance.compliance_bundle_id,
                 compliance.compliance_bundle_name,
                 compliance.compliance_bundle_framework
@@ -341,7 +358,8 @@ pub async fn find_environment_for_user(
                 SELECT
                     cd.name AS cache_name,
                     cd.push_to AS cache_url,
-                    cd.cache_type AS cache_type
+                    cd.cache_type AS cache_type,
+                    cd.enabled AS cache_enabled
                 FROM cache_destination_environments cde
                 JOIN cache_destinations cd ON cd.id = cde.cache_destination_id
                 WHERE cde.environment_id = e.id
@@ -360,7 +378,7 @@ pub async fn find_environment_for_user(
                 LIMIT 1
             ) compliance ON TRUE
             WHERE e.id = $1
-            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, cache.cache_enabled, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
             "#,
         )
         .bind(environment_id)
@@ -391,6 +409,7 @@ pub async fn find_environment_for_user(
                 cache.cache_name,
                 cache.cache_url,
                 cache.cache_type,
+                cache.cache_enabled,
                 compliance.compliance_bundle_id,
                 compliance.compliance_bundle_name,
                 compliance.compliance_bundle_framework
@@ -409,7 +428,8 @@ pub async fn find_environment_for_user(
                 SELECT
                     cd.name AS cache_name,
                     cd.push_to AS cache_url,
-                    cd.cache_type AS cache_type
+                    cd.cache_type AS cache_type,
+                    cd.enabled AS cache_enabled
                 FROM cache_destination_environments cde
                 JOIN cache_destinations cd ON cd.id = cde.cache_destination_id
                 WHERE cde.environment_id = e.id
@@ -428,7 +448,7 @@ pub async fn find_environment_for_user(
                 LIMIT 1
             ) compliance ON TRUE
             WHERE e.id = $2
-            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, cache.cache_enabled, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
             "#,
         )
         .bind(user_id.unwrap())
@@ -496,17 +516,23 @@ pub async fn count_systems_in_environment(pool: &PgPool, environment_id: Uuid) -
     Ok(count)
 }
 
-/// Update an environment name/description and return summary shape.
+/// Update an environment's metadata and return summary shape.
+///
+/// `default_policy`, `auto_sync`, `requires_approval`, and `is_production`
+/// are `Option`: when `None`, the SQL `COALESCE` preserves the environment's
+/// existing stored value instead of overwriting it. This lets callers (and
+/// older clients that don't send these fields) update `name`/`description`/
+/// `color_hex` without silently resetting the newer UI-metadata fields.
 pub async fn update_environment_metadata(
     pool: &PgPool,
     environment_id: Uuid,
     name: &str,
     description: Option<&str>,
     color_hex: &str,
-    default_policy: &str,
-    auto_sync: bool,
-    requires_approval: bool,
-    is_production: bool,
+    default_policy: Option<&str>,
+    auto_sync: Option<bool>,
+    requires_approval: Option<bool>,
+    is_production: Option<bool>,
 ) -> Result<Option<EnvironmentSummary>> {
     let environment_id = sqlx::query_scalar::<_, Uuid>(
         r#"
@@ -514,10 +540,10 @@ pub async fn update_environment_metadata(
         SET name = $2,
             description = $3,
             color_hex = $4,
-            default_policy = $5,
-            auto_sync = $6,
-            requires_approval = $7,
-            is_production = $8,
+            default_policy = COALESCE($5, e.default_policy),
+            auto_sync = COALESCE($6, e.auto_sync),
+            requires_approval = COALESCE($7, e.requires_approval),
+            is_production = COALESCE($8, e.is_production),
             updated_at = NOW()
         WHERE e.id = $1
         RETURNING e.id
@@ -674,10 +700,11 @@ pub async fn get_environment_with_policies(
             COALESCE(e.requires_approval, FALSE) AS requires_approval,
             COALESCE(e.is_production, FALSE) AS is_production,
             COALESCE(rbac.role_assignment_count, 0)::bigint AS role_assignment_count,
-            cache.cache_name,
-            cache.cache_url,
-            cache.cache_type,
-            compliance.compliance_bundle_id,
+                cache.cache_name,
+                cache.cache_url,
+                cache.cache_type,
+                cache.cache_enabled,
+                compliance.compliance_bundle_id,
             compliance.compliance_bundle_name,
             compliance.compliance_bundle_framework
         FROM environments e
@@ -692,7 +719,8 @@ pub async fn get_environment_with_policies(
             SELECT
                 cd.name AS cache_name,
                 cd.push_to AS cache_url,
-                cd.cache_type AS cache_type
+                cd.cache_type AS cache_type,
+                cd.enabled AS cache_enabled
             FROM cache_destination_environments cde
             JOIN cache_destinations cd ON cd.id = cde.cache_destination_id
             WHERE cde.environment_id = e.id
@@ -711,7 +739,7 @@ pub async fn get_environment_with_policies(
             LIMIT 1
         ) compliance ON TRUE
         WHERE e.id = $1
-        GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
+        GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, e.default_policy, e.auto_sync, e.requires_approval, e.is_production, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names, rbac.role_assignment_count, cache.cache_name, cache.cache_url, cache.cache_type, cache.cache_enabled, compliance.compliance_bundle_id, compliance.compliance_bundle_name, compliance.compliance_bundle_framework
         "#,
     )
     .bind(environment_id)
@@ -919,6 +947,18 @@ mod tests {
             offline_count: 0,
             cve_critical_high_count: 9,
             flake_names: vec!["infra".to_string(), "edge".to_string()],
+            default_policy: "manual".to_string(),
+            auto_sync: false,
+            requires_approval: false,
+            is_production: true,
+            role_assignment_count: 0,
+            cache_name: None,
+            cache_url: None,
+            cache_type: None,
+            cache_enabled: None,
+            compliance_bundle_id: None,
+            compliance_bundle_name: None,
+            compliance_bundle_framework: None,
         });
 
         assert_eq!(summary.system_count, 6);
@@ -929,5 +969,241 @@ mod tests {
         assert_eq!(summary.rollup.offline, 0);
         assert_eq!(summary.rollup.cve_critical_high, 9);
         assert_eq!(summary.rollup.flakes, vec!["infra", "edge"]);
+    }
+
+    #[test]
+    fn environment_summary_from_row_reports_cache_disabled_when_not_enabled() {
+        let summary = environment_summary_from_row(EnvironmentRow {
+            id: Uuid::from_u128(7),
+            name: "staging".to_string(),
+            description: None,
+            color_hex: "#B45309".to_string(),
+            is_active: true,
+            system_count: 1,
+            active_system_count: 1,
+            healthy_count: 1,
+            warning_count: 0,
+            critical_count: 0,
+            offline_count: 0,
+            cve_critical_high_count: 0,
+            flake_names: vec![],
+            default_policy: "manual".to_string(),
+            auto_sync: true,
+            requires_approval: false,
+            is_production: false,
+            role_assignment_count: 0,
+            cache_name: Some("staging-cache".to_string()),
+            cache_url: Some("s3://staging-cache".to_string()),
+            cache_type: Some("S3".to_string()),
+            cache_enabled: Some(false),
+            compliance_bundle_id: None,
+            compliance_bundle_name: None,
+            compliance_bundle_framework: None,
+        });
+
+        let cache = summary
+            .cache
+            .expect("cache should be present when a cache is assigned");
+        assert_eq!(cache.status, "disabled");
+    }
+
+    #[test]
+    fn environment_summary_from_row_reports_cache_enabled_when_flagged() {
+        let summary = environment_summary_from_row(EnvironmentRow {
+            id: Uuid::from_u128(8),
+            name: "production".to_string(),
+            description: None,
+            color_hex: "#0F766E".to_string(),
+            is_active: true,
+            system_count: 1,
+            active_system_count: 1,
+            healthy_count: 1,
+            warning_count: 0,
+            critical_count: 0,
+            offline_count: 0,
+            cve_critical_high_count: 0,
+            flake_names: vec![],
+            default_policy: "manual".to_string(),
+            auto_sync: true,
+            requires_approval: true,
+            is_production: true,
+            role_assignment_count: 0,
+            cache_name: Some("prod-cache".to_string()),
+            cache_url: Some("s3://prod-cache".to_string()),
+            cache_type: Some("S3".to_string()),
+            cache_enabled: Some(true),
+            compliance_bundle_id: None,
+            compliance_bundle_name: None,
+            compliance_bundle_framework: None,
+        });
+
+        let cache = summary
+            .cache
+            .expect("cache should be present when a cache is assigned");
+        assert_eq!(cache.status, "enabled");
+    }
+
+    #[test]
+    fn environment_summary_from_row_reports_cache_disabled_when_enabled_flag_missing() {
+        // A NULL enabled flag (should not normally happen given the NOT NULL
+        // column default, but the LATERAL join yields NULL when defensively
+        // coded) must never be interpreted as "healthy"/"enabled".
+        let summary = environment_summary_from_row(EnvironmentRow {
+            id: Uuid::from_u128(9),
+            name: "lab".to_string(),
+            description: None,
+            color_hex: "#6B7280".to_string(),
+            is_active: true,
+            system_count: 1,
+            active_system_count: 1,
+            healthy_count: 1,
+            warning_count: 0,
+            critical_count: 0,
+            offline_count: 0,
+            cve_critical_high_count: 0,
+            flake_names: vec![],
+            default_policy: "manual".to_string(),
+            auto_sync: true,
+            requires_approval: false,
+            is_production: false,
+            role_assignment_count: 0,
+            cache_name: Some("lab-cache".to_string()),
+            cache_url: Some("s3://lab-cache".to_string()),
+            cache_type: Some("S3".to_string()),
+            cache_enabled: None,
+            compliance_bundle_id: None,
+            compliance_bundle_name: None,
+            compliance_bundle_framework: None,
+        });
+
+        let cache = summary
+            .cache
+            .expect("cache should be present when a cache is assigned");
+        assert_eq!(cache.status, "disabled");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // DB-backed regression tests. These require a live Postgres instance
+    // (sqlx::test spins up an isolated database per test using the crate's
+    // migrations) and are `#[ignore]`d by default. Run explicitly against a
+    // local, isolated development database with:
+    //
+    //   cargo test -p default --lib queries::environments::tests::db_tests -- --ignored
+    // ─────────────────────────────────────────────────────────────────────
+    #[cfg(test)]
+    mod db_tests {
+        use super::*;
+
+        async fn insert_environment(
+            pool: &PgPool,
+            name: &str,
+            default_policy: &str,
+            auto_sync: bool,
+            requires_approval: bool,
+            is_production: bool,
+        ) -> EnvironmentSummary {
+            create_environment(
+                pool,
+                name,
+                None,
+                "#2563EB",
+                true,
+                default_policy,
+                auto_sync,
+                requires_approval,
+                is_production,
+            )
+            .await
+            .expect("environment should be created")
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires live database connection"]
+        async fn update_environment_metadata_preserves_omitted_ui_metadata_fields(pool: PgPool) {
+            let created =
+                insert_environment(&pool, "regression-preserve", "pinned", false, true, true).await;
+
+            // Simulate an older client that only sends name/description/color —
+            // the four newer fields are omitted (None). The stored values must
+            // be preserved, not silently reset to defaults.
+            let updated = update_environment_metadata(
+                &pool,
+                created.id,
+                "regression-preserve-renamed",
+                Some("renamed description"),
+                "#16A34A",
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("update should succeed")
+            .expect("environment should still exist");
+
+            assert_eq!(updated.name, "regression-preserve-renamed");
+            assert_eq!(updated.description, Some("renamed description".to_string()));
+            assert_eq!(updated.color_hex, "#16A34A");
+            assert_eq!(updated.default_policy, Some("pinned".to_string()));
+            assert_eq!(updated.auto_sync, Some(false));
+            assert_eq!(updated.requires_approval, Some(true));
+            assert_eq!(updated.is_production, Some(true));
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires live database connection"]
+        async fn update_environment_metadata_applies_explicitly_provided_fields(pool: PgPool) {
+            let created =
+                insert_environment(&pool, "regression-explicit", "manual", true, false, false)
+                    .await;
+
+            let updated = update_environment_metadata(
+                &pool,
+                created.id,
+                "regression-explicit",
+                None,
+                "#2563EB",
+                Some("auto_latest"),
+                Some(false),
+                Some(true),
+                Some(true),
+            )
+            .await
+            .expect("update should succeed")
+            .expect("environment should still exist");
+
+            assert_eq!(updated.default_policy, Some("auto_latest".to_string()));
+            assert_eq!(updated.auto_sync, Some(false));
+            assert_eq!(updated.requires_approval, Some(true));
+            assert_eq!(updated.is_production, Some(true));
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires live database connection"]
+        async fn update_environment_metadata_can_mix_omitted_and_explicit_fields(pool: PgPool) {
+            let created =
+                insert_environment(&pool, "regression-mixed", "manual", true, true, false).await;
+
+            // Only flip is_production; leave the other three untouched.
+            let updated = update_environment_metadata(
+                &pool,
+                created.id,
+                "regression-mixed",
+                None,
+                "#2563EB",
+                None,
+                None,
+                None,
+                Some(true),
+            )
+            .await
+            .expect("update should succeed")
+            .expect("environment should still exist");
+
+            assert_eq!(updated.default_policy, Some("manual".to_string()));
+            assert_eq!(updated.auto_sync, Some(true));
+            assert_eq!(updated.requires_approval, Some(true));
+            assert_eq!(updated.is_production, Some(true));
+        }
     }
 }
