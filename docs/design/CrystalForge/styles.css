@@ -233,15 +233,12 @@ body {
 }
 .brand-mark {
   width: 28px; height: 28px;
-  border-radius: 7px;
-  background: linear-gradient(135deg, #a78bc4 0%, #654a84 100%);
   display: grid; place-items: center;
-  color: #fff;
-  font-weight: 700;
-  font-size: 12px;
-  letter-spacing: 0.5px;
-  box-shadow: 0 4px 16px rgba(130,105,155,0.35);
   flex-shrink: 0;
+}
+.brand-mark img {
+  width: 100%; height: 100%;
+  object-fit: contain;
 }
 .brand-name {
   font-size: 14px; font-weight: 600;
@@ -353,6 +350,27 @@ body {
   position: absolute; left: 10px; top: 50%;
   transform: translateY(-50%); color: var(--cf-text-muted);
   width: 14px; height: 14px; pointer-events: none;
+}
+.search-dropdown {
+  position: absolute; top: calc(100% + 6px); left: 0; right: 0;
+  background: var(--cf-card-bg); border: 1px solid var(--cf-divider);
+  border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.35);
+  padding: 6px; z-index: 60; max-height: 360px; overflow-y: auto;
+}
+.search-empty { padding: 14px 10px; font-size: 12px; color: var(--cf-text-muted); text-align: center; }
+.search-result {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 7px; cursor: pointer;
+  color: var(--cf-text-muted);
+}
+.search-result svg { flex-shrink: 0; }
+.search-result.active, .search-result:hover { background: var(--cf-subtle-bg); }
+.search-result-text { flex: 1; min-width: 0; }
+.search-result-label { font-size: 12.5px; color: var(--cf-text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search-result-sub { font-size: 11px; color: var(--cf-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search-result-type {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--cf-text-muted); flex-shrink: 0;
 }
 .kbd {
   font-family: var(--font-mono);

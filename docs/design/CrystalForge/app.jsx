@@ -360,6 +360,14 @@ function App() {
           onTheme={() => sw.theme(theme === "dark" ? "light" : "dark")}
           onTweaks={() => setTweaksOpen((o) => !o)}
           onNavigate={(v) => { setTopView(v); setDetailSystem(null); }}
+          onSearchResult={(r) => {
+            if (r.type === "system") { setTopView("systems"); openDetail(r.data); }
+            else if (r.type === "flake") { setFlakeFocus({ flake: r.data.name }); setDetailSystem(null); setTopView("flakes"); }
+            else if (r.type === "cache") { setCacheFocus(r.data.id); setDetailSystem(null); setTopView("caches"); }
+            else if (r.type === "policy") { setPolicyFocus(r.data.id); setDetailSystem(null); setTopView("policies"); }
+            else if (r.type === "build") { setBuildFocus({ sha: r.data.commit }); setDetailSystem(null); setTopView("builds"); }
+            else if (r.type === "eval") { setEvalFocus({ sha: r.data.commit }); setDetailSystem(null); setTopView("evals"); }
+          }}
           crumb={
           topView === "builds" ? { current: "Builds" } :
           topView === "evals" ? { current: "Evaluations" } :

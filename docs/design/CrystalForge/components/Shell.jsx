@@ -305,7 +305,7 @@ function Sidebar({ rail, topView, onNav, onToggleRail }) {
   return (
     <aside className={`sidebar${rail ? " rail" : ""}`}>
       <div className="sidebar-brand">
-        <div className="brand-mark">CF</div>
+        <div className="brand-mark"><img src="components/cf-logo.png" alt="Crystal Forge" /></div>
         <div style={{ minWidth: 0 }}>
           <div className="brand-name">Crystal Forge</div>
           <div className="brand-sub">v0.3.0 · dev</div>
@@ -349,7 +349,88 @@ function Sidebar({ rail, topView, onNav, onToggleRail }) {
   );
 }
 
-function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate }) {
+function globalSearch(q) {
+  q = q.trim().toLowerCase();
+  if (!q) return [];
+  const results = [];
+  (typeof SYSTEMS !== "undefined" ? SYSTEMS : []).filter(s => s.hostname.toLowerCase().includes(q)).slice(0, 5)
+    .forEach(s => results.push({ type: "system", label: s.hostname, sub: `${s.environment} · ${s.flake}`, icon: "server", data: s }));
+  (typeof FLAKE_REGISTRY !== "undefined" ? FLAKE_REGISTRY : []).filter(f => f.name.toLowerCase().includes(q)).slice(0, 4)
+    .forEach(f => results.push({ type: "flake", label: f.name, sub: `${f.systemCount} systems · ${f.status}`, icon: "git", data: f }));
+  (typeof CACHE_DESTINATIONS !== "undefined" ? CACHE_DESTINATIONS : []).filter(c => c.name.toLowerCase().includes(q) || c.url.toLowerCase().includes(q)).slice(0, 4)
+    .forEach(c => results.push({ type: "cache", label: c.name, sub: c.url, icon: "cube", data: c }));
+  (typeof POLICIES !== "undefined" ? POLICIES : []).filter(p => p.name.toLowerCase().includes(q)).slice(0, 4)
+    .forEach(p => results.push({ type: "policy", label: p.name, sub: p.description || "", icon: "shield", data: p }));
+  if (q.length >= 3) {
+    const seenB = new Set();
+    [...(typeof ACTIVE_BUILDS !== "undefined" ? ACTIVE_BUILDS : []), ...(typeof HISTORY_BUILDS !== "undefined" ? HISTORY_BUILDS : [])]
+      .filter(b => b.commit && b.commit.toLowerCase().includes(q))
+      .forEach(b => { if (seenB.has(b.commit)) return; seenB.add(b.commit); results.push({ type: "build", label: b.commit, sub: `${b.flake} · ${b.status}`, icon: "build", data: b }); });
+    const seenE = new Set();
+    [...(typeof ACTIVE_EVALS !== "undefined" ? ACTIVE_EVALS : []), ...(typeof HISTORY_EVALS !== "undefined" ? HISTORY_EVALS : [])]
+      .filter(e => e.commit && e.commit.toLowerCase().includes(q))
+      .forEach(e => { if (seenE.has(e.commit)) return; seenE.add(e.commit); results.push({ type: "eval", label: e.commit, sub: `${e.flake} · ${e.status}`, icon: "eval", data: e }); });
+  }
+  return results.slice(0, 10);
+}
+
+function GlobalSearch({ onResult }) {
+  const [query, setQuery] = React.useState("");
+  const [open, setOpen] = React.useState(false);
+  const [active, setActive] = React.useState(0);
+  const wrapRef = React.useRef(null);
+  const inputRef = React.useRef(null);
+  const results = React.useMemo(() => globalSearch(query), [query]);
+
+  React.useEffect(() => {
+    const onDoc = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); inputRef.current?.focus(); setOpen(true); }
+      else if (e.key === "Escape" && document.activeElement === inputRef.current) { setQuery(""); setOpen(false); inputRef.current?.blur(); }
+    };
+    document.addEventListener("mousedown", onDoc);
+    window.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDoc); window.removeEventListener("keydown", onKey); };
+  }, []);
+
+  const pick = (r) => { onResult(r); setQuery(""); setOpen(false); };
+
+  return (
+    <div className="topbar-search" ref={wrapRef}>
+      <Icon name="search" />
+      <input ref={inputRef} className="input focus-ring" placeholder="Search systems, flakes, commits…"
+        value={query}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true); setActive(0); }}
+        onFocus={() => query && setOpen(true)}
+        onKeyDown={(e) => {
+          if (!open || !results.length) return;
+          if (e.key === "ArrowDown") { e.preventDefault(); setActive(a => Math.min(a + 1, results.length - 1)); }
+          else if (e.key === "ArrowUp") { e.preventDefault(); setActive(a => Math.max(a - 1, 0)); }
+          else if (e.key === "Enter") { e.preventDefault(); pick(results[active]); }
+        }} />
+      {!query && <span className="kbd" style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)" }}>⌘K</span>}
+      {open && query && (
+        <div className="search-dropdown">
+          {results.length === 0 ? (
+            <div className="search-empty">No matches for "{query}"</div>
+          ) : results.map((r, i) => (
+            <div key={r.type + r.label + i} className={`search-result${i === active ? " active" : ""}`}
+              onMouseEnter={() => setActive(i)} onMouseDown={(e) => { e.preventDefault(); pick(r); }}>
+              <Icon name={r.icon} size={14} />
+              <div className="search-result-text">
+                <div className="search-result-label mono">{r.label}</div>
+                {r.sub && <div className="search-result-sub">{r.sub}</div>}
+              </div>
+              <span className="search-result-type">{r.type}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult }) {
   const [notifOpen, setNotifOpen] = React.useState(false);
   const bellRef = React.useRef(null);
 
@@ -384,11 +465,7 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate }) {
         )}
         <span className="crumb-current">{crumb?.current || "Systems"}</span>
       </div>
-      <div className="topbar-search">
-        <Icon name="search" />
-        <input className="input focus-ring" placeholder="Search systems, flakes, commits…" />
-        <span className="kbd" style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)" }}>⌘K</span>
-      </div>
+      <GlobalSearch onResult={onSearchResult} />
       <div ref={bellRef} style={{ position:"relative" }}>
         <button className="btn-icon focus-ring topbar-bell" aria-label="Notifications"
           title="Notifications" onClick={() => setNotifOpen(o => !o)}>
