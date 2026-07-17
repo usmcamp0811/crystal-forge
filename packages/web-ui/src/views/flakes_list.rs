@@ -32,8 +32,8 @@ use crate::api::client::{
 };
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
-    EnvironmentSummary, FlakeCommitSystemPath, FlakeRegistryItem, FlakeTimeline, SystemsListParams,
-    TestFlakeCredentialRequest, UpdateFlakeRequest,
+    EnvironmentSummary, FlakeCommitSystemPath, FlakeRegistryItem, FlakeSummary, FlakeTimeline,
+    SystemsListParams, TestFlakeCredentialRequest, UpdateFlakeRequest,
 };
 use crate::components::flake::FlakeSyncErrorBanner;
 use crate::components::layout::Card;
@@ -3224,8 +3224,15 @@ pub fn FlakesListViewNew() -> Element {
             };
             if let Some(flake) = all_flakes.iter().find(|flake| flake.id == target_id) {
                 selected_flake.set(Some(flake.clone()));
-                // Clear focus params so closing and re-opening the panel stays closed.
-                clear_url_params(&["focus_flake_id", "focus_sha"]);
+                // Clear all focus params so closing and re-opening the panel stays closed
+                // and browser history does not retain stale metadata details.
+                clear_url_params(&[
+                    "focus_flake_id",
+                    "focus_sha",
+                    "focus_msg",
+                    "focus_author",
+                    "focus_at",
+                ]);
             }
         });
     }
@@ -3916,7 +3923,7 @@ pub fn FlakesListViewNew() -> Element {
 
 #[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)]
-struct MockFlakeItem {
+pub(crate) struct MockFlakeItem {
     id: i32,
     name: String,
     description: String,
@@ -3933,6 +3940,12 @@ struct MockFlakeItem {
     environment: String,
     error_msg: Option<String>,
     total_commits: i32,
+}
+
+impl MockFlakeItem {
+    pub(crate) fn id(&self) -> i32 {
+        self.id
+    }
 }
 
 fn map_registry_flake_to_view(item: &FlakeRegistryItem) -> MockFlakeItem {
@@ -3967,6 +3980,30 @@ fn map_registry_flake_to_view(item: &FlakeRegistryItem) -> MockFlakeItem {
         // Render this as an explicit unsupported/pending value instead of fabricating one.
         environment: String::new(),
         error_msg: item.last_sync_error.clone(),
+        total_commits: 0,
+    }
+}
+
+pub(crate) fn map_flake_summary_to_tray_item(summary: &FlakeSummary) -> MockFlakeItem {
+    MockFlakeItem {
+        id: summary.id,
+        name: summary.name.clone(),
+        description: "System flake context".to_string(),
+        status: "synced".to_string(),
+        url: summary.repo_url.clone(),
+        branch: "unknown".to_string(),
+        build_scope: String::new(),
+        system_count: 1,
+        latest_commit: summary
+            .latest_commit
+            .clone()
+            .unwrap_or_else(|| "—".to_string()),
+        latest_message: "System deployment context".to_string(),
+        latest_author: "—".to_string(),
+        last_sync_at: "not persisted".to_string(),
+        last_sync_at_raw: None,
+        environment: String::new(),
+        error_msg: None,
         total_commits: 0,
     }
 }
@@ -4016,7 +4053,7 @@ fn build_status_token(status: Option<ApiBuildStatus>) -> Option<String> {
     })
 }
 
-fn map_timeline_commits_to_view(
+pub(crate) fn map_timeline_commits_to_view(
     commits: &[crate::api::models::FlakeCommit],
 ) -> Vec<MockCommitItem> {
     let mut mapped = commits
@@ -4248,7 +4285,7 @@ fn mock_flakes_data() -> Vec<MockFlakeItem> {
 
 #[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)]
-struct MockCommitItem {
+pub(crate) struct MockCommitItem {
     sha: String,
     full_hash: String,
     msg: String,
@@ -5025,7 +5062,7 @@ fn FlakeEnvBadgesNew(
 
 #[allow(dead_code)]
 #[component]
-fn FlakeTrayNew(
+pub(crate) fn FlakeTrayNew(
     flake: MockFlakeItem,
     commits: Vec<MockCommitItem>,
     commits_loading: bool,

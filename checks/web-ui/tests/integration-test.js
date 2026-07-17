@@ -3669,6 +3669,7 @@ const steps = [
     description: "System detail history/logs tabs and edit action",
     action: async (page) => {
       await routeSystemsWarningData(page);
+      await routeFlakeParityData(page);
 
       const historyResponsePromise = page
         .waitForResponse(
@@ -3767,6 +3768,23 @@ const steps = [
         "Expected system detail header to render Edit action",
       );
 
+      await page.getByRole("tab", { name: "Deploy" }).first().click();
+      await page.locator(".sd-commit-sha-link").first().click();
+      await assertVisible(
+        page.locator(".fl-tray").first(),
+        "Expected System Detail commit SHA to open an in-place Flake tray",
+      );
+      const detailPathAfterPeek = new URL(page.url()).pathname;
+      if (!detailPathAfterPeek.startsWith("/systems/00000000-0000-0000-0000-0000000000a1")) {
+        throw new Error(`Expected Flake tray peek to keep System Detail URL, got ${detailPathAfterPeek}`);
+      }
+      await page.locator(".fl-tray .btn-icon").first().click();
+      await assertHidden(
+        page.locator(".fl-tray").first(),
+        "Expected in-place Flake tray to close without leaving System Detail",
+      );
+
+      await unrouteFlakeParityData(page);
       await unrouteSystemsWarningData(page);
     },
   },
