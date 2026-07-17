@@ -1715,6 +1715,7 @@ body {
 .sd-timeline {
   max-height: 320px;
   overflow-y: auto;
+  overflow-x: hidden;
   position: relative;
   -webkit-mask-image: linear-gradient(
     to bottom,
@@ -4147,8 +4148,9 @@ tr.kbd-focused > td {
   font-size: 11px;
   line-height: 1.4;
   color: var(--cf-text-muted);
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   opacity: 0.85;
 }
 
