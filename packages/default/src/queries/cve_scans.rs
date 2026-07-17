@@ -709,3 +709,140 @@ pub async fn resolve_system_cve_scan_target(
         blocked_reason: r.get("blocked_reason"),
     }))
 }
+
+/// Get derivations whose most recent completed CVE scan is stale according to
+/// the configured `scan_schedule_policy` intervals.
+///
+/// A derivation is stale when the time elapsed since its last `completed` scan
+/// exceeds the policy interval for its freshness class:
+/// - **deployed** (last scan ≤ 24 h ago): uses `deployed_interval`
+/// - **recent** (last scan 24 h–30 d ago): uses `recent_interval`
+/// - **archived** (last scan > 30 d ago): uses `archived_interval` (only when
+///   `archived_enabled = TRUE`)
+///
+/// Uses dynamic SQL (not `query!`) because interval strings are stored as text
+/// in the `scan_schedule_policy` singleton row — the same approach used by
+/// `queries/scanning.rs`.  PostgreSQL accepts e.g. `'24h'::INTERVAL` directly.
+///
+/// Derivations with an active in-progress scan or with ≥ 5 failed attempts are
+/// excluded to avoid double-scanning or hammering permanently-failing targets.
+pub async fn get_targets_needing_cve_rescan(
+    pool: &PgPool,
+    limit: Option<i64>,
+) -> anyhow::Result<Vec<Derivation>> {
+    let limit = limit.unwrap_or(10);
+
+    let rows = sqlx::query(
+        r#"
+        WITH policy AS (
+            SELECT
+                deployed_interval,
+                recent_interval,
+                archived_interval,
+                archived_enabled
+            FROM scan_schedule_policy
+            WHERE id = 1
+        ),
+        latest_completed AS (
+            SELECT DISTINCT ON (derivation_id)
+                derivation_id,
+                completed_at
+            FROM cve_scans
+            WHERE status = 'completed'
+            ORDER BY derivation_id, completed_at DESC
+        )
+        SELECT
+            d.id,
+            d.commit_id,
+            d.derivation_type,
+            d.derivation_name,
+            d.derivation_path,
+            d.derivation_target,
+            d.scheduled_at,
+            d.completed_at,
+            d.started_at,
+            d.attempt_count,
+            d.evaluation_duration_ms,
+            d.error_message,
+            d.pname,
+            d.version,
+            d.status_id,
+            d.build_elapsed_seconds,
+            d.build_current_target,
+            d.build_last_activity_seconds,
+            d.build_last_heartbeat,
+            d.cf_agent_enabled,
+            d.store_path
+        FROM derivations d
+        JOIN derivation_statuses ds ON d.status_id = ds.id
+        JOIN latest_completed lc ON lc.derivation_id = d.id
+        CROSS JOIN policy p
+        WHERE ds.name IN ('build-complete', 'complete')
+            AND d.store_path IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM cve_scans cs
+                WHERE cs.derivation_id = d.id
+                  AND cs.status IN ('pending', 'in_progress')
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM cve_scans cs
+                WHERE cs.derivation_id = d.id
+                  AND cs.status = 'failed'
+                  AND cs.attempts >= 5
+            )
+            AND (
+                (NOW() - lc.completed_at <= INTERVAL '24 hours'
+                    AND NOW() - lc.completed_at > p.deployed_interval::INTERVAL)
+                OR
+                (NOW() - lc.completed_at > INTERVAL '24 hours'
+                    AND NOW() - lc.completed_at <= INTERVAL '30 days'
+                    AND NOW() - lc.completed_at > p.recent_interval::INTERVAL)
+                OR
+                (NOW() - lc.completed_at > INTERVAL '30 days'
+                    AND p.archived_enabled = TRUE
+                    AND NOW() - lc.completed_at > p.archived_interval::INTERVAL)
+            )
+        ORDER BY lc.completed_at ASC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let derivations = rows
+        .into_iter()
+        .map(|row| {
+            let derivation_type_str: String = row.try_get("derivation_type").unwrap_or_default();
+            let derivation_type = match derivation_type_str.as_str() {
+                "package" => crate::derivations::DerivationType::Package,
+                _ => crate::derivations::DerivationType::NixOS,
+            };
+            Derivation {
+                id: row.try_get("id").unwrap_or(0),
+                commit_id: row.try_get("commit_id").ok(),
+                derivation_type,
+                derivation_name: row.try_get("derivation_name").unwrap_or_default(),
+                derivation_path: row.try_get("derivation_path").ok(),
+                derivation_target: row.try_get("derivation_target").ok(),
+                scheduled_at: row.try_get("scheduled_at").ok(),
+                completed_at: row.try_get("completed_at").ok(),
+                started_at: row.try_get("started_at").ok(),
+                attempt_count: row.try_get("attempt_count").ok(),
+                evaluation_duration_ms: row.try_get("evaluation_duration_ms").ok(),
+                error_message: row.try_get("error_message").ok(),
+                pname: row.try_get("pname").ok(),
+                version: row.try_get("version").ok(),
+                status_id: row.try_get("status_id").unwrap_or(0),
+                build_elapsed_seconds: row.try_get("build_elapsed_seconds").ok(),
+                build_current_target: row.try_get("build_current_target").ok(),
+                build_last_activity_seconds: row.try_get("build_last_activity_seconds").ok(),
+                build_last_heartbeat: row.try_get("build_last_heartbeat").ok(),
+                cf_agent_enabled: row.try_get("cf_agent_enabled").ok(),
+                store_path: row.try_get("store_path").ok(),
+            }
+        })
+        .collect();
+
+    Ok(derivations)
+}

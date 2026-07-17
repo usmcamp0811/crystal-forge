@@ -1,6 +1,10 @@
+pub mod jobs;
+
+use crate::builder::run_cve_scan_loop;
 use crate::config::{CrystalForgeConfig, FlakeConfig};
 use crate::deployment::spawn_deployment_policy_manager;
 use crate::flake::commits::sync_all_watched_flakes_commits_with_ids;
+use crate::server::jobs::{BackgroundJobHandle, BackgroundJobRegistry};
 use crate::log::log_builder_worker_status;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::DeploymentPolicy;
@@ -382,11 +386,18 @@ pub async fn load_cve_policies(pool: &PgPool) -> Vec<DeploymentPolicy> {
     }
 }
 
+/// Spawn all server background tasks and register controllable jobs in the
+/// provided [`BackgroundJobRegistry`].
+///
+/// The registry is stored on server state so the Admin → Background Jobs tab
+/// (TASK-336.5) can expose live job status and runtime controls (enable/disable,
+/// run-now) without a heavyweight scheduler.
 pub fn spawn_background_tasks(
     cfg: CrystalForgeConfig,
     pool: PgPool,
     cf_state: Arc<crate::handlers::agent_request::CFState>,
     queue_notifier: Arc<QueueNotifier>,
+    job_registry: BackgroundJobRegistry,
 ) {
     let flake_pool = pool.clone();
     let commit_pool = pool.clone();
@@ -394,6 +405,7 @@ pub fn spawn_background_tasks(
     let deployment_pool = pool.clone();
     let artifact_pool = pool.clone();
     let build_log_pool = pool.clone();
+    let cve_pool = pool.clone();
 
     // Get the flake config with a fallback
     let flake_config = cfg.flakes.clone();
@@ -427,7 +439,25 @@ pub fn spawn_background_tasks(
         cfg.server.commit_cache_retention_days,
     ));
 
-    tokio::spawn(spawn_deployment_policy_manager(cfg, deployment_pool));
+    tokio::spawn(spawn_deployment_policy_manager(cfg.clone(), deployment_pool));
+
+    // --- CVE scan background job ---
+    // The job handle is registered in the registry so the Admin Background Jobs
+    // tab (TASK-336.5) can list it, toggle enabled/disabled, and trigger run-now.
+    // vulnix poll_interval comes from [vulnix] config (default: 60 s).
+    let vulnix_poll_interval = cfg.get_vulnix_config().poll_interval;
+    let (cve_job_handle, cve_run_now_rx) = BackgroundJobHandle::new(
+        "cve_scan",
+        "CVE Scan",
+        vulnix_poll_interval,
+        true, // enabled by default
+    );
+    let cve_job_for_task = cve_job_handle.clone();
+    let registry_for_spawn = job_registry.clone();
+    tokio::spawn(async move {
+        registry_for_spawn.register(cve_job_handle).await;
+        run_cve_scan_loop(cve_pool, cve_job_for_task, cve_run_now_rx).await;
+    });
 }
 
 /// Runs daily build log retention cleanup.

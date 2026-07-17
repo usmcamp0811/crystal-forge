@@ -31,6 +31,7 @@ use crystal_forge::{
     queries::cache_destinations::encrypt_plaintext_cache_secrets,
     queries::derivations::reset_non_terminal_derivations,
     queue::QueueNotifier,
+    server::jobs::BackgroundJobRegistry,
     server::memory_monitor_task,
     server::spawn_background_tasks,
 };
@@ -162,11 +163,17 @@ async fn main() -> anyhow::Result<()> {
     let state = CFState::new(pool, server_cfg.clone(), queue_notifier.clone());
     let state_arc = Arc::new(state.clone());
 
+    // Create the background job registry.  Jobs register themselves during
+    // spawn_background_tasks.  The registry will be stored on server state in
+    // TASK-336.5 so the Admin Background Jobs tab can expose live controls.
+    let job_registry = BackgroundJobRegistry::new();
+
     spawn_background_tasks(
         cfg.clone(),
         background_pool,
         state_arc.clone(),
         queue_notifier.clone(),
+        job_registry,
     );
     let mut app = Router::new()
         .route("/status", get(status::status))
