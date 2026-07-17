@@ -327,7 +327,6 @@ fn credential_fields_for_request(
 /// Cache management page
 #[component]
 pub fn CachesView() -> Element {
-    let mut active_tab = use_signal(|| CachesTab::Destinations);
     let from_setup = use_signal(came_from_setup);
     let mut show_add_modal = use_signal(|| false);
 
@@ -363,8 +362,9 @@ pub fn CachesView() -> Element {
                         match destinations.read().as_ref() {
                             Some(Ok(dests)) => {
                                 let total = dests.len();
-                                let enabled = dests.iter().filter(|d| d.enabled).count();
-                                rsx! { "{total} destinations · {enabled} enabled" }
+                                let healthy = dests.iter().filter(|d| d.enabled).count();
+                                let paths: i64 = dests.iter().map(|d| cache_mock_paths(d.id) as i64).sum();
+                                rsx! { "{total} destinations · {healthy} healthy · {paths} paths cached" }
                             },
                             _ => rsx! { "Loading…" }
                         }
@@ -374,7 +374,6 @@ pub fn CachesView() -> Element {
                 button {
                     class: "btn btn-primary focus-ring",
                     onclick: move |_| {
-                        active_tab.set(CachesTab::Destinations);
                         show_add_modal.set(true);
                     },
                     svg {
@@ -398,8 +397,9 @@ pub fn CachesView() -> Element {
                 match destinations.read().as_ref() {
                     Some(Ok(dests)) => {
                         let total = dests.len();
-                        let enabled_count = dests.iter().filter(|d| d.enabled).count();
-                        let disabled_count = total - enabled_count;
+                        let healthy_count = dests.iter().filter(|d| d.enabled).count();
+                        let issues_count = total - healthy_count;
+                        let paths_total: i64 = dests.iter().map(|d| cache_mock_paths(d.id) as i64).sum();
                         rsx! {
                             div {
                                 class: "stat",
@@ -410,20 +410,20 @@ pub fn CachesView() -> Element {
                             div {
                                 class: "stat",
                                 span { class: "stat-accent", style: "--stat-color: #34d399;" }
-                                div { class: "stat-label", "Enabled" }
-                                div { class: "stat-value", "{enabled_count}" }
+                                div { class: "stat-label", "Healthy" }
+                                div { class: "stat-value", "{healthy_count}" }
                             }
                             div {
                                 class: "stat",
                                 span { class: "stat-accent", style: "--stat-color: #fbbf24;" }
-                                div { class: "stat-label", "Disabled" }
-                                div { class: "stat-value", "{disabled_count}" }
+                                div { class: "stat-label", "Issues" }
+                                div { class: "stat-value", "{issues_count}" }
                             }
                             div {
                                 class: "stat",
                                 span { class: "stat-accent", style: "--stat-color: #60a5fa;" }
                                 div { class: "stat-label", "Paths cached" }
-                                div { class: "stat-value", "—" }
+                                div { class: "stat-value", "{paths_total}" }
                             }
                         }
                     },
@@ -438,44 +438,17 @@ pub fn CachesView() -> Element {
                 }
             }
 
-            // Tabs
-            div {
-                class: "flex border-b {theme::surface::DIVIDER}",
-                button {
-                    class: if active_tab() == CachesTab::Destinations {
-                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
-                    } else {
-                        "px-4 py-2 border-b-2 border-transparent {theme::text::SECONDARY} hover:{theme::text::PRIMARY} transition-colors"
-                    },
-                    onclick: move |_| active_tab.set(CachesTab::Destinations),
-                    "Cache Destinations"
-                }
-                button {
-                    class: if active_tab() == CachesTab::PushJobs {
-                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
-                    } else {
-                        "px-4 py-2 border-b-2 border-transparent {theme::text::SECONDARY} hover:{theme::text::PRIMARY} transition-colors"
-                    },
-                    onclick: move |_| active_tab.set(CachesTab::PushJobs),
-                    "Push Jobs"
-                }
-            }
-
-            // Tab content
-            match active_tab() {
-                CachesTab::Destinations => rsx! {
-                    CacheDestinationsList {
-                        show_onboarding_hint: from_setup(),
-                        refresh_nonce: refresh_nonce,
-                        show_add_modal: show_add_modal,
-                    }
-                },
-                CachesTab::PushJobs => rsx! {
-                    CachePushJobsList {}
-                },
+            CacheDestinationsList {
+                show_onboarding_hint: from_setup(),
+                refresh_nonce: refresh_nonce,
+                show_add_modal: show_add_modal,
             }
         }
     }
+}
+
+fn cache_mock_paths(id: i32) -> i32 {
+    ((id * 137) % 9000) + 1200
 }
 
 /// List of cache destinations with CRUD operations

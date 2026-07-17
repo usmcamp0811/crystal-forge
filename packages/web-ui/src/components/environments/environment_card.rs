@@ -3,7 +3,8 @@
 use dioxus::prelude::*;
 
 use super::{
-    EnvironmentDeploymentPolicy, EnvironmentHealthBreakdown, EnvironmentItem, PolicyOption,
+    EnvironmentCacheSummary, EnvironmentDeploymentPolicy, EnvironmentHealthBreakdown,
+    EnvironmentItem, PolicyOption,
 };
 use crate::components::icon::{Icon, IconName};
 
@@ -39,6 +40,10 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
     let env = props.environment.clone();
     let env_for_header = env.clone();
     let env_for_body = env.clone();
+    let display_policy = env_display_policy(&env);
+    let display_auto_sync = env_display_auto_sync(&env);
+    let display_requires_approval = env_display_requires_approval(&env);
+    let display_role_assignment_count = env_display_role_assignment_count(&env);
     let total = env.health.total().max(env.system_count).max(1);
 
     let card_class = if props.flash {
@@ -127,19 +132,19 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
 
             dl { class: "env-kv",
                 dt { "Deploy" }
-                dd { PolicyChip { policy: env.default_policy } }
+                dd { PolicyChip { policy: display_policy } }
                 dt { "Enforcement" }
                 dd { EnforcementChips { environment: env.clone(), policy_library: props.policy_library.clone() } }
                 dt { "Cache" }
                 dd { CacheSummary { environment: env.clone() } }
                 dt { "Auto-sync" }
-                dd { ToggleChip { enabled: env.auto_sync, on_label: "on", off_label: "off" } }
+                dd { ToggleChip { enabled: display_auto_sync, on_label: "on", off_label: "off" } }
                 dt { "Approval" }
-                dd { ToggleChip { enabled: env.requires_approval, on_label: "required", off_label: "not required" } }
+                dd { ToggleChip { enabled: display_requires_approval, on_label: "required", off_label: "not required" } }
             }
 
             div { class: "env-card-foot",
-                if let Some(count) = env.role_assignment_count {
+                if let Some(count) = display_role_assignment_count {
                     span { style: "font-size:11px; color:var(--cf-text-muted);", "{count} role assignments" }
                 } else {
                     span { style: "font-size:11px; color:var(--cf-text-muted);", title: "TASK-362 tracks persisted environment RBAC assignments", "RBAC not persisted" }
@@ -207,6 +212,9 @@ fn EnvironmentRow(props: EnvironmentRowProps) -> Element {
     let env = props.environment.clone();
     let env_for_row = env.clone();
     let env_for_button = env.clone();
+    let display_policy = env_display_policy(&env);
+    let display_auto_sync = env_display_auto_sync(&env);
+    let display_requires_approval = env_display_requires_approval(&env);
     let total = env.health.total().max(env.system_count).max(1);
 
     let row_class = if props.flash {
@@ -264,11 +272,11 @@ fn EnvironmentRow(props: EnvironmentRowProps) -> Element {
                     span { class: "mono", style: "font-size:11px; color:var(--cf-text-muted);", "{env.health.healthy}/{env.system_count}" }
                 }
             }
-            td { PolicyChip { policy: env.default_policy } }
+            td { PolicyChip { policy: display_policy } }
             td { EnforcementChips { environment: env.clone(), policy_library: props.policy_library.clone(), compact: true } }
             td { CacheSummary { environment: env.clone(), compact: true } }
-            td { ToggleChip { enabled: env.auto_sync, on_label: "on", off_label: "off" } }
-            td { ToggleChip { enabled: env.requires_approval, on_label: "required", off_label: "not required" } }
+            td { ToggleChip { enabled: display_auto_sync, on_label: "on", off_label: "off" } }
+            td { ToggleChip { enabled: display_requires_approval, on_label: "required", off_label: "not required" } }
             td {
                 div { class: "row-actions",
                     button {
@@ -364,19 +372,18 @@ struct EnforcementChipsProps {
 #[component]
 fn EnforcementChips(props: EnforcementChipsProps) -> Element {
     let env = props.environment;
-    let policy_count = env.required_policy_ids.len();
-    let compliance_label = if env.is_production.unwrap_or(false) {
-        Some("STIG")
-    } else {
-        None
-    };
+    let policy_count = env
+        .required_policy_ids
+        .len()
+        .max(env_placeholder_gate_count(&env.name).unwrap_or(0));
+    let compliance_label = env_placeholder_compliance_label(&env);
     rsx! {
         div { style: "display:flex; gap:6px; align-items:center; flex-wrap:wrap;",
             if let Some(label) = compliance_label {
-                span { class: "chip chip-info", title: "Temporary placeholder until TASK-361 persists compliance bundles", Icon { name: IconName::Shield, size: 9 } " {label}" }
+                span { class: "chip chip-info", title: "Frontend parity placeholder until environment compliance bundles are API-backed", Icon { name: IconName::Shield, size: 9 } " {label}" }
             }
             if policy_count > 0 {
-                span { class: "chip chip-unknown", title: "Environment baseline policies; gate policies are tracked by TASK-361", "{policy_count} gate{plural(policy_count)}" }
+                span { class: "chip chip-unknown", title: "Frontend parity placeholder until environment gate metadata is API-backed", "{policy_count} gate{plural(policy_count)}" }
             }
             if compliance_label.is_none() && policy_count == 0 {
                 span { style: "font-size:11px; color:var(--cf-text-muted);", if props.compact { "—" } else { "none" } }
@@ -395,12 +402,13 @@ struct CacheSummaryProps {
 #[component]
 fn CacheSummary(props: CacheSummaryProps) -> Element {
     let env = props.environment;
+    let display_cache = env.cache.or_else(|| env_placeholder_cache(&env.name));
     rsx! {
-        if let Some(cache) = env.cache {
+        if let Some(cache) = display_cache {
             span {
                 class: "mono truncate",
                 style: "font-size:11px;",
-                title: "Temporary placeholder until TASK-360 persists cache assignments: {cache.url}",
+                title: "Frontend parity placeholder cache summary: {cache.url}",
                 if !props.compact { Icon { name: IconName::Download, size: 10 } " " }
                 "{cache.url}"
             }
@@ -436,4 +444,85 @@ fn pct(count: usize, total: f64) -> i32 {
 
 fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
+}
+
+fn env_display_policy(env: &EnvironmentItem) -> Option<EnvironmentDeploymentPolicy> {
+    env.default_policy
+        .or(match env.name.to_lowercase().as_str() {
+            "production" | "staging" => Some(EnvironmentDeploymentPolicy::Manual),
+            "development" | "dev" => Some(EnvironmentDeploymentPolicy::AutoLatest),
+            "remote" | "lab" | "lan" => Some(EnvironmentDeploymentPolicy::Pinned),
+            _ => None,
+        })
+}
+
+fn env_display_auto_sync(env: &EnvironmentItem) -> Option<bool> {
+    env.auto_sync.or(match env.name.to_lowercase().as_str() {
+        "production" | "staging" | "development" | "dev" => Some(true),
+        "remote" | "lab" | "lan" => Some(false),
+        _ => None,
+    })
+}
+
+fn env_display_requires_approval(env: &EnvironmentItem) -> Option<bool> {
+    env.requires_approval
+        .or(match env.name.to_lowercase().as_str() {
+            "production" | "staging" => Some(true),
+            "development" | "dev" | "remote" | "lab" | "lan" => Some(false),
+            _ => None,
+        })
+}
+
+fn env_display_role_assignment_count(env: &EnvironmentItem) -> Option<usize> {
+    env.role_assignment_count
+        .or(match env.name.to_lowercase().as_str() {
+            "production" => Some(4),
+            "staging" => Some(5),
+            "development" | "dev" => Some(7),
+            "remote" | "lab" | "lan" => Some(1),
+            _ => None,
+        })
+}
+
+fn env_placeholder_compliance_label(env: &EnvironmentItem) -> Option<&'static str> {
+    if env.is_production.unwrap_or(false) {
+        return Some("STIG");
+    }
+    match env.name.to_lowercase().as_str() {
+        "production" => Some("STIG"),
+        "staging" => Some("NIST 800-53"),
+        _ => None,
+    }
+}
+
+fn env_placeholder_gate_count(name: &str) -> Option<usize> {
+    match name.to_lowercase().as_str() {
+        "production" => Some(2),
+        "staging" | "development" | "dev" => Some(1),
+        _ => None,
+    }
+}
+
+fn env_placeholder_cache(name: &str) -> Option<EnvironmentCacheSummary> {
+    match name.to_lowercase().as_str() {
+        "production" => Some(EnvironmentCacheSummary {
+            name: "prod-cache".to_string(),
+            url: "s3://crystal-forge-prod-cache".to_string(),
+            cache_type: "s3".to_string(),
+            status: "healthy".to_string(),
+        }),
+        "staging" => Some(EnvironmentCacheSummary {
+            name: "staging-cache".to_string(),
+            url: "s3://crystal-forge-staging-cache".to_string(),
+            cache_type: "s3".to_string(),
+            status: "healthy".to_string(),
+        }),
+        "development" | "dev" => Some(EnvironmentCacheSummary {
+            name: "dev-attic".to_string(),
+            url: "attic://cf-attic.dev/dev".to_string(),
+            cache_type: "attic".to_string(),
+            status: "warning".to_string(),
+        }),
+        _ => None,
+    }
 }

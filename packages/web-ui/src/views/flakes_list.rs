@@ -3100,19 +3100,11 @@ pub fn FlakesListViewNew() -> Element {
     };
 
     let flake_count = filtered_flakes.len();
-    let total_systems: i32 = filtered_flakes.iter().map(|f| f.system_count).sum();
-    let synced_count = filtered_flakes
-        .iter()
-        .filter(|f| f.status == "synced")
-        .count();
-    let syncing_count = filtered_flakes
-        .iter()
-        .filter(|f| f.status == "syncing")
-        .count();
-    let error_count = filtered_flakes
-        .iter()
-        .filter(|f| f.status == "error")
-        .count();
+    let total_flake_count = all_flakes.len();
+    let total_systems: i32 = all_flakes.iter().map(|f| f.system_count).sum();
+    let synced_count = all_flakes.iter().filter(|f| f.status == "synced").count();
+    let syncing_count = all_flakes.iter().filter(|f| f.status == "syncing").count();
+    let error_count = all_flakes.iter().filter(|f| f.status == "error").count();
     let flake_alert_ids = raw_flakes
         .iter()
         .filter(|flake| flake.sync_status == "error")
@@ -3246,7 +3238,7 @@ pub fn FlakesListViewNew() -> Element {
                 div {
                     h1 { class: "page-title", "Flakes" }
                     p { class: "page-subtitle",
-                        "{flake_count} tracked · {total_systems} systems · {synced_count} synced"
+                        "{total_flake_count} tracked · {total_systems} systems · {synced_count} synced"
                     }
                 }
                 div { style: "display: flex; gap: 8px;",
@@ -3304,39 +3296,6 @@ pub fn FlakesListViewNew() -> Element {
                             " Add flake"
                         }
                     }
-                }
-            }
-
-            div { class: "stat-strip flakes-stat-strip", "data-testid": "flakes-stat-strip",
-                div { class: "stat",
-                    div { class: "stat-accent", style: "--stat-color: var(--cf-brand-purple);" }
-                    div { class: "stat-label", "Tracked" }
-                    div { class: "stat-value", "{flake_count}" }
-                    div { class: "stat-meta", "registered flakes" }
-                }
-                div { class: "stat",
-                    div { class: "stat-accent", style: "--stat-color: #60a5fa;" }
-                    div { class: "stat-label", "Systems" }
-                    div { class: "stat-value", "{total_systems}" }
-                    div { class: "stat-meta", "mapped hosts" }
-                }
-                div { class: "stat",
-                    div { class: "stat-accent", style: "--stat-color: #34d399;" }
-                    div { class: "stat-label", "Synced" }
-                    div { class: "stat-value", "{synced_count}" }
-                    div { class: "stat-meta", "latest status clean" }
-                }
-                div { class: "stat",
-                    div { class: "stat-accent", style: "--stat-color: #f59e0b;" }
-                    div { class: "stat-label", "Syncing" }
-                    div { class: "stat-value", "{syncing_count}" }
-                    div { class: "stat-meta", "queued or building" }
-                }
-                div { class: "stat",
-                    div { class: "stat-accent", style: "--stat-color: #f87171;" }
-                    div { class: "stat-label", "Errors" }
-                    div { class: "stat-value", "{error_count}" }
-                    div { class: "stat-meta", "needs attention" }
                 }
             }
 

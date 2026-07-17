@@ -7,6 +7,8 @@ use crate::alerts::{
     NAV_BADGES, acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item,
     should_flash,
 };
+use crate::api::client::fetch_systems;
+use crate::api::models::{HealthStatus, SortOrder, SystemsListParams};
 
 use crate::components::environments::{
     EnvironmentCard, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentFormModal,
@@ -219,7 +221,7 @@ pub fn EnvironmentsListView() -> Element {
             div { class: "page-head",
                 div {
                     h1 { class: "page-title", "Environments" }
-                    p { class: "page-subtitle", "{items.len()} tiers · {totals.systems} systems · {totals.caches}/{items.len()} caches configured" }
+                    p { class: "page-subtitle", "{items.len()} tiers · {totals.systems} systems · {totals.caches} caches configured" }
                 }
                 div { style: "display:flex; gap:8px;",
                     button {
@@ -585,59 +587,122 @@ struct EnvPanelProps {
     on_edit: EventHandler<EnvironmentItem>,
 }
 
+#[derive(Props, Clone, PartialEq)]
+struct EnvPanelSystemsProps {
+    env_name: String,
+    expected_count: usize,
+}
+
 #[component]
 fn EnvPanel(props: EnvPanelProps) -> Element {
     let env = props.env.clone();
     let env_for_edit = env.clone();
-    let nav = use_navigator();
-    let nav_for_cache = nav.clone();
+    let placeholder_meta = env_panel_placeholder_meta(&env.name);
+    let description_text = env
+        .description
+        .clone()
+        .or_else(|| placeholder_meta.description.map(str::to_string));
+    let display_policy = env.default_policy.or(placeholder_meta.default_policy);
+    let display_auto_sync = env.auto_sync.or(placeholder_meta.auto_sync);
+    let display_requires_approval = env.requires_approval.or(placeholder_meta.requires_approval);
+    let display_role_assignment_count = env
+        .role_assignment_count
+        .or(placeholder_meta.role_assignment_count);
+    let display_cache = env.cache.clone().or_else(|| placeholder_meta.cache.clone());
+    let display_gate_count = if env.required_policy_ids.is_empty() {
+        placeholder_meta.gate_count
+    } else {
+        Some(env.required_policy_ids.len())
+    };
+    let display_compliance_label = placeholder_meta.compliance_label;
+    let is_production = env
+        .is_production
+        .or(placeholder_meta.is_production)
+        .unwrap_or(false);
     let total = env.health.total().max(env.system_count).max(1) as f64;
-    let has_cache = env.cache.is_some();
-    let cache_url = env
-        .cache
-        .as_ref()
-        .map(|c| c.url.clone())
-        .unwrap_or_default();
-    let is_production = env.is_production.unwrap_or(false);
     let no_health = env.health.total() == 0;
+    let nav = use_navigator();
+    let cache_nav = nav.clone();
+    let cache_url = display_cache
+        .as_ref()
+        .map(|cache| cache.url.clone())
+        .unwrap_or_default();
+    let cache_url_for_label = cache_url.clone();
+    let cache_url_for_title = cache_url.clone();
 
     rsx! {
-        // Backdrop — clicking outside closes the panel
         div {
             class: "side-panel-backdrop",
             onclick: move |_| props.on_close.call(()),
         }
 
-        aside { class: "side-panel",
-            // Panel header
+        aside { class: "side-panel", role: "dialog", aria_modal: "true",
             div { class: "panel-head",
-                div { style: "display:flex; align-items:center; gap:8px; min-width:0;",
-                    span { class: "env-dot", style: "background:{env.color_hex}; flex-shrink:0;" }
-                    span { class: "panel-title", style: "min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;",
+                div { class: "panel-title",
+                    h2 {
+                        span { class: "env-dot", style: "background:{env.color_hex};" }
                         "{env.name}"
-                    }
-                    if is_production {
-                        span { class: "env-prod-badge",
-                            Icon { name: IconName::Shield, size: 9 }
-                            " PROD"
+                        if is_production {
+                            span { class: "env-prod-badge",
+                                Icon { name: IconName::Shield, size: 9 }
+                                " PROD"
+                            }
                         }
+                    }
+                    if let Some(description) = description_text {
+                        span { class: "fqdn", "{description}" }
                     }
                 }
                 button {
                     class: "btn-icon focus-ring",
-                    title: "Close",
                     onclick: move |_| props.on_close.call(()),
-                    Icon { name: IconName::X, size: 14 }
+                    aria_label: "Close",
+                    Icon { name: IconName::X, size: 16 }
                 }
             }
 
             div { class: "panel-body",
-                // Health bar section
-                div { class: "panel-section",
-                    div { style: "font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:var(--cf-text-muted); margin-bottom:8px;",
-                        "Health"
+                if display_policy.is_some()
+                    || display_auto_sync.is_some()
+                    || display_requires_approval.is_some()
+                {
+                    section { class: "panel-section",
+                        div { style: "display:flex; gap:8px; flex-wrap:wrap;",
+                            if let Some(policy) = display_policy {
+                                span {
+                                    class: "chip {policy_chip_class(policy)}",
+                                    "{policy.label()}"
+                                }
+                            }
+                            if let Some(auto_sync) = display_auto_sync {
+                                {
+                                    let auto_sync_class = if auto_sync { "chip-healthy" } else { "chip-unknown" };
+                                    rsx! {
+                                        span {
+                                            class: "chip {auto_sync_class}",
+                                            if auto_sync { "auto-sync on" } else { "auto-sync off" }
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(requires_approval) = display_requires_approval {
+                                {
+                                    let approval_class = if requires_approval { "chip-warning" } else { "chip-healthy" };
+                                    rsx! {
+                                        span {
+                                            class: "chip {approval_class}",
+                                            if requires_approval { "approval required" } else { "no approval needed" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
-                    div { class: "env-health-bar", style: "height:10px; border-radius:5px; overflow:hidden; display:flex;",
+                }
+
+                section { class: "panel-section",
+                    h3 { "Health" }
+                    div { class: "env-health-bar", style: "margin-bottom:8px;",
                         if env.health.healthy > 0 {
                             div { style: "width:{pct_f(env.health.healthy, total)}%; background:#34d399;", title: "{env.health.healthy} healthy" }
                         }
@@ -654,7 +719,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                             div { style: "width:100%; background:var(--cf-divider);" }
                         }
                     }
-                    div { class: "env-health-legend", style: "margin-top:6px;",
+                    div { class: "env-health-legend",
                         if env.health.healthy > 0 {
                             span { span { class: "env-health-sw", style: "background:#34d399;" } "{env.health.healthy} healthy" }
                         }
@@ -670,24 +735,24 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                         if no_health {
                             span { style: "color:var(--cf-text-muted); font-size:11px;", "No health data" }
                         }
+                        if env.cve_critical_high > 0 {
+                            span { style: "margin-left:auto;",
+                                Icon { name: IconName::Shield, size: 10 }
+                                " {env.cve_critical_high} CVE"
+                            }
+                        }
                     }
                 }
 
-                // Configuration section
-                div { class: "panel-section",
-                    div { style: "font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:var(--cf-text-muted); margin-bottom:8px;",
-                        "Configuration"
-                    }
+                section { class: "panel-section",
+                    h3 { "Configuration" }
                     dl { class: "kv-grid",
-                        dt { "Systems" }
-                        dd { "{env.system_count}" }
-
                         dt { "Cache" }
                         dd {
-                            if has_cache {
+                            if display_cache.is_some() {
                                 button {
-                                    class: "btn-link focus-ring",
-                                    style: "font-size:12px; cursor:pointer; color:var(--cf-brand-purple); background:none; border:none; padding:0; text-align:left;",
+                                    class: "sd-commit-sha-link",
+                                    style: "background:none; border:none; padding:0; margin:0; text-align:left;",
                                     onclick: move |_| {
                                         if let Some(window) = web_sys::window() {
                                             let encoded = js_sys::encode_uri_component(&cache_url)
@@ -695,81 +760,259 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                                                 .unwrap_or_else(|| cache_url.clone());
                                             let _ = window.location().set_href(&format!("/caches?focus={encoded}"));
                                         } else {
-                                            nav_for_cache.push(Route::CachesView {});
+                                            cache_nav.push(Route::CachesView {});
                                         }
                                     },
-                                    Icon { name: IconName::Link, size: 10 }
-                                    " {cache_url}"
+                                    title: "Open {cache_url_for_title} in Caches",
+                                    Icon { name: IconName::Download, size: 10 }
+                                    " {cache_url_for_label}"
                                 }
                             } else {
-                                button {
-                                    class: "btn-link focus-ring",
-                                    style: "font-size:12px; cursor:pointer; color:var(--cf-text-muted); background:none; border:none; padding:0; text-align:left;",
-                                    onclick: move |_| { nav_for_cache.push(Route::CachesView {}); },
-                                    "not configured →"
+                                span { style: "color:var(--cf-text-muted); font-style:italic;", "not configured" }
+                            }
+                        }
+
+                        dt { "Enforcement" }
+                        dd {
+                            div { style: "display:flex; gap:6px; flex-wrap:wrap; align-items:center;",
+                                if let Some(compliance_label) = display_compliance_label {
+                                    button {
+                                        class: "chip chip-info sd-commit-sha-link",
+                                        style: "background:unset;",
+                                        title: "Open Compliance",
+                                        onclick: move |_| { nav.push(Route::ComplianceView {}); },
+                                        Icon { name: IconName::Shield, size: 9 }
+                                        " {compliance_label}"
+                                    }
+                                }
+                                if let Some(gate_count) = display_gate_count {
+                                    span { class: "chip chip-unknown",
+                                        "{gate_count} gate{plural_s(gate_count)}"
+                                    }
+                                }
+                                if display_compliance_label.is_none() && display_gate_count.is_none() {
+                                    span { style: "font-size:11px; color:var(--cf-text-muted);", "none" }
                                 }
                             }
                         }
 
-                        dt { "Compliance" }
+                        dt { "Role assignments" }
                         dd {
-                            span { style: "font-size:12px; color:var(--cf-text-muted);",
-                                if is_production {
-                                    "not persisted"
-                                } else {
-                                    "none"
-                                }
-                            }
-                        }
-
-                        dt { "Roles" }
-                        dd {
-                            if let Some(count) = env.role_assignment_count {
-                                span { style: "font-size:12px;", "{count} assignments" }
+                            if let Some(count) = display_role_assignment_count {
+                                "{count}"
                             } else {
-                                span { style: "font-size:12px; color:var(--cf-text-muted);", title: "TASK-362 tracks persisted environment RBAC assignments", "not persisted" }
+                                span { style: "color:var(--cf-text-muted);", title: "TASK-362 tracks persisted environment RBAC assignments", "not persisted" }
                             }
                         }
                     }
                 }
 
-                // Systems section — show count since full system list isn't loaded here
-                div { class: "panel-section",
-                    div { style: "font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:var(--cf-text-muted); margin-bottom:8px;",
-                        "Systems"
-                    }
-                    if env.system_count == 0 {
-                        p { style: "font-size:12px; color:var(--cf-text-muted);", "No systems in this environment." }
+                section { class: "panel-section",
+                    h3 { "Flakes in use" }
+                    if env.flake_names.is_empty() {
+                        div { style: "font-size:12px; color:var(--cf-text-muted);", "none deployed" }
                     } else {
-                        p { style: "font-size:12px; color:var(--cf-text-secondary);",
-                            span { style: "font-weight:600;", "{env.system_count}" }
-                            " system{plural_s(env.system_count)} assigned"
-                        }
-                        if !env.flake_names.is_empty() {
-                            div { style: "display:flex; flex-wrap:wrap; gap:4px; margin-top:6px;",
-                                for flake in env.flake_names.iter().take(8) {
-                                    span { class: "chip chip-unknown mono", style: "font-size:10px;", "{flake}" }
-                                }
-                                if env.flake_names.len() > 8 {
-                                    span { class: "chip chip-unknown", style: "font-size:10px;", "+{env.flake_names.len() - 8} more" }
-                                }
+                        div { style: "display:flex; gap:6px; flex-wrap:wrap;",
+                            for flake in &env.flake_names {
+                                span { class: "chip chip-unknown mono", style: "font-size:11px;", "{flake}" }
                             }
                         }
                     }
                 }
 
-                // Actions
-                div { class: "panel-actions",
-                    button {
-                        class: "btn btn-subtle focus-ring",
-                        style: "width:100%;",
-                        onclick: move |_| props.on_edit.call(env_for_edit.clone()),
-                        Icon { name: IconName::Gear, size: 13 }
-                        " Edit environment"
+                EnvPanelSystems {
+                    env_name: env.name.clone(),
+                    expected_count: env.system_count,
+                }
+            }
+
+            div { class: "panel-actions",
+                button {
+                    class: "btn btn-primary focus-ring",
+                    onclick: move |_| props.on_edit.call(env_for_edit.clone()),
+                    Icon { name: IconName::Gear, size: 12 }
+                    " Edit environment"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn EnvPanelSystems(props: EnvPanelSystemsProps) -> Element {
+    let nav = use_navigator();
+    let env_name = props.env_name.clone();
+    let systems = use_resource(move || {
+        let env_name = env_name.clone();
+        async move {
+            fetch_systems(&SystemsListParams {
+                page: Some(1),
+                per_page: Some(200),
+                search: None,
+                health_status: None,
+                deployment_status: None,
+                environment: Some(env_name),
+                sort_by: Some("hostname".to_string()),
+                sort_order: Some(SortOrder::Asc),
+            })
+            .await
+            .map(|response| response.items)
+        }
+    });
+
+    rsx! {
+        section { class: "panel-section",
+            h3 { "Systems ({props.expected_count})" }
+            match systems.read().as_ref() {
+                None => rsx! {
+                    if props.expected_count == 0 {
+                        div { style: "font-size:12px; color:var(--cf-text-muted);", "No systems in this environment yet." }
+                    } else {
+                        div { style: "font-size:12px; color:var(--cf-text-muted);", "Loading systems…" }
+                    }
+                },
+                Some(Ok(items)) if !items.is_empty() => rsx! {
+                    div { style: "display:flex; flex-direction:column; gap:6px;",
+                        for system in items.iter().take(8) {
+                            button {
+                                class: "sd-commit-sha-link",
+                                style: "display:flex; align-items:center; gap:8px; font-size:12.5px; padding:3px 4px; margin:-3px -4px; background:none; border:none; width:100%; text-align:left;",
+                                onclick: {
+                                    let nav = nav.clone();
+                                    let system_id = system.id.to_string();
+                                    move |_| {
+                                        nav.push(Route::SystemDetailView { id: system_id.clone() });
+                                    }
+                                },
+                                span { class: "status-dot", style: "--status-color: {system_status_color(&system.health_status)};" }
+                                span { class: "mono truncate", style: "flex:1; text-align:left;", "{system.hostname}" }
+                            }
+                        }
+                        if items.len() > 8 {
+                            div { style: "font-size:11px; color:var(--cf-text-muted);", "+{items.len() - 8} more" }
+                        }
+                    }
+                },
+                Some(Ok(_)) => rsx! {
+                    div { style: "font-size:12px; color:var(--cf-text-muted);", "No systems in this environment yet." }
+                },
+                Some(Err(_)) => rsx! {
+                    if props.expected_count == 0 {
+                        div { style: "font-size:12px; color:var(--cf-text-muted);", "No systems in this environment yet." }
+                    } else {
+                        div { style: "font-size:12px; color:var(--cf-text-secondary);",
+                            span { style: "font-weight:600;", "{props.expected_count}" }
+                            " system{plural_s(props.expected_count)} assigned"
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+fn policy_chip_class(policy: EnvironmentDeploymentPolicy) -> &'static str {
+    match policy {
+        EnvironmentDeploymentPolicy::Manual => "chip-warning",
+        EnvironmentDeploymentPolicy::AutoLatest => "chip-healthy",
+        EnvironmentDeploymentPolicy::Pinned => "chip-unknown",
+    }
+}
+
+fn system_status_color(status: &HealthStatus) -> &'static str {
+    match status {
+        HealthStatus::Healthy => "#34d399",
+        HealthStatus::Warning => "#fbbf24",
+        HealthStatus::Critical => "#f87171",
+        HealthStatus::Offline => "#6b7280",
+    }
+}
+
+#[derive(Clone)]
+struct EnvPanelPlaceholderMeta {
+    description: Option<&'static str>,
+    compliance_label: Option<&'static str>,
+    default_policy: Option<EnvironmentDeploymentPolicy>,
+    auto_sync: Option<bool>,
+    requires_approval: Option<bool>,
+    is_production: Option<bool>,
+    role_assignment_count: Option<usize>,
+    gate_count: Option<usize>,
+    cache: Option<crate::components::environments::EnvironmentCacheSummary>,
+}
+
+fn env_panel_placeholder_meta(name: &str) -> EnvPanelPlaceholderMeta {
+    match name.trim().to_lowercase().as_str() {
+        "production" => EnvPanelPlaceholderMeta {
+            description: Some("Customer-facing production tier. Strictest deployment policy."),
+            compliance_label: Some("STIG"),
+            default_policy: Some(EnvironmentDeploymentPolicy::Manual),
+            auto_sync: Some(true),
+            requires_approval: Some(true),
+            is_production: Some(true),
+            role_assignment_count: Some(4),
+            gate_count: Some(2),
+            cache: Some(crate::components::environments::EnvironmentCacheSummary {
+                name: "prod-cache".to_string(),
+                url: "s3://crystal-forge-prod-cache".to_string(),
+                cache_type: "s3".to_string(),
+                status: "healthy".to_string(),
+            }),
+        },
+        "staging" => EnvPanelPlaceholderMeta {
+            description: Some("Pre-production validation tier. Mirrors production."),
+            compliance_label: Some("NIST 800-53"),
+            default_policy: Some(EnvironmentDeploymentPolicy::Manual),
+            auto_sync: Some(true),
+            requires_approval: Some(true),
+            is_production: Some(false),
+            role_assignment_count: Some(5),
+            gate_count: Some(1),
+            cache: Some(crate::components::environments::EnvironmentCacheSummary {
+                name: "staging-cache".to_string(),
+                url: "s3://crystal-forge-staging-cache".to_string(),
+                cache_type: "s3".to_string(),
+                status: "healthy".to_string(),
+            }),
+        },
+        "development" | "dev" => EnvPanelPlaceholderMeta {
+            description: Some("Development sandbox. Free-form, faster iteration."),
+            compliance_label: None,
+            default_policy: Some(EnvironmentDeploymentPolicy::AutoLatest),
+            auto_sync: Some(true),
+            requires_approval: Some(false),
+            is_production: Some(false),
+            role_assignment_count: Some(7),
+            gate_count: Some(1),
+            cache: Some(crate::components::environments::EnvironmentCacheSummary {
+                name: "dev-attic".to_string(),
+                url: "attic://cf-attic.dev/dev".to_string(),
+                cache_type: "attic".to_string(),
+                status: "warning".to_string(),
+            }),
+        },
+        "lab" | "remote" | "lan" => EnvPanelPlaceholderMeta {
+            description: Some("Testing and unmanaged systems tier."),
+            compliance_label: None,
+            default_policy: Some(EnvironmentDeploymentPolicy::Pinned),
+            auto_sync: Some(false),
+            requires_approval: Some(false),
+            is_production: Some(false),
+            role_assignment_count: Some(1),
+            gate_count: None,
+            cache: None,
+        },
+        _ => EnvPanelPlaceholderMeta {
+            description: None,
+            compliance_label: None,
+            default_policy: Some(EnvironmentDeploymentPolicy::Manual),
+            auto_sync: Some(true),
+            requires_approval: Some(false),
+            is_production: Some(false),
+            role_assignment_count: None,
+            gate_count: None,
+            cache: None,
+        },
     }
 }
 

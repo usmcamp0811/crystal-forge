@@ -1101,6 +1101,7 @@ pub fn SystemDetailView(id: String) -> Element {
                             system: system.clone(),
                             now: now,
                             current_commit: overview_current_commit.clone(),
+                            target_store_path: deployment_progress.as_ref().map(|progress| progress.target_store_path.clone()),
                             history_entries: effective_history_entries.clone(),
                             on_open_cves: move |_| active_tab.set(Tab::Cves),
                             on_view_history: move |_| active_tab.set(Tab::History),
@@ -2082,6 +2083,7 @@ fn OverviewTab(
     system: SystemDetail,
     now: chrono::DateTime<chrono::Utc>,
     current_commit: Option<SystemCommitHistory>,
+    target_store_path: Option<String>,
     history_entries: Vec<SystemHistoryEntry>,
     on_open_cves: EventHandler<()>,
     on_view_history: EventHandler<()>,
@@ -2127,11 +2129,14 @@ fn OverviewTab(
         .as_ref()
         .map(|f| f.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
-    let flake_commit = system
-        .flake
+    let flake_commit = current_commit
         .as_ref()
-        .and_then(|f| f.latest_commit.clone())
+        .map(|commit| commit.hash.clone())
+        .or_else(|| system.flake.as_ref().and_then(|f| f.latest_commit.clone()))
         .unwrap_or_else(|| "unknown".to_string());
+    let flake_commit_for_open = flake_commit.clone();
+    let flake_commit_for_label = flake_commit.clone();
+    let flake_commit_for_title = flake_commit.clone();
     let flake_summary_for_commit = system.flake.clone();
     let nixos_version = system
         .nixos_version
@@ -2180,6 +2185,12 @@ fn OverviewTab(
         } else {
             ""
         };
+    let store_path_text = system
+        .current_store_path
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let target_store_path_text =
+        target_store_path.filter(|target| !target.is_empty() && target != &store_path_text);
     let commit_message_text = current_commit
         .as_ref()
         .map(|commit| commit.message.clone())
@@ -2252,10 +2263,10 @@ fn OverviewTab(
                             class: "tl-commit-link mono focus-ring",
                             title: "Open this commit in Flakes",
                             onclick: move |_| {
-                                if let (Some(flake), false) = (flake_summary_for_commit.clone(), flake_commit == "unknown") {
+                                if let (Some(flake), false) = (flake_summary_for_commit.clone(), flake_commit_for_open == "unknown") {
                                     on_open_flake_commit.call(FlakeCommitPeekTarget {
                                         flake,
-                                        sha: flake_commit.clone(),
+                                        sha: flake_commit_for_open.clone(),
                                         meta: CommitFocusMeta {
                                             msg: Some(commit_message_text.clone()),
                                             author: current_commit.as_ref().map(|commit| commit.author.clone()),
@@ -2265,17 +2276,17 @@ fn OverviewTab(
                                 }
                             },
                             Icon { name: IconName::Git, size: 11 }
-                            " {flake_commit} "
+                            " {flake_commit_for_label} "
                             Icon { name: IconName::ArrowRight, size: 10 }
                         }
                         " "
                         button {
                             class: "tl-commit-link mono focus-ring",
-                            title: "Open builds",
+                            title: "Open the build for {flake_commit_for_title}",
                             onclick: move |_| {
                                 nav.push(Route::BuildsView {});
                             },
-                            Icon { name: IconName::Deploy, size: 11 }
+                            Icon { name: IconName::Build, size: 11 }
                             " build {generation_text} "
                             Icon { name: IconName::ArrowRight, size: 10 }
                         }
@@ -2284,6 +2295,23 @@ fn OverviewTab(
                     dt { "Generation" } dd { class: "mono", "{generation_text}{generation_mismatch_note}" }
                     dt { "NixOS" } dd { class: "mono", "{nixos_version}" }
                     dt { "Kernel" } dd { class: "mono", "{kernel}" }
+                    dt { "Store path" }
+                    dd {
+                        class: "mono",
+                        style: "font-size:11px; white-space:normal; word-break:break-all; line-height:1.4;",
+                        title: "{store_path_text}",
+                        "{store_path_text}"
+                    }
+                    if let Some(target_store_path_text) = target_store_path_text {
+                        dt { style: "color:#fbbf24;", "Target" }
+                        dd {
+                            class: "mono",
+                            style: "font-size:11px; white-space:normal; word-break:break-all; line-height:1.4; color:#fbbf24;",
+                            title: "{target_store_path_text}",
+                            "{target_store_path_text}"
+                            span { class: "chip chip-warning", style: "margin-left:6px; font-size:10px;", "drift" }
+                        }
+                    }
                 }
             }
 
