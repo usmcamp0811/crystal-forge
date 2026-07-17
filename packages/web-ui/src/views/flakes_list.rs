@@ -246,6 +246,9 @@ struct NewFlakeDraft {
     name: String,
     repo_url: String,
     branch: String,
+    description: String,
+    auto_sync: bool,
+    sync_interval: String,
     build_scope: String,
     credential_type: String,
     credential_username: String,
@@ -261,6 +264,8 @@ struct EditFlakeDraft {
     branch: String,
     environments: Vec<String>,
     description: String,
+    auto_sync: bool,
+    sync_interval: String,
     build_scope: String,
     credential_type: String,
     credential_username: String,
@@ -425,17 +430,50 @@ fn AddFlakeForm(
                                 draft.set(next);
                             }
                         }
+                        label {
+                            class: "space-y-2 block md:col-span-2",
+                            span { class: "text-xs uppercase tracking-wide text-gray-500", "Description" }
+                            input {
+                                class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                                value: "{draft.read().description}",
+                                placeholder: "Short description shown in the registry",
+                                oninput: move |evt| {
+                                    let mut next = draft.read().clone();
+                                    next.description = evt.value();
+                                    draft.set(next);
+                                },
+                            }
+                        }
                         div { class: "md:col-span-2", style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 12px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 45%, var(--cf-card-bg));",
-                            label { style: "display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--cf-text-muted); cursor: not-allowed;",
-                                input { r#type: "checkbox", disabled: true }
+                            label { style: "display: flex; gap: 8px; align-items: center; font-size: 13px; cursor: pointer;",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: draft.read().auto_sync,
+                                    oninput: move |evt| {
+                                        let mut next = draft.read().clone();
+                                        next.auto_sync = evt.checked();
+                                        draft.set(next);
+                                    },
+                                    style: "accent-color: var(--cf-brand-purple);"
+                                }
                                 span { "Auto-sync" }
                             }
                             div { class: "field",
                                 label { "Sync interval" }
-                                select { class: "input focus-ring", disabled: true,
-                                    option { "not persisted" }
+                                select {
+                                    class: "input focus-ring",
+                                    value: "{draft.read().sync_interval}",
+                                    disabled: !draft.read().auto_sync,
+                                    onchange: move |evt| {
+                                        let mut next = draft.read().clone();
+                                        next.sync_interval = evt.value();
+                                        draft.set(next);
+                                    },
+                                    option { value: "1m", "Every 1 min" }
+                                    option { value: "5m", "Every 5 min" }
+                                    option { value: "15m", "Every 15 min" }
+                                    option { value: "1h", "Every hour" }
                                 }
-                                div { class: "help", "Auto-sync scheduling is not persisted by the current backend API." }
                             }
                         }
                     }
@@ -646,7 +684,7 @@ fn EditFlakeDialog(
     let draft_for_repo = draft.clone();
     let draft_for_branch = draft.clone();
 
-    let draft_signal = use_signal(|| draft.clone());
+    let mut draft_signal = use_signal(|| draft.clone());
     {
         let mut draft_signal = draft_signal.clone();
         let draft = draft.clone();
@@ -762,28 +800,50 @@ fn EditFlakeDialog(
                         input {
                             class: "input focus-ring",
                             value: "{draft.description}",
-                            placeholder: "not persisted",
-                            disabled: true,
+                            placeholder: "Short description shown in the registry",
+                            oninput: move |evt| {
+                                let mut next = draft_signal.read().clone();
+                                next.description = evt.value();
+                                draft_signal.set(next.clone());
+                                on_change.call(next);
+                            },
                         }
-                        div { class: "help", "Description is not persisted by the current backend API." }
                     }
 
                     div { style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px;",
                         label { style: "display: flex; gap: 8px; align-items: center; font-size: 13px; cursor: pointer;",
-                            input { r#type: "checkbox", disabled: true, style: "accent-color: var(--cf-brand-purple);" }
+                            input {
+                                r#type: "checkbox",
+                                checked: draft.auto_sync,
+                                oninput: move |evt| {
+                                    let mut next = draft_signal.read().clone();
+                                    next.auto_sync = evt.checked();
+                                    draft_signal.set(next.clone());
+                                    on_change.call(next);
+                                },
+                                style: "accent-color: var(--cf-brand-purple);"
+                            }
                             span { "Auto-sync" }
                         }
                         div { class: "field",
                             label { "Sync interval" }
-                            select { class: "input focus-ring", disabled: true,
+                            select {
+                                class: "input focus-ring",
+                                value: "{draft.sync_interval}",
+                                disabled: !draft.auto_sync,
+                                onchange: move |evt| {
+                                    let mut next = draft_signal.read().clone();
+                                    next.sync_interval = evt.value();
+                                    draft_signal.set(next.clone());
+                                    on_change.call(next);
+                                },
                                 option { value: "1m", "Every 1 min" }
-                                option { value: "5m", selected: true, "Every 5 min" }
+                                option { value: "5m", "Every 5 min" }
                                 option { value: "15m", "Every 15 min" }
                                 option { value: "1h", "Every hour" }
                             }
                         }
                     }
-                    div { class: "help", "Auto-sync scheduling is not persisted by the current backend API." }
 
                     FlakeCredentialFields {
                         flake_id: Some(draft.id),
@@ -1198,6 +1258,8 @@ fn start_edit_flake(
             branch: flake.branch,
             environments: flake.environments.clone(),
             description: String::new(),
+            auto_sync: true,
+            sync_interval: "5m".to_string(),
             build_scope: flake.build_scope,
             credential_type: "none".to_string(),
             credential_username: String::new(),
@@ -2942,6 +3004,9 @@ pub fn FlakesListViewNew() -> Element {
         name: String::new(),
         repo_url: String::new(),
         branch: String::new(),
+        description: String::new(),
+        auto_sync: true,
+        sync_interval: "5m".to_string(),
         build_scope: "cf_systems_only".to_string(),
         credential_type: "none".to_string(),
         credential_username: String::new(),
@@ -3412,6 +3477,9 @@ pub fn FlakesListViewNew() -> Element {
                                             name: String::new(),
                                             repo_url: String::new(),
                                             branch: String::new(),
+                                            description: String::new(),
+                                            auto_sync: true,
+                                            sync_interval: "5m".to_string(),
                                             build_scope: "cf_systems_only".to_string(),
                                             credential_type: "none".to_string(),
                                             credential_username: String::new(),
@@ -3487,6 +3555,8 @@ pub fn FlakesListViewNew() -> Element {
                                     branch: current.branch.clone(),
                                     environments: current.environment.split(',').map(str::trim).filter(|s| !s.is_empty()).map(ToString::to_string).collect(),
                                     description: current.description.clone(),
+                                    auto_sync: true,
+                                    sync_interval: "5m".to_string(),
                                     build_scope: current.build_scope.clone(),
                                     credential_type: "none".to_string(),
                                     credential_username: String::new(),
@@ -3558,6 +3628,8 @@ pub fn FlakesListViewNew() -> Element {
                                     branch: current.branch.clone(),
                                     environments: current.environment.split(',').map(str::trim).filter(|s| !s.is_empty()).map(ToString::to_string).collect(),
                                     description: current.description.clone(),
+                                    auto_sync: true,
+                                    sync_interval: "5m".to_string(),
                                     build_scope: current.build_scope.clone(),
                                     credential_type: "none".to_string(),
                                     credential_username: String::new(),
@@ -3640,6 +3712,8 @@ pub fn FlakesListViewNew() -> Element {
                                         branch: current.branch.clone(),
                                         environments: current.environment.split(',').map(str::trim).filter(|s| !s.is_empty()).map(ToString::to_string).collect(),
                                         description: current.description.clone(),
+                                        auto_sync: true,
+                                        sync_interval: "5m".to_string(),
                                         build_scope: current.build_scope.clone(),
                                         credential_type: "none".to_string(),
                                         credential_username: String::new(),

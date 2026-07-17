@@ -2230,6 +2230,14 @@ fn OverviewTab(
         .take(9)
         .map(activity_row_from_history)
         .collect::<Vec<_>>();
+    let tag_suggestions = vec![
+        "prod".to_string(),
+        "db".to_string(),
+        "web".to_string(),
+        "edge".to_string(),
+        "critical".to_string(),
+        "canary".to_string(),
+    ];
 
     rsx! {
         div {
@@ -2497,10 +2505,18 @@ fn OverviewTab(
                     for tag in tags.read().clone() {
                         {
                             let tag_to_remove = tag.clone();
+                            let tag_for_filter = tag.clone();
                             rsx! {
                                 span {
                                     class: "sd-tag mono sd-tag-chip",
-                                    span { class: "sd-tag-label", "#{tag}" }
+                                    button {
+                                        class: "sd-tag-label focus-ring",
+                                        title: "Filter fleet by #{tag_for_filter}",
+                                        onclick: move |_| {
+                                            nav.push(Route::SystemsView {});
+                                        },
+                                        "#{tag}"
+                                    }
                                     button {
                                         class: "sd-tag-x focus-ring",
                                         title: "Remove tag",
@@ -2526,6 +2542,7 @@ fn OverviewTab(
                             input {
                                 class: "sd-tag-input mono focus-ring",
                                 autofocus: true,
+                                list: "cf-fleet-tags",
                                 placeholder: "tag…",
                                 value: "{tag_draft}",
                                 oninput: move |e| tag_draft.set(e.value().clone()),
@@ -2552,6 +2569,12 @@ fn OverviewTab(
                                     tag_adding.set(false);
                                 },
                             }
+                            datalist {
+                                id: "cf-fleet-tags",
+                                for suggestion in &tag_suggestions {
+                                    option { value: "{suggestion}" }
+                                }
+                            }
                         }
                     } else {
                         button {
@@ -2572,7 +2595,7 @@ fn OverviewTab(
                 p {
                     class: "help",
                     style: "margin-top: 8px;",
-                    "Free-form labels for your own grouping & filtering. Not saved yet — tag persistence is coming soon."
+                    "Free-form labels for your own grouping & filtering — click a tag to slice the fleet by it. They don't affect policies or deployment."
                 }
             }
         }
