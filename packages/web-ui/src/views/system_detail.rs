@@ -342,6 +342,8 @@ pub fn SystemDetailView(id: String) -> Element {
     let mut deploy_action_notice: Signal<Option<(String, bool)>> = use_signal(|| None);
     let mut flake_commit_peek: Signal<Option<FlakeCommitPeekState>> = use_signal(|| None);
     let mut flake_commit_peek_reload = use_signal(|| 0_u64);
+    // Reload nonce for system detail — incremented after edit-save to re-fetch the system.
+    let mut detail_reload = use_signal(|| 0_u64);
 
     // Live clock tick for relative timers/heartbeat countdowns while page is open.
     let mut now_tick = use_signal(Utc::now);
@@ -355,9 +357,11 @@ pub fn SystemDetailView(id: String) -> Element {
     });
     let now = now_tick();
 
-    // System data state — use_resource keyed on id prevents repeated fetches.
+    // System data state — use_resource reads detail_reload as a dependency so that
+    // incrementing the reload nonce (e.g. after saving edits) triggers a re-fetch.
     let id_for_detail = id.clone();
     let mut detail_resource = use_resource(move || {
+        let _ = detail_reload();
         let id = id_for_detail.clone();
         async move { load_system_detail_with_fallback(&id).await }
     });
@@ -1335,7 +1339,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         {
                             Ok(_) => {
                                 edit_modal_open.set(false);
-                                detail_resource.restart();
+                                detail_reload.set(detail_reload() + 1);
                             }
                             Err(error_message) => {
                                 toast_message.set(Some((error_message, false)));
