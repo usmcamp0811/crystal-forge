@@ -133,6 +133,7 @@ pub fn TopBar(title: String) -> Element {
     let mut ui_theme = use_context::<Signal<UiTheme>>();
     let nav = navigator();
     let current_route = use_route::<Route>();
+    let breadcrumb_override = use_context::<Signal<Option<(String, String)>>>();
     let app_state = use_context::<Signal<AppState>>();
     let auth_context = app_state.read().auth.clone();
     let is_admin_user = auth::is_admin(&auth_context);
@@ -150,14 +151,19 @@ pub fn TopBar(title: String) -> Element {
         .iter()
         .filter(|item| item.unread)
         .count();
-    let (crumb_parent, crumb_current) = match &current_route {
-        Route::SystemDetailView { id } => (Some("Systems".to_string()), id.clone()),
-        Route::EvaluationsCommitView { commit_id } => (
-            Some("Evaluations".to_string()),
-            format!("commit {commit_id}"),
-        ),
-        _ => (None, title.clone()),
-    };
+    let (crumb_parent, crumb_current) =
+        if let Some((parent, current)) = breadcrumb_override.read().clone() {
+            (Some(parent), current)
+        } else {
+            match &current_route {
+                Route::SystemDetailView { id } => (Some("Systems".to_string()), id.clone()),
+                Route::EvaluationsCommitView { commit_id } => (
+                    Some("Evaluations".to_string()),
+                    format!("commit {commit_id}"),
+                ),
+                _ => (None, title.clone()),
+            }
+        };
 
     let toggle_drawer = move |_| {
         is_mobile_drawer_open.set(!is_mobile_drawer_open());

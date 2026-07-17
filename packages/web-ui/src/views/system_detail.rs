@@ -295,6 +295,7 @@ struct FlakeCommitPeekState {
 #[component]
 pub fn SystemDetailView(id: String) -> Element {
     let nav = navigator();
+    let mut breadcrumb_override = use_context::<Signal<Option<(String, String)>>>();
     let app_state = use_context::<Signal<AppState>>();
 
     // Current tab state — defaults to Overview but honours a ?tab=deploy query param
@@ -635,6 +636,7 @@ pub fn SystemDetailView(id: String) -> Element {
 
     // Not found state.
     if not_found {
+        breadcrumb_override.set(None);
         return rsx! {
             div {
                 class: "space-y-4",
@@ -656,6 +658,19 @@ pub fn SystemDetailView(id: String) -> Element {
         .read_unchecked()
         .clone()
         .unwrap_or_default();
+    {
+        let mut breadcrumb_override = breadcrumb_override.clone();
+        let hostname = system.hostname.clone();
+        use_effect(move || {
+            breadcrumb_override.set(Some(("Systems".to_string(), hostname.clone())));
+        });
+    }
+    {
+        let mut breadcrumb_override = breadcrumb_override.clone();
+        use_drop(move || {
+            breadcrumb_override.set(None);
+        });
+    }
     let deployment_progress = deployment_progress_resource
         .read_unchecked()
         .clone()
