@@ -591,7 +591,6 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
     let env_for_edit = env.clone();
     let nav = use_navigator();
     let nav_for_cache = nav.clone();
-    let nav_for_compliance = nav.clone();
     let total = env.health.total().max(env.system_count).max(1) as f64;
     let has_cache = env.cache.is_some();
     let cache_url = env
@@ -600,11 +599,6 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
         .map(|c| c.url.clone())
         .unwrap_or_default();
     let is_production = env.is_production.unwrap_or(false);
-    let compliance_label = if is_production {
-        "DISA STIG (placeholder)"
-    } else {
-        ""
-    };
     let no_health = env.health.total() == 0;
 
     rsx! {
@@ -719,16 +713,12 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
 
                         dt { "Compliance" }
                         dd {
-                            if is_production {
-                                button {
-                                    class: "btn-link focus-ring",
-                                    style: "font-size:12px; cursor:pointer; color:var(--cf-brand-purple); background:none; border:none; padding:0; text-align:left;",
-                                    onclick: move |_| { nav_for_compliance.push(Route::ComplianceView {}); },
-                                    Icon { name: IconName::Shield, size: 10 }
-                                    " {compliance_label}"
+                            span { style: "font-size:12px; color:var(--cf-text-muted);",
+                                if is_production {
+                                    "not persisted"
+                                } else {
+                                    "none"
                                 }
-                            } else {
-                                span { style: "font-size:12px; color:var(--cf-text-muted);", "none" }
                             }
                         }
 

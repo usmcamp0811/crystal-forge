@@ -2698,7 +2698,7 @@ fn DeployTab(
                                             verify_notice.set(None);
                                             on_clear_deploy_notice.call(());
                                         },
-                                        button {
+                                        span {
                                             class: "mono sd-commit-sha sd-commit-sha-link",
                                             title: "Open {commit_hash_for_title} in Flakes",
                                             onclick: move |evt| {
@@ -2785,7 +2785,7 @@ fn DeployTab(
                                         span { class: "mono sd-commit-sha sd-generation-number", "{gen_label}" }
                                         span { class: "sd-commit-msg", "generation rollback" }
                                         if let Some(short) = commit_short {
-                                            button {
+                                            span {
                                                 class: "sd-commit-meta mono sd-commit-sha-link",
                                                 onclick: move |evt| {
                                                     evt.stop_propagation();

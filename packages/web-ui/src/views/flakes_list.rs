@@ -1889,6 +1889,39 @@ fn query_param(name: &str) -> Option<String> {
     None
 }
 
+/// Remove one or more query parameters from the URL without reloading the page.
+fn clear_url_params(names: &[&str]) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(win) = window() else { return };
+        let pathname = win.location().pathname().ok().unwrap_or_default();
+        let search = win.location().search().ok().unwrap_or_default();
+        let query = search.trim_start_matches('?');
+        if query.is_empty() {
+            return;
+        }
+        let remaining: Vec<&str> = query
+            .split('&')
+            .filter(|pair| {
+                let key = pair.splitn(2, '=').next().unwrap_or("");
+                !names.iter().any(|n| *n == key)
+            })
+            .collect();
+        let new_search = if remaining.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", remaining.join("&"))
+        };
+        if let Ok(history) = win.history() {
+            let _ = history.replace_state_with_url(
+                &wasm_bindgen::JsValue::NULL,
+                "",
+                Some(&format!("{pathname}{new_search}")),
+            );
+        }
+    }
+}
+
 fn table_class(active: bool) -> &'static str {
     if active {
         "bg-blue-600/30 text-white"
@@ -3191,6 +3224,8 @@ pub fn FlakesListViewNew() -> Element {
             };
             if let Some(flake) = all_flakes.iter().find(|flake| flake.id == target_id) {
                 selected_flake.set(Some(flake.clone()));
+                // Clear focus params so closing and re-opening the panel stays closed.
+                clear_url_params(&["focus_flake_id", "focus_sha"]);
             }
         });
     }
@@ -5042,7 +5077,21 @@ fn FlakeTrayNew(
         }
     };
 
-    let mut selected_commit = use_signal(|| effective_commits.first().cloned());
+    let mut selected_commit = use_signal(|| {
+        // If focus_sha is provided, try to select the matching commit
+        // (either by short sha or full_hash). Fall back to the first
+        // commit only when no match exists.
+        if let Some(ref sha) = focus_sha {
+            let sha_short = sha.chars().take(7).collect::<String>();
+            if let Some(matched) = effective_commits
+                .iter()
+                .find(|c| c.sha == sha_short || c.full_hash == *sha)
+            {
+                return Some(matched.clone());
+            }
+        }
+        effective_commits.first().cloned()
+    });
     let mut unavailable_commit_hashes = use_signal(Vec::<String>::new);
     let mut commit_query = use_signal(String::new);
     let mut visible_limit = use_signal(|| INITIAL_VISIBLE_COMMITS);

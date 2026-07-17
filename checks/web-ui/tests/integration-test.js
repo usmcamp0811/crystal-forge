@@ -2932,6 +2932,15 @@ const steps = [
       if (evalsIdx >= buildsIdx) {
         throw new Error(`Expected Evaluations (idx ${evalsIdx}) before Builds (idx ${buildsIdx}) in sidebar nav`);
       }
+      // Verify exactly one link for each route (no duplicates)
+      let buildsCount = 0;
+      for (let i = 0; i < itemCount; i++) {
+        const text = await navItems.nth(i).textContent();
+        if (text && text.includes("Builds")) buildsCount++;
+      }
+      if (buildsCount !== 1) {
+        throw new Error(`Expected exactly 1 Builds nav item, found ${buildsCount}`);
+      }
       // Screenshot taken here: full desktop expanded sidebar, all groups visible
     },
   },
@@ -5840,6 +5849,21 @@ const steps = [
       await page.waitForTimeout(500);
       await cardsBtn.click();
       await page.waitForTimeout(500);
+
+      // Test detail panel open/close if any cache cards exist
+      const cardCount = await page.locator(".env-card").count();
+      if (cardCount > 0) {
+        // Click first card to open detail panel
+        await page.locator(".env-card").first().click();
+        await page.waitForTimeout(500);
+        const panel = page.locator(".side-panel").first();
+        await assertVisible(panel, "Expected cache detail panel after card click");
+        // Close panel by clicking backdrop
+        const backdrop = page.locator(".side-panel-backdrop").first();
+        await backdrop.click();
+        await page.waitForTimeout(500);
+        await assertHidden(panel, "Expected cache detail panel to close after backdrop click");
+      }
     },
   },
   {

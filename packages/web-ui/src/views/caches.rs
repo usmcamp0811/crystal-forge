@@ -203,6 +203,39 @@ fn query_param(name: &str) -> Option<String> {
     None
 }
 
+/// Remove one or more query parameters from the URL without reloading the page.
+fn clear_url_params(names: &[&str]) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(win) = web_sys::window() else { return };
+        let pathname = win.location().pathname().ok().unwrap_or_default();
+        let search = win.location().search().ok().unwrap_or_default();
+        let query = search.trim_start_matches('?');
+        if query.is_empty() {
+            return;
+        }
+        let remaining: Vec<&str> = query
+            .split('&')
+            .filter(|pair| {
+                let key = pair.splitn(2, '=').next().unwrap_or("");
+                !names.iter().any(|n| *n == key)
+            })
+            .collect();
+        let new_search = if remaining.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", remaining.join("&"))
+        };
+        if let Ok(history) = win.history() {
+            let _ = history.replace_state_with_url(
+                &wasm_bindgen::JsValue::NULL,
+                "",
+                Some(&format!("{pathname}{new_search}")),
+            );
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum CachesTab {
     Destinations,
@@ -326,12 +359,12 @@ pub fn CachesView() -> Element {
                     h1 { class: "page-title", "Caches" }
                     p {
                         class: "page-subtitle",
-                        // Show totals: X destinations · Y healthy
+                        // Show totals: X destinations · Y enabled
                         match destinations.read().as_ref() {
                             Some(Ok(dests)) => {
                                 let total = dests.len();
-                                let healthy = dests.iter().filter(|d| d.enabled).count();
-                                rsx! { "{total} destinations · {healthy} healthy" }
+                                let enabled = dests.iter().filter(|d| d.enabled).count();
+                                rsx! { "{total} destinations · {enabled} enabled" }
                             },
                             _ => rsx! { "Loading…" }
                         }
@@ -365,8 +398,8 @@ pub fn CachesView() -> Element {
                 match destinations.read().as_ref() {
                     Some(Ok(dests)) => {
                         let total = dests.len();
-                        let healthy = dests.iter().filter(|d| d.enabled).count();
-                        let issues = total - healthy;
+                        let enabled_count = dests.iter().filter(|d| d.enabled).count();
+                        let disabled_count = total - enabled_count;
                         rsx! {
                             div {
                                 class: "stat",
@@ -377,14 +410,14 @@ pub fn CachesView() -> Element {
                             div {
                                 class: "stat",
                                 span { class: "stat-accent", style: "--stat-color: #34d399;" }
-                                div { class: "stat-label", "Healthy" }
-                                div { class: "stat-value", "{healthy}" }
+                                div { class: "stat-label", "Enabled" }
+                                div { class: "stat-value", "{enabled_count}" }
                             }
                             div {
                                 class: "stat",
                                 span { class: "stat-accent", style: "--stat-color: #fbbf24;" }
-                                div { class: "stat-label", "Issues" }
-                                div { class: "stat-value", "{issues}" }
+                                div { class: "stat-label", "Disabled" }
+                                div { class: "stat-value", "{disabled_count}" }
                             }
                             div {
                                 class: "stat",
@@ -557,6 +590,8 @@ fn CacheDestinationsList(
                     || dest.id.to_string() == focus
             }) {
                 view_destination.set(Some(dest.clone()));
+                // Clear focus param so closing and re-opening the panel stays closed.
+                clear_url_params(&["focus"]);
             }
         });
     }
@@ -1552,9 +1587,9 @@ fn CacheDestinationCardNew(
     let dest_for_view = destination.clone();
     let dest_for_edit = destination.clone();
     let (status_cls, status_color, status_label) = if destination.enabled {
-        ("chip-healthy", "#34d399", "healthy")
+        ("chip-healthy", "#34d399", "enabled")
     } else {
-        ("chip-critical", "#f87171", "error")
+        ("chip-critical", "#f87171", "disabled")
     };
 
     rsx! {
@@ -1637,9 +1672,9 @@ fn CacheDestinationRow(
 
     // Status mapping
     let (status_cls, status_color, status_label) = if destination.enabled {
-        ("chip-healthy", "#34d399", "healthy")
+        ("chip-healthy", "#34d399", "enabled")
     } else {
-        ("chip-critical", "#f87171", "error")
+        ("chip-critical", "#f87171", "disabled")
     };
 
     // Type icon glyph family
@@ -1917,9 +1952,9 @@ fn CacheDestinationPanel(props: CacheDestinationPanelProps) -> Element {
         (env_list, systems)
     });
     let (status_cls, status_color, status_label) = if destination.enabled {
-        ("chip-healthy", "#34d399", "healthy")
+        ("chip-healthy", "#34d399", "enabled")
     } else {
-        ("chip-critical", "#f87171", "error")
+        ("chip-critical", "#f87171", "disabled")
     };
 
     rsx! {
