@@ -3,7 +3,7 @@ id: TASK-393
 title: >-
   Implement the 2026-07-14 Builders design delta for side-panel and open-flow
   parity
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-07-14 00:00'
 updated_date: '2026-07-14 00:00'
@@ -153,4 +153,4 @@ delta, file a separate Backlog task instead of expanding this one.
 
 ## Task Notes
 
-LOCK: opencode on reckless in /home/mcamp/code/crystal-forge/TASK-393-builders-side-panel-delta
+MR: !300 (https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/300)
