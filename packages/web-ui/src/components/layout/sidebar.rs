@@ -324,7 +324,30 @@ pub fn SidebarNav() -> Element {
                 }
 
                 // ── Pipeline ──────────────────────────────────────────────
+                // Design delta 2026-07-14: Evaluations comes before Builds (Shell.jsx NAV_OPS order)
                 NavSection { collapsed: is_collapsed, label: "Pipeline" }
+                NavLink {
+                    collapsed: is_collapsed,
+                    to: Route::EvaluationsView {},
+                    label: "Evaluations",
+                    // Evals badge is acknowledged only when the failures tab is opened (not on mount).
+                    badge_count: if evals_failed > 0 { Some(evals_failed) } else { None },
+                    badge_attention: evals_failed > 0,
+                    badge_hidden: !badge_visible("evals", evals_failed, evals_failed > 0),
+                    badge_title: Some(format!("{} new failed evaluation{} since you last checked", evals_failed, if evals_failed == 1 { "" } else { "s" })),
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" }
+                            path { d: "M9 5a2 2 0 002 2h2a2 2 0 002-2" }
+                            path { d: "M9 12l2 2 4-4" }
+                        }
+                    )
+                }
                 NavLink {
                     collapsed: is_collapsed,
                     to: Route::BuildsView {},
@@ -348,13 +371,8 @@ pub fn SidebarNav() -> Element {
                 }
                 NavLink {
                     collapsed: is_collapsed,
-                    to: Route::EvaluationsView {},
-                    label: "Evaluations",
-                    // Evals badge is acknowledged only when the failures tab is opened (not on mount).
-                    badge_count: if evals_failed > 0 { Some(evals_failed) } else { None },
-                    badge_attention: evals_failed > 0,
-                    badge_hidden: !badge_visible("evals", evals_failed, evals_failed > 0),
-                    badge_title: Some(format!("{} new failed evaluation{} since you last checked", evals_failed, if evals_failed == 1 { "" } else { "s" })),
+                    to: Route::BuildsView {},
+                    label: "Builds",
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -362,9 +380,7 @@ pub fn SidebarNav() -> Element {
                             stroke: "currentColor",
                             stroke_width: "1.75",
                             view_box: "0 0 24 24",
-                            path { d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" }
-                            path { d: "M9 5a2 2 0 002 2h2a2 2 0 002-2" }
-                            path { d: "M9 12l2 2 4-4" }
+                            path { d: "M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" }
                         }
                     )
                 }
@@ -705,22 +721,8 @@ pub fn MobileDrawer() -> Element {
                     )
                 }
 
+                // Design delta 2026-07-14: Evaluations comes before Builds (Shell.jsx NAV_OPS order)
                 NavSection { collapsed: false, label: "Pipeline" }
-                NavLink {
-                    collapsed: false,
-                    to: Route::BuildsView {},
-                    label: "Builds",
-                    icon: rsx!(
-                        svg {
-                            class: "w-4 h-4",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "1.75",
-                            view_box: "0 0 24 24",
-                            path { d: "M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" }
-                        }
-                    )
-                }
                 NavLink {
                     collapsed: false,
                     to: Route::EvaluationsView {},
@@ -735,6 +737,21 @@ pub fn MobileDrawer() -> Element {
                             path { d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" }
                             path { d: "M9 5a2 2 0 002 2h2a2 2 0 002-2" }
                             path { d: "M9 12l2 2 4-4" }
+                        }
+                    )
+                }
+                NavLink {
+                    collapsed: false,
+                    to: Route::BuildsView {},
+                    label: "Builds",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" }
                         }
                     )
                 }

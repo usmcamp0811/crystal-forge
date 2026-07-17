@@ -5081,6 +5081,17 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
   display: inline-flex; align-items: center; gap: 4px;
 }
 .tl-commit-link:hover { text-decoration: underline; }
+.sd-commit-sha-link {
+  display: inline-flex; align-items: center; gap: 4px;
+  cursor: pointer; border-radius: 4px; padding: 1px 4px; margin: -1px -4px;
+  transition: background 120ms, color 120ms;
+  background: none; border: none;
+}
+.sd-commit-sha-link:hover {
+  background: color-mix(in oklab, var(--cf-brand-purple) 16%, transparent);
+  color: var(--cf-brand-purple);
+}
+.sd-commit-sha-link svg { opacity: 0.7; }
 
 .tl-sentinel .tl-body { padding-bottom: 0; }
 .tl-loadmore {

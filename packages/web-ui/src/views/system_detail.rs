@@ -268,6 +268,57 @@ fn system_detail_wants_deploy_tab() -> bool {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn navigate_to_flake_focus(
+    flake_id: Option<i32>,
+    sha: Option<String>,
+    msg: Option<String>,
+    author: Option<String>,
+    at: Option<String>,
+) {
+    let (Some(flake_id), Some(sha)) = (flake_id, sha) else {
+        return;
+    };
+
+    let encode = |value: &str| {
+        js_sys::encode_uri_component(value)
+            .as_string()
+            .unwrap_or_else(|| value.to_string())
+    };
+
+    let mut url = format!(
+        "/flakes?focus_flake_id={}&focus_sha={}",
+        flake_id,
+        encode(&sha)
+    );
+    if let Some(msg) = msg.filter(|value| !value.trim().is_empty()) {
+        url.push_str("&focus_msg=");
+        url.push_str(&encode(&msg));
+    }
+    if let Some(author) = author.filter(|value| !value.trim().is_empty()) {
+        url.push_str("&focus_author=");
+        url.push_str(&encode(&author));
+    }
+    if let Some(at) = at.filter(|value| !value.trim().is_empty()) {
+        url.push_str("&focus_at=");
+        url.push_str(&encode(&at));
+    }
+
+    if let Some(window) = web_sys::window() {
+        let _ = window.location().set_href(&url);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn navigate_to_flake_focus(
+    _flake_id: Option<i32>,
+    _sha: Option<String>,
+    _msg: Option<String>,
+    _author: Option<String>,
+    _at: Option<String>,
+) {
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main Component
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1998,6 +2049,7 @@ fn OverviewTab(
     on_open_cves: EventHandler<()>,
     on_view_history: EventHandler<()>,
 ) -> Element {
+    let nav = use_navigator();
     let environment = system
         .environment
         .clone()
@@ -2037,11 +2089,13 @@ fn OverviewTab(
         .as_ref()
         .map(|f| f.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
+    let flake_id = system.flake.as_ref().map(|f| f.id);
     let flake_commit = system
         .flake
         .as_ref()
         .and_then(|f| f.latest_commit.clone())
         .unwrap_or_else(|| "unknown".to_string());
+    let flake_id = system.flake.as_ref().map(|f| f.id);
     let nixos_version = system
         .nixos_version
         .clone()
@@ -2155,7 +2209,36 @@ fn OverviewTab(
                     class: "kv-grid",
                     dt { "Flake" } dd { class: "mono", "{flake_name}" }
                     dt { "Branch" } dd { class: "mono", "{branch_text}" }
-                    dt { "Commit" } dd { class: "mono", "{flake_commit}" }
+                    dt { "Commit" }
+                    dd { class: "mono",
+                        button {
+                            class: "tl-commit-link mono focus-ring",
+                            title: "Open this commit in Flakes",
+                            onclick: move |_| {
+                                navigate_to_flake_focus(
+                                    flake_id,
+                                    Some(flake_commit.clone()),
+                                    Some(commit_message_text.clone()),
+                                    current_commit.as_ref().map(|commit| commit.author.clone()),
+                                    current_commit.as_ref().map(|commit| commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()),
+                                );
+                            },
+                            Icon { name: IconName::Git, size: 11 }
+                            " {flake_commit} "
+                            Icon { name: IconName::ArrowRight, size: 10 }
+                        }
+                        " "
+                        button {
+                            class: "tl-commit-link mono focus-ring",
+                            title: "Open builds",
+                            onclick: move |_| {
+                                nav.push(Route::BuildsView {});
+                            },
+                            Icon { name: IconName::Deploy, size: 11 }
+                            " build {generation_text} "
+                            Icon { name: IconName::ArrowRight, size: 10 }
+                        }
+                    }
                     dt { "Message" } dd { style: "white-space: normal; font-family: var(--font-sans);", "{commit_message_text}" }
                     dt { "Generation" } dd { class: "mono", "{generation_text}{generation_mismatch_note}" }
                     dt { "NixOS" } dd { class: "mono", "{nixos_version}" }
@@ -2445,6 +2528,7 @@ fn DeployTab(
         .as_ref()
         .map(|f| f.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
+    let flake_id = system.flake.as_ref().map(|f| f.id);
 
     let default_commit = commits
         .iter()
@@ -2588,7 +2672,9 @@ fn DeployTab(
                                 let commit_hash_for_title = commit.hash.clone();
                                 let short_hash = commit.hash.chars().take(7).collect::<String>();
                                 let commit_message = commit.message.clone();
+                                let commit_message_for_click = commit_message.clone();
                                 let commit_author = commit.author.clone();
+                                let commit_author_for_click = commit_author.clone();
                                 let when_text = {
                                     let now = chrono::Utc::now();
                                     let d = now.signed_duration_since(commit.committed_at);
@@ -2602,6 +2688,7 @@ fn DeployTab(
                                         format!("{}d ago", d.num_days())
                                     }
                                 };
+                                let when_text_for_click = when_text.clone();
                                 rsx! {
                                     button {
                                         key: "{commit_hash_for_key}",
@@ -2611,10 +2698,21 @@ fn DeployTab(
                                             verify_notice.set(None);
                                             on_clear_deploy_notice.call(());
                                         },
-                                        span {
-                                            class: "mono sd-commit-sha",
-                                            title: "{commit_hash_for_title}",
-                                            "{short_hash}"
+                                        button {
+                                            class: "mono sd-commit-sha sd-commit-sha-link",
+                                            title: "Open {commit_hash_for_title} in Flakes",
+                                            onclick: move |evt| {
+                                                evt.stop_propagation();
+                                                navigate_to_flake_focus(
+                                                    flake_id,
+                                                    Some(commit_hash_for_title.clone()),
+                                                    Some(commit_message_for_click.clone()),
+                                                    Some(commit_author_for_click.clone()),
+                                                    Some(when_text_for_click.clone()),
+                                                );
+                                            },
+                                            Icon { name: IconName::Git, size: 10 }
+                                            " {short_hash}"
                                         }
                                         span {
                                             class: "sd-commit-msg",
@@ -2660,6 +2758,7 @@ fn DeployTab(
                                     .commit_hash
                                     .as_ref()
                                     .map(|c| c.chars().take(7).collect::<String>());
+                                let generation_commit_hash = generation.commit_hash.clone();
                                 let when_text = {
                                     let now = chrono::Utc::now();
                                     let d = now.signed_duration_since(generation.timestamp);
@@ -2673,6 +2772,7 @@ fn DeployTab(
                                         format!("{}d ago", d.num_days())
                                     }
                                 };
+                                let when_text_for_click = when_text.clone();
                                 rsx! {
                                     button {
                                         key: "gen-{gen_num}",
@@ -2685,7 +2785,21 @@ fn DeployTab(
                                         span { class: "mono sd-commit-sha sd-generation-number", "{gen_label}" }
                                         span { class: "sd-commit-msg", "generation rollback" }
                                         if let Some(short) = commit_short {
-                                            span { class: "sd-commit-meta mono", "{short}" }
+                                            button {
+                                                class: "sd-commit-meta mono sd-commit-sha-link",
+                                                onclick: move |evt| {
+                                                    evt.stop_propagation();
+                                                    navigate_to_flake_focus(
+                                                        flake_id,
+                                                        generation_commit_hash.clone(),
+                                                        Some("(generated commit)".to_string()),
+                                                        None,
+                                                        Some(when_text_for_click.clone()),
+                                                    );
+                                                },
+                                                Icon { name: IconName::Git, size: 10 }
+                                                " {short}"
+                                            }
                                         } else {
                                             span { class: "sd-commit-meta mono", "unknown / not in CF" }
                                         }
@@ -2765,7 +2879,15 @@ fn DeployTab(
                                 dd { class: "mono", "{system.hostname}" }
 
                                 dt { "From" }
-                                dd { class: "mono", "{from_short} · {current_gen_display}" }
+                                dd { class: "mono",
+                                    button {
+                                        class: "sd-commit-sha-link mono",
+                                        onclick: move |_| navigate_to_flake_focus(flake_id, Some(from_commit.clone()), None, None, None),
+                                        Icon { name: IconName::Git, size: 10 }
+                                        " {from_short}"
+                                    }
+                                    " · {current_gen_display}"
+                                }
 
                                 dt { "To" }
                                 dd { class: "mono", "gen #{gen_num}" }
@@ -2778,7 +2900,21 @@ fn DeployTab(
                                 }
 
                                 dt { "Commit" }
-                                dd { class: "mono", title: "{commit_full}", "{commit_display}" }
+                                dd { class: "mono",
+                                    button {
+                                        class: "sd-commit-sha-link mono",
+                                        title: "{commit_full}",
+                                        onclick: move |_| navigate_to_flake_focus(
+                                            flake_id,
+                                            generation_data.commit_hash.clone(),
+                                            Some("(generated commit)".to_string()),
+                                            None,
+                                            Some(generation_data.timestamp.format("%Y-%m-%d %H:%M UTC").to_string()),
+                                        ),
+                                        Icon { name: IconName::Git, size: 10 }
+                                        " {commit_display}"
+                                    }
+                                }
 
                                 dt { "Strategy" }
                                 dd { "rollback" }
@@ -2895,10 +3031,31 @@ fn DeployTab(
                                 dd { class: "mono", "{system.hostname}" }
 
                                 dt { "From" }
-                                dd { class: "mono", "{from_short} · {current_gen_display}" }
+                                dd { class: "mono",
+                                    button {
+                                        class: "sd-commit-sha-link mono",
+                                        onclick: move |_| navigate_to_flake_focus(flake_id, Some(from_commit.clone()), None, None, None),
+                                        Icon { name: IconName::Git, size: 10 }
+                                        " {from_short}"
+                                    }
+                                    " · {current_gen_display}"
+                                }
 
                                 dt { "To" }
-                                dd { class: "mono", "{to_short}" }
+                                dd { class: "mono",
+                                    button {
+                                        class: "sd-commit-sha-link mono",
+                                        onclick: move |_| navigate_to_flake_focus(
+                                            flake_id,
+                                            Some(commit.hash.clone()),
+                                            Some(commit.message.clone()),
+                                            Some(commit.author.clone()),
+                                            Some(commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()),
+                                        ),
+                                        Icon { name: IconName::Git, size: 10 }
+                                        " {to_short}"
+                                    }
+                                }
 
                                 dt { "Strategy" }
                                 dd { "immediate_persist" }

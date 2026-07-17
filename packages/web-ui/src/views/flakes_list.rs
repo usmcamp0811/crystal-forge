@@ -1867,6 +1867,28 @@ fn prefers_view_from_query() -> Option<FlakesViewMode> {
     None
 }
 
+fn query_param(name: &str) -> Option<String> {
+    let window = window()?;
+    let search = window.location().search().ok()?;
+    let query = search.trim_start_matches('?');
+    if query.is_empty() {
+        return None;
+    }
+
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or_default();
+        let value = parts.next().unwrap_or_default();
+        if key == name {
+            return js_sys::decode_uri_component(value)
+                .ok()
+                .map(|v| v.as_string().unwrap_or_default());
+        }
+    }
+
+    None
+}
+
 fn table_class(active: bool) -> &'static str {
     if active {
         "bg-blue-600/30 text-white"
@@ -2899,6 +2921,17 @@ pub fn FlakesListViewNew() -> Element {
     let mut flakes_ack_in_flight = use_signal(|| false);
     let mut flakes_last_ack_attempt_cursor = use_signal(|| None::<String>);
     let mut flakes_local_ack_hidden = use_signal(|| false);
+    let focus_flake_id = query_param("focus_flake_id").and_then(|value| value.parse::<i32>().ok());
+    let focus_sha = query_param("focus_sha");
+    let focus_meta = if focus_sha.is_some() {
+        Some(CommitFocusMeta {
+            msg: query_param("focus_msg"),
+            author: query_param("focus_author"),
+            at: query_param("focus_at"),
+        })
+    } else {
+        None
+    };
 
     let flakes_resource = use_resource(move || {
         let _nonce = *reload_nonce.read();
@@ -3143,6 +3176,21 @@ pub fn FlakesListViewNew() -> Element {
                     Some(_) => {}
                     None => selected_flake.set(None),
                 }
+            }
+        });
+    }
+    {
+        let all_flakes = all_flakes.clone();
+        let mut selected_flake = selected_flake.clone();
+        use_effect(move || {
+            if selected_flake.read().is_some() {
+                return;
+            }
+            let Some(target_id) = focus_flake_id else {
+                return;
+            };
+            if let Some(flake) = all_flakes.iter().find(|flake| flake.id == target_id) {
+                selected_flake.set(Some(flake.clone()));
             }
         });
     }
@@ -3579,6 +3627,8 @@ pub fn FlakesListViewNew() -> Element {
                             commits_error: tray_commits_error,
                             notice: action_notice.read().clone(),
                             is_admin: is_admin_user,
+                            focus_sha: focus_sha.clone(),
+                            focus_meta: focus_meta.clone(),
                             flake,
                             on_edit: move |flake_id| {
                                 if let Some(current) = all_flakes_for_edit.iter().find(|item| item.id == flake_id) {
@@ -4177,6 +4227,14 @@ struct MockCommitItem {
     build_status: Option<String>,
     rollout_on: i32,
     rollout_total: i32,
+}
+
+/// Optional metadata for a focused/deployed commit that may not be in the commits list.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub(crate) struct CommitFocusMeta {
+    pub msg: Option<String>,
+    pub author: Option<String>,
+    pub at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -4939,6 +4997,8 @@ fn FlakeTrayNew(
     commits_error: Option<String>,
     notice: Option<String>,
     is_admin: bool,
+    focus_sha: Option<String>,
+    focus_meta: Option<CommitFocusMeta>,
     on_edit: EventHandler<i32>,
     on_sync: EventHandler<i32>,
     on_history_rewrite_conflict: EventHandler<(i32, String)>,
@@ -4947,16 +5007,51 @@ fn FlakeTrayNew(
     const INITIAL_VISIBLE_COMMITS: usize = 100;
     const LOAD_MORE_STEP: usize = 100;
 
-    let mut selected_commit = use_signal(|| commits.first().cloned());
+    // Build effective commit list: prepend synthetic stub for focused SHA not yet in list
+    let effective_commits: Vec<MockCommitItem> = {
+        if let Some(ref sha) = focus_sha {
+            let sha_short = sha.chars().take(7).collect::<String>();
+            if !commits
+                .iter()
+                .any(|c| c.sha.starts_with(&sha_short) || sha.starts_with(&c.sha))
+            {
+                let meta = focus_meta.clone().unwrap_or_default();
+                let mut v = Vec::with_capacity(commits.len() + 1);
+                v.push(MockCommitItem {
+                    sha: sha_short.clone(),
+                    full_hash: sha.clone(),
+                    msg: meta.msg.unwrap_or_else(|| "(deployed commit)".to_string()),
+                    author: meta.author.unwrap_or_else(|| "—".to_string()),
+                    at: meta.at.unwrap_or_else(|| "deployed".to_string()),
+                    committed_at: chrono::Utc::now(),
+                    files: 0,
+                    add: 0,
+                    del: 0,
+                    eval_status: None,
+                    build_status: None,
+                    rollout_on: 0,
+                    rollout_total: 0,
+                });
+                v.extend(commits.iter().cloned());
+                v
+            } else {
+                commits.clone()
+            }
+        } else {
+            commits.clone()
+        }
+    };
+
+    let mut selected_commit = use_signal(|| effective_commits.first().cloned());
     let mut unavailable_commit_hashes = use_signal(Vec::<String>::new);
     let mut commit_query = use_signal(String::new);
     let mut visible_limit = use_signal(|| INITIAL_VISIBLE_COMMITS);
     let commits_scroll_id = format!("fl-tray-commits-{}", flake.id);
     let query = commit_query.read().trim().to_lowercase();
     let filtered_commits = if query.is_empty() {
-        commits.clone()
+        effective_commits.clone()
     } else {
-        commits
+        effective_commits
             .iter()
             .filter(|commit| {
                 commit.sha.to_lowercase().contains(&query)

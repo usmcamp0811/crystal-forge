@@ -18,6 +18,7 @@ pub struct EnvironmentCardProps {
     /// Applied alongside the flash class to keep the card highlighted.
     #[props(default)]
     pub attention_class: String,
+    pub on_view: EventHandler<EnvironmentItem>,
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -30,13 +31,14 @@ pub struct EnvironmentTableProps {
     /// Per-item attention class strings, one per environment in the same order.
     #[props(default)]
     pub attention_classes: Vec<String>,
+    pub on_view: EventHandler<EnvironmentItem>,
 }
 
 #[component]
 pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
     let env = props.environment.clone();
     let env_for_header = env.clone();
-    let env_for_footer = env.clone();
+    let env_for_body = env.clone();
     let total = env.health.total().max(env.system_count).max(1);
 
     let card_class = if props.flash {
@@ -52,7 +54,10 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
     };
 
     rsx! {
-        div { class: "{card_class}",
+        div {
+            class: "{card_class}",
+            style: "cursor:pointer;",
+            onclick: move |_| props.on_view.call(env_for_body.clone()),
             div { class: "env-card-rail", style: "background:{env.color_hex};" }
             div { class: "env-card-head",
                 div {
@@ -90,7 +95,10 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
                     button {
                         class: "btn-icon focus-ring",
                         title: "Edit",
-                        onclick: move |_| props.on_edit.call(env_for_header.clone()),
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            props.on_edit.call(env_for_header.clone());
+                        },
                         Icon { name: IconName::Gear, size: 14 }
                     }
                 }
@@ -136,13 +144,6 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
                 } else {
                     span { style: "font-size:11px; color:var(--cf-text-muted);", title: "TASK-362 tracks persisted environment RBAC assignments", "RBAC not persisted" }
                 }
-                button {
-                    class: "btn btn-subtle focus-ring",
-                    style: "padding:4px 10px; font-size:12px;",
-                    onclick: move |_| props.on_edit.call(env_for_footer.clone()),
-                    Icon { name: IconName::Gear, size: 12 }
-                    " Edit"
-                }
             }
         }
     }
@@ -181,6 +182,7 @@ pub fn EnvironmentTable(props: EnvironmentTableProps) -> Element {
                             on_edit: props.on_edit,
                             flash: *flash,
                             attention_class: attention_class.clone(),
+                            on_view: props.on_view,
                         }
                     }
                 }
@@ -197,6 +199,7 @@ struct EnvironmentRowProps {
     flash: bool,
     #[props(default)]
     attention_class: String,
+    on_view: EventHandler<EnvironmentItem>,
 }
 
 #[component]
@@ -217,7 +220,10 @@ fn EnvironmentRow(props: EnvironmentRowProps) -> Element {
     };
 
     rsx! {
-        tr { class: "{row_class}", onclick: move |_| props.on_edit.call(env_for_row.clone()),
+        tr {
+            class: "{row_class}",
+            style: "cursor:pointer;",
+            onclick: move |_| props.on_view.call(env_for_row.clone()),
             td {
                 div { style: "display:flex; align-items:center; gap:8px;",
                     span { class: "env-dot", style: "background:{env.color_hex};" }
