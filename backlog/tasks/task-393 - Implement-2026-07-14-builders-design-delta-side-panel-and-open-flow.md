@@ -3,7 +3,7 @@ id: TASK-393
 title: >-
   Implement the 2026-07-14 Builders design delta for side-panel and open-flow
   parity
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-14 00:00'
 updated_date: '2026-07-14 00:00'
@@ -150,3 +150,7 @@ delta, file a separate Backlog task instead of expanding this one.
 - [ ] #6 `cargo fmt`, `cargo clippy -- -D warnings`, `cargo test`, and `nix build .#checks.x86_64-linux.web-ui --no-link` pass from the repository dev environment
 - [ ] #7 Any newly discovered Builders parity work outside this delta is filed as a separate Backlog task rather than implemented here
 <!-- AC:END -->
+
+## Task Notes
+
+LOCK: opencode on reckless in /home/mcamp/code/crystal-forge/TASK-393-builders-side-panel-delta
