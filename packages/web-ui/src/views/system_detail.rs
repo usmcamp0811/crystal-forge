@@ -2153,8 +2153,13 @@ fn OverviewTab(
         .map(|commit| commit.hash.clone())
         .or_else(|| system.flake.as_ref().and_then(|f| f.latest_commit.clone()))
         .unwrap_or_else(|| "unknown".to_string());
+    let flake_commit_short = if flake_commit == "unknown" {
+        flake_commit.clone()
+    } else {
+        flake_commit.chars().take(8).collect::<String>()
+    };
     let flake_commit_for_open = flake_commit.clone();
-    let flake_commit_for_label = flake_commit.clone();
+    let flake_commit_for_label = flake_commit_short.clone();
     let flake_commit_for_title = flake_commit.clone();
     let flake_summary_for_commit = system.flake.clone();
     let nixos_version = system
@@ -2302,20 +2307,16 @@ fn OverviewTab(
                                     });
                                 }
                             },
-                            Icon { name: IconName::Git, size: 11 }
-                            " {flake_commit_for_label} "
-                            Icon { name: IconName::ArrowRight, size: 10 }
+                            "{flake_commit_for_label}"
                         }
-                        " "
+                        span { style: "margin:0 6px; color:var(--cf-text-muted);", "build" }
                         button {
                             class: "tl-commit-link mono focus-ring",
                             title: "Open the build for {flake_commit_for_title}",
                             onclick: move |_| {
                                 nav.push(Route::BuildsView {});
                             },
-                            Icon { name: IconName::Build, size: 11 }
-                            " build {generation_text} "
-                            Icon { name: IconName::ArrowRight, size: 10 }
+                            "{generation_text}"
                         }
                     }
                     dt { "Message" } dd { style: "white-space: normal; font-family: var(--font-sans);", "{commit_message_text}" }
