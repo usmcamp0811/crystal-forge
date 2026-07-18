@@ -2,11 +2,12 @@
 id: TASK-394
 title: >-
   Implement the 2026-07-18 Builds/Evals infinite-scroll design delta
-status: In Progress
+status: Review
 assignee: [agent]
 created_date: '2026-07-18 00:00'
 updated_date: '2026-07-18 00:00'
-lock: TASK-394-infinite-scroll (worktree: /home/mcamp/code/crystal-forge/TASK-394-infinite-scroll, branch: TASK-394-infinite-scroll, base: dev)
+mr: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/303
+lock: awaiting-review
 labels:
   - design-parity
   - web-ui
