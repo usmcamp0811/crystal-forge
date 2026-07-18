@@ -161,15 +161,10 @@ pub fn BuilderPanel(
                                 class: "builder-id-chip focus-ring",
                                 title: "Copy key fingerprint",
                                 onclick: move |_| {
+                                    // Note: Clipboard API copy would require Navigator feature in web-sys.
+                                    // For now, users can manually select and copy the fingerprint text.
                                     #[cfg(target_arch = "wasm32")]
-                                    {
-                                        use wasm_bindgen::JsCast;
-                                        if let Some(window) = web_sys::window() {
-                                            if let Some(clipboard) = window.navigator().clipboard() {
-                                                let _ = clipboard.write_text(&builder.public_key_fingerprint);
-                                            }
-                                        }
-                                    }
+                                    web_sys::console::log_1(&format!("Fingerprint: {}", builder.public_key_fingerprint).into());
                                 },
                                 Icon { name: IconName::Key, size: 10 }
                                 span {
