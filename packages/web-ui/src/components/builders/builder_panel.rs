@@ -42,7 +42,10 @@ pub fn BuilderPanel(
         0
     };
 
-    let load_pct = 0; // Load percentage not available from BuilderSummary; JSX design uses w.load
+    let load_pct = builder
+        .load_avg
+        .map(|l| (l * 100.0).round() as i32)
+        .unwrap_or(0);
 
     let slot_bar_color = if slot_pct > 85 { "#fbbf24" } else { "#34d399" };
     let load_bar_color = if load_pct > 85 {
@@ -197,12 +200,16 @@ pub fn BuilderPanel(
                     div {
                         style: "display: flex; justify-content: space-between; font-size: 11px; color: var(--cf-text-muted); margin-bottom: 4px;",
                         span { "Load" }
-                        span { class: "mono", "—" }
+                        if let Some(load) = builder.load_avg {
+                            span { class: "mono", "{(load * 100.0).round() as i32}%" }
+                        } else {
+                            span { class: "mono", "—" }
+                        }
                     }
                     div {
                         style: "height: 6px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden;",
                         div {
-                            style: "width: 0%; height: 100%; background: {load_bar_color};"
+                            style: "width: {load_pct}%; height: 100%; background: {load_bar_color};"
                         }
                     }
                 }
@@ -221,7 +228,11 @@ pub fn BuilderPanel(
                         dt { "Built 24h" }
                         dd {
                             class: "mono",
-                            "—"
+                            if builder.failed_24h > 0 {
+                                "{builder.completed_24h} · {builder.failed_24h} failed"
+                            } else {
+                                "{builder.completed_24h}"
+                            }
                         }
                         dt { "Last seen" }
                         dd { "{heartbeat_text}" }

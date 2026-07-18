@@ -2349,6 +2349,12 @@ pub struct BuilderSummary {
     pub assigned_environments: Vec<BuilderEnvironmentInfo>,
     pub public_key_fingerprint: String,
     pub registered: bool,
+    #[serde(default)]
+    pub load_avg: Option<f64>,
+    #[serde(default)]
+    pub completed_24h: i32,
+    #[serde(default)]
+    pub failed_24h: i32,
 }
 
 /// Full builder details
