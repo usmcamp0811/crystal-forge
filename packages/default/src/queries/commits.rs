@@ -367,6 +367,9 @@ pub struct EvalQueueRow {
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
+    pub active_total_count: i64,
+    pub completed_total_count: i64,
+    pub failed_total_count: i64,
 }
 
 pub async fn list_eval_queue(pool: &PgPool, limit: i64) -> Result<Vec<EvalQueueRow>> {
@@ -402,7 +405,16 @@ pub async fn list_eval_queue(pool: &PgPool, limit: i64) -> Result<Vec<EvalQueueR
                 FROM derivations d
                 WHERE d.commit_id = c.id
                   AND d.status_id = 6
-            ), 0) AS eval_failed_count
+            ), 0) AS eval_failed_count,
+            COUNT(*) FILTER (
+                WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling')
+            ) OVER () AS active_total_count,
+            COUNT(*) FILTER (
+                WHERE COALESCE(c.evaluation_status, 'pending') NOT IN ('pending', 'in_progress', 'cancelling')
+            ) OVER () AS completed_total_count,
+            COUNT(*) FILTER (
+                WHERE COALESCE(c.evaluation_status, 'pending') = 'failed'
+            ) OVER () AS failed_total_count
         FROM commits c
         JOIN flakes f ON f.id = c.flake_id
         LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
@@ -662,7 +674,7 @@ pub async fn list_eval_history(
     status_filter: Option<&str>,
     flake_filter: Option<&str>,
 ) -> Result<EvalHistoryPage> {
-    let offset = (page.max(1) - 1) * limit;
+    let offset = (page.max(1) - 1) * limit.max(1);
 
     #[derive(sqlx::FromRow)]
     struct HistoryRow {

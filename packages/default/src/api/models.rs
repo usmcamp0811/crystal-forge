@@ -606,7 +606,7 @@ pub struct BuildQueueParams {
     /// Page number (1-indexed, default 1).
     #[serde(default = "default_page")]
     pub page: i64,
-    /// Items per page (default 50, max 200).
+    /// Items per page (default 50).
     #[serde(default = "default_limit")]
     pub limit: i64,
     /// Filter by status: queued, building, success, failed (comma-separated or repeated).
@@ -654,6 +654,7 @@ pub struct BuildQueuePageResponse {
 pub struct EvalQueueSummary {
     pub active_count: i64,
     pub completed_count: i64,
+    pub failed_count: i64,
     pub execution_mode: String,
     pub items: Vec<EvalQueueItem>,
     pub timestamp: DateTime<Utc>,

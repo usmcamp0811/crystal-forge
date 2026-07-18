@@ -292,9 +292,11 @@ pub fn BuildsView() -> Element {
         let _ = refresh_trigger();
         api::client::fetch_builders().await
     });
+    let mut build_history_fetch_limit = use_signal(|| 100_i64);
+    let mut build_history_total = use_signal(|| 0_i64);
     let recent_builds = use_resource(move || async move {
         let _ = refresh_trigger();
-        fetch_recent_build_jobs().await
+        fetch_recent_build_jobs(build_history_fetch_limit()).await
     });
 
     let mut build_history = use_signal(Vec::<BuildItem>::new);
@@ -345,9 +347,10 @@ pub fn BuildsView() -> Element {
     });
 
     use_effect(move || {
-        if let Some(Ok(items)) = &*recent_builds.read() {
+        if let Some(Ok(page_resp)) = &*recent_builds.read() {
             build_history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
-            let mapped = items
+            let mapped = page_resp
+                .items
                 .iter()
                 .enumerate()
                 .map(|(idx, item)| {
@@ -410,6 +413,7 @@ pub fn BuildsView() -> Element {
                 })
                 .collect::<Vec<_>>();
             build_history.set(mapped);
+            build_history_total.set(page_resp.total);
         }
     });
 
@@ -556,12 +560,13 @@ pub fn BuildsView() -> Element {
     let paged_list: Vec<BuildItem> = filtered_list.iter().take(paging.count()).cloned().collect();
     // has_more is true when:
     //   (a) there are more client-side rows in the filtered list, OR
-    //   (b) on the Active tab, the server still has unloaded pages.
+    //   (b) the active/completed backing resource still has unloaded rows.
     let loaded_active_len = queue_data.len();
-    let can_grow_fetch_limit = fetch_limit() < 200;
-    let server_has_more = (loaded_active_len as i64) < queue_total() && can_grow_fetch_limit;
+    let active_server_has_more = (loaded_active_len as i64) < queue_total();
+    let completed_server_has_more = (build_history.read().len() as i64) < build_history_total();
     let has_more = paging.count() < filtered_list.len()
-        || (active_view() == BuildsTab::ActiveQueue && server_has_more);
+        || (active_view() == BuildsTab::ActiveQueue && active_server_has_more)
+        || (active_view() == BuildsTab::Completed && completed_server_has_more);
 
     // Grow the server fetch limit when the client-side paging count has caught
     // up with all visible (search-filtered) loaded rows and the server still
@@ -574,7 +579,8 @@ pub fn BuildsView() -> Element {
         if active_view() == BuildsTab::ActiveQueue {
             let loaded_len = builds.read().len();
             let total = queue_total();
-            let server_has_more = (loaded_len as i64) < total && fetch_limit() < 200;
+            let requested_len = fetch_limit();
+            let server_has_more = (loaded_len as i64) < total;
             let paging_count = paging.count();
 
             // Determine how many loaded items pass the search filter.
@@ -609,9 +615,55 @@ pub fn BuildsView() -> Element {
             // NB: no `threshold > 0` guard — a zero-match search must still
             // advance through server pages until matches appear or the server
             // is exhausted (review finding #3).
-            if paging_count >= threshold && server_has_more {
+            if (loaded_len as i64) >= requested_len && paging_count >= threshold && server_has_more
+            {
                 fetch_limit.with_mut(|limit| {
-                    *limit = (*limit + PAGE_SIZE).min(200);
+                    *limit += PAGE_SIZE;
+                });
+            }
+        }
+    });
+
+    use_effect(move || {
+        if active_view() == BuildsTab::Completed {
+            let loaded_len = build_history.read().len();
+            let total = build_history_total();
+            let requested_len = build_history_fetch_limit();
+            let paging_count = paging.count();
+
+            let q = search_query().trim().to_lowercase();
+            let threshold = if q.is_empty() {
+                loaded_len
+            } else {
+                build_history
+                    .read()
+                    .iter()
+                    .filter(|b| {
+                        [
+                            Some(extract_system_name(&b.hostname).to_lowercase()),
+                            Some(b.flake.to_lowercase()),
+                            Some(b.commit.to_lowercase()),
+                            if b.worker_id == "unassigned" {
+                                None
+                            } else {
+                                Some(b.worker_id.to_lowercase())
+                            },
+                            Some(b.arch.to_lowercase()),
+                            Some(b.status.label().to_lowercase()),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .any(|v| v.contains(&q))
+                    })
+                    .count()
+            };
+
+            if (loaded_len as i64) >= requested_len
+                && paging_count >= threshold
+                && (loaded_len as i64) < total
+            {
+                build_history_fetch_limit.with_mut(|limit| {
+                    *limit += 100;
                 });
             }
         }

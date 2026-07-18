@@ -1758,7 +1758,7 @@ pub async fn get_job_status(
 /// GET /api/v1/build-jobs - Paginated build queue with filtering (viewer+)
 ///
 /// Query parameters (all optional):
-/// - `page` (default 1), `limit` (default 50, max 200)
+/// - `page` (default 1), `limit` (default 50)
 /// - `status`: comma-separated statuses to include (queued, building, success, failed)
 /// - `commit_hash`: prefix match on git commit hash
 /// - `flake_name`: partial match on flake name
@@ -1787,12 +1787,19 @@ pub async fn list_build_queue(
 pub async fn list_recent_build_jobs(
     State(state): State<CFState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<crate::api::models::BuildQueueItem>>, StatusCode> {
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<crate::api::models::BuildQueuePageResponse>, StatusCode> {
     let Some(_viewer) = require_viewer_or_above(&state.pool, &headers).await else {
         return Err(StatusCode::FORBIDDEN);
     };
 
-    let items = crate::queries::dashboard::fetch_recent_build_history(&state.pool, 100)
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100)
+        .max(1);
+
+    let items = crate::queries::dashboard::fetch_recent_build_history(&state.pool, limit)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

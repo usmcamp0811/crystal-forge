@@ -61,6 +61,7 @@ fn reorder_validation_details(message: &str) -> Option<serde_json::Value> {
 pub async fn list_eval_queue(
     State(state): State<CFState>,
     headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     if require_viewer_or_above(&state.pool, &headers)
         .await
@@ -69,7 +70,13 @@ pub async fn list_eval_queue(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let rows = match crate::queries::commits::list_eval_queue(&state.pool, 200).await {
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200)
+        .max(1);
+
+    let rows = match crate::queries::commits::list_eval_queue(&state.pool, limit).await {
         Ok(rows) => rows,
         Err(err) => {
             tracing::error!("Failed to list eval queue: {}", err);
@@ -77,41 +84,38 @@ pub async fn list_eval_queue(
         }
     };
 
-    let mut active_count = 0_i64;
-    let mut completed_count = 0_i64;
+    let active_count = rows.first().map(|row| row.active_total_count).unwrap_or(0);
+    let completed_count = rows
+        .first()
+        .map(|row| row.completed_total_count)
+        .unwrap_or(0);
+    let failed_count = rows.first().map(|row| row.failed_total_count).unwrap_or(0);
 
     let items = rows
         .into_iter()
-        .map(|row| {
-            if matches!(row.evaluation_status.as_str(), "pending" | "in_progress") {
-                active_count += 1;
-            } else {
-                completed_count += 1;
-            }
-
-            EvalQueueItem {
-                commit_id: row.commit_id,
-                flake_id: row.flake_id,
-                flake_name: row.flake_name,
-                branch: row.branch,
-                commit_hash: row.commit_hash,
-                commit_message: row.commit_message,
-                author: row.author,
-                committed_at: row.committed_at,
-                evaluation_status: row.evaluation_status,
-                queue_position: row.queue_position,
-                systems: row.systems,
-                system_count: row.system_count,
-                passed_count: row.passed_count,
-                policy_failed_count: row.policy_failed_count,
-                eval_failed_count: row.eval_failed_count,
-            }
+        .map(|row| EvalQueueItem {
+            commit_id: row.commit_id,
+            flake_id: row.flake_id,
+            flake_name: row.flake_name,
+            branch: row.branch,
+            commit_hash: row.commit_hash,
+            commit_message: row.commit_message,
+            author: row.author,
+            committed_at: row.committed_at,
+            evaluation_status: row.evaluation_status,
+            queue_position: row.queue_position,
+            systems: row.systems,
+            system_count: row.system_count,
+            passed_count: row.passed_count,
+            policy_failed_count: row.policy_failed_count,
+            eval_failed_count: row.eval_failed_count,
         })
         .collect::<Vec<_>>();
 
     Json(EvalQueueSummary {
         active_count,
         completed_count,
+        failed_count,
         execution_mode: state.server_config.execution_mode.as_str().to_string(),
         items,
         timestamp: chrono::Utc::now(),
@@ -663,7 +667,7 @@ pub async fn list_eval_history(
         .get("limit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(50)
-        .clamp(1, 200);
+        .max(1);
     let status_filter = params.get("status").map(|s| s.as_str());
     let flake_filter = params.get("flake").map(|s| s.as_str());
 

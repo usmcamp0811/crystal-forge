@@ -46,6 +46,7 @@ pub fn EvaluationsCommitView(commit_id: i32) -> Element {
 #[component]
 fn EvaluationsPage() -> Element {
     let mut queue_items = use_signal(Vec::<EvalQueueItem>::new);
+    let mut active_fetch_limit = use_signal(|| 200_i64);
     let mut refresh = use_signal(|| 0_u64);
     let mut active_tab = use_signal(|| EvaluationsTab::ActiveQueue);
     let mut drawer_target = use_signal(|| None::<EvalDrawerTarget>);
@@ -64,7 +65,7 @@ fn EvaluationsPage() -> Element {
     let mut history_fetch_limit = use_signal(|| 50_i64);
     let mut history_status_filter = use_signal(|| String::from("all"));
     let mut history_flake_filter = use_signal(|| String::from("all"));
-    let mut history_auto_selected = use_signal(|| false);
+    let mut history_select_all_loaded = use_signal(|| true);
     let mut history_ack_cursor = use_signal(|| None::<String>);
     let mut evals_ack_sent = use_signal(|| false);
     // Accumulated history items across the current page-1 fetch window.
@@ -95,7 +96,7 @@ fn EvaluationsPage() -> Element {
 
     let queue_resource = use_resource(move || async move {
         let _ = refresh();
-        fetch_eval_queue().await
+        fetch_eval_queue(active_fetch_limit()).await
     });
 
     {
@@ -133,17 +134,16 @@ fn EvaluationsPage() -> Element {
         }
     });
 
-    // Auto-select all history items on first successful data load.
+    // Keep "select all loaded" in sync with newly fetched history rows until
+    // the user manually changes the selection.
     use_effect(move || {
-        let already = *history_auto_selected.read();
         if let Some(Ok(page_data)) = &*history_resource.read() {
             history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
-            if !already {
+            if history_select_all_loaded() {
                 let ids: std::collections::HashSet<i32> =
                     page_data.items.iter().map(|item| item.commit_id).collect();
                 if !ids.is_empty() {
                     history_selected_ids.set(ids);
-                    history_auto_selected.set(true);
                 }
             }
         }
@@ -164,12 +164,16 @@ fn EvaluationsPage() -> Element {
     use_effect(move || {
         let loaded_history_len = history_items_acc.read().len();
         let history_total = history_total_acc();
-        let hist_server_has_more =
-            (loaded_history_len as i64) < history_total && history_fetch_limit() < 200;
+        let requested_len = history_fetch_limit();
+        let hist_server_has_more = (loaded_history_len as i64) < history_total;
         let hist_count = hist_paging.count();
-        if hist_count >= loaded_history_len && loaded_history_len > 0 && hist_server_has_more {
+        if (loaded_history_len as i64) >= requested_len
+            && hist_count >= loaded_history_len
+            && loaded_history_len > 0
+            && hist_server_has_more
+        {
             history_fetch_limit.with_mut(|limit| {
-                *limit = (*limit + 50).min(200);
+                *limit += 50;
             });
         }
     });
@@ -188,7 +192,39 @@ fn EvaluationsPage() -> Element {
         .take(active_paging.count())
         .cloned()
         .collect();
-    let active_has_more = active_paging.count() < active_items.len();
+    let active_total = queue_resource
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|summary| summary.active_count)
+        .unwrap_or(0);
+    let active_has_more =
+        active_paging.count() < active_items.len() || (active_items.len() as i64) < active_total;
+
+    use_effect(move || {
+        if active_tab() == EvaluationsTab::ActiveQueue {
+            let loaded_active_len = queue_items
+                .read()
+                .iter()
+                .filter(|item| is_active_eval_status(&item.evaluation_status))
+                .count();
+            let requested_len = active_fetch_limit();
+            let active_total = queue_resource
+                .read()
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .map(|summary| summary.active_count)
+                .unwrap_or(0);
+            if (loaded_active_len as i64) >= requested_len
+                && active_paging.count() >= loaded_active_len
+                && (loaded_active_len as i64) < active_total
+            {
+                active_fetch_limit.with_mut(|limit| {
+                    *limit += 200;
+                });
+            }
+        }
+    });
 
     let summary_snapshot = queue_resource
         .read()
@@ -196,17 +232,19 @@ fn EvaluationsPage() -> Element {
         .and_then(|result| result.as_ref().ok())
         .cloned();
 
-    let active_count = active_items.len() as i64;
+    let active_count = summary_snapshot
+        .as_ref()
+        .map(|s| s.active_count)
+        .unwrap_or(0);
     let completed_count = summary_snapshot
         .as_ref()
         .map(|s| s.completed_count)
         .unwrap_or(0);
-    let failed_count = queue_items
-        .read()
-        .iter()
-        .filter(|item| item.evaluation_status == "failed")
-        .count() as i64;
-    let total_count = queue_items.read().len() as i64;
+    let failed_count = summary_snapshot
+        .as_ref()
+        .map(|s| s.failed_count)
+        .unwrap_or(0);
+    let total_count = active_count + completed_count;
     let history_count = history_resource
         .read()
         .as_ref()
@@ -591,6 +629,7 @@ fn EvaluationsPage() -> Element {
                             history_status_filter: history_status_filter,
                             history_flake_filter: history_flake_filter,
                             history_fetch_limit: history_fetch_limit,
+                            history_select_all_loaded: history_select_all_loaded,
                             refresh: refresh,
                             history_selected_ids: history_selected_ids,
                             drawer_target: drawer_target,
@@ -943,6 +982,7 @@ fn EvalHistory(
     mut history_status_filter: Signal<String>,
     mut history_flake_filter: Signal<String>,
     mut history_fetch_limit: Signal<i64>,
+    mut history_select_all_loaded: Signal<bool>,
     mut refresh: Signal<u64>,
     mut history_selected_ids: Signal<std::collections::HashSet<i32>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
@@ -958,7 +998,7 @@ fn EvalHistory(
     let hist_server_has_more = {
         let loaded = history_items_acc.read().len();
         let total = history_total_acc();
-        (loaded as i64) < total && history_fetch_limit() < 200
+        (loaded as i64) < total
     };
 
     rsx! {
@@ -980,6 +1020,7 @@ fn EvalHistory(
                                     onclick: move |_| {
                                         history_status_filter.set(value_str.clone());
                                         history_fetch_limit.set(50);
+                                        history_select_all_loaded.set(true);
                                         refresh.set(refresh() + 1);
                                     },
                                     "{label}"
@@ -996,6 +1037,7 @@ fn EvalHistory(
                     onchange: move |evt| {
                         history_flake_filter.set(evt.value().clone());
                         history_fetch_limit.set(50);
+                        history_select_all_loaded.set(true);
                         refresh.set(refresh() + 1);
                     },
                     option { value: "all", "All flakes" }
@@ -1060,12 +1102,14 @@ fn EvalHistory(
                                                     next.remove(id);
                                                 }
                                                 history_selected_ids.set(next);
+                                                history_select_all_loaded.set(false);
                                             } else {
                                                 let mut next = history_selected_ids.read().clone();
                                                 for id in &all_loaded_ids {
                                                     next.insert(*id);
                                                 }
                                                 history_selected_ids.set(next);
+                                                history_select_all_loaded.set(true);
                                             }
                                         }
                                     }
@@ -1128,6 +1172,7 @@ fn EvalHistory(
                                                         next.insert(commit_id);
                                                     }
                                                     history_selected_ids.set(next);
+                                                    history_select_all_loaded.set(false);
                                                 },
                                                 input {
                                                     r#type: "checkbox",
