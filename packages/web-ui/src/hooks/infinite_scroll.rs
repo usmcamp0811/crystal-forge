@@ -185,21 +185,19 @@ pub fn use_infinite_scroll(reset_key: String, page_size: usize) -> InfiniteScrol
     #[allow(dead_code)]
     let handle_id = *id.read();
 
-    // Reset count and disconnect any active observer when the key changes.
+    // Reset count when the key changes.
     // Runs synchronously on every render (not inside a use_effect) so the
     // comparison is always against the latest reset_key value and Dioxus
     // does not need to track signal dependencies.
+    //
+    // The IntersectionObserver is intentionally left connected across
+    // resets: it targets the same sentinel element and the same count
+    // signal.  Disconnecting here would require the sentinel to remount
+    // and invoke onmounted again, but Dioxus may reuse the DOM node and
+    // onmounted only fires once per element (review finding #2).
     if *prev_key.read() != reset_key {
         prev_key.set(reset_key);
         count.set(page_size);
-        // Disconnect the observer; it will be re-registered when the
-        // sentinel remounts after the reset renders new items.
-        #[cfg(target_arch = "wasm32")]
-        OBSERVER_REGISTRY.with(|reg| {
-            if let Some((observer, _cb)) = reg.borrow_mut().remove(&handle_id) {
-                observer.disconnect();
-            }
-        });
     }
 
     // Disconnect observer on component unmount.

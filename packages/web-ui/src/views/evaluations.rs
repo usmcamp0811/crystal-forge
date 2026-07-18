@@ -70,6 +70,10 @@ fn EvaluationsPage() -> Element {
     // Accumulated history items across server pages.
     let mut history_items_acc: Signal<Vec<EvalHistoryItem>> = use_signal(Vec::new);
     let mut history_total_acc = use_signal(|| 0_i64);
+    // Page-indexed cache: polling refetches replace the corresponding page
+    // entry so data refreshes without duplication (review finding #1).
+    let mut history_page_cache =
+        use_signal(std::collections::HashMap::<i64, Vec<EvalHistoryItem>>::new);
 
     let history_resource = use_resource(move || async move {
         let _ = refresh();
@@ -123,15 +127,23 @@ fn EvaluationsPage() -> Element {
         }
     });
 
-    // Accumulate history pages: replace on page 1, append on subsequent pages.
+    // Accumulate history pages using a page-indexed cache.  Polling
+    // refetches replace their page entry in-place so data refreshes
+    // without duplication (review finding #1).
     use_effect(move || {
         if let Some(Ok(page_data)) = &*history_resource.read() {
+            let page = history_page();
             history_total_acc.set(page_data.total_count);
-            if history_page() == 1 {
-                history_items_acc.set(page_data.items.clone());
-            } else {
-                history_items_acc.write().extend(page_data.items.clone());
+            if page == 1 {
+                history_page_cache.write().clear();
             }
+            history_page_cache.with_mut(|cache| {
+                cache.insert(page, page_data.items.clone());
+                let mut pages: Vec<_> = cache.iter().collect();
+                pages.sort_by_key(|(p, _)| **p);
+                let all: Vec<_> = pages.into_iter().flat_map(|(_, v)| v.clone()).collect();
+                history_items_acc.set(all);
+            });
         }
     });
 
@@ -308,11 +320,13 @@ fn EvaluationsPage() -> Element {
                     // Keyboard nav is bounded to the currently *rendered* slice so
                     // focus never lands on an invisible row (review finding #4).
                     // `hist_paging` is created in the parent so the visible count
-                    // is directly accessible here.
+                    // is directly accessible here, but it may briefly exceed the
+                    // number of actually loaded rows while a server page is in
+                    // flight — cap to the accumulated items count (finding #4).
                     let list_len = if active_tab() == EvaluationsTab::ActiveQueue {
                         paged_active_items.len()
                     } else {
-                        hist_paging.count()
+                        hist_paging.count().min(history_items_acc.read().len())
                     };
 
                     match evt.key() {

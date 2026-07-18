@@ -214,6 +214,9 @@ pub fn BuildsView() -> Element {
     let mut queue_page = use_signal(|| 1_i64);
     let mut queue_total = use_signal(|| 0_i64);
     let mut builds = use_signal(Vec::<BuildItem>::new);
+    // Page-indexed cache: polling refetches replace the corresponding page
+    // entry so data refreshes without duplication (review finding #1).
+    let mut page_cache = use_signal(std::collections::HashMap::<i64, Vec<BuildItem>>::new);
 
     // Filter state — Active Queue defaults to active jobs only (queued + building + cancelling).
     // Operators can widen to "All" or other statuses via the status dropdown.
@@ -236,6 +239,7 @@ pub fn BuildsView() -> Element {
             filter_time_range(),
         );
         queue_page.set(1);
+        page_cache.write().clear();
     });
 
     // Derived filter signals used to trigger resource re-fetch
@@ -343,13 +347,17 @@ pub fn BuildsView() -> Element {
                 .enumerate()
                 .map(|(idx, item)| map_queue_item(item, offset + idx))
                 .collect::<Vec<_>>();
-            if page == 1 {
-                // First page or filter reset: replace.
-                builds.set(mapped);
-            } else {
-                // Subsequent pages: accumulate.
-                builds.write().extend(mapped);
-            }
+            // Insert/replace the page entry in the page-indexed cache,
+            // then rebuild `builds` in page order.  Polling refetches
+            // replace their page entry in-place so data refreshes without
+            // duplication (review finding #1).
+            page_cache.with_mut(|cache| {
+                cache.insert(page, mapped);
+                let mut pages: Vec<_> = cache.iter().collect();
+                pages.sort_by_key(|(p, _)| **p);
+                let all: Vec<_> = pages.into_iter().flat_map(|(_, v)| v.clone()).collect();
+                builds.set(all);
+            });
             queue_total.set(page_resp.total);
         }
     });
@@ -615,7 +623,10 @@ pub fn BuildsView() -> Element {
                     .count()
             };
 
-            if paging_count >= threshold && threshold > 0 && server_has_more {
+            // NB: no `threshold > 0` guard — a zero-match search must still
+            // advance through server pages until matches appear or the server
+            // is exhausted (review finding #3).
+            if paging_count >= threshold && server_has_more {
                 queue_page.with_mut(|p| *p += 1);
             }
         }
