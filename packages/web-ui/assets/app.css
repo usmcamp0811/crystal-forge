@@ -5073,11 +5073,20 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
 .tl-meta-item.tl-untracked { color: var(--cf-amber); }
 .tl-when { color: var(--cf-text-muted); margin-left: auto; }
 .tl-commit-link {
-  background: none; border: none; color: var(--cf-blue); cursor: pointer;
-  font-family: var(--font-mono); font-size: 11px; padding: 0;
-  display: inline-flex; align-items: center; gap: 4px;
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; padding: 2px 8px; border-radius: 6px;
+  border: 1px solid color-mix(in oklab, var(--cf-brand-purple) 35%, var(--cf-card-border));
+  background: color-mix(in oklab, var(--cf-brand-purple) 8%, transparent);
+  color: var(--cf-brand-purple); cursor: pointer;
+  transition: background 120ms, border-color 120ms;
+  white-space: nowrap;
 }
-.tl-commit-link:hover { text-decoration: underline; }
+.tl-commit-link:hover {
+  background: color-mix(in oklab, var(--cf-brand-purple) 16%, transparent);
+  border-color: var(--cf-brand-purple);
+}
+.tl-commit-link svg:last-child { opacity: 0.6; }
+
 .sd-commit-sha-link {
   display: inline-flex; align-items: center; gap: 4px;
   cursor: pointer; border-radius: 4px; padding: 1px 4px; margin: -1px -4px;
