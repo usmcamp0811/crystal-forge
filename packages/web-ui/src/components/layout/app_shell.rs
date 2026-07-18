@@ -123,9 +123,11 @@ pub fn AppShell() -> Element {
 
     // In debug builds, allow mock auth for screenshot tests
     #[cfg(debug_assertions)]
-    if auth_context.is_none() && ui_check_mock_auth_enabled() {
+    if ui_check_mock_auth_enabled() {
         let mock = ui_check_mock_auth_context();
-        app_state.write().auth = Some(mock.clone());
+        let mut state = app_state.write();
+        state.auth = Some(mock.clone());
+        state.auth_fetch_state = AuthFetchState::Loaded;
         auth_context = Some(mock);
     }
 

@@ -65,21 +65,19 @@ pub fn LoginView() -> Element {
                                                 if let Ok(status) =
                                                     serde_json::from_str::<serde_json::Value>(&text)
                                                 {
-                                                    // Check if first-time setup is required
-                                                    if status
-                                                        .get("requires_setup")
-                                                        .and_then(|v| v.as_bool())
-                                                        .unwrap_or(false)
-                                                    {
-                                                        // Redirect to registration for first-time setup
-                                                        nav.push("/register");
-                                                        return;
-                                                    }
-                                                    // Check if registration is allowed
+                                                    // Check if registration is allowed. First-run
+                                                    // setup should keep the login page visible and
+                                                    // expose the Register link, rather than
+                                                    // redirecting away before the user can see the
+                                                    // login form.
                                                     if status
                                                         .get("allow_registration")
                                                         .and_then(|v| v.as_bool())
                                                         .unwrap_or(false)
+                                                        || status
+                                                            .get("requires_setup")
+                                                            .and_then(|v| v.as_bool())
+                                                            .unwrap_or(false)
                                                     {
                                                         allow_registration.set(true);
                                                     }
