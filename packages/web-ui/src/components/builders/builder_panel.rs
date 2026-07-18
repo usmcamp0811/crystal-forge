@@ -32,6 +32,7 @@ fn builder_status_chip(builder: &BuilderSummary) -> Element {
 #[component]
 pub fn BuilderPanel(
     builder: BuilderSummary,
+    can_manage: bool,
     on_close: EventHandler<()>,
     on_edit: EventHandler<()>,
 ) -> Element {
@@ -251,17 +252,19 @@ pub fn BuilderPanel(
             }
 
                 // Panel actions
-                div {
-                    class: "panel-actions",
-                    button {
-                        class: "btn btn-primary focus-ring",
-                        onclick: move |_| on_edit.call(()),
-                        if builder.registered {
-                            Icon { name: IconName::Gear, size: 12 }
-                            " Edit builder"
-                        } else {
-                            Icon { name: IconName::Key, size: 12 }
-                            " Register"
+                if can_manage {
+                    div {
+                        class: "panel-actions",
+                        button {
+                            class: "btn btn-primary focus-ring",
+                            onclick: move |_| on_edit.call(()),
+                            if builder.registered {
+                                Icon { name: IconName::Gear, size: 12 }
+                                " Edit builder"
+                            } else {
+                                Icon { name: IconName::Key, size: 12 }
+                                " Register"
+                            }
                         }
                     }
                 }

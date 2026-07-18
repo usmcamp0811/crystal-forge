@@ -449,6 +449,7 @@ pub fn BuildersView() -> Element {
                     BuilderPanel {
                         key: "{builder.id}",
                         builder: builder.clone(),
+                        can_manage: can_manage_builders,
                         on_close: move |_| on_close_builder_panel(),
                         on_edit: move |_| {
                             on_close_builder_panel();

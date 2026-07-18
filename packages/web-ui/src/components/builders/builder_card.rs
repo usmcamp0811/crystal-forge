@@ -88,7 +88,12 @@ pub fn BuilderCard(
     rsx! {
         div {
             class: "sys-card",
-            onclick: move |_| on_open.call(()),
+            style: if can_manage { "cursor: pointer;" } else { "" },
+            onclick: move |_| {
+                if can_manage {
+                    on_open.call(())
+                }
+            },
             div {
                 class: "status-rail",
                 style: "--status-color: {rail_color};"
