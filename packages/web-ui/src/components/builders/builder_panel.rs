@@ -164,10 +164,9 @@ pub fn BuilderPanel(
                                     #[cfg(target_arch = "wasm32")]
                                     {
                                         if let Some(window) = web_sys::window() {
-                                            if let Ok(clipboard) = window.navigator().clipboard() {
-                                                let fp = builder.public_key_fingerprint.clone();
-                                                let _ = clipboard.write_text(&fp);
-                                            }
+                                            let clipboard = window.navigator().clipboard();
+                                            let fp = builder.public_key_fingerprint.clone();
+                                            let _ = clipboard.write_text(&fp);
                                         }
                                     }
                                 },
