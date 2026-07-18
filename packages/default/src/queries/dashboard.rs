@@ -558,6 +558,12 @@ pub async fn list_build_queue_paginated(
                 WHEN bj.status = 'queued' THEN bj.priority_weight
                 ELSE NULL
             END DESC NULLS LAST,
+            -- For queued jobs, older jobs first (matches move_up/move_down order)
+            -- For non-queued jobs, newer first
+            CASE
+                WHEN bj.status = 'queued' THEN bj.created_at
+                ELSE NULL
+            END ASC NULLS LAST,
             bj.created_at DESC NULLS LAST
         LIMIT $7
         OFFSET $8

@@ -199,8 +199,8 @@ pub async fn create_builder(
 
     let builder = sqlx::query_as::<_, Builder>(
         r#"
-        INSERT INTO builders (name, host, arch, public_key, max_cpu_cores, max_memory_mb, max_concurrent_jobs, enabled, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'inactive')
+        INSERT INTO builders (name, host, arch, public_key, max_cpu_cores, max_memory_mb, max_concurrent_jobs, enabled, status, registered)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'inactive', true)
         RETURNING *
         "#
     )
@@ -306,7 +306,8 @@ pub async fn list_builders(pool: &PgPool) -> Result<Vec<BuilderSummary>> {
                 ),
                 '[]'::json
             ) as assigned_environments,
-            b.public_key_fingerprint,
+            -- Fingerprint is computed from public_key to avoid sync issues
+            encode(digest(decode(b.public_key, 'base64'), 'sha256'::text), 'hex') as public_key_fingerprint,
             b.registered,
             b.load_avg,
             -- Count completed jobs in last 24 hours
@@ -314,7 +315,7 @@ pub async fn list_builders(pool: &PgPool) -> Result<Vec<BuilderSummary>> {
                 SELECT COUNT(*)
                 FROM build_jobs
                 WHERE builder_id = b.id
-                  AND status = 'complete'
+                  AND status = 'success'
                   AND completed_at > now() - interval '24 hours'
             ), 0)::int as completed_24h,
             -- Count failed jobs in last 24 hours
@@ -328,7 +329,7 @@ pub async fn list_builders(pool: &PgPool) -> Result<Vec<BuilderSummary>> {
         FROM builders b
         LEFT JOIN builder_environment_assignments bea ON bea.builder_id = b.id
         LEFT JOIN build_jobs bj ON bj.builder_id = b.id AND bj.status = 'building'
-        GROUP BY b.id, b.name, b.host, b.arch, b.status, b.max_cpu_cores, b.max_memory_mb, b.max_concurrent_jobs, b.enabled, b.last_heartbeat_at, b.public_key_fingerprint, b.registered, b.load_avg
+        GROUP BY b.id, b.name, b.host, b.arch, b.status, b.max_cpu_cores, b.max_memory_mb, b.max_concurrent_jobs, b.enabled, b.last_heartbeat_at, b.registered, b.load_avg
         ORDER BY b.created_at DESC
         "#
     )

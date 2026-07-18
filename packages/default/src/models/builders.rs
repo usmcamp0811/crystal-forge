@@ -110,6 +110,9 @@ pub struct BuilderSummary {
     #[serde(default)]
     #[sqlx(default, json)]
     pub assigned_environments: Vec<BuilderEnvironmentInfo>,
+    /// SHA256 hex fingerprint derived from public_key
+    #[serde(default)]
+    #[sqlx(default)]
     pub public_key_fingerprint: String,
     pub registered: bool,
     /// System load average (0.0-1.0), if reported in recent heartbeat
