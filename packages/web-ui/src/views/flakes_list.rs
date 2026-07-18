@@ -3364,6 +3364,39 @@ pub fn FlakesListViewNew() -> Element {
                 }
             }
 
+            div { class: "stat-strip flakes-stat-strip", "data-testid": "flakes-stat-strip",
+                div { class: "stat",
+                    div { class: "stat-accent", style: "--stat-color: var(--cf-brand-purple);" }
+                    div { class: "stat-label", "Tracked" }
+                    div { class: "stat-value", "{flake_count}" }
+                    div { class: "stat-meta", "registered flakes" }
+                }
+                div { class: "stat",
+                    div { class: "stat-accent", style: "--stat-color: #60a5fa;" }
+                    div { class: "stat-label", "Systems" }
+                    div { class: "stat-value", "{total_systems}" }
+                    div { class: "stat-meta", "mapped hosts" }
+                }
+                div { class: "stat",
+                    div { class: "stat-accent", style: "--stat-color: #34d399;" }
+                    div { class: "stat-label", "Synced" }
+                    div { class: "stat-value", "{synced_count}" }
+                    div { class: "stat-meta", "latest status clean" }
+                }
+                div { class: "stat",
+                    div { class: "stat-accent", style: "--stat-color: #f59e0b;" }
+                    div { class: "stat-label", "Syncing" }
+                    div { class: "stat-value", "{syncing_count}" }
+                    div { class: "stat-meta", "queued or building" }
+                }
+                div { class: "stat",
+                    div { class: "stat-accent", style: "--stat-color: #f87171;" }
+                    div { class: "stat-label", "Errors" }
+                    div { class: "stat-value", "{error_count}" }
+                    div { class: "stat-meta", "needs attention" }
+                }
+            }
+
             // Filter bar - JSX lines 42-52
             div { class: "filterbar",
                 div { class: "filter-search",
