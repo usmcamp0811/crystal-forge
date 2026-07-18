@@ -154,3 +154,44 @@ delta, file a separate Backlog task instead of expanding this one.
 ## Task Notes
 
 MR: !300 (https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/300)
+
+### Data Model Gaps (Backend Contract)
+
+The BuilderPanel implementation matches the design structure exactly, but displays
+placeholder values for metrics not currently available in BuilderSummary:
+
+**Load percentage** (panel "Slot use" section, second bar):
+- Design: `w.load` (0.0-1.0 fraction, shown as percentage)
+- Current: Always displays "—" and 0% bar
+- Reason: BuilderSummary has no load metric field
+- Impact: Panel shows slot utilization correctly, but system load is unavailable
+
+**Builds completed in 24h** (panel "Details" section, "Built 24h" row):
+- Design: `w.completed24h` and `w.failed24h` counts
+- Current: Always displays "—"
+- Reason: BuilderSummary does not include build completion metrics
+- Impact: Users cannot see recent build throughput in the panel
+
+These are **not UI bugs**. The panel correctly renders all fields available in the
+current API contract. Adding these metrics would require:
+
+1. Load metric:
+   - Builders report load average in heartbeat
+   - Server stores/exposes in BuilderSummary
+   - Query: `b.last_reported_load_avg as load_pct`
+
+2. Build metrics:
+   - Aggregate build_jobs WHERE builder_id = b.id AND completed_at > now() - interval '24 hours'
+   - Add `completed_24h` and `failed_24h` to BuilderSummary
+   - Query: Complex aggregation with GROUP BY and time filter
+
+If these metrics become available, update:
+- `packages/default/src/models/builders.rs` (BuilderSummary struct)
+- `packages/default/src/queries/builders.rs` (list_builders query)
+- `packages/web-ui/src/api/models.rs` (BuilderSummary struct)
+- `packages/web-ui/src/components/builders/builder_panel.rs` (remove placeholder logic)
+
+### Environment Ordering
+
+Fixed: The SQL query now uses `ORDER BY e.name` in the json_agg() to ensure
+deterministic environment pill ordering in the panel.
