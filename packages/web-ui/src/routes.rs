@@ -114,7 +114,7 @@ impl Route {
                 format!("Evaluations · commit {commit_id}")
             }
             Route::BuildersView { .. } => "Builders".to_string(),
-            Route::CachesView { .. } => "Cache Management".to_string(),
+            Route::CachesView { .. } => "Caches".to_string(),
             Route::CvesView { .. } => "CVEs".to_string(),
             Route::ScanningView { .. } => "Scanning".to_string(),
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),

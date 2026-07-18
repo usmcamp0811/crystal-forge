@@ -2915,6 +2915,32 @@ const steps = [
       await assertVisible(sidebar.getByText("Pipeline").first(), "Expected Pipeline section label");
       await assertVisible(sidebar.getByText("Compliance").first(), "Expected Compliance section label");
       await assertVisible(sidebar.getByText("System").first(), "Expected System section label");
+
+      // TASK-392: verify Evaluations appears before Builds in sidebar nav order
+      const navItems = sidebar.locator(".nav-item");
+      const itemCount = await navItems.count();
+      let evalsIdx = -1;
+      let buildsIdx = -1;
+      for (let i = 0; i < itemCount; i++) {
+        const text = await navItems.nth(i).textContent();
+        if (text && text.includes("Evaluations") && evalsIdx === -1) evalsIdx = i;
+        if (text && text.includes("Builds") && buildsIdx === -1) buildsIdx = i;
+      }
+      if (evalsIdx === -1 || buildsIdx === -1) {
+        throw new Error(`Could not find Evaluations (${evalsIdx}) or Builds (${buildsIdx}) nav items`);
+      }
+      if (evalsIdx >= buildsIdx) {
+        throw new Error(`Expected Evaluations (idx ${evalsIdx}) before Builds (idx ${buildsIdx}) in sidebar nav`);
+      }
+      // Verify exactly one link for each route (no duplicates)
+      let buildsCount = 0;
+      for (let i = 0; i < itemCount; i++) {
+        const text = await navItems.nth(i).textContent();
+        if (text && text.includes("Builds")) buildsCount++;
+      }
+      if (buildsCount !== 1) {
+        throw new Error(`Expected exactly 1 Builds nav item, found ${buildsCount}`);
+      }
       // Screenshot taken here: full desktop expanded sidebar, all groups visible
     },
   },
@@ -3643,6 +3669,7 @@ const steps = [
     description: "System detail history/logs tabs and edit action",
     action: async (page) => {
       await routeSystemsWarningData(page);
+      await routeFlakeParityData(page);
 
       const historyResponsePromise = page
         .waitForResponse(
@@ -3741,6 +3768,23 @@ const steps = [
         "Expected system detail header to render Edit action",
       );
 
+      await page.getByRole("tab", { name: "Deploy" }).first().click();
+      await page.locator(".sd-commit-sha-link").first().click();
+      await assertVisible(
+        page.locator(".fl-tray").first(),
+        "Expected System Detail commit SHA to open an in-place Flake tray",
+      );
+      const detailPathAfterPeek = new URL(page.url()).pathname;
+      if (!detailPathAfterPeek.startsWith("/systems/00000000-0000-0000-0000-0000000000a1")) {
+        throw new Error(`Expected Flake tray peek to keep System Detail URL, got ${detailPathAfterPeek}`);
+      }
+      await page.locator(".fl-tray .btn-icon").first().click();
+      await assertHidden(
+        page.locator(".fl-tray").first(),
+        "Expected in-place Flake tray to close without leaving System Detail",
+      );
+
+      await unrouteFlakeParityData(page);
       await unrouteSystemsWarningData(page);
     },
   },
@@ -4685,6 +4729,45 @@ const steps = [
       await page.evaluate(() => window.scrollTo(0, 140));
       await unrouteEnvironmentWarningData(page);
       await unrouteConfigHealth(page);
+    },
+  },
+  // TASK-392: Environments detail side panel — card/row click opens panel, not edit form
+  {
+    name: "14c-environments-detail-panel",
+    description: "Environments: clicking a card opens the detail side panel (not the edit form)",
+    route: "/environments",
+    profiles: ["ci_fast"],
+    action: async (page) => {
+      await routeEnvironmentWarningData(page);
+      await page.goto(`${baseUrl}/environments`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      // Click the first env card (cards mode is default)
+      const firstCard = page.locator(".env-card").first();
+      await firstCard.waitFor({ timeout: 5000 });
+      await firstCard.click();
+
+      // The side panel should open — check backdrop + panel
+      await assertVisible(
+        page.locator(".side-panel").first(),
+        "Expected environment detail side panel to open on card click",
+        5000,
+      );
+      // Should NOT open the edit form (which has an "Add environment" / modal heading)
+      const editModalHeading = page.getByRole("heading", { name: "Edit environment" });
+      const editOpen = await editModalHeading.isVisible().catch(() => false);
+      if (editOpen) {
+        throw new Error("Expected detail panel, but edit modal opened instead");
+      }
+      // Panel should show the env name
+      await assertVisible(
+        page.locator(".side-panel").getByText("Production").first(),
+        "Expected environment name in detail panel",
+        3000,
+      );
+      // Close the panel
+      await page.locator(".side-panel-backdrop").click();
+      await unrouteEnvironmentWarningData(page);
     },
   },
   {
@@ -5760,6 +5843,45 @@ const steps = [
         page.getByRole("heading", { name: /Cache Push Jobs/i }).first(),
         "Expected Cache Push Jobs heading after tab switch",
       );
+    },
+  },
+  {
+    // TASK-392: Caches cards/table toggle
+    name: "21a-caches-cards-table-toggle",
+    description: "Caches: cards/table toggle switches display mode; card click opens detail panel",
+    route: "/caches",
+    profiles: ["ci_fast"],
+    action: async (page) => {
+      await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2500);
+
+      // Default view is Cards — check the Cards toggle is present
+      const cardsBtn = page.getByRole("button", { name: /Cards/i }).first();
+      const tableBtn = page.getByRole("button", { name: /Table/i }).first();
+      await assertVisible(cardsBtn, "Expected Cards toggle button");
+      await assertVisible(tableBtn, "Expected Table toggle button");
+
+      // Caches view starts in Cards mode by default — if no caches exist, at least the toggle renders
+      // Switch to Table and back
+      await tableBtn.click();
+      await page.waitForTimeout(500);
+      await cardsBtn.click();
+      await page.waitForTimeout(500);
+
+      // Test detail panel open/close if any cache cards exist
+      const cardCount = await page.locator(".env-card").count();
+      if (cardCount > 0) {
+        // Click first card to open detail panel
+        await page.locator(".env-card").first().click();
+        await page.waitForTimeout(500);
+        const panel = page.locator(".side-panel").first();
+        await assertVisible(panel, "Expected cache detail panel after card click");
+        // Close panel by clicking backdrop
+        const backdrop = page.locator(".side-panel-backdrop").first();
+        await backdrop.click();
+        await page.waitForTimeout(500);
+        await assertHidden(panel, "Expected cache detail panel to close after backdrop click");
+      }
     },
   },
   {

@@ -1020,6 +1020,21 @@ pub struct EnvironmentRollup {
     pub flakes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentCacheSummary {
+    pub name: String,
+    pub url: String,
+    pub cache_type: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentComplianceSummary {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub framework: String,
+}
+
 /// Environment summary for API responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentSummary {
@@ -1033,6 +1048,20 @@ pub struct EnvironmentSummary {
     /// Per-environment health breakdown, CVE totals, and flakes.
     #[serde(default)]
     pub rollup: EnvironmentRollup,
+    #[serde(default)]
+    pub default_policy: Option<String>,
+    #[serde(default)]
+    pub auto_sync: Option<bool>,
+    #[serde(default)]
+    pub requires_approval: Option<bool>,
+    #[serde(default)]
+    pub is_production: Option<bool>,
+    #[serde(default)]
+    pub role_assignment_count: Option<i64>,
+    #[serde(default)]
+    pub cache: Option<EnvironmentCacheSummary>,
+    #[serde(default)]
+    pub compliance_bundle: Option<EnvironmentComplianceSummary>,
 }
 
 /// Request payload for creating an environment.
@@ -1042,6 +1071,14 @@ pub struct CreateEnvironmentRequest {
     pub description: Option<String>,
     pub color_hex: String,
     pub is_active: bool,
+    #[serde(default)]
+    pub default_policy: Option<String>,
+    #[serde(default)]
+    pub auto_sync: Option<bool>,
+    #[serde(default)]
+    pub requires_approval: Option<bool>,
+    #[serde(default)]
+    pub is_production: Option<bool>,
 }
 
 /// Request payload for updating an environment.
@@ -1050,6 +1087,14 @@ pub struct UpdateEnvironmentRequest {
     pub name: String,
     pub description: Option<String>,
     pub color_hex: String,
+    #[serde(default)]
+    pub default_policy: Option<String>,
+    #[serde(default)]
+    pub auto_sync: Option<bool>,
+    #[serde(default)]
+    pub requires_approval: Option<bool>,
+    #[serde(default)]
+    pub is_production: Option<bool>,
 }
 
 /// Request payload for updating environment required policies only.

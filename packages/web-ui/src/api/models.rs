@@ -892,6 +892,21 @@ pub struct EnvironmentRollup {
     pub flakes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentCacheSummary {
+    pub name: String,
+    pub url: String,
+    pub cache_type: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentComplianceSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub framework: String,
+}
+
 /// Lightweight environment summary returned by the environments API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnvironmentSummary {
@@ -904,6 +919,20 @@ pub struct EnvironmentSummary {
     pub system_count: i64,
     #[serde(default)]
     pub rollup: EnvironmentRollup,
+    #[serde(default)]
+    pub default_policy: Option<String>,
+    #[serde(default)]
+    pub auto_sync: Option<bool>,
+    #[serde(default)]
+    pub requires_approval: Option<bool>,
+    #[serde(default)]
+    pub is_production: Option<bool>,
+    #[serde(default)]
+    pub role_assignment_count: Option<i64>,
+    #[serde(default)]
+    pub cache: Option<EnvironmentCacheSummary>,
+    #[serde(default)]
+    pub compliance_bundle: Option<EnvironmentComplianceSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1066,6 +1095,14 @@ pub struct CreateEnvironmentRequest {
     pub description: Option<String>,
     pub color_hex: String,
     pub is_active: bool,
+    #[serde(default)]
+    pub default_policy: Option<String>,
+    #[serde(default)]
+    pub auto_sync: Option<bool>,
+    #[serde(default)]
+    pub requires_approval: Option<bool>,
+    #[serde(default)]
+    pub is_production: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1073,6 +1110,14 @@ pub struct UpdateEnvironmentRequest {
     pub name: String,
     pub description: Option<String>,
     pub color_hex: String,
+    #[serde(default)]
+    pub default_policy: Option<String>,
+    #[serde(default)]
+    pub auto_sync: Option<bool>,
+    #[serde(default)]
+    pub requires_approval: Option<bool>,
+    #[serde(default)]
+    pub is_production: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

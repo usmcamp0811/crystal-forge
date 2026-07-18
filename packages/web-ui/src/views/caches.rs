@@ -1,13 +1,16 @@
 //! Cache management view - configure cache destinations and monitor push jobs.
 
 use dioxus::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::api::client;
+use crate::api::client::{self, ApiClientError};
 use crate::api::models::{
-    CacheDestination, CachePushJob, CreateCacheDestination, UpdateCacheDestination,
+    CacheDestination, CachePushJob, CreateCacheDestination, EnvironmentSummary, SortOrder, SystemSummary,
+    SystemsListParams, UpdateCacheDestination,
 };
+use crate::components::icon::{Icon, IconName};
+use crate::routes::Route;
 use crate::theme;
 
 fn is_http_url(value: &str) -> bool {
@@ -178,10 +181,71 @@ fn came_from_setup() -> bool {
     false
 }
 
+fn query_param(name: &str) -> Option<String> {
+    let window = web_sys::window()?;
+    let search = window.location().search().ok()?;
+    let query = search.trim_start_matches('?');
+    if query.is_empty() {
+        return None;
+    }
+
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or_default();
+        let value = parts.next().unwrap_or_default();
+        if key == name {
+            return js_sys::decode_uri_component(value)
+                .ok()
+                .map(|v| v.as_string().unwrap_or_default());
+        }
+    }
+
+    None
+}
+
+/// Remove one or more query parameters from the URL without reloading the page.
+fn clear_url_params(names: &[&str]) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(win) = web_sys::window() else { return };
+        let pathname = win.location().pathname().ok().unwrap_or_default();
+        let search = win.location().search().ok().unwrap_or_default();
+        let query = search.trim_start_matches('?');
+        if query.is_empty() {
+            return;
+        }
+        let remaining: Vec<&str> = query
+            .split('&')
+            .filter(|pair| {
+                let key = pair.splitn(2, '=').next().unwrap_or("");
+                !names.iter().any(|n| *n == key)
+            })
+            .collect();
+        let new_search = if remaining.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", remaining.join("&"))
+        };
+        if let Ok(history) = win.history() {
+            let _ = history.replace_state_with_url(
+                &wasm_bindgen::JsValue::NULL,
+                "",
+                Some(&format!("{pathname}{new_search}")),
+            );
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum CachesTab {
     Destinations,
     PushJobs,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CacheViewMode {
+    Cards,
+    Table,
 }
 
 #[derive(Clone, PartialEq)]
@@ -263,7 +327,6 @@ fn credential_fields_for_request(
 /// Cache management page
 #[component]
 pub fn CachesView() -> Element {
-    let mut active_tab = use_signal(|| CachesTab::Destinations);
     let from_setup = use_signal(came_from_setup);
     let mut show_add_modal = use_signal(|| false);
 
@@ -295,12 +358,15 @@ pub fn CachesView() -> Element {
                     h1 { class: "page-title", "Caches" }
                     p {
                         class: "page-subtitle",
-                        // Show totals: X destinations · Y healthy
+                        // Show totals: X destinations · Y enabled. "Paths cached" is not
+                        // shown here because no backend metric exists yet for it —
+                        // see the stat strip below, which renders "—" for that card
+                        // rather than a fabricated number.
                         match destinations.read().as_ref() {
                             Some(Ok(dests)) => {
                                 let total = dests.len();
-                                let healthy = dests.iter().filter(|d| d.enabled).count();
-                                rsx! { "{total} destinations · {healthy} healthy" }
+                                let enabled = dests.iter().filter(|d| d.enabled).count();
+                                rsx! { "{total} destinations · {enabled} enabled" }
                             },
                             _ => rsx! { "Loading…" }
                         }
@@ -310,7 +376,6 @@ pub fn CachesView() -> Element {
                 button {
                     class: "btn btn-primary focus-ring",
                     onclick: move |_| {
-                        active_tab.set(CachesTab::Destinations);
                         show_add_modal.set(true);
                     },
                     svg {
@@ -334,8 +399,7 @@ pub fn CachesView() -> Element {
                 match destinations.read().as_ref() {
                     Some(Ok(dests)) => {
                         let total = dests.len();
-                        let healthy = dests.iter().filter(|d| d.enabled).count();
-                        let issues = total - healthy;
+                        let enabled_count = dests.iter().filter(|d| d.enabled).count();
                         rsx! {
                             div {
                                 class: "stat",
@@ -346,14 +410,14 @@ pub fn CachesView() -> Element {
                             div {
                                 class: "stat",
                                 span { class: "stat-accent", style: "--stat-color: #34d399;" }
-                                div { class: "stat-label", "Healthy" }
-                                div { class: "stat-value", "{healthy}" }
+                                div { class: "stat-label", "Enabled" }
+                                div { class: "stat-value", "{enabled_count}" }
                             }
                             div {
                                 class: "stat",
                                 span { class: "stat-accent", style: "--stat-color: #fbbf24;" }
-                                div { class: "stat-label", "Issues" }
-                                div { class: "stat-value", "{issues}" }
+                                div { class: "stat-label", "Disabled" }
+                                div { class: "stat-value", "{total - enabled_count}" }
                             }
                             div {
                                 class: "stat",
@@ -374,41 +438,10 @@ pub fn CachesView() -> Element {
                 }
             }
 
-            // Tabs
-            div {
-                class: "flex border-b {theme::surface::DIVIDER}",
-                button {
-                    class: if active_tab() == CachesTab::Destinations {
-                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
-                    } else {
-                        "px-4 py-2 border-b-2 border-transparent {theme::text::SECONDARY} hover:{theme::text::PRIMARY} transition-colors"
-                    },
-                    onclick: move |_| active_tab.set(CachesTab::Destinations),
-                    "Cache Destinations"
-                }
-                button {
-                    class: if active_tab() == CachesTab::PushJobs {
-                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
-                    } else {
-                        "px-4 py-2 border-b-2 border-transparent {theme::text::SECONDARY} hover:{theme::text::PRIMARY} transition-colors"
-                    },
-                    onclick: move |_| active_tab.set(CachesTab::PushJobs),
-                    "Push Jobs"
-                }
-            }
-
-            // Tab content
-            match active_tab() {
-                CachesTab::Destinations => rsx! {
-                    CacheDestinationsList {
-                        show_onboarding_hint: from_setup(),
-                        refresh_nonce: refresh_nonce,
-                        show_add_modal: show_add_modal,
-                    }
-                },
-                CachesTab::PushJobs => rsx! {
-                    CachePushJobsList {}
-                },
+            CacheDestinationsList {
+                show_onboarding_hint: from_setup(),
+                refresh_nonce: refresh_nonce,
+                show_add_modal: show_add_modal,
             }
         }
     }
@@ -427,7 +460,10 @@ fn CacheDestinationsList(
     });
 
     let mut search_query = use_signal(String::new);
+    let mut view_mode = use_signal(|| CacheViewMode::Cards);
     let mut edit_destination = use_signal(|| None::<CacheDestination>);
+    let mut view_destination = use_signal(|| None::<CacheDestination>);
+    let focus_value = query_param("focus");
 
     // Unified form state for both add and edit (simplified to match mockup)
     let mut form_name = use_signal(String::new);
@@ -493,12 +529,41 @@ fn CacheDestinationsList(
     });
     let mut dismiss_add_target_callout = use_signal(|| false);
 
-    // Fetch available environments for assignment
+    // Fetch available environments for assignment and cache-assignment display.
     let environments = use_resource(|| async move { client::fetch_environments().await });
     let show_add_target_callout = show_onboarding_hint
         && !dismiss_add_target_callout()
         && !show_add_modal()
         && matches!(&*destinations.read_unchecked(), Some(Ok(dests)) if dests.is_empty());
+
+    {
+        let maybe_dests = destinations.read().clone();
+        let mut view_destination = view_destination.clone();
+        use_effect(move || {
+            if view_destination.read().is_some() {
+                return;
+            }
+            let Some(focus) = focus_value.clone() else {
+                return;
+            };
+            let Some(Ok(dests)) = maybe_dests.as_ref() else {
+                return;
+            };
+            let focus_lower = focus.to_ascii_lowercase();
+            if let Some(dest) = dests.iter().find(|dest| {
+                dest.name.to_ascii_lowercase() == focus_lower
+                    || dest
+                        .push_to
+                        .as_ref()
+                        .is_some_and(|url| url.to_ascii_lowercase() == focus_lower)
+                    || dest.id.to_string() == focus
+            }) {
+                view_destination.set(Some(dest.clone()));
+                // Clear focus param so closing and re-opening the panel stays closed.
+                clear_url_params(&["focus"]);
+            }
+        });
+    }
 
     rsx! {
         div {
@@ -526,6 +591,21 @@ fn CacheDestinationsList(
                         placeholder: "Search caches…",
                         value: "{search_query}",
                         oninput: move |evt| search_query.set(evt.value())
+                    }
+                }
+                div {
+                    class: "seg",
+                    button {
+                        class: if view_mode() == CacheViewMode::Cards { "active" } else { "" },
+                        onclick: move |_| view_mode.set(CacheViewMode::Cards),
+                        Icon { name: crate::components::icon::IconName::Grid, size: 12 }
+                        " Cards"
+                    }
+                    button {
+                        class: if view_mode() == CacheViewMode::Table { "active" } else { "" },
+                        onclick: move |_| view_mode.set(CacheViewMode::Table),
+                        Icon { name: crate::components::icon::IconName::Rows, size: 12 }
+                        " Table"
                     }
                 }
                 span {
@@ -585,30 +665,44 @@ fn CacheDestinationsList(
                                 p { class: "{theme::text::MUTED} text-sm mt-2", "Add your first cache destination to start pushing build artifacts." }
                             }
                         } else {
-                            // Table structure matching mockup
-                            div {
-                                class: "card",
-                                style: "overflow:hidden;",
-                                table {
-                                    class: "sys-table",
-                                    thead {
-                                        tr {
-                                            th { "Cache" }
-                                            th { "Type" }
-                                            th { "Status" }
-                                            th { "Storage" }
-                                            th { "Paths" }
-                                            th { "Last push" }
-                                            th { "Environments" }
-                                            th { style: "text-align:right;", " " }
+                            if view_mode() == CacheViewMode::Cards {
+                                div {
+                                    class: "cards-grid",
+                                    for dest in filtered {
+                                        CacheDestinationCardNew {
+                                            destination: dest.clone(),
+                                            environments: environments,
+                                            on_view: move |d: CacheDestination| view_destination.set(Some(d)),
+                                            on_edit: move |d: CacheDestination| edit_destination.set(Some(d)),
                                         }
                                     }
-                                    tbody {
-                                        for dest in filtered {
-                                            CacheDestinationRow {
-                                                destination: dest.clone(),
-                                                on_edit: move |d: CacheDestination| edit_destination.set(Some(d)),
-                                                on_change: move |_| refresh_nonce.set(refresh_nonce() + 1),
+                                }
+                            } else {
+                                div {
+                                    class: "card",
+                                    style: "overflow:hidden;",
+                                    table {
+                                        class: "sys-table",
+                                        thead {
+                                            tr {
+                                                th { "Cache" }
+                                                th { "Type" }
+                                                th { "Status" }
+                                                th { "Storage" }
+                                                th { "Paths" }
+                                                th { "Last push" }
+                                                th { "Environments" }
+                                                th { style: "text-align:right;", " " }
+                                            }
+                                        }
+                                        tbody {
+                                            for dest in filtered {
+                                                CacheDestinationRow {
+                                                    destination: dest.clone(),
+                                                    environments: environments,
+                                                    on_view: move |d: CacheDestination| view_destination.set(Some(d)),
+                                                    on_edit: move |d: CacheDestination| edit_destination.set(Some(d)),
+                                                }
                                             }
                                         }
                                     }
@@ -629,6 +723,17 @@ fn CacheDestinationsList(
                         p { class: "{theme::text::SECONDARY}", "Loading cache destinations..." }
                     }
                 },
+            }
+
+            if let Some(destination) = view_destination() {
+                CacheDestinationPanel {
+                    destination,
+                    on_close: move |_| view_destination.set(None),
+                    on_edit: move |dest: CacheDestination| {
+                        view_destination.set(None);
+                        edit_destination.set(Some(dest));
+                    },
+                }
             }
 
             // Add modal - matching JSX mockup CacheFormModal (add mode)
@@ -1437,22 +1542,93 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
     }
 }
 
-/// Individual cache destination card
 #[component]
+fn CacheDestinationCardNew(
+    destination: CacheDestination,
+    environments: Resource<Result<Vec<EnvironmentSummary>, ApiClientError>>,
+    on_view: EventHandler<CacheDestination>,
+    on_edit: EventHandler<CacheDestination>,
+) -> Element {
+    let cache_id = destination.id;
+    let env_ids = use_resource(move || async move { client::get_cache_environments(cache_id).await });
+    let dest_for_view = destination.clone();
+    let dest_for_edit = destination.clone();
+    let (status_cls, status_color, status_label) = if destination.enabled {
+        ("chip-healthy", "#34d399", "enabled")
+    } else {
+        ("chip-critical", "#f87171", "disabled")
+    };
+
+    rsx! {
+        div {
+            class: "env-card",
+            style: "cursor:pointer;",
+            onclick: move |_| on_view.call(dest_for_view.clone()),
+            div { class: "env-card-rail", style: "background:{status_color};" }
+            div { class: "env-card-head",
+                div {
+                    div { class: "env-card-title",
+                        Icon { name: cache_type_icon(&destination.cache_type), size: 13 }
+                        span { "{destination.name}" }
+                    }
+                    if let Some(url) = destination.push_to.clone() {
+                        div { class: "env-card-desc mono", "{url}" }
+                    }
+                }
+                div { style: "display:flex; gap:4px;",
+                    button {
+                        class: "btn-icon focus-ring",
+                        title: "Edit",
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            on_edit.call(dest_for_edit.clone());
+                        },
+                        Icon { name: IconName::Gear, size: 14 }
+                    }
+                }
+            }
+            div { style: "display:flex; gap:8px; flex-wrap:wrap; padding:0 16px;",
+                span { class: "chip {status_cls}",
+                    span { class: "chip-dot", style: "background:{status_color};" }
+                    "{status_label}"
+                }
+                span { class: "chip chip-unknown mono", "{destination.cache_type}" }
+            }
+            div { style: "padding:12px 16px 0;",
+                div { style: "font-size:11px; color:var(--cf-text-secondary); margin-bottom:4px;",
+                    if let Some(last_used) = destination.last_used_at {
+                        "Last push "
+                        {last_used.format("%Y-%m-%d %H:%M").to_string()}
+                    } else {
+                        "Never pushed"
+                    }
+                }
+            }
+            div { class: "env-card-foot",
+                span { style: "font-size:11px; color:var(--cf-text-muted);", "Updated {destination.updated_at.format(\"%Y-%m-%d\")}" }
+                div { style: "display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end;",
+                    {render_cache_assignment_state(env_ids, environments, "no environments")}
+                }
+            }
+        }
+    }
+}
+
 /// Cache destination table row matching mockup (JSX lines 89-153)
 #[component]
 fn CacheDestinationRow(
     destination: CacheDestination,
+    environments: Resource<Result<Vec<EnvironmentSummary>, ApiClientError>>,
+    on_view: EventHandler<CacheDestination>,
     on_edit: EventHandler<CacheDestination>,
-    on_change: EventHandler<()>,
 ) -> Element {
     let mut show_delete_confirm = use_signal(|| false);
 
     // Status mapping
     let (status_cls, status_color, status_label) = if destination.enabled {
-        ("chip-healthy", "#34d399", "healthy")
+        ("chip-healthy", "#34d399", "enabled")
     } else {
-        ("chip-critical", "#f87171", "error")
+        ("chip-critical", "#f87171", "disabled")
     };
 
     // Type icon glyph family
@@ -1460,12 +1636,7 @@ fn CacheDestinationRow(
 
     // Fetch environment assignments
     let cache_id = destination.id;
-    let env_ids = use_resource(move || async move {
-        client::get_cache_environments(cache_id)
-            .await
-            .unwrap_or_default()
-    });
-    let environments = use_resource(|| async move { client::fetch_environments().await });
+    let env_ids = use_resource(move || async move { client::get_cache_environments(cache_id).await });
 
     let dest_for_click = destination.clone();
     let dest_for_edit_btn = destination.clone();
@@ -1473,7 +1644,7 @@ fn CacheDestinationRow(
     rsx! {
         tr {
             style: "cursor:pointer;",
-            onclick: move |_| on_edit.call(dest_for_click.clone()),
+            onclick: move |_| on_view.call(dest_for_click.clone()),
 
             // Cache column
             td {
@@ -1543,36 +1714,15 @@ fn CacheDestinationRow(
                 }
             }
 
-            // Storage column with usage bar (mockup lines 115-132)
+            // Storage column — no backend metric yet; show placeholder
             td {
-                div {
-                    style: "min-width:120px; height:30px; display:flex; flex-direction:column; justify-content:center; gap:3px;",
-                    // Mock storage data (TODO: replace with real API data when available)
-                    {
-                        // Generate deterministic mock storage based on cache ID
-                        let used = ((destination.id as f64 * 37.0) % 80.0 + 10.0) as i32;
-                        let total = 100;
-                        let unit = "GB";
-                        let usage_pct = (used as f64 / total as f64) * 100.0;
-                        let bar_color = if usage_pct > 85.0 { "#fbbf24" } else { "#34d399" };
-
-                        rsx! {
-                            div {
-                                style: "font-size:11px; color:var(--cf-text-secondary);",
-                                span { class: "mono", "{used}/{total} {unit}" }
-                            }
-                            div {
-                                style: "height:4px; background:var(--cf-subtle-bg); border-radius:99px; overflow:hidden;",
-                                div {
-                                    style: "width:{usage_pct}%; height:100%; background:{bar_color};"
-                                }
-                            }
-                        }
-                    }
+                span {
+                    style: "font-size:11px; color:var(--cf-text-muted);",
+                    "—"
                 }
             }
 
-            // Paths column (mockup line 133)
+            // Paths column
             td {
                 class: "mono",
                 style: "font-size:12px;",
@@ -1593,33 +1743,7 @@ fn CacheDestinationRow(
             td {
                 div {
                     style: "display:flex; gap:4px; flex-wrap:wrap;",
-                    match (env_ids.read().as_ref(), environments.read().as_ref()) {
-                        (Some(ids), Some(Ok(all_envs))) if !ids.is_empty() => {
-                            let matching_envs: Vec<_> = all_envs.iter()
-                                .filter(|e| ids.contains(&e.id))
-                                .take(3)
-                                .collect();
-
-                            rsx! {
-                                for env in matching_envs {
-                                    EnvBadge { env_name: env.name.clone(), color_hex: env.color_hex.clone() }
-                                }
-                                if ids.len() > 3 {
-                                    span {
-                                        class: "chip chip-unknown",
-                                        style: "font-size:10px;",
-                                        "+{ids.len() - 3}"
-                                    }
-                                }
-                            }
-                        },
-                        _ => rsx! {
-                            span {
-                                style: "font-size:11px; color:var(--cf-text-muted);",
-                                "none"
-                            }
-                        }
-                    }
+                    {render_cache_assignment_state(env_ids, environments, "none")}
                 }
             }
 
@@ -1656,6 +1780,65 @@ fn CacheDestinationRow(
     }
 }
 
+fn render_cache_assignment_state(
+    env_ids: Resource<Result<Vec<Uuid>, ApiClientError>>,
+    environments: Resource<Result<Vec<EnvironmentSummary>, ApiClientError>>,
+    empty_label: &'static str,
+) -> Element {
+    let env_ids_state = env_ids.read();
+    let environments_state = environments.read();
+
+    match (&*env_ids_state, &*environments_state) {
+        (None, _) | (_, None) => rsx! {
+            span { style: "font-size:11px; color:var(--cf-text-muted);", "loading…" }
+        },
+        (Some(Err(err)), _) => rsx! {
+            span {
+                style: "font-size:11px; color:var(--cf-text-muted);",
+                title: "{err}",
+                "failed to load"
+            }
+        },
+        (_, Some(Err(err))) => rsx! {
+            span {
+                style: "font-size:11px; color:var(--cf-text-muted);",
+                title: "{err}",
+                "environment list unavailable"
+            }
+        },
+        (Some(Ok(ids)), Some(Ok(all_envs))) => {
+            if ids.is_empty() {
+                rsx! { span { style: "font-size:11px; color:var(--cf-text-muted);", "{empty_label}" } }
+            } else {
+                let matching: Vec<(String, String)> = all_envs
+                    .iter()
+                    .filter(|env| ids.contains(&env.id))
+                    .map(|env| (env.name.clone(), env.color_hex.clone()))
+                    .collect();
+                let count = ids.len();
+                if matching.is_empty() {
+                    rsx! {
+                        span {
+                            style: "font-size:11px; color:var(--cf-text-muted);",
+                            title: "Assigned environments were returned, but their names are unavailable in the shared environment list.",
+                            "{count} assigned"
+                        }
+                    }
+                } else {
+                    rsx! {
+                        for (name, color_hex) in matching.into_iter().take(3) {
+                            EnvBadge { env_name: name, color_hex: color_hex }
+                        }
+                        if count > 3 {
+                            span { class: "chip chip-unknown", style: "font-size:10px;", "+{count - 3}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Environment badge component
 #[component]
 fn EnvBadge(env_name: String, color_hex: String) -> Element {
@@ -1669,6 +1852,172 @@ fn EnvBadge(env_name: String, color_hex: String) -> Element {
                 style: "width:5px; height:5px; border-radius:50%; background:{color}; display:inline-block; margin-right:4px;",
             }
             "{env_name}"
+        }
+    }
+}
+
+fn cache_type_icon(cache_type: &str) -> IconName {
+    match cache_type.to_ascii_lowercase().as_str() {
+        "nix" | "http" => IconName::Link,
+        _ => IconName::Download,
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct CacheDestinationPanelProps {
+    destination: CacheDestination,
+    on_close: EventHandler<()>,
+    on_edit: EventHandler<CacheDestination>,
+}
+
+#[component]
+fn CacheDestinationPanel(props: CacheDestinationPanelProps) -> Element {
+    let destination = props.destination.clone();
+    let dest_for_edit = destination.clone();
+    let nav = use_navigator();
+    let cache_id = destination.id;
+    let assignments = use_resource(move || async move {
+        let env_ids = client::get_cache_environments(cache_id)
+            .await
+            .unwrap_or_default();
+        let envs = client::fetch_environments().await.unwrap_or_default();
+        let env_list: Vec<_> = envs
+            .iter()
+            .filter(|env| env_ids.contains(&env.id))
+            .map(|env| (env.id, env.name.clone(), env.color_hex.clone()))
+            .collect();
+
+        let mut systems = Vec::<SystemSummary>::new();
+        let mut seen = HashSet::new();
+        for (_, env_name, _) in &env_list {
+            if let Ok(response) = client::fetch_systems(&SystemsListParams {
+                page: Some(1),
+                per_page: Some(200),
+                search: None,
+                health_status: None,
+                deployment_status: None,
+                environment: Some(env_name.clone()),
+                sort_by: Some("hostname".to_string()),
+                sort_order: Some(SortOrder::Asc),
+            })
+            .await
+            {
+                for system in response.items {
+                    if seen.insert(system.id) {
+                        systems.push(system);
+                    }
+                }
+            }
+        }
+        systems.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
+        (env_list, systems)
+    });
+    let (status_cls, status_color, status_label) = if destination.enabled {
+        ("chip-healthy", "#34d399", "enabled")
+    } else {
+        ("chip-critical", "#f87171", "disabled")
+    };
+
+    rsx! {
+        div { class: "side-panel-backdrop", onclick: move |_| props.on_close.call(()) }
+        aside { class: "side-panel", role: "dialog", aria_modal: "true",
+            div { class: "panel-head",
+                div { class: "panel-title",
+                    h2 {
+                        Icon { name: cache_type_icon(&destination.cache_type), size: 14 }
+                        "{destination.name}"
+                    }
+                    if let Some(url) = destination.push_to.clone() {
+                        span { class: "fqdn mono", "{url}" }
+                    }
+                }
+                button { class: "btn-icon focus-ring", onclick: move |_| props.on_close.call(()), aria_label: "Close",
+                    Icon { name: IconName::X, size: 16 }
+                }
+            }
+            div { class: "panel-body",
+                section { class: "panel-section",
+                    div { style: "display:flex; gap:8px; flex-wrap:wrap;",
+                        span { class: "chip {status_cls}",
+                            span { class: "chip-dot", style: "background:{status_color};" }
+                            "{status_label}"
+                        }
+                        span { class: "chip chip-unknown mono", "{destination.cache_type}" }
+                    }
+                }
+                section { class: "panel-section",
+                    h3 { "Details" }
+                    dl { class: "kv-grid",
+                        dt { "Last push" }
+                        dd {
+                            if let Some(last_used) = destination.last_used_at {
+                                {last_used.format("%Y-%m-%d %H:%M").to_string()}
+                            } else {
+                                "—"
+                            }
+                        }
+                        dt { "Created" }
+                        dd { "{destination.created_at.format(\"%Y-%m-%d\")}" }
+                        dt { "Compression" }
+                        dd {
+                            {destination
+                                .compression
+                                .clone()
+                                .unwrap_or_else(|| "—".to_string())}
+                        }
+                    }
+                }
+                section { class: "panel-section",
+                    h3 { "Environments" }
+                    match assignments.read().as_ref() {
+                        Some((envs, _)) if !envs.is_empty() => rsx! {
+                            div { style: "display:flex; gap:6px; flex-wrap:wrap;",
+                                for (_, name, color) in envs.iter() {
+                                    EnvBadge { env_name: name.clone(), color_hex: color.clone() }
+                                }
+                            }
+                        },
+                        _ => rsx! { div { style: "font-size:12px; color:var(--cf-text-muted);", "none assigned" } }
+                    }
+                }
+                section { class: "panel-section",
+                    h3 { "Systems using this cache" }
+                    match assignments.read().as_ref() {
+                        Some((_, systems)) if !systems.is_empty() => rsx! {
+                            div { style: "display:flex; flex-direction:column; gap:6px;",
+                                for system in systems.iter().take(8) {
+                                    button {
+                                        class: "sd-commit-sha-link",
+                                        style: "justify-content:flex-start; font-size:12.5px; padding:3px 4px; margin:-3px -4px; background:none; border:none; width:100%;",
+                                        onclick: {
+                                            let nav = nav.clone();
+                                            let system_id = system.id.to_string();
+                                            move |_| {
+                                                nav.push(Route::SystemDetailView { id: system_id.clone() });
+                                            }
+                                        },
+                                        Icon { name: IconName::Server, size: 10 }
+                                        span { class: "mono truncate", style: "flex:1; text-align:left;", "{system.hostname}" }
+                                        if let Some(environment) = system.environment.clone() {
+                                            span { class: "chip chip-unknown", style: "font-size:10px;", "{environment}" }
+                                        }
+                                    }
+                                }
+                                if systems.len() > 8 {
+                                    div { style: "font-size:11px; color:var(--cf-text-muted);", "+{systems.len() - 8} more" }
+                                }
+                            }
+                        },
+                        _ => rsx! { div { style: "font-size:12px; color:var(--cf-text-muted);", "No systems in an assigned environment yet." } }
+                    }
+                }
+            }
+            div { class: "panel-actions",
+                button { class: "btn btn-primary focus-ring", onclick: move |_| props.on_edit.call(dest_for_edit.clone()),
+                    Icon { name: IconName::Gear, size: 12 }
+                    " Edit cache"
+                }
+            }
         }
     }
 }

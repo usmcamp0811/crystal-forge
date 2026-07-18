@@ -132,6 +132,8 @@ fn notifications() -> Vec<NotificationItem> {
 pub fn TopBar(title: String) -> Element {
     let mut ui_theme = use_context::<Signal<UiTheme>>();
     let nav = navigator();
+    let current_route = use_route::<Route>();
+    let breadcrumb_override = use_context::<Signal<Option<(String, String)>>>();
     let app_state = use_context::<Signal<AppState>>();
     let auth_context = app_state.read().auth.clone();
     let is_admin_user = auth::is_admin(&auth_context);
@@ -149,6 +151,19 @@ pub fn TopBar(title: String) -> Element {
         .iter()
         .filter(|item| item.unread)
         .count();
+    let (crumb_parent, crumb_current) =
+        if let Some((parent, current)) = breadcrumb_override.read().clone() {
+            (Some(parent), current)
+        } else {
+            match &current_route {
+                Route::SystemDetailView { id } => (Some("Systems".to_string()), id.clone()),
+                Route::EvaluationsCommitView { commit_id } => (
+                    Some("Evaluations".to_string()),
+                    format!("commit {commit_id}"),
+                ),
+                _ => (None, title.clone()),
+            }
+        };
 
     let toggle_drawer = move |_| {
         is_mobile_drawer_open.set(!is_mobile_drawer_open());
@@ -196,7 +211,11 @@ pub fn TopBar(title: String) -> Element {
                 class: "breadcrumbs",
                 span { "Fleet" }
                 span { class: "sep", "/" }
-                span { class: "crumb-current", "{title}" }
+                if let Some(parent) = crumb_parent.clone() {
+                    span { "{parent}" }
+                    span { class: "sep", "/" }
+                }
+                span { class: "crumb-current", "{crumb_current}" }
             }
 
             div {
@@ -389,12 +408,14 @@ pub fn TopBar(title: String) -> Element {
                         div {
                             class: "notif-foot",
                             button {
-                                "data-testid": "topbar-notifications-settings-placeholder",
+                                "data-testid": "topbar-notifications-settings-button",
                                 class: "btn btn-ghost focus-ring xs",
                                 r#type: "button",
-                                title: "Notification settings coming soon",
-                                disabled: true,
-                                "aria-disabled": "true",
+                                title: "Notification settings",
+                                onclick: move |_| {
+                                    notifications_open.set(false);
+                                    tweaks_open.set(true);
+                                },
                                 "Notification settings"
                             }
                         }
