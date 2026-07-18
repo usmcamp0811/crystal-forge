@@ -111,6 +111,8 @@ pub fn AppShell() -> Element {
         is_mobile_drawer_open,
         is_collapsed,
     });
+    let breadcrumb_override = use_signal(|| None::<(String, String)>);
+    use_context_provider(|| breadcrumb_override);
 
     let sidebar_width = if is_collapsed() { "64px" } else { "240px" };
 

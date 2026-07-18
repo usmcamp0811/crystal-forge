@@ -32,6 +32,7 @@ pub enum IconName {
     /// System detail tab icons (match CrystalForgelatest Icon.jsx paths).
     Dashboard,
     Server,
+    Build,
     Deploy,
     History,
     Key,
@@ -263,6 +264,15 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
             rect { x: "3", y: "13", width: "18", height: "7", rx: "1.5" }
             circle { cx: "7", cy: "7.5", r: "0.6", fill: "currentColor", stroke: "none" }
             circle { cx: "7", cy: "16.5", r: "0.6", fill: "currentColor", stroke: "none" }
+        },
+        // Build package/layer icon (design Icon.jsx "build").
+        IconName::Build => rsx! {
+            path { d: "M12 3l9 5-9 5-9-5 9-5z" }
+            path {
+                d: "M3 13l9 5 9-5",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
         },
         // Deploy: upward arrow over a base tray (design Icon.jsx "deploy").
         IconName::Deploy => rsx! {

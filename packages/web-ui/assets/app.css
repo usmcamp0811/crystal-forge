@@ -1715,6 +1715,7 @@ body {
 .sd-timeline {
   max-height: 320px;
   overflow-y: auto;
+  overflow-x: hidden;
   position: relative;
   -webkit-mask-image: linear-gradient(
     to bottom,
@@ -2165,14 +2166,7 @@ html[data-theme="light"] .sd-nix {
 }
 
 .sidebar.rail .nav-item .nav-count {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  margin-left: 0;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  font-size: 10px;
+  display: none;
 }
 
 .sidebar.rail .nav-section-label {
@@ -3145,6 +3139,8 @@ html[data-theme="light"] .sd-nix {
 }
 
 .panel-body {
+  flex: 1;
+  min-height: 0;
   padding: 18px 22px;
   overflow-y: auto;
   display: flex;
@@ -4154,8 +4150,9 @@ tr.kbd-focused > td {
   font-size: 11px;
   line-height: 1.4;
   color: var(--cf-text-muted);
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   opacity: 0.85;
 }
 
@@ -5076,11 +5073,31 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
 .tl-meta-item.tl-untracked { color: var(--cf-amber); }
 .tl-when { color: var(--cf-text-muted); margin-left: auto; }
 .tl-commit-link {
-  background: none; border: none; color: var(--cf-blue); cursor: pointer;
-  font-family: var(--font-mono); font-size: 11px; padding: 0;
-  display: inline-flex; align-items: center; gap: 4px;
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; padding: 2px 8px; border-radius: 6px;
+  border: 1px solid color-mix(in oklab, var(--cf-brand-purple) 35%, var(--cf-card-border));
+  background: color-mix(in oklab, var(--cf-brand-purple) 8%, transparent);
+  color: var(--cf-brand-purple); cursor: pointer;
+  transition: background 120ms, border-color 120ms;
+  white-space: nowrap;
 }
-.tl-commit-link:hover { text-decoration: underline; }
+.tl-commit-link:hover {
+  background: color-mix(in oklab, var(--cf-brand-purple) 16%, transparent);
+  border-color: var(--cf-brand-purple);
+}
+.tl-commit-link svg:last-child { opacity: 0.6; }
+
+.sd-commit-sha-link {
+  display: inline-flex; align-items: center; gap: 4px;
+  cursor: pointer; border-radius: 4px; padding: 1px 4px; margin: -1px -4px;
+  transition: background 120ms, color 120ms;
+  background: none; border: none;
+}
+.sd-commit-sha-link:hover {
+  background: color-mix(in oklab, var(--cf-brand-purple) 16%, transparent);
+  color: var(--cf-brand-purple);
+}
+.sd-commit-sha-link svg { opacity: 0.7; }
 
 .tl-sentinel .tl-body { padding-bottom: 0; }
 .tl-loadmore {
@@ -5198,18 +5215,6 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
 .nav-item.active .nav-count.nav-count-alert {
   color: #fff;
 }
-/* Rail mode: show attention badges even when collapsed (override hide rule) */
-.sidebar.rail .nav-item .nav-count.nav-count-alert {
-  display: inline-flex;
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  min-width: 14px;
-  height: 14px;
-  font-size: 9px;
-  padding: 0 3px;
-}
-
 /* ─── Attention flash — first-visit pulse on alerting items (TASK-385) ─── */
 @keyframes attention-flash-pulse {
   0%, 100% { box-shadow: 0 0 0 0 transparent; background-color: transparent; }

@@ -16,16 +16,17 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api::client::{
-    ApiClientError, fetch_compliance_system_evidence, fetch_system_compliance_bundles,
-    fetch_system_cve_scan_eligibility, fetch_system_cves, fetch_system_hardening,
-    fetch_system_hardening_justifications, fetch_system_hardening_scan_eligibility,
-    get_system_deployment_progress, request_system_generation_rollback, request_system_rollback,
-    request_system_sync, save_system_hardening_justification,
+    ApiClientError, fetch_compliance_system_evidence, fetch_flake_timeline_for_tray,
+    fetch_system_compliance_bundles, fetch_system_cve_scan_eligibility, fetch_system_cves,
+    fetch_system_hardening, fetch_system_hardening_justifications,
+    fetch_system_hardening_scan_eligibility, get_system_deployment_progress,
+    request_system_generation_rollback, request_system_rollback, request_system_sync,
+    save_system_hardening_justification,
     verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
     BuildStatus, CommitInfo, ComplianceEvidenceResponse, CveScanEligibilityResponse,
-    DeploymentLogEntry, DeploymentStatus, HardeningJustificationResponse,
+    DeploymentLogEntry, DeploymentStatus, FlakeSummary, HardeningJustificationResponse,
     HardeningScanEligibilityResponse, HardeningServiceResultResponse, HealthStatus, LogLevel,
     SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
     SystemComplianceBundle, SystemDeploymentProgress, SystemDetail, SystemGeneration,
@@ -51,6 +52,10 @@ use crate::systems::adapter::{
 };
 use crate::systems::adapter::{fallback_system_detail, load_system_detail_with_fallback};
 use crate::theme;
+use crate::views::flakes_list::{
+    CommitFocusMeta, FlakeTrayNew, MockCommitItem, MockFlakeItem, map_flake_summary_to_tray_item,
+    map_timeline_commits_to_view,
+};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
 #[cfg(target_arch = "wasm32")]
@@ -268,6 +273,20 @@ fn system_detail_wants_deploy_tab() -> bool {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct FlakeCommitPeekTarget {
+    flake: FlakeSummary,
+    sha: String,
+    meta: CommitFocusMeta,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct FlakeCommitPeekState {
+    flake: MockFlakeItem,
+    focus_sha: String,
+    focus_meta: CommitFocusMeta,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main Component
 // ─────────────────────────────────────────────────────────────────────────────
@@ -276,6 +295,7 @@ fn system_detail_wants_deploy_tab() -> bool {
 #[component]
 pub fn SystemDetailView(id: String) -> Element {
     let nav = navigator();
+    let mut breadcrumb_override = use_context::<Signal<Option<(String, String)>>>();
     let app_state = use_context::<Signal<AppState>>();
 
     // Current tab state — defaults to Overview but honours a ?tab=deploy query param
@@ -320,6 +340,10 @@ pub fn SystemDetailView(id: String) -> Element {
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
     let mut deploy_action_notice: Signal<Option<(String, bool)>> = use_signal(|| None);
+    let mut flake_commit_peek: Signal<Option<FlakeCommitPeekState>> = use_signal(|| None);
+    let mut flake_commit_peek_reload = use_signal(|| 0_u64);
+    // Reload nonce for system detail — incremented after edit-save to re-fetch the system.
+    let mut detail_reload = use_signal(|| 0_u64);
 
     // Live clock tick for relative timers/heartbeat countdowns while page is open.
     let mut now_tick = use_signal(Utc::now);
@@ -333,11 +357,25 @@ pub fn SystemDetailView(id: String) -> Element {
     });
     let now = now_tick();
 
-    // System data state — use_resource keyed on id prevents repeated fetches.
+    // System data state — use_resource reads detail_reload as a dependency so that
+    // incrementing the reload nonce (e.g. after saving edits) triggers a re-fetch.
     let id_for_detail = id.clone();
     let mut detail_resource = use_resource(move || {
+        let _ = detail_reload();
         let id = id_for_detail.clone();
         async move { load_system_detail_with_fallback(&id).await }
+    });
+
+    let flake_commit_peek_for_resource = flake_commit_peek.clone();
+    let flake_commit_peek_resource = use_resource(move || {
+        let _reload = flake_commit_peek_reload();
+        let peek = flake_commit_peek_for_resource.read().clone();
+        async move {
+            let Some(peek) = peek else {
+                return None;
+            };
+            Some(fetch_flake_timeline_for_tray(peek.flake.id()).await)
+        }
     });
 
     let id_for_vulns = id.clone();
@@ -602,6 +640,7 @@ pub fn SystemDetailView(id: String) -> Element {
 
     // Not found state.
     if not_found {
+        breadcrumb_override.set(None);
         return rsx! {
             div {
                 class: "space-y-4",
@@ -623,6 +662,19 @@ pub fn SystemDetailView(id: String) -> Element {
         .read_unchecked()
         .clone()
         .unwrap_or_default();
+    {
+        let mut breadcrumb_override = breadcrumb_override.clone();
+        let hostname = system.hostname.clone();
+        use_effect(move || {
+            breadcrumb_override.set(Some(("Systems".to_string(), hostname.clone())));
+        });
+    }
+    {
+        let mut breadcrumb_override = breadcrumb_override.clone();
+        use_drop(move || {
+            breadcrumb_override.set(None);
+        });
+    }
     let deployment_progress = deployment_progress_resource
         .read_unchecked()
         .clone()
@@ -774,6 +826,37 @@ pub fn SystemDetailView(id: String) -> Element {
             }
         })
         .unwrap_or_else(|| "Never".to_string());
+
+    let on_open_flake_commit = {
+        let mut flake_commit_peek = flake_commit_peek.clone();
+        move |target: FlakeCommitPeekTarget| {
+            flake_commit_peek.set(Some(FlakeCommitPeekState {
+                flake: map_flake_summary_to_tray_item(&target.flake),
+                focus_sha: target.sha,
+                focus_meta: target.meta,
+            }));
+        }
+    };
+
+    let current_flake_peek = flake_commit_peek.read().clone();
+    let peek_resource_state = flake_commit_peek_resource.read_unchecked().clone();
+    let (peek_commits, peek_commits_loading, peek_commits_error): (
+        Vec<MockCommitItem>,
+        bool,
+        Option<String>,
+    ) = match (current_flake_peek.as_ref(), peek_resource_state.as_ref()) {
+        (Some(peek), Some(Some(Ok(timelines)))) => {
+            let commits = timelines
+                .iter()
+                .find(|timeline| timeline.flake_id == peek.flake.id())
+                .map(|timeline| map_timeline_commits_to_view(&timeline.commits))
+                .unwrap_or_default();
+            (commits, false, None)
+        }
+        (Some(_), Some(Some(Err(err)))) => (Vec::new(), false, Some(err.to_string())),
+        (Some(_), _) => (Vec::new(), true, None),
+        (None, _) => (Vec::new(), false, None),
+    };
 
     rsx! {
         div {
@@ -1037,9 +1120,11 @@ pub fn SystemDetailView(id: String) -> Element {
                             system: system.clone(),
                             now: now,
                             current_commit: overview_current_commit.clone(),
+                            target_store_path: deployment_progress.as_ref().map(|progress| progress.target_store_path.clone()),
                             history_entries: effective_history_entries.clone(),
                             on_open_cves: move |_| active_tab.set(Tab::Cves),
                             on_view_history: move |_| active_tab.set(Tab::History),
+                            on_open_flake_commit: on_open_flake_commit,
                         }
                     },
                     Tab::Deploy => rsx! {
@@ -1051,6 +1136,7 @@ pub fn SystemDetailView(id: String) -> Element {
                             allow_mutations: can_mutate,
                             deploy_notice: deploy_action_notice.read().clone(),
                             on_clear_deploy_notice: move |_| deploy_action_notice.set(None),
+                            on_open_flake_commit: on_open_flake_commit,
                             on_deploy_commit: {
                                 let system_id = system.id;
                                 let hostname = system.hostname.clone();
@@ -1203,6 +1289,28 @@ pub fn SystemDetailView(id: String) -> Element {
             }
         }
 
+        if let Some(peek) = current_flake_peek.clone() {
+            FlakeTrayNew {
+                commits: peek_commits.clone(),
+                commits_loading: peek_commits_loading,
+                commits_error: peek_commits_error.clone(),
+                notice: None,
+                is_admin: false,
+                focus_sha: Some(peek.focus_sha.clone()),
+                focus_meta: Some(peek.focus_meta.clone()),
+                flake: peek.flake.clone(),
+                on_edit: move |_| {},
+                on_sync: move |_| flake_commit_peek_reload.set(flake_commit_peek_reload() + 1),
+                on_history_rewrite_conflict: move |(_flake_id, detail)| {
+                    toast_message.set(Some((
+                        format!("Flake history rewrite detected: {detail}"),
+                        false,
+                    )));
+                },
+                on_close: move |_| flake_commit_peek.set(None),
+            }
+        }
+
         // Sync confirmation dialog (rendered as portal outside main content)
         if *edit_modal_open.read() {
             EditSystemModal {
@@ -1231,7 +1339,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         {
                             Ok(_) => {
                                 edit_modal_open.set(false);
-                                detail_resource.restart();
+                                detail_reload.set(detail_reload() + 1);
                             }
                             Err(error_message) => {
                                 toast_message.set(Some((error_message, false)));
@@ -1994,10 +2102,13 @@ fn OverviewTab(
     system: SystemDetail,
     now: chrono::DateTime<chrono::Utc>,
     current_commit: Option<SystemCommitHistory>,
+    target_store_path: Option<String>,
     history_entries: Vec<SystemHistoryEntry>,
     on_open_cves: EventHandler<()>,
     on_view_history: EventHandler<()>,
+    on_open_flake_commit: EventHandler<FlakeCommitPeekTarget>,
 ) -> Element {
+    let nav = use_navigator();
     let environment = system
         .environment
         .clone()
@@ -2037,11 +2148,20 @@ fn OverviewTab(
         .as_ref()
         .map(|f| f.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
-    let flake_commit = system
-        .flake
+    let flake_commit = current_commit
         .as_ref()
-        .and_then(|f| f.latest_commit.clone())
+        .map(|commit| commit.hash.clone())
+        .or_else(|| system.flake.as_ref().and_then(|f| f.latest_commit.clone()))
         .unwrap_or_else(|| "unknown".to_string());
+    let flake_commit_short = if flake_commit == "unknown" {
+        flake_commit.clone()
+    } else {
+        flake_commit.chars().take(8).collect::<String>()
+    };
+    let flake_commit_for_open = flake_commit.clone();
+    let flake_commit_for_label = flake_commit_short.clone();
+    let flake_commit_for_title = flake_commit.clone();
+    let flake_summary_for_commit = system.flake.clone();
     let nixos_version = system
         .nixos_version
         .clone()
@@ -2089,6 +2209,12 @@ fn OverviewTab(
         } else {
             ""
         };
+    let store_path_text = system
+        .current_store_path
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let target_store_path_text =
+        target_store_path.filter(|target| !target.is_empty() && target != &store_path_text);
     let commit_message_text = current_commit
         .as_ref()
         .map(|commit| commit.message.clone())
@@ -2128,6 +2254,14 @@ fn OverviewTab(
         .take(9)
         .map(activity_row_from_history)
         .collect::<Vec<_>>();
+    let tag_suggestions = vec![
+        "prod".to_string(),
+        "db".to_string(),
+        "web".to_string(),
+        "edge".to_string(),
+        "critical".to_string(),
+        "canary".to_string(),
+    ];
 
     rsx! {
         div {
@@ -2155,11 +2289,57 @@ fn OverviewTab(
                     class: "kv-grid",
                     dt { "Flake" } dd { class: "mono", "{flake_name}" }
                     dt { "Branch" } dd { class: "mono", "{branch_text}" }
-                    dt { "Commit" } dd { class: "mono", "{flake_commit}" }
+                    dt { "Commit" }
+                    dd { class: "mono",
+                        button {
+                            class: "tl-commit-link mono focus-ring",
+                            title: "Open this commit in Flakes",
+                            onclick: move |_| {
+                                if let (Some(flake), false) = (flake_summary_for_commit.clone(), flake_commit_for_open == "unknown") {
+                                    on_open_flake_commit.call(FlakeCommitPeekTarget {
+                                        flake,
+                                        sha: flake_commit_for_open.clone(),
+                                        meta: CommitFocusMeta {
+                                            msg: Some(commit_message_text.clone()),
+                                            author: current_commit.as_ref().map(|commit| commit.author.clone()),
+                                            at: current_commit.as_ref().map(|commit| commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()),
+                                        },
+                                    });
+                                }
+                            },
+                            "{flake_commit_for_label}"
+                        }
+                        span { style: "margin:0 6px; color:var(--cf-text-muted);", "build" }
+                        button {
+                            class: "tl-commit-link mono focus-ring",
+                            title: "Open the build for {flake_commit_for_title}",
+                            onclick: move |_| {
+                                nav.push(Route::BuildsView {});
+                            },
+                            "{generation_text}"
+                        }
+                    }
                     dt { "Message" } dd { style: "white-space: normal; font-family: var(--font-sans);", "{commit_message_text}" }
                     dt { "Generation" } dd { class: "mono", "{generation_text}{generation_mismatch_note}" }
                     dt { "NixOS" } dd { class: "mono", "{nixos_version}" }
                     dt { "Kernel" } dd { class: "mono", "{kernel}" }
+                    dt { "Store path" }
+                    dd {
+                        class: "mono",
+                        style: "font-size:11px; white-space:normal; word-break:break-all; line-height:1.4;",
+                        title: "{store_path_text}",
+                        "{store_path_text}"
+                    }
+                    if let Some(target_store_path_text) = target_store_path_text {
+                        dt { style: "color:#fbbf24;", "Target" }
+                        dd {
+                            class: "mono",
+                            style: "font-size:11px; white-space:normal; word-break:break-all; line-height:1.4; color:#fbbf24;",
+                            title: "{target_store_path_text}",
+                            "{target_store_path_text}"
+                            span { class: "chip chip-warning", style: "margin-left:6px; font-size:10px;", "drift" }
+                        }
+                    }
                 }
             }
 
@@ -2345,10 +2525,18 @@ fn OverviewTab(
                     for tag in tags.read().clone() {
                         {
                             let tag_to_remove = tag.clone();
+                            let tag_for_filter = tag.clone();
                             rsx! {
                                 span {
                                     class: "sd-tag mono sd-tag-chip",
-                                    span { class: "sd-tag-label", "#{tag}" }
+                                    button {
+                                        class: "sd-tag-label focus-ring",
+                                        title: "Filter fleet by #{tag_for_filter}",
+                                        onclick: move |_| {
+                                            nav.push(Route::SystemsView {});
+                                        },
+                                        "#{tag}"
+                                    }
                                     button {
                                         class: "sd-tag-x focus-ring",
                                         title: "Remove tag",
@@ -2374,6 +2562,7 @@ fn OverviewTab(
                             input {
                                 class: "sd-tag-input mono focus-ring",
                                 autofocus: true,
+                                list: "cf-fleet-tags",
                                 placeholder: "tag…",
                                 value: "{tag_draft}",
                                 oninput: move |e| tag_draft.set(e.value().clone()),
@@ -2400,6 +2589,12 @@ fn OverviewTab(
                                     tag_adding.set(false);
                                 },
                             }
+                            datalist {
+                                id: "cf-fleet-tags",
+                                for suggestion in &tag_suggestions {
+                                    option { value: "{suggestion}" }
+                                }
+                            }
                         }
                     } else {
                         button {
@@ -2420,7 +2615,7 @@ fn OverviewTab(
                 p {
                     class: "help",
                     style: "margin-top: 8px;",
-                    "Free-form labels for your own grouping & filtering. Not saved yet — tag persistence is coming soon."
+                    "Free-form labels for your own grouping & filtering — click a tag to slice the fleet by it. They don't affect policies or deployment."
                 }
             }
         }
@@ -2437,6 +2632,7 @@ fn DeployTab(
     allow_mutations: bool,
     deploy_notice: Option<(String, bool)>,
     on_clear_deploy_notice: EventHandler<()>,
+    on_open_flake_commit: EventHandler<FlakeCommitPeekTarget>,
     on_deploy_commit: EventHandler<String>,
     on_deploy_generation: EventHandler<String>,
 ) -> Element {
@@ -2445,6 +2641,7 @@ fn DeployTab(
         .as_ref()
         .map(|f| f.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
+    let flake_summary = system.flake.clone();
 
     let default_commit = commits
         .iter()
@@ -2588,7 +2785,9 @@ fn DeployTab(
                                 let commit_hash_for_title = commit.hash.clone();
                                 let short_hash = commit.hash.chars().take(7).collect::<String>();
                                 let commit_message = commit.message.clone();
+                                let commit_message_for_click = commit_message.clone();
                                 let commit_author = commit.author.clone();
+                                let commit_author_for_click = commit_author.clone();
                                 let when_text = {
                                     let now = chrono::Utc::now();
                                     let d = now.signed_duration_since(commit.committed_at);
@@ -2602,6 +2801,8 @@ fn DeployTab(
                                         format!("{}d ago", d.num_days())
                                     }
                                 };
+                                let when_text_for_click = when_text.clone();
+                                let flake_summary_for_click = flake_summary.clone();
                                 rsx! {
                                     button {
                                         key: "{commit_hash_for_key}",
@@ -2612,9 +2813,24 @@ fn DeployTab(
                                             on_clear_deploy_notice.call(());
                                         },
                                         span {
-                                            class: "mono sd-commit-sha",
-                                            title: "{commit_hash_for_title}",
-                                            "{short_hash}"
+                                            class: "mono sd-commit-sha sd-commit-sha-link",
+                                            title: "Open {commit_hash_for_title} in Flakes",
+                                                onclick: move |evt| {
+                                                    evt.stop_propagation();
+                                                    if let Some(flake) = flake_summary_for_click.clone() {
+                                                    on_open_flake_commit.call(FlakeCommitPeekTarget {
+                                                        flake,
+                                                        sha: commit_hash_for_title.clone(),
+                                                        meta: CommitFocusMeta {
+                                                            msg: Some(commit_message_for_click.clone()),
+                                                            author: Some(commit_author_for_click.clone()),
+                                                            at: Some(when_text_for_click.clone()),
+                                                        },
+                                                    });
+                                                }
+                                            },
+                                            Icon { name: IconName::Git, size: 10 }
+                                            " {short_hash}"
                                         }
                                         span {
                                             class: "sd-commit-msg",
@@ -2660,6 +2876,7 @@ fn DeployTab(
                                     .commit_hash
                                     .as_ref()
                                     .map(|c| c.chars().take(7).collect::<String>());
+                                let generation_commit_hash = generation.commit_hash.clone();
                                 let when_text = {
                                     let now = chrono::Utc::now();
                                     let d = now.signed_duration_since(generation.timestamp);
@@ -2673,6 +2890,8 @@ fn DeployTab(
                                         format!("{}d ago", d.num_days())
                                     }
                                 };
+                                let when_text_for_click = when_text.clone();
+                                let flake_summary_for_click = flake_summary.clone();
                                 rsx! {
                                     button {
                                         key: "gen-{gen_num}",
@@ -2685,7 +2904,25 @@ fn DeployTab(
                                         span { class: "mono sd-commit-sha sd-generation-number", "{gen_label}" }
                                         span { class: "sd-commit-msg", "generation rollback" }
                                         if let Some(short) = commit_short {
-                                            span { class: "sd-commit-meta mono", "{short}" }
+                                            span {
+                                                class: "sd-commit-meta mono sd-commit-sha-link",
+                                                onclick: move |evt| {
+                                                    evt.stop_propagation();
+                                                    if let (Some(flake), Some(sha)) = (flake_summary_for_click.clone(), generation_commit_hash.clone()) {
+                                                        on_open_flake_commit.call(FlakeCommitPeekTarget {
+                                                            flake,
+                                                            sha,
+                                                            meta: CommitFocusMeta {
+                                                                msg: Some("(generated commit)".to_string()),
+                                                                author: None,
+                                                                at: Some(when_text_for_click.clone()),
+                                                            },
+                                                        });
+                                                    }
+                                                },
+                                                Icon { name: IconName::Git, size: 10 }
+                                                " {short}"
+                                            }
                                         } else {
                                             span { class: "sd-commit-meta mono", "unknown / not in CF" }
                                         }
@@ -2757,6 +2994,8 @@ fn DeployTab(
                         } else {
                             commit_full.chars().take(7).collect::<String>()
                         };
+                        let flake_summary_for_from = flake_summary.clone();
+                        let flake_summary_for_commit = flake_summary.clone();
 
                         rsx! {
                             dl {
@@ -2765,7 +3004,23 @@ fn DeployTab(
                                 dd { class: "mono", "{system.hostname}" }
 
                                 dt { "From" }
-                                dd { class: "mono", "{from_short} · {current_gen_display}" }
+                                dd { class: "mono",
+                                    button {
+                                        class: "sd-commit-sha-link mono",
+                                        onclick: move |_| {
+                                            if let (Some(flake), false) = (flake_summary_for_from.clone(), from_commit == "unknown") {
+                                                on_open_flake_commit.call(FlakeCommitPeekTarget {
+                                                    flake,
+                                                    sha: from_commit.clone(),
+                                                    meta: CommitFocusMeta::default(),
+                                                });
+                                            }
+                                        },
+                                        Icon { name: IconName::Git, size: 10 }
+                                        " {from_short}"
+                                    }
+                                    " · {current_gen_display}"
+                                }
 
                                 dt { "To" }
                                 dd { class: "mono", "gen #{gen_num}" }
@@ -2778,7 +3033,27 @@ fn DeployTab(
                                 }
 
                                 dt { "Commit" }
-                                dd { class: "mono", title: "{commit_full}", "{commit_display}" }
+                                dd { class: "mono",
+                                    button {
+                                        class: "sd-commit-sha-link mono",
+                                        title: "{commit_full}",
+                                        onclick: move |_| {
+                                            if let (Some(flake), Some(sha)) = (flake_summary_for_commit.clone(), generation_data.commit_hash.clone()) {
+                                                on_open_flake_commit.call(FlakeCommitPeekTarget {
+                                                    flake,
+                                                    sha,
+                                                    meta: CommitFocusMeta {
+                                                        msg: Some("(generated commit)".to_string()),
+                                                        author: None,
+                                                        at: Some(generation_data.timestamp.format("%Y-%m-%d %H:%M UTC").to_string()),
+                                                    },
+                                                });
+                                            }
+                                        },
+                                        Icon { name: IconName::Git, size: 10 }
+                                        " {commit_display}"
+                                    }
+                                }
 
                                 dt { "Strategy" }
                                 dd { "rollback" }
@@ -2887,6 +3162,8 @@ fn DeployTab(
                         let policy_for_callout = policy_name.clone();
                         let current_gen_display = current_generation.map(|g| format!("gen #{}", g)).unwrap_or_else(|| "—".to_string());
                         let commit_sha_for_deploy = commit.hash.clone();
+                        let flake_summary_for_from = flake_summary.clone();
+                        let flake_summary_for_to = flake_summary.clone();
 
                         rsx! {
                             dl {
@@ -2895,10 +3172,45 @@ fn DeployTab(
                                 dd { class: "mono", "{system.hostname}" }
 
                                 dt { "From" }
-                                dd { class: "mono", "{from_short} · {current_gen_display}" }
+                                dd { class: "mono",
+                                    button {
+                                        class: "sd-commit-sha-link mono",
+                                        onclick: move |_| {
+                                            if let (Some(flake), false) = (flake_summary_for_from.clone(), from_commit == "unknown") {
+                                                on_open_flake_commit.call(FlakeCommitPeekTarget {
+                                                    flake,
+                                                    sha: from_commit.clone(),
+                                                    meta: CommitFocusMeta::default(),
+                                                });
+                                            }
+                                        },
+                                        Icon { name: IconName::Git, size: 10 }
+                                        " {from_short}"
+                                    }
+                                    " · {current_gen_display}"
+                                }
 
                                 dt { "To" }
-                                dd { class: "mono", "{to_short}" }
+                                dd { class: "mono",
+                                    button {
+                                        class: "sd-commit-sha-link mono",
+                                        onclick: move |_| {
+                                            if let Some(flake) = flake_summary_for_to.clone() {
+                                                on_open_flake_commit.call(FlakeCommitPeekTarget {
+                                                    flake,
+                                                    sha: commit.hash.clone(),
+                                                    meta: CommitFocusMeta {
+                                                        msg: Some(commit.message.clone()),
+                                                        author: Some(commit.author.clone()),
+                                                        at: Some(commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()),
+                                                    },
+                                                });
+                                            }
+                                        },
+                                        Icon { name: IconName::Git, size: 10 }
+                                        " {to_short}"
+                                    }
+                                }
 
                                 dt { "Strategy" }
                                 dd { "immediate_persist" }

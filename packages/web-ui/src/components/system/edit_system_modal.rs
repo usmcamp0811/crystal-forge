@@ -4,6 +4,7 @@
 //! flake assignment section, segmented deployment mode, pinned commit picker.
 
 use crate::api::models::{CommitInfo, FieldUpdate, SystemDetail, UpdateSystemRequest};
+use crate::components::icon::{Icon, IconName};
 use crate::components::modals::RemoveSystemDialog;
 use dioxus::prelude::*;
 
@@ -54,8 +55,7 @@ pub fn EditSystemModal(
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
     });
-    let mut system_configuration_name =
-        use_signal(|| system.system_configuration_name.clone().unwrap_or_default());
+    let system_configuration_name = system.system_configuration_name.clone().unwrap_or_default();
     let mut deployment_policy = use_signal(|| system.deployment_policy.clone());
     let mut flake_name = use_signal(|| {
         system
@@ -138,10 +138,10 @@ pub fn EditSystemModal(
             } else {
                 Some(fqdn.read().trim().to_string())
             },
-            system_configuration_name: if system_configuration_name.read().trim().is_empty() {
+            system_configuration_name: if system_configuration_name.trim().is_empty() {
                 None
             } else {
-                Some(system_configuration_name.read().clone())
+                Some(system_configuration_name.clone())
             },
             environment: if environment.read().trim().is_empty() {
                 None
@@ -173,6 +173,9 @@ pub fn EditSystemModal(
                 div {
                     class: "modal-head",
                     h2 {
+                        span { style: "margin-right:6px; display:inline-flex; vertical-align:text-bottom;",
+                            Icon { name: IconName::Gear, size: 14 }
+                        }
                         "Edit {system.hostname}"
                     }
                     p {
@@ -242,16 +245,24 @@ pub fn EditSystemModal(
                         p { class: "help", "Saved as this system's operator-managed FQDN. Clear it to fall back to hostname + environment." }
                     }
 
-                    // System Configuration Name
+                    // Reachability section (design: Direct/LAN vs Agent pull-only)
                     div {
-                        class: "field",
-                        label { "System Configuration Name" }
-                        input {
-                            r#type: "text",
-                            class: "input focus-ring mono",
-                            value: "{system_configuration_name}",
-                            placeholder: "Defaults to hostname if not set",
-                            oninput: move |e| system_configuration_name.set(e.value().clone()),
+                        style: "margin-top: 8px; padding: 14px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 50%, var(--cf-card-bg));",
+                        div {
+                            style: "display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 13px; font-weight: 600;",
+                            Icon { name: IconName::Server, size: 13 }
+                            " Reachability"
+                        }
+                        div {
+                            class: "field",
+                            label { "How the server reaches this system" }
+                            div {
+                                class: "seg",
+                                style: "width: fit-content;",
+                                button { class: "active", "Direct / LAN" }
+                                button { "Agent pull-only" }
+                            }
+                            p { class: "help", "Server can open connections to the agent (same LAN / routable / VPN). Enables server-initiated deploys and live log tail." }
                         }
                     }
 
@@ -260,7 +271,8 @@ pub fn EditSystemModal(
                         style: "margin-top: 8px; padding: 14px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 50%, var(--cf-card-bg));",
                         div {
                             style: "display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 13px; font-weight: 600;",
-                            "Flake assignment"
+                            Icon { name: IconName::Git, size: 13 }
+                            " Flake assignment"
                         }
                         div {
                             style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px;",
@@ -383,29 +395,6 @@ pub fn EditSystemModal(
                         }
                     }
 
-                    // Reachability section placeholder (design: Direct/LAN vs Agent pull-only)
-                    // Requires backend support for reachability_mode, server_address fields.
-                    div {
-                        style: "margin-top: 8px; padding: 14px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 50%, var(--cf-card-bg)); opacity: 0.55;",
-                        "data-testid": "reachability-placeholder",
-                        title: "Reachability settings require backend support (coming soon)",
-                        div {
-                            style: "display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 13px; font-weight: 600;",
-                            "Reachability"
-                        }
-                        div {
-                            class: "field",
-                            label { "How the server reaches this system" }
-                            div {
-                                class: "seg",
-                                style: "width: fit-content;",
-                                button { class: "active", disabled: "true", "Direct / LAN" }
-                                button { disabled: "true", "Agent pull-only" }
-                            }
-                            p { class: "help", "Server can open connections to the agent (same LAN / routable / VPN). Enables server-initiated deploys and live log tail." }
-                        }
-                    }
-
                     // Two-column: Heartbeat interval + Tags.
                     // Heartbeat interval is persisted and returned to the agent via LogResponse.
                     // Tags are still local-only (no systems.tags column yet — TASK-353.1).
@@ -447,7 +436,7 @@ pub fn EditSystemModal(
                                 placeholder: "e.g. builder, stig-enforced",
                                 oninput: move |e| tags_draft.set(e.value().clone()),
                             }
-                            p { class: "help", "Not saved yet — tag persistence is coming soon." }
+                             p { class: "help", "Free-form labels for grouping & filtering. Click a tag in System Detail to slice the fleet by it." }
                         }
                     }
 
@@ -462,7 +451,7 @@ pub fn EditSystemModal(
                             placeholder: "Optional context for operators…",
                             style: "resize: vertical;",
                         }
-                        p { class: "help", "Not saved yet — description persistence is coming soon." }
+                        p { class: "help", "Optional context for operators. Not persisted to the backend yet." }
                     }
 
                     // Danger zone (design: remove system)
@@ -478,7 +467,8 @@ pub fn EditSystemModal(
 
                     if let Some(message) = &error_message {
                         div {
-                            class: "rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200",
+                            class: "sd-callout sd-callout-danger",
+                            style: "margin-top: 10px;",
                             "{message}"
                         }
                     }
@@ -500,9 +490,9 @@ pub fn EditSystemModal(
                         disabled: is_saving() || hostname.read().trim().is_empty(),
 
                         if is_saving() {
-                            "Saving..."
+                            "Saving…"
                         } else {
-                            "Save Changes"
+                            "Save changes"
                         }
                     }
                 }

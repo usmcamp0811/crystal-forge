@@ -64,7 +64,13 @@ pub fn EnvironmentFormModal(props: EnvironmentFormModalProps) -> Element {
                         " "
                         if is_edit { "Edit {current.name}" } else { "Add environment" }
                     }
-                    p { if is_edit { "Update environment settings, cache assignment, and deployment policy." } else { "Create a new environment tier." } }
+                    p {
+                        if is_edit {
+                            "Update environment settings and persisted deployment metadata. Some controls are stored now for future automation and approval behavior."
+                        } else {
+                            "Create a new environment tier with persisted deployment metadata for future automation and approval behavior."
+                        }
+                    }
                 }
 
                 div { class: "modal-body", style: "overflow-y:auto; display:flex; flex-direction:column; gap:14px;",
@@ -100,21 +106,24 @@ pub fn EnvironmentFormModal(props: EnvironmentFormModalProps) -> Element {
                         label { style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
                             input {
                                 r#type: "checkbox",
-                                checked: current.auto_sync.unwrap_or(false),
-                                disabled: true,
+                                checked: current.auto_sync.unwrap_or(true),
+                                onchange: move |evt| update_draft(&mut draft, |next| next.auto_sync = Some(evt.checked())),
                                 style: "accent-color:var(--cf-brand-purple);",
                             }
-                            span { "Auto-sync flakes (not yet persisted)" }
+                            span { "Auto-sync flakes" }
                         }
                         label { style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
                             input {
                                 r#type: "checkbox",
-                                checked: current.requires_approval.unwrap_or(false),
-                                disabled: true,
+                                checked: current.requires_approval.unwrap_or(true),
+                                onchange: move |evt| update_draft(&mut draft, |next| next.requires_approval = Some(evt.checked())),
                                 style: "accent-color:var(--cf-brand-purple);",
                             }
-                            span { "Require approval before deploy (not yet persisted)" }
+                            span { "Require approval before deploy" }
                         }
+                    }
+                    div { class: "help",
+                        "These settings are stored with the environment today. Approval enforcement and flake auto-sync behavior are future server-side automation work."
                     }
 
                     if is_edit {
@@ -254,13 +263,12 @@ fn DeploymentPolicySection(props: DeploymentPolicySectionProps) -> Element {
                 for (policy, label) in policies {
                     button {
                         class: if current.default_policy == Some(policy) { "active" } else { "" },
-                        disabled: true,
-                        title: "TASK-359 tracks persisted environment deployment policy",
+                        onclick: move |_| update_draft(&mut draft, |next| next.default_policy = Some(policy)),
                         "{label}"
                     }
                 }
             }
-            div { class: "help", "Display-only until TASK-359 persists environment deployment policy." }
+            div { class: "help", "Stored as environment metadata today; future deployment automation will consume this default mode." }
         }
     }
 }
@@ -346,7 +354,7 @@ fn ProductionToggle(props: ProductionToggleProps) -> Element {
             input {
                 r#type: "checkbox",
                 checked: current.is_production.unwrap_or(false),
-                disabled: true,
+                onchange: move |evt| update_draft(&mut draft, |next| next.is_production = Some(evt.checked())),
                 style: "accent-color:var(--cf-danger-berry); margin-top:2px;",
             }
             span { style: "min-width:0;",
@@ -355,7 +363,7 @@ fn ProductionToggle(props: ProductionToggleProps) -> Element {
                     "Production environment"
                 }
                 span { style: "display:block; font-size:11.5px; color:var(--cf-text-muted); margin-top:3px; line-height:1.45;",
-                    "Production flag persistence is tracked by TASK-359. This control is read-only until backend support lands."
+                    "Marks this environment as production. It affects UI highlighting now and is stored for future policy and automation behavior."
                 }
             }
         }

@@ -2,9 +2,7 @@
 
 use dioxus::prelude::*;
 
-use super::{
-    EnvironmentDeploymentPolicy, EnvironmentHealthBreakdown, EnvironmentItem, PolicyOption,
-};
+use super::{EnvironmentDeploymentPolicy, EnvironmentHealthBreakdown, EnvironmentItem, PolicyOption};
 use crate::components::icon::{Icon, IconName};
 
 #[derive(Props, Clone, PartialEq)]
@@ -18,6 +16,7 @@ pub struct EnvironmentCardProps {
     /// Applied alongside the flash class to keep the card highlighted.
     #[props(default)]
     pub attention_class: String,
+    pub on_view: EventHandler<EnvironmentItem>,
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -30,13 +29,18 @@ pub struct EnvironmentTableProps {
     /// Per-item attention class strings, one per environment in the same order.
     #[props(default)]
     pub attention_classes: Vec<String>,
+    pub on_view: EventHandler<EnvironmentItem>,
 }
 
 #[component]
 pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
     let env = props.environment.clone();
     let env_for_header = env.clone();
-    let env_for_footer = env.clone();
+    let env_for_body = env.clone();
+    let display_policy = env.default_policy;
+    let display_auto_sync = env.auto_sync;
+    let display_requires_approval = env.requires_approval;
+    let display_role_assignment_count = env.role_assignment_count;
     let total = env.health.total().max(env.system_count).max(1);
 
     let card_class = if props.flash {
@@ -52,7 +56,10 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
     };
 
     rsx! {
-        div { class: "{card_class}",
+        div {
+            class: "{card_class}",
+            style: "cursor:pointer;",
+            onclick: move |_| props.on_view.call(env_for_body.clone()),
             div { class: "env-card-rail", style: "background:{env.color_hex};" }
             div { class: "env-card-head",
                 div {
@@ -90,7 +97,10 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
                     button {
                         class: "btn-icon focus-ring",
                         title: "Edit",
-                        onclick: move |_| props.on_edit.call(env_for_header.clone()),
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            props.on_edit.call(env_for_header.clone());
+                        },
                         Icon { name: IconName::Gear, size: 14 }
                     }
                 }
@@ -119,29 +129,22 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
 
             dl { class: "env-kv",
                 dt { "Deploy" }
-                dd { PolicyChip { policy: env.default_policy } }
+                dd { PolicyChip { policy: display_policy } }
                 dt { "Enforcement" }
                 dd { EnforcementChips { environment: env.clone(), policy_library: props.policy_library.clone() } }
                 dt { "Cache" }
                 dd { CacheSummary { environment: env.clone() } }
                 dt { "Auto-sync" }
-                dd { ToggleChip { enabled: env.auto_sync, on_label: "on", off_label: "off" } }
+                dd { ToggleChip { enabled: display_auto_sync, on_label: "on", off_label: "off" } }
                 dt { "Approval" }
-                dd { ToggleChip { enabled: env.requires_approval, on_label: "required", off_label: "not required" } }
+                dd { ToggleChip { enabled: display_requires_approval, on_label: "required", off_label: "not required" } }
             }
 
             div { class: "env-card-foot",
-                if let Some(count) = env.role_assignment_count {
+                if let Some(count) = display_role_assignment_count {
                     span { style: "font-size:11px; color:var(--cf-text-muted);", "{count} role assignments" }
                 } else {
-                    span { style: "font-size:11px; color:var(--cf-text-muted);", title: "TASK-362 tracks persisted environment RBAC assignments", "RBAC not persisted" }
-                }
-                button {
-                    class: "btn btn-subtle focus-ring",
-                    style: "padding:4px 10px; font-size:12px;",
-                    onclick: move |_| props.on_edit.call(env_for_footer.clone()),
-                    Icon { name: IconName::Gear, size: 12 }
-                    " Edit"
+                    span { style: "font-size:11px; color:var(--cf-text-muted);", "no role assignments" }
                 }
             }
         }
@@ -181,6 +184,7 @@ pub fn EnvironmentTable(props: EnvironmentTableProps) -> Element {
                             on_edit: props.on_edit,
                             flash: *flash,
                             attention_class: attention_class.clone(),
+                            on_view: props.on_view,
                         }
                     }
                 }
@@ -197,6 +201,7 @@ struct EnvironmentRowProps {
     flash: bool,
     #[props(default)]
     attention_class: String,
+    on_view: EventHandler<EnvironmentItem>,
 }
 
 #[component]
@@ -204,6 +209,9 @@ fn EnvironmentRow(props: EnvironmentRowProps) -> Element {
     let env = props.environment.clone();
     let env_for_row = env.clone();
     let env_for_button = env.clone();
+    let display_policy = env.default_policy;
+    let display_auto_sync = env.auto_sync;
+    let display_requires_approval = env.requires_approval;
     let total = env.health.total().max(env.system_count).max(1);
 
     let row_class = if props.flash {
@@ -217,7 +225,10 @@ fn EnvironmentRow(props: EnvironmentRowProps) -> Element {
     };
 
     rsx! {
-        tr { class: "{row_class}", onclick: move |_| props.on_edit.call(env_for_row.clone()),
+        tr {
+            class: "{row_class}",
+            style: "cursor:pointer;",
+            onclick: move |_| props.on_view.call(env_for_row.clone()),
             td {
                 div { style: "display:flex; align-items:center; gap:8px;",
                     span { class: "env-dot", style: "background:{env.color_hex};" }
@@ -258,11 +269,11 @@ fn EnvironmentRow(props: EnvironmentRowProps) -> Element {
                     span { class: "mono", style: "font-size:11px; color:var(--cf-text-muted);", "{env.health.healthy}/{env.system_count}" }
                 }
             }
-            td { PolicyChip { policy: env.default_policy } }
+            td { PolicyChip { policy: display_policy } }
             td { EnforcementChips { environment: env.clone(), policy_library: props.policy_library.clone(), compact: true } }
             td { CacheSummary { environment: env.clone(), compact: true } }
-            td { ToggleChip { enabled: env.auto_sync, on_label: "on", off_label: "off" } }
-            td { ToggleChip { enabled: env.requires_approval, on_label: "required", off_label: "not required" } }
+            td { ToggleChip { enabled: display_auto_sync, on_label: "on", off_label: "off" } }
+            td { ToggleChip { enabled: display_requires_approval, on_label: "required", off_label: "not required" } }
             td {
                 div { class: "row-actions",
                     button {
@@ -343,7 +354,7 @@ fn PolicyChip(props: PolicyChipProps) -> Element {
         };
         rsx! { span { class, "{policy.label()}" } }
     } else {
-        rsx! { span { class: "chip chip-unknown", title: "TASK-359 tracks persisted environment deployment policy", "not persisted" } }
+        rsx! { span { class: "chip chip-unknown", "not set" } }
     }
 }
 
@@ -359,18 +370,17 @@ struct EnforcementChipsProps {
 fn EnforcementChips(props: EnforcementChipsProps) -> Element {
     let env = props.environment;
     let policy_count = env.required_policy_ids.len();
-    let compliance_label = if env.is_production.unwrap_or(false) {
-        Some("STIG")
-    } else {
-        None
-    };
+    let compliance_label = env
+        .compliance_bundle
+        .as_ref()
+        .map(|bundle| bundle.framework.clone());
     rsx! {
         div { style: "display:flex; gap:6px; align-items:center; flex-wrap:wrap;",
-            if let Some(label) = compliance_label {
-                span { class: "chip chip-info", title: "Temporary placeholder until TASK-361 persists compliance bundles", Icon { name: IconName::Shield, size: 9 } " {label}" }
+            if let Some(label) = compliance_label.clone() {
+                span { class: "chip chip-info", title: "Compliance bundle assigned to this environment", Icon { name: IconName::Shield, size: 9 } " {label}" }
             }
             if policy_count > 0 {
-                span { class: "chip chip-unknown", title: "Environment baseline policies; gate policies are tracked by TASK-361", "{policy_count} gate{plural(policy_count)}" }
+                span { class: "chip chip-unknown", title: "Required deployment policies (gates) for this environment", "{policy_count} gate{plural(policy_count)}" }
             }
             if compliance_label.is_none() && policy_count == 0 {
                 span { style: "font-size:11px; color:var(--cf-text-muted);", if props.compact { "—" } else { "none" } }
@@ -394,7 +404,7 @@ fn CacheSummary(props: CacheSummaryProps) -> Element {
             span {
                 class: "mono truncate",
                 style: "font-size:11px;",
-                title: "Temporary placeholder until TASK-360 persists cache assignments: {cache.url}",
+                title: "{cache.url} ({cache.status})",
                 if !props.compact { Icon { name: IconName::Download, size: 10 } " " }
                 "{cache.url}"
             }
@@ -420,7 +430,7 @@ fn ToggleChip(props: ToggleChipProps) -> Element {
             rsx! { span { class: "chip chip-unknown", "{props.off_label}" } }
         }
     } else {
-        rsx! { span { class: "chip chip-unknown", title: "TASK-362 tracks persisted environment automation/approval settings", "not persisted" } }
+        rsx! { span { class: "chip chip-unknown", "not set" } }
     }
 }
 
