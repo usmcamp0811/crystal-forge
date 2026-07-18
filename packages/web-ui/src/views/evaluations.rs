@@ -61,28 +61,24 @@ fn EvaluationsPage() -> Element {
     let mut toast_msg = use_signal(|| None::<String>);
 
     // History tab state
-    let mut history_page = use_signal(|| 1_i64);
+    let mut history_fetch_limit = use_signal(|| 50_i64);
     let mut history_status_filter = use_signal(|| String::from("all"));
     let mut history_flake_filter = use_signal(|| String::from("all"));
     let mut history_auto_selected = use_signal(|| false);
     let mut history_ack_cursor = use_signal(|| None::<String>);
     let mut evals_ack_sent = use_signal(|| false);
-    // Accumulated history items across server pages.
+    // Accumulated history items across the current page-1 fetch window.
     let mut history_items_acc: Signal<Vec<EvalHistoryItem>> = use_signal(Vec::new);
     let mut history_total_acc = use_signal(|| 0_i64);
-    // Page-indexed cache: polling refetches replace the corresponding page
-    // entry so data refreshes without duplication (review finding #1).
-    let mut history_page_cache =
-        use_signal(std::collections::HashMap::<i64, Vec<EvalHistoryItem>>::new);
 
     let history_resource = use_resource(move || async move {
         let _ = refresh();
-        let page = history_page();
+        let limit = history_fetch_limit();
         let status = history_status_filter();
         let flake = history_flake_filter();
         fetch_eval_history(
-            page,
-            50,
+            1,
+            limit,
             if status.is_empty() || status == "all" {
                 None
             } else {
@@ -127,23 +123,13 @@ fn EvaluationsPage() -> Element {
         }
     });
 
-    // Accumulate history pages using a page-indexed cache.  Polling
-    // refetches replace their page entry in-place so data refreshes
-    // without duplication (review finding #1).
+    // Replace the loaded history window atomically on each refresh. Fetching
+    // from page 1 with a growing limit avoids inconsistencies from mutable
+    // offset pagination (review finding #1).
     use_effect(move || {
         if let Some(Ok(page_data)) = &*history_resource.read() {
-            let page = history_page();
             history_total_acc.set(page_data.total_count);
-            if page == 1 {
-                history_page_cache.write().clear();
-            }
-            history_page_cache.with_mut(|cache| {
-                cache.insert(page, page_data.items.clone());
-                let mut pages: Vec<_> = cache.iter().collect();
-                pages.sort_by_key(|(p, _)| **p);
-                let all: Vec<_> = pages.into_iter().flat_map(|(_, v)| v.clone()).collect();
-                history_items_acc.set(all);
-            });
+            history_items_acc.set(page_data.items.clone());
         }
     });
 
@@ -173,15 +159,18 @@ fn EvaluationsPage() -> Element {
     );
     let hist_paging = use_infinite_scroll(hist_reset_key, 20);
 
-    // Server-page advancement for history, reactive because all signal reads
-    // are inside the closure (review finding #1).
+    // Grow the server fetch limit for history, reactive because all signal
+    // reads are inside the closure (review finding #1).
     use_effect(move || {
         let loaded_history_len = history_items_acc.read().len();
         let history_total = history_total_acc();
-        let hist_server_has_more = (loaded_history_len as i64) < history_total;
+        let hist_server_has_more =
+            (loaded_history_len as i64) < history_total && history_fetch_limit() < 200;
         let hist_count = hist_paging.count();
         if hist_count >= loaded_history_len && loaded_history_len > 0 && hist_server_has_more {
-            history_page.with_mut(|p| *p += 1);
+            history_fetch_limit.with_mut(|limit| {
+                *limit = (*limit + 50).min(200);
+            });
         }
     });
 
@@ -227,9 +216,8 @@ fn EvaluationsPage() -> Element {
     use_effect(move || {
         if active_tab() == EvaluationsTab::History && !evals_ack_sent() {
             if let Some(Ok(page_data)) = history_resource.read().as_ref() {
-                let unfiltered_first_page = history_page() == 1
-                    && history_status_filter() == "all"
-                    && history_flake_filter() == "all";
+                let unfiltered_first_page =
+                    history_status_filter() == "all" && history_flake_filter() == "all";
                 let complete_page = page_data.total_count <= page_data.items.len() as i64;
                 if unfiltered_first_page && complete_page {
                     let history_failed_count = page_data
@@ -602,7 +590,7 @@ fn EvaluationsPage() -> Element {
                             history_resource: history_resource,
                             history_status_filter: history_status_filter,
                             history_flake_filter: history_flake_filter,
-                            history_page: history_page,
+                            history_fetch_limit: history_fetch_limit,
                             refresh: refresh,
                             history_selected_ids: history_selected_ids,
                             drawer_target: drawer_target,
@@ -954,7 +942,7 @@ fn EvalHistory(
     history_resource: Resource<Result<EvalHistoryPage, ApiClientError>>,
     mut history_status_filter: Signal<String>,
     mut history_flake_filter: Signal<String>,
-    mut history_page: Signal<i64>,
+    mut history_fetch_limit: Signal<i64>,
     mut refresh: Signal<u64>,
     mut history_selected_ids: Signal<std::collections::HashSet<i32>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
@@ -970,7 +958,7 @@ fn EvalHistory(
     let hist_server_has_more = {
         let loaded = history_items_acc.read().len();
         let total = history_total_acc();
-        (loaded as i64) < total
+        (loaded as i64) < total && history_fetch_limit() < 200
     };
 
     rsx! {
@@ -991,7 +979,7 @@ fn EvalHistory(
                                     class: if is_active { "active" } else { "" },
                                     onclick: move |_| {
                                         history_status_filter.set(value_str.clone());
-                                        history_page.set(1);
+                                        history_fetch_limit.set(50);
                                         refresh.set(refresh() + 1);
                                     },
                                     "{label}"
@@ -1007,7 +995,7 @@ fn EvalHistory(
                     value: "{history_flake_filter()}",
                     onchange: move |evt| {
                         history_flake_filter.set(evt.value().clone());
-                        history_page.set(1);
+                        history_fetch_limit.set(50);
                         refresh.set(refresh() + 1);
                     },
                     option { value: "all", "All flakes" }

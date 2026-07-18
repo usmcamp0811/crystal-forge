@@ -71,7 +71,7 @@ impl InfiniteScroll {
             use wasm_bindgen::prelude::*;
 
             let page_size = self.page_size;
-            let mut count = self.count;
+            let count = self.count;
             let id = self.id;
 
             let Some(window) = web_sys::window() else {
@@ -108,6 +108,7 @@ impl InfiniteScroll {
                 for entry in entries.iter() {
                     let entry: web_sys::IntersectionObserverEntry = entry.unchecked_into();
                     if entry.is_intersecting() {
+                        let mut count = count;
                         count.with_mut(|c| *c += page_size);
                     }
                 }
@@ -199,6 +200,20 @@ pub fn use_infinite_scroll(reset_key: String, page_size: usize) -> InfiniteScrol
         prev_key.set(reset_key);
         count.set(page_size);
     }
+
+    // Re-register after each count change so the observer reevaluates the
+    // sentinel even when it remains inside the expanded root viewport after
+    // newly rendered rows push content downward. Without this, the browser may
+    // emit no new IntersectionObserver transition and paging stalls.
+    use_effect(move || {
+        let _ = count();
+        self::InfiniteScroll {
+            count,
+            page_size,
+            id: handle_id,
+        }
+        .check_and_register();
+    });
 
     // Disconnect observer on component unmount.
     use_drop(move || {

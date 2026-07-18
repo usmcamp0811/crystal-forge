@@ -211,12 +211,9 @@ pub fn BuildsView() -> Element {
     });
 
     // --- Active queue state ---
-    let mut queue_page = use_signal(|| 1_i64);
+    let mut fetch_limit = use_signal(|| PAGE_SIZE);
     let mut queue_total = use_signal(|| 0_i64);
     let mut builds = use_signal(Vec::<BuildItem>::new);
-    // Page-indexed cache: polling refetches replace the corresponding page
-    // entry so data refreshes without duplication (review finding #1).
-    let mut page_cache = use_signal(std::collections::HashMap::<i64, Vec<BuildItem>>::new);
 
     // Filter state — Active Queue defaults to active jobs only (queued + building + cancelling).
     // Operators can widen to "All" or other statuses via the status dropdown.
@@ -227,9 +224,9 @@ pub fn BuildsView() -> Element {
     // Simple time range: "today", "last7d", "" (all)
     let mut filter_time_range = use_signal(String::new);
 
-    // Reset to page 1 whenever filters change so accumulated rows are cleared.
+    // Reset to page 1 limit whenever filters change so accumulated rows are cleared.
     // NB: `refresh_trigger` is deliberately excluded — polling ticks every 5 s
-    // and must not erase previously loaded pages (review finding #8).
+    // and must not erase previously loaded rows (review finding #8).
     use_effect(move || {
         let _ = (
             filter_status(),
@@ -238,14 +235,13 @@ pub fn BuildsView() -> Element {
             filter_config(),
             filter_time_range(),
         );
-        queue_page.set(1);
-        page_cache.write().clear();
+        fetch_limit.set(PAGE_SIZE);
     });
 
     // Derived filter signals used to trigger resource re-fetch
     let queue_resource = use_resource(move || async move {
         let _ = refresh_trigger();
-        let page = queue_page();
+        let limit = fetch_limit();
         let status = filter_status();
         let commit = filter_commit();
         let flake = filter_flake();
@@ -268,8 +264,8 @@ pub fn BuildsView() -> Element {
         };
 
         let params = BuildQueueParams {
-            page: Some(page),
-            limit: Some(PAGE_SIZE),
+            page: Some(1),
+            limit: Some(limit),
             status: if status.is_empty() {
                 None
             } else {
@@ -337,27 +333,13 @@ pub fn BuildsView() -> Element {
 
     use_effect(move || {
         if let Some(Ok(page_resp)) = &*queue_resource.read() {
-            let page = queue_page();
-            // Offset the enumerate by the page so row IDs are globally
-            // unique across server pages (review finding #3).
-            let offset = ((page - 1) * PAGE_SIZE) as usize;
             let mapped = page_resp
                 .items
                 .iter()
                 .enumerate()
-                .map(|(idx, item)| map_queue_item(item, offset + idx))
+                .map(|(idx, item)| map_queue_item(item, idx))
                 .collect::<Vec<_>>();
-            // Insert/replace the page entry in the page-indexed cache,
-            // then rebuild `builds` in page order.  Polling refetches
-            // replace their page entry in-place so data refreshes without
-            // duplication (review finding #1).
-            page_cache.with_mut(|cache| {
-                cache.insert(page, mapped);
-                let mut pages: Vec<_> = cache.iter().collect();
-                pages.sort_by_key(|(p, _)| **p);
-                let all: Vec<_> = pages.into_iter().flat_map(|(_, v)| v.clone()).collect();
-                builds.set(all);
-            });
+            builds.set(mapped);
             queue_total.set(page_resp.total);
         }
     });
@@ -431,7 +413,7 @@ pub fn BuildsView() -> Element {
         }
     });
 
-    let mut selected_build = use_signal(|| None::<i32>);
+    let mut selected_build = use_signal(|| None::<uuid::Uuid>);
     let mut log_open = use_signal(|| false);
     let mut active_view = use_signal(|| BuildsTab::ActiveQueue);
     let mut active_tab = use_signal(|| DetailTab::Details);
@@ -576,13 +558,14 @@ pub fn BuildsView() -> Element {
     //   (a) there are more client-side rows in the filtered list, OR
     //   (b) on the Active tab, the server still has unloaded pages.
     let loaded_active_len = queue_data.len();
-    let server_has_more = (loaded_active_len as i64) < queue_total();
+    let can_grow_fetch_limit = fetch_limit() < 200;
+    let server_has_more = (loaded_active_len as i64) < queue_total() && can_grow_fetch_limit;
     let has_more = paging.count() < filtered_list.len()
         || (active_view() == BuildsTab::ActiveQueue && server_has_more);
 
-    // Advance the server page when the client-side paging count has caught up
-    // with all visible (search-filtered) loaded rows and the server still has
-    // more to fetch.  All signal reads are *inside* the closure so Dioxus
+    // Grow the server fetch limit when the client-side paging count has caught
+    // up with all visible (search-filtered) loaded rows and the server still
+    // has more to fetch. All signal reads are *inside* the closure so Dioxus
     // subscribes to them reactively (review finding #1).
     // The threshold is the number of loaded items that match the search filter,
     // ensuring that client-side searching does not block server-page fetches
@@ -591,7 +574,7 @@ pub fn BuildsView() -> Element {
         if active_view() == BuildsTab::ActiveQueue {
             let loaded_len = builds.read().len();
             let total = queue_total();
-            let server_has_more = (loaded_len as i64) < total;
+            let server_has_more = (loaded_len as i64) < total && fetch_limit() < 200;
             let paging_count = paging.count();
 
             // Determine how many loaded items pass the search filter.
@@ -627,19 +610,12 @@ pub fn BuildsView() -> Element {
             // advance through server pages until matches appear or the server
             // is exhausted (review finding #3).
             if paging_count >= threshold && server_has_more {
-                queue_page.with_mut(|p| *p += 1);
+                fetch_limit.with_mut(|limit| {
+                    *limit = (*limit + PAGE_SIZE).min(200);
+                });
             }
         }
     });
-
-    let total_pages = {
-        let t = queue_total();
-        if t == 0 {
-            1
-        } else {
-            (t + PAGE_SIZE - 1) / PAGE_SIZE
-        }
-    };
 
     rsx! {
         // JSX: <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
@@ -826,11 +802,11 @@ pub fn BuildsView() -> Element {
                         selected_id: selected_build,
                         flash_failed: flash_hist_rows(),
                         can_requeue,
-                        on_build_action: move |(build_id, action)| {
+                        on_build_action: move |(job_id, action)| {
                             match action {
-                                 BuildAction::MoveUp | BuildAction::MoveDown => {
+                                  BuildAction::MoveUp | BuildAction::MoveDown => {
                                     #[cfg(target_arch = "wasm32")]
-                                    web_sys::console::log_1(&format!("Move action triggered: {:?} for build_id {}", action, build_id).into());
+                                    web_sys::console::log_1(&format!("Move action triggered: {:?} for job_id {}", action, job_id).into());
 
                                     let queue_snapshot = builds.read().clone();
                                     let mut action_error = action_error;
@@ -838,11 +814,11 @@ pub fn BuildsView() -> Element {
                                     let mut refresh_trigger = refresh_trigger;
                                     spawn(async move {
                                         #[cfg(target_arch = "wasm32")]
-                                        web_sys::console::log_1(&format!("Move action: searching for build_id {} in {} builds", build_id, queue_snapshot.len()).into());
+                                        web_sys::console::log_1(&format!("Move action: searching for job_id {} in {} builds", job_id, queue_snapshot.len()).into());
 
-                                        let selected = queue_snapshot.iter().find(|b| b.id == build_id);
+                                        let selected = queue_snapshot.iter().find(|b| b.job_id == Some(job_id));
                                         let Some(selected) = selected else {
-                                            let err = format!("Build row #{} not found", build_id);
+                                            let err = format!("Build job {} not found", job_id);
                                             #[cfg(target_arch = "wasm32")]
                                             web_sys::console::error_1(&err.clone().into());
                                             action_error.set(Some(err));
@@ -851,14 +827,6 @@ pub fn BuildsView() -> Element {
 
                                         #[cfg(target_arch = "wasm32")]
                                         web_sys::console::log_1(&format!("Found build, job_id: {:?}, status: {:?}", selected.job_id, selected.status).into());
-
-                                        let Some(job_id) = selected.job_id else {
-                                            let err = "Queue item has no job id; cannot reorder".to_string();
-                                            #[cfg(target_arch = "wasm32")]
-                                            web_sys::console::error_1(&err.clone().into());
-                                            action_error.set(Some(err));
-                                            return;
-                                        };
 
                                         #[cfg(target_arch = "wasm32")]
                                         web_sys::console::log_1(&format!("Calling API to move job {} {:?}", job_id, action).into());
@@ -893,17 +861,17 @@ pub fn BuildsView() -> Element {
                                         }
                                     });
                                 }
-                                _ => pending_action.set(Some(PendingAction::Build { build_id, action })),
+                                _ => pending_action.set(Some(PendingAction::Build { job_id, action })),
                             }
                         },
-                        on_log: move |build_id| {
+                        on_log: move |job_id| {
                             // JSX parity: open the tray on its Log tab (not a separate modal).
-                            selected_build.set(Some(build_id));
+                            selected_build.set(Some(job_id));
                             active_tab.set(DetailTab::Logs);
                             log_open.set(false);
                         },
                         on_bulk_rerun: {
-                            move |build_ids: Vec<i32>| {
+                            move |build_ids: Vec<uuid::Uuid>| {
                                 let mut action_error = action_error;
                                 let mut last_action_note = last_action_note;
                                 let mut refresh_trigger = refresh_trigger;
@@ -911,7 +879,7 @@ pub fn BuildsView() -> Element {
                                 spawn(async move {
                                     let count = build_ids.len();
                                     for id in &build_ids {
-                                        if let Some(build) = filtered.iter().find(|b| b.id == *id) {
+                                        if let Some(build) = filtered.iter().find(|b| b.job_id == Some(*id)) {
                                             if let Some(jid) = build.job_id {
                                                 let _ = api::client::requeue_build_job(&jid).await;
                                             }
@@ -974,10 +942,9 @@ pub fn BuildsView() -> Element {
                         },
                         on_build_action: move |action| {
                             if let Some(build) = selected_for_action.clone() {
-                                pending_action.set(Some(PendingAction::Build {
-                                    build_id: build.id,
-                                    action,
-                                }));
+                                if let Some(job_id) = build.job_id {
+                                    pending_action.set(Some(PendingAction::Build { job_id, action }));
+                                }
                             }
                         },
                         tab: active_tab,
@@ -1170,7 +1137,7 @@ pub fn BuildsView() -> Element {
                                         }
                                     });
                                 }
-                                PendingAction::Build { build_id, action } => {
+                                PendingAction::Build { job_id, action } => {
                                     let queue_snapshot = builds.read().clone();
                                     let history_snapshot = build_history.read().clone();
                                     let mut action_error = action_error;
@@ -1178,10 +1145,10 @@ pub fn BuildsView() -> Element {
                                     let mut refresh_trigger = refresh_trigger;
                                     spawn(async move {
                                         // Check both active queue and completed history
-                                        let selected = queue_snapshot.iter().find(|b| b.id == build_id)
-                                            .or_else(|| history_snapshot.iter().find(|b| b.id == build_id));
+                                        let selected = queue_snapshot.iter().find(|b| b.job_id == Some(job_id))
+                                            .or_else(|| history_snapshot.iter().find(|b| b.job_id == Some(job_id)));
                                         let Some(selected) = selected else {
-                                            action_error.set(Some(format!("Build row #{} not found", build_id)));
+                                            action_error.set(Some(format!("Build job {} not found", job_id)));
                                             return;
                                         };
 
@@ -1333,8 +1300,8 @@ use crate::components::builds::{build_status_badge_class, queue_sort_rank, short
 #[component]
 fn BuildQueueFullTable(
     builds: Vec<BuildItem>,
-    selected_id: Signal<Option<i32>>,
-    on_build_action: EventHandler<(i32, BuildAction)>,
+    selected_id: Signal<Option<uuid::Uuid>>,
+    on_build_action: EventHandler<(uuid::Uuid, BuildAction)>,
 ) -> Element {
     let app_state = use_context::<Signal<AppState>>();
     let can_requeue = auth::is_operator_or_above(&app_state.read().auth);
@@ -1363,7 +1330,11 @@ fn BuildQueueFullTable(
                 tbody {
                     for build in sorted {
                         {
-                            let is_selected = *selected_id.read() == Some(build.id);
+                            let is_selected = build.job_id.is_some_and(|id| *selected_id.read() == Some(id));
+                            let row_key = build
+                                .job_id
+                                .map(|id| id.to_string())
+                                .unwrap_or_else(|| format!("legacy-{}", build.id));
                             let row_bg = if is_selected {
                                 "bg-cyan-900/20"
                             } else {
@@ -1371,10 +1342,14 @@ fn BuildQueueFullTable(
                             };
                             rsx! {
                                 tr {
-                                    key: "{build.id}",
+                                    key: "{row_key}",
                                     class: "{row_bg} border-b border-slate-800 cursor-pointer transition-colors",
                                     "data-testid": "build-queue-row",
-                                    onclick: move |_| selected_id.set(Some(build.id)),
+                                    onclick: move |_| {
+                                        if let Some(job_id) = build.job_id {
+                                            selected_id.set(Some(job_id));
+                                        }
+                                    },
                                     td { class: "px-3 py-2",
                                         span {
                                             class: "inline-flex px-2 py-0.5 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
@@ -1412,7 +1387,9 @@ fn BuildQueueFullTable(
                                                     class: "text-[10px] text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
                                                     onclick: move |evt| {
                                                         evt.stop_propagation();
-                                                        on_build_action.call((build.id, BuildAction::Stop));
+                                                        if let Some(job_id) = build.job_id {
+                                                            on_build_action.call((job_id, BuildAction::Stop));
+                                                        }
                                                     },
                                                     "Stop"
                                                 }
@@ -1422,7 +1399,9 @@ fn BuildQueueFullTable(
                                                     class: "text-[10px] text-orange-400 hover:text-orange-300 px-2 py-1 rounded hover:bg-orange-500/10 transition-colors",
                                                     onclick: move |evt| {
                                                         evt.stop_propagation();
-                                                        on_build_action.call((build.id, BuildAction::ForceCancel));
+                                                        if let Some(job_id) = build.job_id {
+                                                            on_build_action.call((job_id, BuildAction::ForceCancel));
+                                                        }
                                                     },
                                                     "Force Cancel"
                                                 }
@@ -1432,7 +1411,9 @@ fn BuildQueueFullTable(
                                                     class: "text-[10px] px-2 py-1 rounded transition-colors cf-action-link",
                                                     onclick: move |evt| {
                                                         evt.stop_propagation();
-                                                        on_build_action.call((build.id, BuildAction::Restart));
+                                                        if let Some(job_id) = build.job_id {
+                                                            on_build_action.call((job_id, BuildAction::Restart));
+                                                        }
                                                     },
                                                     "Requeue"
                                                 }
@@ -1442,7 +1423,9 @@ fn BuildQueueFullTable(
                                                     class: "text-[10px] text-cyan-300 hover:text-cyan-200 px-2 py-1 rounded hover:bg-cyan-500/10 transition-colors",
                                                     onclick: move |evt| {
                                                         evt.stop_propagation();
-                                                        on_build_action.call((build.id, BuildAction::RunNext));
+                                                        if let Some(job_id) = build.job_id {
+                                                            on_build_action.call((job_id, BuildAction::RunNext));
+                                                        }
                                                     },
                                                     "Run Next"
                                                 }
