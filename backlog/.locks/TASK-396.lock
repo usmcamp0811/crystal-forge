@@ -3,4 +3,4 @@ branch: TASK-396-cve-scan-loop-wired
 worktree: /home/mcamp/code/crystal-forge/TASK-396-cve-scan-loop-wired
 locked_at: '2026-07-17 14:40'
 state: awaiting_review
-mr_url: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/new?merge_request%5Bsource_branch%5D=TASK-396-cve-scan-loop-wired
+mr_url: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/302
