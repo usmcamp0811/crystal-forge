@@ -32,20 +32,23 @@ COMMENT ON COLUMN builders.registered IS 'Whether builder has completed bootstra
 COMMENT ON COLUMN builders.load_avg IS 'Current load average percentage (0.0-100.0+), NULL if not reported';
 
 -- =============================================================================
--- 3. BACKFILL FINGERPRINTS FOR EXISTING BUILDERS
+-- 3. ENABLE PGCRYPTO EXTENSION (for SHA256 hashing)
+-- =============================================================================
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- =============================================================================
+-- 4. BACKFILL FINGERPRINTS FOR EXISTING BUILDERS
 -- =============================================================================
 -- Compute SHA256 fingerprints for existing builders with public keys
--- Note: This uses PostgreSQL's pgcrypto extension which should already be enabled
-
--- Generate fingerprints from existing public_key base64 strings
 -- We decode base64 -> bytes, hash with SHA256, then encode as hex
+
 UPDATE builders
-SET public_key_fingerprint = encode(digest(decode(public_key, 'base64'), 'sha256'), 'hex')
+SET public_key_fingerprint = encode(digest(decode(public_key, 'base64'), 'sha256'::text), 'hex')
 WHERE public_key IS NOT NULL
   AND public_key_fingerprint IS NULL;
 
 -- =============================================================================
--- 4. CREATE INDEX FOR FINGERPRINT LOOKUPS
+-- 5. CREATE INDEX FOR FINGERPRINT LOOKUPS
 -- =============================================================================
 CREATE INDEX IF NOT EXISTS idx_builders_fingerprint
     ON builders(public_key_fingerprint)
