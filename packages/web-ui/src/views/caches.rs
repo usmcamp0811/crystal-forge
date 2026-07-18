@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use crate::api::client::{self, ApiClientError};
 use crate::api::models::{
-    CacheDestination, CachePushJob, CreateCacheDestination, EnvironmentSummary, SortOrder, SystemSummary,
-    SystemsListParams, UpdateCacheDestination,
+    CacheDestination, CachePushJob, CreateCacheDestination, EnvironmentSummary, SortOrder,
+    SystemSummary, SystemsListParams, UpdateCacheDestination,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::routes::Route;
@@ -1550,7 +1550,8 @@ fn CacheDestinationCardNew(
     on_edit: EventHandler<CacheDestination>,
 ) -> Element {
     let cache_id = destination.id;
-    let env_ids = use_resource(move || async move { client::get_cache_environments(cache_id).await });
+    let env_ids =
+        use_resource(move || async move { client::get_cache_environments(cache_id).await });
     let dest_for_view = destination.clone();
     let dest_for_edit = destination.clone();
     let (status_cls, status_color, status_label) = if destination.enabled {
@@ -1636,7 +1637,8 @@ fn CacheDestinationRow(
 
     // Fetch environment assignments
     let cache_id = destination.id;
-    let env_ids = use_resource(move || async move { client::get_cache_environments(cache_id).await });
+    let env_ids =
+        use_resource(move || async move { client::get_cache_environments(cache_id).await });
 
     let dest_for_click = destination.clone();
     let dest_for_edit_btn = destination.clone();

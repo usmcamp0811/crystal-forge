@@ -116,6 +116,7 @@ pub fn BuildersList(show_onboarding_hint: bool) -> Element {
                                                 key: "{builder.id}",
                                                 builder: builder.clone(),
                                                 can_manage: can_manage_builders,
+                                                on_open: move |_| on_edit_builder(builder_id),
                                                 on_edit: move |_| on_edit_builder(builder_id),
                                             }
                                         }

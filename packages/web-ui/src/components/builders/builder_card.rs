@@ -33,6 +33,7 @@ fn builder_status_chip(builder: &BuilderSummary) -> Element {
 pub fn BuilderCard(
     builder: BuilderSummary,
     can_manage: bool,
+    on_open: EventHandler<()>,
     on_edit: EventHandler<()>,
 ) -> Element {
     let slot_pct = if builder.max_concurrent_jobs > 0 {
@@ -87,6 +88,12 @@ pub fn BuilderCard(
     rsx! {
         div {
             class: "sys-card",
+            style: if can_manage { "cursor: pointer;" } else { "" },
+            onclick: move |_| {
+                if can_manage {
+                    on_open.call(())
+                }
+            },
             div {
                 class: "status-rail",
                 style: "--status-color: {rail_color};"

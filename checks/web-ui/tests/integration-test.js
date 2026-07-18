@@ -467,6 +467,14 @@ function mockBuilders() {
       assigned_environment_count: 1,
       active_jobs: 1,
       queued_jobs: 1,
+      public_key_fingerprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      registered: true,
+      load_avg: 0.42,
+      completed_24h: 5,
+      failed_24h: 0,
+      assigned_environments: [
+        { name: "production", color_hex: "#34d399" },
+      ],
     },
     {
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -482,6 +490,15 @@ function mockBuilders() {
       assigned_environment_count: 2,
       active_jobs: 0,
       queued_jobs: 0,
+      public_key_fingerprint: "a1b2c3d4e5f678901234567890abcdef1234567890abcdef1234567890abcdef",
+      registered: true,
+      load_avg: null,
+      completed_24h: 0,
+      failed_24h: 1,
+      assigned_environments: [
+        { name: "production", color_hex: "#34d399" },
+        { name: "staging", color_hex: "#60a5fa" },
+      ],
     },
     {
       id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -497,6 +514,14 @@ function mockBuilders() {
       assigned_environment_count: 1,
       active_jobs: 0,
       queued_jobs: 0,
+      public_key_fingerprint: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      registered: true,
+      load_avg: 0.12,
+      completed_24h: 2,
+      failed_24h: 0,
+      assigned_environments: [
+        { name: "production", color_hex: "#34d399" },
+      ],
     },
   ];
 }

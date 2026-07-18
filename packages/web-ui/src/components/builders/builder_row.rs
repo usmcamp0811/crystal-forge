@@ -30,7 +30,12 @@ fn builder_status_chip(builder: &BuilderSummary) -> Element {
 }
 
 #[component]
-pub fn BuilderRow(builder: BuilderSummary, can_manage: bool, on_edit: EventHandler<()>) -> Element {
+pub fn BuilderRow(
+    builder: BuilderSummary,
+    can_manage: bool,
+    on_open: EventHandler<()>,
+    on_edit: EventHandler<()>,
+) -> Element {
     let slot_pct = if builder.max_concurrent_jobs > 0 {
         ((builder.active_jobs as f64 / builder.max_concurrent_jobs as f64) * 100.0).round() as i32
     } else {
@@ -75,7 +80,7 @@ pub fn BuilderRow(builder: BuilderSummary, can_manage: bool, on_edit: EventHandl
             style: if can_manage { "cursor: pointer;" } else { "cursor: default;" },
             onclick: move |_| {
                 if can_manage {
-                    on_edit.call(())
+                    on_open.call(())
                 }
             },
 

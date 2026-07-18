@@ -1570,6 +1570,36 @@ pub async fn move_build_job_down(
     Ok(StatusCode::OK)
 }
 
+/// Request body for bulk queue reorder
+#[derive(Debug, Deserialize)]
+pub struct ReorderBuildQueueRequest {
+    pub ordered_job_ids: Vec<Uuid>,
+}
+
+/// POST /api/v1/build-queue/reorder - Reorder entire build queue (operator/admin)
+pub async fn reorder_build_queue(
+    State(state): State<CFState>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<ReorderBuildQueueRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let Some(_operator_or_admin) = require_operator_or_admin(&state.pool, &headers).await else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Operator or admin access required".to_string(),
+        ));
+    };
+
+    builders::reorder_build_queue(&state.pool, &request.ordered_job_ids)
+        .await
+        .map_err(|e| {
+            let message = e.to_string();
+            tracing::error!("Failed to reorder build queue: {}", message);
+            (StatusCode::BAD_REQUEST, message)
+        })?;
+
+    Ok(StatusCode::OK)
+}
+
 /// POST /api/v1/build-jobs/:id/cancel - Cancel/stop a build job (admin-only)
 pub async fn cancel_build_job(
     State(state): State<CFState>,

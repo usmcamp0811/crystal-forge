@@ -817,6 +817,21 @@ pub async fn move_build_job_down(job_id: &uuid::Uuid) -> Result<(), ApiClientErr
     send_empty_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Reorder the entire build queue with a new order.
+/// ordered_job_ids must contain all queued job UUIDs exactly once.
+pub async fn reorder_build_queue(ordered_job_ids: &[uuid::Uuid]) -> Result<(), ApiClientError> {
+    #[derive(serde::Serialize)]
+    struct ReorderRequest {
+        ordered_job_ids: Vec<uuid::Uuid>,
+    }
+
+    let url = format!("{}/build-queue/reorder", base_url());
+    let request = ReorderRequest {
+        ordered_job_ids: ordered_job_ids.to_vec(),
+    };
+    send_empty_with_csrf("POST", &url, Some(&request)).await
+}
+
 /// Cancel a queued or building job (admin/operator).
 /// Returns the updated job with new status (cancelled or cancelling).
 pub async fn cancel_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
