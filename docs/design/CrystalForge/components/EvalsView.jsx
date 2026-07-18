@@ -120,6 +120,12 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
   });
   const historySel = useMultiSelect("hist|" + filterStatus + "|" + filterFlake + "|" + q);
   const evalsShown = evals.filter(matchEval);
+  const activePaging = useInfiniteScroll("active|" + q, 20);
+  const evalsPaged = evalsShown.slice(0, activePaging.count);
+  const activeHasMore = activePaging.count < evalsShown.length;
+  const histPaging = useInfiniteScroll("hist|" + filterStatus + "|" + filterFlake + "|" + q, 20);
+  const historyPaged = historyFiltered.slice(0, histPaging.count);
+  const histHasMore = histPaging.count < historyFiltered.length;
 
   // Keyboard nav (when drawer closed)
   React.useEffect(() => {
@@ -204,7 +210,10 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
           evalsShown.length === 0 ? (
             <div className="q-empty"><Icon name="search" size={20} /><div>No active evaluations match “{query}”.</div><button className="btn btn-ghost xs focus-ring" onClick={()=>setQuery("")}>Clear search</button></div>
           ) : (
-            <EvalActiveQueue evals={evalsShown} activeIdx={activeIdx} onCancel={cancelEval} onMove={moveEval} onReorder={reorderEval} onOpen={setDrawerEv} sel={activeSel} reorderable={!q}/>
+            <>
+              <EvalActiveQueue evals={evalsPaged} activeIdx={activeIdx} onCancel={cancelEval} onMove={moveEval} onReorder={reorderEval} onOpen={setDrawerEv} sel={activeSel} reorderable={!q}/>
+              {activeHasMore && <div ref={activePaging.sentinelRef} className="infinite-sentinel">Loading more…</div>}
+            </>
           )
         )}
 
@@ -239,7 +248,7 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
               );
             })()}
             <EvalHistory
-              entries={historyFiltered}
+              entries={historyPaged}
               activeIdx={activeIdx}
               filterStatus={filterStatus} setFilterStatus={setFilterStatus}
               filterFlake={filterFlake}   setFilterFlake={setFilterFlake}
@@ -247,6 +256,9 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
               onOpen={setDrawerEv}
               flashFailed={flashHistRows}
               onRowAction={(label, ev)=>{ setToast({ msg:`${label} ${ev.flake} · ${ev.commit.slice(0,7)}`, action:null }); setTimeout(()=>setToast(null), 3000); }}
+              hasMore={histHasMore}
+              sentinelRef={histPaging.sentinelRef}
+              totalCount={historyFiltered.length}
             />
           </>
         )}
@@ -357,7 +369,7 @@ function EvalActiveQueue({ evals, activeIdx, onCancel, onMove, onReorder, onOpen
 }
 
 /* ── History ────────────────────────────────────────── */
-function EvalHistory({ entries, activeIdx, filterStatus, setFilterStatus, filterFlake, setFilterFlake, sel, onSelectAll, onOpen, onRowAction, flashFailed }) {
+function EvalHistory({ entries, activeIdx, filterStatus, setFilterStatus, filterFlake, setFilterFlake, sel, onSelectAll, onOpen, onRowAction, flashFailed, hasMore, sentinelRef, totalCount }) {
   const ids = entries.map(e => e.id);
   const allChecked = entries.length > 0 && entries.every(e => sel.has(e.id));
   return (
@@ -372,11 +384,12 @@ function EvalHistory({ entries, activeIdx, filterStatus, setFilterStatus, filter
           <option value="all">All flakes</option>
           {EVAL_FLAKES.map(f => <option key={f} value={f}>{f}</option>)}
         </select>
-        <span className="filter-count">{entries.length} entries</span>
+        <span className="filter-count">{typeof totalCount === "number" ? totalCount : entries.length} entries</span>
       </div>
       {entries.length === 0 ? (
         <div className="q-empty"><Icon name="search" size={20} /><div>No evaluations match these filters.</div></div>
       ) : (
+      <>
       <table className="sys-table">
         <thead>
           <tr>
@@ -425,6 +438,8 @@ function EvalHistory({ entries, activeIdx, filterStatus, setFilterStatus, filter
           })}
         </tbody>
       </table>
+      {hasMore && <div ref={sentinelRef} className="infinite-sentinel">Loading more…</div>}
+      </>
       )}
     </>
   );

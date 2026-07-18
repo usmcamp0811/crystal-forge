@@ -32,6 +32,33 @@ function BulkBar({ count, onClear, children }) {
 }
 window.BulkBar = BulkBar;
 
+// Paginates a list for infinite scroll: renders `count` items, grows by `pageSize` when the
+// sentinel scrolls into view within the scroll container. Resets to the first page whenever
+// resetKey changes (tab switch, new search/filter).
+function useInfiniteScroll(resetKey, pageSize = 30) {
+  const [count, setCount] = React.useState(pageSize);
+  const [node, setNode] = React.useState(null);
+  const sentinelRef = React.useCallback((n) => setNode(n), []);
+  React.useEffect(() => { setCount(pageSize); }, [resetKey]);
+  React.useEffect(() => {
+    if (!node) return;
+    const scroller = node.closest(".content") || window;
+    const check = () => {
+      const rect = node.getBoundingClientRect();
+      const scrollerRect = scroller === window
+        ? { bottom: window.innerHeight }
+        : scroller.getBoundingClientRect();
+      if (rect.top < scrollerRect.bottom + 400) setCount(c => c + pageSize);
+    };
+    check();
+    scroller.addEventListener("scroll", check, { passive: true });
+    window.addEventListener("resize", check);
+    return () => { scroller.removeEventListener("scroll", check); window.removeEventListener("resize", check); };
+  }, [node, count, resetKey]);
+  return { count, sentinelRef };
+}
+window.useInfiniteScroll = useInfiniteScroll;
+
 // Tracks a Set of selected ids with modifier-click (⌘/Ctrl toggle, Shift range) support.
 function useMultiSelect(resetKey) {
   const [ids, setIds] = React.useState(() => new Set());

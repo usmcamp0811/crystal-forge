@@ -90,8 +90,11 @@ function BuildsView({ focus, onClearFocus }) {
       .filter(Boolean).some(v => String(v).toLowerCase().includes(q));
   const baseList = tab === "active" ? activeList : historyList;
   const filteredList = baseList.filter(matchBuild);
+  const { count, sentinelRef } = useInfiniteScroll(tab + "|" + q, 20);
+  const pagedList = filteredList.slice(0, count);
+  const hasMore = count < filteredList.length;
   // Selection eligibility: active = cancellable builds; completed = every row.
-  const selectableIds = tab === "active" ? cancellable.map(b => b.id) : filteredList.map(b => b.id);
+  const selectableIds = tab === "active" ? cancellable.filter(b => pagedList.includes(b)).map(b => b.id) : pagedList.map(b => b.id);
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
@@ -153,20 +156,23 @@ function BuildsView({ focus, onClearFocus }) {
             <button className="btn btn-ghost xs focus-ring" onClick={()=>setQuery("")}>Clear search</button>
           </div>
         ) : (
-          <BuildQueueTable
-            entries={filteredList}
-            selected={selected}
-            onSelect={setSelected}
-            onLog={(b) => { setSelected(b); setLogOpen(true); }}
-            sel={sel}
-            isCancellable={isCancellable}
-            cancellable={cancellable}
-            selectableIds={selectableIds}
-            reorderable={tab==="active" && !q}
-            flashFailed={tab==="history" && flashHistRows}
-            onMove={moveBuild}
-            onReorder={reorderBuild}
-          />
+          <>
+            <BuildQueueTable
+              entries={pagedList}
+              selected={selected}
+              onSelect={setSelected}
+              onLog={(b) => { setSelected(b); setLogOpen(true); }}
+              sel={sel}
+              isCancellable={isCancellable}
+              cancellable={cancellable}
+              selectableIds={selectableIds}
+              reorderable={tab==="active" && !q}
+              flashFailed={tab==="history" && flashHistRows}
+              onMove={moveBuild}
+              onReorder={reorderBuild}
+            />
+            {hasMore && <div ref={sentinelRef} className="infinite-sentinel">Loading more builds…</div>}
+          </>
         )}
       </div>
 

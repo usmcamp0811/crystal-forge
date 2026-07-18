@@ -109,7 +109,7 @@ function mkBuild(i, forceStatus) {
 }
 
 const ACTIVE_BUILDS  = (typeof __fx === "function" && __fx("builds.active"))  || [0,1,2,3,4,5].map(i => mkBuild(i));
-const HISTORY_BUILDS = (typeof __fx === "function" && __fx("builds.history")) || Array.from({length:40},(_,i) => mkBuild(100+i));
+const HISTORY_BUILDS = Array.from({length:220},(_,i) => mkBuild(100+i));
 
 const BUILD_STATS = {
   building: ACTIVE_BUILDS.filter(b=>b.status==="building").length,
@@ -163,7 +163,7 @@ function mkEval(i, isHistoryFlag) {
 }
 
 const ACTIVE_EVALS  = (typeof __fx === "function" && __fx("evaluations.active")) || [0,1,2,3].map(i => mkEval(i));
-const HISTORY_EVALS = (typeof __fx === "function" && __fx("evaluations.history")) || Array.from({length:50},(_,i)=>mkEval(200+i, true));
+const HISTORY_EVALS = Array.from({length:180},(_,i)=>mkEval(200+i, true));
 
 const EVAL_STATS = {
   active:    ACTIVE_EVALS.length,
