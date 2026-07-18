@@ -224,6 +224,19 @@ pub fn BuildsView() -> Element {
     // Simple time range: "today", "last7d", "" (all)
     let mut filter_time_range = use_signal(String::new);
 
+    // Reset to page 1 whenever filters change so accumulated rows are cleared.
+    use_effect(move || {
+        let _ = (
+            filter_status(),
+            filter_commit(),
+            filter_flake(),
+            filter_config(),
+            filter_time_range(),
+            refresh_trigger(),
+        );
+        queue_page.set(1);
+    });
+
     // Derived filter signals used to trigger resource re-fetch
     let queue_resource = use_resource(move || async move {
         let _ = refresh_trigger();
@@ -319,13 +332,20 @@ pub fn BuildsView() -> Element {
 
     use_effect(move || {
         if let Some(Ok(page_resp)) = &*queue_resource.read() {
+            let page = queue_page();
             let mapped = page_resp
                 .items
                 .iter()
                 .enumerate()
                 .map(|(idx, item)| map_queue_item(item, idx))
                 .collect::<Vec<_>>();
-            builds.set(mapped);
+            if page == 1 {
+                // First page or filter reset: replace.
+                builds.set(mapped);
+            } else {
+                // Subsequent pages: accumulate.
+                builds.write().extend(mapped);
+            }
             queue_total.set(page_resp.total);
         }
     });
@@ -540,7 +560,27 @@ pub fn BuildsView() -> Element {
     };
     let paging = use_infinite_scroll(format!("{}|{}", tab_key, search_q), 20);
     let paged_list: Vec<BuildItem> = filtered_list.iter().take(paging.count()).cloned().collect();
-    let has_more = paging.count() < filtered_list.len();
+    // has_more is true when:
+    //   (a) there are more client-side rows in the filtered list, OR
+    //   (b) on the Active tab, the server still has unloaded pages.
+    let loaded_active_len = queue_data.len();
+    let server_has_more = (loaded_active_len as i64) < queue_total();
+    let has_more = paging.count() < filtered_list.len()
+        || (active_view() == BuildsTab::ActiveQueue && server_has_more);
+
+    // Advance the server page when the client-side paging count has caught up
+    // with all loaded rows and the server still has more to fetch.  This fires
+    // whenever paging.count() or the loaded length changes.
+    let paging_count = paging.count();
+    use_effect(move || {
+        if active_view() == BuildsTab::ActiveQueue
+            && paging_count >= loaded_active_len
+            && loaded_active_len > 0
+            && server_has_more
+        {
+            queue_page.with_mut(|p| *p += 1);
+        }
+    });
 
     let total_pages = {
         let t = queue_total();

@@ -67,6 +67,9 @@ fn EvaluationsPage() -> Element {
     let mut history_auto_selected = use_signal(|| false);
     let mut history_ack_cursor = use_signal(|| None::<String>);
     let mut evals_ack_sent = use_signal(|| false);
+    // Accumulated history items across server pages.
+    let mut history_items_acc: Signal<Vec<EvalHistoryItem>> = use_signal(Vec::new);
+    let mut history_total_acc = use_signal(|| 0_i64);
 
     let history_resource = use_resource(move || async move {
         let _ = refresh();
@@ -117,6 +120,18 @@ fn EvaluationsPage() -> Element {
     use_effect(move || {
         if let Some(Ok(summary)) = &*queue_resource.read() {
             queue_items.set(summary.items.clone());
+        }
+    });
+
+    // Accumulate history pages: replace on page 1, append on subsequent pages.
+    use_effect(move || {
+        if let Some(Ok(page_data)) = &*history_resource.read() {
+            history_total_acc.set(page_data.total_count);
+            if history_page() == 1 {
+                history_items_acc.set(page_data.items.clone());
+            } else {
+                history_items_acc.write().extend(page_data.items.clone());
+            }
         }
     });
 
@@ -271,15 +286,18 @@ fn EvaluationsPage() -> Element {
                         return;
                     }
 
+                    // Keyboard nav is bounded to the currently *rendered* slice so
+                    // focus never lands on an invisible row (review finding #4).
+                    // For the active queue, `paged_active_items` is the rendered
+                    // slice.  For history, the rendered slice is managed inside
+                    // EvalHistory but we bound to history_items_acc (all loaded
+                    // rows) as a safe upper limit — at least all loaded rows are
+                    // reachable via keyboard even if not yet visible, which is the
+                    // existing pre-paging behaviour.
                     let list_len = if active_tab() == EvaluationsTab::ActiveQueue {
-                        active_items.len()
+                        paged_active_items.len()
                     } else {
-                        history_resource
-                            .read()
-                            .as_ref()
-                            .and_then(|r| r.as_ref().ok())
-                            .map(|p| p.items.len())
-                            .unwrap_or(0)
+                        history_items_acc.read().len()
                     };
 
                     match evt.key() {
@@ -316,15 +334,13 @@ fn EvaluationsPage() -> Element {
                         Key::Enter => {
                             if let Some(idx) = focused_index() {
                                 if active_tab() == EvaluationsTab::ActiveQueue {
-                                    if let Some(ev) = active_items.get(idx) {
+                                    // Use paged slice — idx is clamped to its length above.
+                                    if let Some(ev) = paged_active_items.get(idx) {
                                         drawer_target.set(Some(EvalDrawerTarget::Queue(ev.clone())));
                                     }
                                 } else {
-                                    let item = history_resource
-                                        .read()
-                                        .as_ref()
-                                        .and_then(|r| r.as_ref().ok())
-                                        .and_then(|p| p.items.get(idx).cloned());
+                                    // Use accumulated history items.
+                                    let item = history_items_acc.read().get(idx).cloned();
                                     if let Some(ev) = item {
                                         drawer_target.set(Some(EvalDrawerTarget::History(ev)));
                                     }
@@ -334,7 +350,7 @@ fn EvaluationsPage() -> Element {
                         Key::Character(ref c) if c == "c" => {
                             if active_tab() == EvaluationsTab::ActiveQueue {
                                 if let Some(idx) = focused_index() {
-                                    if let Some(ev) = active_items.get(idx) {
+                                    if let Some(ev) = paged_active_items.get(idx) {
                                         let commit_id = ev.commit_id;
                                         let can_cancel = matches!(
                                             ev.evaluation_status.as_str(),
@@ -563,6 +579,8 @@ fn EvaluationsPage() -> Element {
                             drawer_target: drawer_target,
                             focused_index: focused_index,
                             flash_evals: flash_evals,
+                            history_items_acc: history_items_acc,
+                            history_total_acc: history_total_acc,
                         }
                     }
                 }
@@ -912,16 +930,31 @@ fn EvalHistory(
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
     focused_index: Signal<Option<usize>>,
     flash_evals: bool,
+    history_items_acc: Signal<Vec<EvalHistoryItem>>,
+    history_total_acc: Signal<i64>,
 ) -> Element {
     let history_snapshot = history_resource.read();
 
-    // Infinite-scroll paging over the current server page's items.
+    // Infinite-scroll paging over the accumulated loaded items.
+    // Reset key includes filter state so paging resets on filter change.
     let hist_reset_key = format!(
         "hist|{}|{}",
         history_status_filter(),
         history_flake_filter()
     );
     let hist_paging = use_infinite_scroll(hist_reset_key, 20);
+
+    // When paging has consumed all accumulated rows and more exist on the
+    // server, advance to the next server page.
+    let loaded_history_len = history_items_acc.read().len();
+    let history_total = history_total_acc();
+    let hist_server_has_more = (loaded_history_len as i64) < history_total;
+    let hist_count = hist_paging.count();
+    use_effect(move || {
+        if hist_count >= loaded_history_len && loaded_history_len > 0 && hist_server_has_more {
+            history_page.with_mut(|p| *p += 1);
+        }
+    });
 
     rsx! {
         div {
@@ -981,10 +1014,10 @@ fn EvalHistory(
                     }
                 }
 
-                if let Some(Ok(page_data)) = &*history_snapshot {
+                if history_total > 0 {
                     span {
                         class: "filter-count",
-                        "{page_data.total_count} entries"
+                        "{history_total} entries"
                     }
                 }
             }
@@ -993,11 +1026,17 @@ fn EvalHistory(
             match &*history_snapshot {
                 Some(Ok(page_data)) => rsx! {
                     {
-                        let paged_items: Vec<EvalHistoryItem> = page_data.items.iter().take(hist_paging.count()).cloned().collect();
-                        let hist_has_more = hist_paging.count() < page_data.items.len();
-                        let commit_ids: Vec<i32> = paged_items.iter().map(|item| item.commit_id).collect();
-                        let all_checked = commit_ids.iter().all(|id| history_selected_ids.read().contains(id))
-                            && !commit_ids.is_empty();
+                        // Use accumulated items (across server pages) for the table.
+                        // page_data is still used for the flake filter dropdown above
+                        // and for loading/error state detection.
+                        let all_loaded = history_items_acc.read().clone();
+                        let paged_items: Vec<EvalHistoryItem> = all_loaded.iter().take(hist_paging.count()).cloned().collect();
+                        let hist_has_more = hist_paging.count() < all_loaded.len() || hist_server_has_more;
+                        // Select-all operates on all loaded rows (not just the visible page)
+                        // so check/uncheck is symmetric and consistent (fixes review finding #5).
+                        let all_loaded_ids: Vec<i32> = all_loaded.iter().map(|item| item.commit_id).collect();
+                        let all_checked = !all_loaded_ids.is_empty()
+                            && all_loaded_ids.iter().all(|id| history_selected_ids.read().contains(id));
                         rsx! {
                     table {
                         class: "sys-table",
@@ -1010,10 +1049,15 @@ fn EvalHistory(
                                         checked: all_checked,
                                         oninput: move |_| {
                                             if all_checked {
-                                                history_selected_ids.write().clear();
+                                                // Uncheck: remove only the loaded IDs.
+                                                let mut next = history_selected_ids.read().clone();
+                                                for id in &all_loaded_ids {
+                                                    next.remove(id);
+                                                }
+                                                history_selected_ids.set(next);
                                             } else {
                                                 let mut next = history_selected_ids.read().clone();
-                                                for id in &commit_ids {
+                                                for id in &all_loaded_ids {
                                                     next.insert(*id);
                                                 }
                                                 history_selected_ids.set(next);

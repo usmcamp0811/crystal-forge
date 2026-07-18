@@ -1,7 +1,17 @@
 //! Infinite-scroll hook for Dioxus WASM.
 //!
 //! Mirrors `useInfiniteScroll(resetKey, pageSize = 30)` from
-//! `docs/design/CrystalForge/components/Shell.jsx`.
+//! `docs/design/CrystalForge/components/Shell.jsx`, with the following
+//! behavioural differences from the v1 implementation:
+//!
+//! * Listens on the `.content` scroll container (where Crystal Forge's
+//!   vertical scroll actually occurs) via `IntersectionObserver`, not on
+//!   `window`.
+//! * The observer is disconnected in effect cleanup so listeners never
+//!   multiply across sentinel remounts.
+//! * The check reruns automatically whenever the sentinel enters the
+//!   expanded root viewport (400 px root margin), including after `count`
+//!   grows and the sentinel is still visible.
 //!
 //! ## Usage
 //!
@@ -21,10 +31,6 @@
 //! ```
 
 use dioxus::prelude::*;
-
-/// Lead-in pixels before the sentinel hits the viewport bottom.
-#[cfg(target_arch = "wasm32")]
-const LEAD_PX: f64 = 400.0;
 
 /// Next unique sentinel number, used to give each instance a distinct DOM attribute.
 static SENTINEL_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -50,10 +56,14 @@ impl InfiniteScroll {
         format!("s{}", self.id)
     }
 
-    /// Attach to the sentinel's `onmounted` event.  Fires an immediate
-    /// viewport check and registers a passive `scroll` listener on `window`
-    /// that grows `count` by `page_size` whenever the sentinel is within
-    /// `LEAD_PX` of the visible bottom edge.
+    /// Call from the sentinel's `onmounted` event.
+    ///
+    /// Creates an `IntersectionObserver` rooted on the nearest `.content`
+    /// ancestor (Crystal Forge's scroll container) with a 400 px root
+    /// margin.  When the sentinel enters that expanded viewport the observer
+    /// callback increments `count` by `page_size`.  The observer is stored
+    /// on the sentinel element itself so the owning `use_effect` can
+    /// disconnect it during cleanup.
     pub fn check_and_register(&self) {
         #[cfg(target_arch = "wasm32")]
         {
@@ -67,43 +77,91 @@ impl InfiniteScroll {
             let Some(window) = web_sys::window() else {
                 return;
             };
+            let Some(doc) = window.document() else {
+                return;
+            };
 
-            let win_clone = window.clone();
-            let check_fn = Closure::<dyn Fn()>::new(move || {
-                let Some(doc) = win_clone.document() else {
-                    return;
-                };
-                let selector = format!("[data-sentinel='s{}']", id);
-                let Some(el) = doc.query_selector(&selector).ok().flatten() else {
-                    return; // sentinel unmounted (tab switch); listener will become a no-op
-                };
-                let rect = el.get_bounding_client_rect();
-                let vh = win_clone
-                    .inner_height()
-                    .ok()
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(768.0);
-                if rect.top() < vh + LEAD_PX {
-                    count.with_mut(|c| *c += page_size);
+            // Locate the sentinel element.
+            let selector = format!("[data-sentinel='s{}']", id);
+            let Some(sentinel) = doc.query_selector(&selector).ok().flatten() else {
+                return;
+            };
+
+            // Walk up to the nearest .content ancestor to use as the
+            // IntersectionObserver root.  Fall back to None (= viewport) if
+            // no such ancestor exists.
+            let scroll_root: Option<web_sys::Element> = {
+                let mut node = sentinel.parent_element();
+                let mut found = None;
+                while let Some(el) = node {
+                    if el.class_list().contains("content") {
+                        found = Some(el.clone());
+                        break;
+                    }
+                    node = el.parent_element();
+                }
+                found
+            };
+
+            // Build IntersectionObserver callback.
+            let cb = Closure::<dyn Fn(js_sys::Array)>::new(move |entries: js_sys::Array| {
+                for entry in entries.iter() {
+                    let entry: web_sys::IntersectionObserverEntry = entry.unchecked_into();
+                    if entry.is_intersecting() {
+                        count.with_mut(|c| *c += page_size);
+                    }
                 }
             });
 
-            // Fire immediately (after current microtask queue settles).
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                check_fn.as_ref().unchecked_ref(),
-                0,
-            );
+            // Configure: 400 px root margin so loading triggers before the
+            // sentinel is fully in view, matching the design reference.
+            let mut opts = web_sys::IntersectionObserverInit::new();
+            opts.root_margin("400px");
+            if let Some(ref root) = scroll_root {
+                opts.root(Some(root));
+            }
 
-            // Persistent scroll listener.
-            let _ = window
-                .add_event_listener_with_callback("scroll", check_fn.as_ref().unchecked_ref());
+            let observer =
+                web_sys::IntersectionObserver::new_with_options(cb.as_ref().unchecked_ref(), &opts)
+                    .expect("IntersectionObserver construction failed");
 
-            // The closure must stay alive for the lifetime of the listener.
-            // Each sentinel is mounted once per view lifetime, so this is a
-            // small bounded allocation.
-            check_fn.forget();
+            observer.observe(&sentinel);
+
+            // Store the observer reference on the sentinel element so the
+            // cleanup effect can retrieve and disconnect it.  We use a custom
+            // data attribute with the observer's JS value serialised as a
+            // property on the element's __io__ field to avoid a separate
+            // global map.  The simpler approach: store it in a thread-local.
+            OBSERVER_REGISTRY.with(|reg| {
+                reg.borrow_mut().insert(id, (observer, cb));
+            });
         }
     }
+
+    /// Disconnect any active observer for this sentinel.
+    /// Called by the `use_effect` cleanup so old listeners don't survive
+    /// key resets or unmounts.
+    pub fn disconnect(&self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            OBSERVER_REGISTRY.with(|reg| {
+                if let Some((observer, _cb)) = reg.borrow_mut().remove(&self.id) {
+                    observer.disconnect();
+                }
+            });
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    /// Maps sentinel id → (IntersectionObserver, owning Closure).
+    /// Keeping the Closure here prevents it from being dropped while the
+    /// observer is active.  Entries are removed (and the observer disconnected)
+    /// in `InfiniteScroll::disconnect`.
+    static OBSERVER_REGISTRY: std::cell::RefCell<
+        std::collections::HashMap<u32, (web_sys::IntersectionObserver, wasm_bindgen::prelude::Closure<dyn Fn(js_sys::Array)>)>
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 /// Paginate a client-side list for infinite scroll.
@@ -113,7 +171,9 @@ impl InfiniteScroll {
 /// - `page_size`: items rendered initially and added per scroll trigger.
 ///
 /// Render `list[..handle.count()]` items, and place a sentinel element below
-/// the list calling `handle.check_and_register()` on `onmounted`.
+/// the list calling `handle.check_and_register()` on `onmounted`.  The
+/// sentinel disappears when `count >= list.len()`, which disconnects the
+/// observer automatically (sentinel is no longer in the DOM).
 pub fn use_infinite_scroll(reset_key: String, page_size: usize) -> InfiniteScroll {
     // Stable unique id for this hook instance.
     let id = use_signal(|| SENTINEL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
@@ -121,12 +181,21 @@ pub fn use_infinite_scroll(reset_key: String, page_size: usize) -> InfiniteScrol
     let mut count = use_signal(|| page_size);
     let mut prev_key = use_signal(|| reset_key.clone());
 
-    // Reset to first page when the key changes.
+    // Reset count and disconnect any active observer when the key changes.
+    let handle_id = *id.read();
     use_effect(move || {
         let key = reset_key.clone();
         if *prev_key.read() != key {
             prev_key.set(key);
             count.set(page_size);
+            // Disconnect the observer; it will be re-registered when the
+            // sentinel remounts after the reset renders new items.
+            #[cfg(target_arch = "wasm32")]
+            OBSERVER_REGISTRY.with(|reg| {
+                if let Some((observer, _cb)) = reg.borrow_mut().remove(&handle_id) {
+                    observer.disconnect();
+                }
+            });
         }
     });
 
