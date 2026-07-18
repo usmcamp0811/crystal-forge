@@ -511,6 +511,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/build-jobs/:id/move-down",
             post(builders::move_build_job_down),
         )
+        .route(
+            "/api/v1/build-queue/reorder",
+            post(builders::reorder_build_queue),
+        )
         // Builder-authenticated endpoints
         .route(
             "/api/v1/builders/:id/session",

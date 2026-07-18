@@ -601,7 +601,7 @@ pub fn BuildsView() -> Element {
                             log_open.set(false);
                             search_query.set(String::new());
                         },
-                        "Active "
+                        "Active"
                         span { class: "sd-tab-badge", "{queue_data.len()}" }
                     }
                     button {
@@ -634,10 +634,8 @@ pub fn BuildsView() -> Element {
                             // (persists server-side — TASK-385 follow-up).
                             builds_ack_sent.set(false);
                         },
-                        "Completed ({build_history.read().len()})"
-                        if builds_failed_new > 0 {
-                            span { class: "sd-tab-badge", "{builds_failed_new}" }
-                        }
+                        "Completed"
+                        span { class: "sd-tab-badge", "{build_history.read().len()}" }
                     }
                     // JSX: {selectableIds.length > 0 && <MultiSelectHint />}
                     // selectableIds = cancellable builds on Active, filteredList on Completed.
@@ -729,21 +727,40 @@ pub fn BuildsView() -> Element {
                         can_requeue,
                         on_build_action: move |(build_id, action)| {
                             match action {
-                                BuildAction::MoveUp | BuildAction::MoveDown => {
+                                 BuildAction::MoveUp | BuildAction::MoveDown => {
+                                    #[cfg(target_arch = "wasm32")]
+                                    web_sys::console::log_1(&format!("Move action triggered: {:?} for build_id {}", action, build_id).into());
+
                                     let queue_snapshot = builds.read().clone();
                                     let mut action_error = action_error;
                                     let mut last_action_note = last_action_note;
                                     let mut refresh_trigger = refresh_trigger;
                                     spawn(async move {
+                                        #[cfg(target_arch = "wasm32")]
+                                        web_sys::console::log_1(&format!("Move action: searching for build_id {} in {} builds", build_id, queue_snapshot.len()).into());
+
                                         let selected = queue_snapshot.iter().find(|b| b.id == build_id);
                                         let Some(selected) = selected else {
-                                            action_error.set(Some(format!("Build row #{} not found", build_id)));
+                                            let err = format!("Build row #{} not found", build_id);
+                                            #[cfg(target_arch = "wasm32")]
+                                            web_sys::console::error_1(&err.clone().into());
+                                            action_error.set(Some(err));
                                             return;
                                         };
+
+                                        #[cfg(target_arch = "wasm32")]
+                                        web_sys::console::log_1(&format!("Found build, job_id: {:?}, status: {:?}", selected.job_id, selected.status).into());
+
                                         let Some(job_id) = selected.job_id else {
-                                            action_error.set(Some("Queue item has no job id; cannot reorder".to_string()));
+                                            let err = "Queue item has no job id; cannot reorder".to_string();
+                                            #[cfg(target_arch = "wasm32")]
+                                            web_sys::console::error_1(&err.clone().into());
+                                            action_error.set(Some(err));
                                             return;
                                         };
+
+                                        #[cfg(target_arch = "wasm32")]
+                                        web_sys::console::log_1(&format!("Calling API to move job {} {:?}", job_id, action).into());
 
                                         let result = if action == BuildAction::MoveUp {
                                             move_build_job_up(&job_id).await
@@ -753,6 +770,9 @@ pub fn BuildsView() -> Element {
 
                                         match result {
                                             Ok(_) => {
+                                                #[cfg(target_arch = "wasm32")]
+                                                web_sys::console::log_1(&format!("Move succeeded for job {}", job_id).into());
+
                                                 action_error.set(None);
                                                 last_action_note.set(Some(
                                                     if action == BuildAction::MoveUp {
@@ -763,7 +783,12 @@ pub fn BuildsView() -> Element {
                                                 ));
                                                 refresh_trigger.set(refresh_trigger() + 1);
                                             }
-                                            Err(e) => action_error.set(Some(format!("Failed to reorder: {}", e))),
+                                            Err(e) => {
+                                                let err = format!("Failed to reorder: {}", e);
+                                                #[cfg(target_arch = "wasm32")]
+                                                web_sys::console::error_1(&err.clone().into());
+                                                action_error.set(Some(err));
+                                            }
                                         }
                                     });
                                 }

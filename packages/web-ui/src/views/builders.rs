@@ -3,7 +3,8 @@
 use dioxus::prelude::*;
 
 use crate::api;
-use crate::components::builders::{AddBuilderModal, EditBuilderModal};
+use crate::api::models::BuilderSummary;
+use crate::components::builders::{AddBuilderModal, BuilderPanel, EditBuilderModal};
 use crate::components::loading::LoadingSpinner;
 use crate::components::{Icon, IconName};
 use crate::state::app_state::AppState;
@@ -40,6 +41,7 @@ pub fn BuildersView() -> Element {
     let mut view_mode = use_signal(|| ViewMode::Cards);
     let mut show_add_modal = use_signal(|| false);
     let mut edit_builder_id = use_signal(|| None::<uuid::Uuid>);
+    let mut view_builder = use_signal(|| None::<BuilderSummary>);
     let mut refresh_trigger = use_signal(|| 0);
     let from_setup = use_signal(came_from_setup);
 
@@ -58,8 +60,16 @@ pub fn BuildersView() -> Element {
         refresh_trigger.set(refresh_trigger() + 1);
     };
 
+    let mut on_open_builder = move |b: BuilderSummary| {
+        view_builder.set(Some(b));
+    };
+
     let mut on_edit_builder = move |id: uuid::Uuid| {
         edit_builder_id.set(Some(id));
+    };
+
+    let mut on_close_builder_panel = move || {
+        view_builder.set(None);
     };
 
     rsx! {
@@ -353,11 +363,18 @@ pub fn BuildersView() -> Element {
                                             }
                                         } else {
                                             for builder in filtered {
-                                                BuilderCard {
-                                                    key: "{builder.id}",
-                                                    builder: builder.clone(),
-                                                    can_manage: can_manage_builders,
-                                                    on_edit: move |_| on_edit_builder(builder.id)
+                                                {
+                                                    let b = builder.clone();
+                                                    let id = builder.id;
+                                                    rsx! {
+                                                        BuilderCard {
+                                                            key: "{id}",
+                                                            builder: builder.clone(),
+                                                            can_manage: can_manage_builders,
+                                                            on_open: move |_| on_open_builder(b.clone()),
+                                                            on_edit: move |_| on_edit_builder(id)
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -389,11 +406,18 @@ pub fn BuildersView() -> Element {
                                                 }
                                                 tbody {
                                                     for builder in filtered {
-                                                        BuilderRow {
-                                                            key: "{builder.id}",
-                                                            builder: builder.clone(),
-                                                            can_manage: can_manage_builders,
-                                                            on_edit: move |_| on_edit_builder(builder.id)
+                                                        {
+                                                            let b = builder.clone();
+                                                            let id = builder.id;
+                                                            rsx! {
+                                                                BuilderRow {
+                                                                    key: "{id}",
+                                                                    builder: builder.clone(),
+                                                                    can_manage: can_manage_builders,
+                                                                    on_open: move |_| on_open_builder(b.clone()),
+                                                                    on_edit: move |_| on_edit_builder(id)
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -414,6 +438,27 @@ pub fn BuildersView() -> Element {
                         LoadingSpinner {}
                     }
                 }
+            }
+        }
+
+        // Builder detail side panel
+        {
+            if let Some(builder) = view_builder() {
+                let cloned = builder.clone();
+                rsx! {
+                    BuilderPanel {
+                        key: "{builder.id}",
+                        builder: builder.clone(),
+                        can_manage: can_manage_builders,
+                        on_close: move |_| on_close_builder_panel(),
+                        on_edit: move |_| {
+                            on_close_builder_panel();
+                            on_edit_builder(cloned.id);
+                        }
+                    }
+                }
+            } else {
+                rsx! {}
             }
         }
 

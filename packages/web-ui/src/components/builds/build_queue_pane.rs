@@ -58,6 +58,22 @@ pub fn BuildQueuePane(
         .map(|b| b.id)
         .collect();
 
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::console::log_1(
+            &format!(
+                "BuildQueuePane: {} total builds, {} queued, reorderable={}",
+                builds.len(),
+                queued_ids.len(),
+                reorderable
+            )
+            .into(),
+        );
+        if !queued_ids.is_empty() {
+            web_sys::console::log_1(&format!("Queued IDs: {:?}", queued_ids).into());
+        }
+    }
+
     let bulk_count = selected_ids.read().len();
 
     // Drag-to-reorder state (JSX: dragId, overIdx). IDs identify backend
@@ -183,11 +199,22 @@ pub fn BuildQueuePane(
                                         }
                                         let from = dragged_id();
                                         if let Some(f) = from {
-                                            for action in queue_drag_reorder_actions(
+                                            #[cfg(target_arch = "wasm32")]
+                                            web_sys::console::log_1(&format!("Drag drop: from build {} to build {}", f, build.id).into());
+
+                                            let actions = queue_drag_reorder_actions(
                                                 &queued_ids_for_drop,
                                                 f,
                                                 build.id,
-                                            ) {
+                                            );
+
+                                            #[cfg(target_arch = "wasm32")]
+                                            web_sys::console::log_1(&format!("Generated {} reorder actions", actions.len()).into());
+
+                                            // Call each action individually. The handler will process them,
+                                            // but they may race. A better solution would be a bulk reorder API.
+                                            // For now, calling them in sequence is better than nothing.
+                                            for action in actions {
                                                 on_build_action.call((f, action));
                                             }
                                         }

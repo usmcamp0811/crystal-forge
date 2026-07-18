@@ -2,7 +2,9 @@
 
 use dioxus::prelude::*;
 
-use super::{EnvironmentDeploymentPolicy, EnvironmentHealthBreakdown, EnvironmentItem, PolicyOption};
+use super::{
+    EnvironmentDeploymentPolicy, EnvironmentHealthBreakdown, EnvironmentItem, PolicyOption,
+};
 use crate::components::icon::{Icon, IconName};
 
 #[derive(Props, Clone, PartialEq)]

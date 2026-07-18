@@ -199,8 +199,8 @@ pub async fn create_builder(
 
     let builder = sqlx::query_as::<_, Builder>(
         r#"
-        INSERT INTO builders (name, host, arch, public_key, max_cpu_cores, max_memory_mb, max_concurrent_jobs, enabled, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'inactive')
+        INSERT INTO builders (name, host, arch, public_key, max_cpu_cores, max_memory_mb, max_concurrent_jobs, enabled, status, registered)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'inactive', true)
         RETURNING *
         "#
     )
@@ -295,11 +295,41 @@ pub async fn list_builders(pool: &PgPool) -> Result<Vec<BuilderSummary>> {
                     qj.environment_id IS NULL
                     OR qj.environment_id IN (SELECT environment_id FROM builder_environment_assignments WHERE builder_id = b.id)
                   )
-            ), 0)::int as queued_jobs
+            ), 0)::int as queued_jobs,
+            -- JSON array of assigned environments with name and color (ordered by name)
+            COALESCE(
+                (
+                    SELECT json_agg(json_build_object('name', e.name, 'color_hex', e.color_hex) ORDER BY e.name)
+                    FROM builder_environment_assignments bea_inner
+                    JOIN environments e ON e.id = bea_inner.environment_id
+                    WHERE bea_inner.builder_id = b.id
+                ),
+                '[]'::json
+            ) as assigned_environments,
+            -- Fingerprint is computed from public_key to avoid sync issues
+            encode(digest(decode(b.public_key, 'base64'), 'sha256'::text), 'hex') as public_key_fingerprint,
+            b.registered,
+            b.load_avg,
+            -- Count completed jobs in last 24 hours
+            COALESCE((
+                SELECT COUNT(*)
+                FROM build_jobs
+                WHERE builder_id = b.id
+                  AND status = 'success'
+                  AND completed_at > now() - interval '24 hours'
+            ), 0)::int as completed_24h,
+            -- Count failed jobs in last 24 hours
+            COALESCE((
+                SELECT COUNT(*)
+                FROM build_jobs
+                WHERE builder_id = b.id
+                  AND status = 'failed'
+                  AND completed_at > now() - interval '24 hours'
+            ), 0)::int as failed_24h
         FROM builders b
         LEFT JOIN builder_environment_assignments bea ON bea.builder_id = b.id
         LEFT JOIN build_jobs bj ON bj.builder_id = b.id AND bj.status = 'building'
-        GROUP BY b.id, b.name, b.host, b.arch, b.status, b.max_cpu_cores, b.max_memory_mb, b.max_concurrent_jobs, b.enabled, b.last_heartbeat_at
+        GROUP BY b.id, b.name, b.host, b.arch, b.status, b.max_cpu_cores, b.max_memory_mb, b.max_concurrent_jobs, b.enabled, b.last_heartbeat_at, b.registered, b.load_avg
         ORDER BY b.created_at DESC
         "#
     )
@@ -1538,6 +1568,72 @@ async fn reorder_queued_build_job(pool: &PgPool, job_id: &Uuid, move_up: bool) -
     tx.commit()
         .await
         .context("Failed to commit queue reorder")?;
+    Ok(())
+}
+
+/// Reorder the entire build queue given an ordered list of job UUIDs.
+/// All queued jobs must be present in the list exactly once.
+pub async fn reorder_build_queue(pool: &PgPool, ordered_job_ids: &[Uuid]) -> Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin bulk reorder transaction")?;
+
+    lock_build_queue_priority(&mut tx).await?;
+
+    // Get current queued jobs
+    let current_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM build_jobs
+        WHERE status = 'queued'
+        ORDER BY priority_weight DESC, created_at ASC
+        FOR UPDATE
+        "#,
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .context("Failed to load queued build jobs")?;
+
+    // Validate that ordered list matches current queue
+    if ordered_job_ids.len() != current_ids.len() {
+        bail!(
+            "Reorder list length mismatch: got {}, expected {}",
+            ordered_job_ids.len(),
+            current_ids.len()
+        );
+    }
+
+    let mut ordered_set = std::collections::HashSet::new();
+    for id in ordered_job_ids {
+        if !ordered_set.insert(id) {
+            bail!("Duplicate job ID in reorder list: {}", id);
+        }
+        if !current_ids.contains(id) {
+            bail!("Job ID not in queue: {}", id);
+        }
+    }
+
+    // Apply new priority weights
+    let total = ordered_job_ids.len();
+    for (index, id) in ordered_job_ids.iter().enumerate() {
+        let weight = (total - index) as f64;
+        sqlx::query(
+            r#"
+            UPDATE build_jobs
+            SET priority_weight = $2,
+                updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .bind(weight)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to update priority weight")?;
+    }
+
+    tx.commit().await.context("Failed to commit bulk reorder")?;
     Ok(())
 }
 
