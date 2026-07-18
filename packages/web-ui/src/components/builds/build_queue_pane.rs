@@ -201,19 +201,20 @@ pub fn BuildQueuePane(
                                         if let Some(f) = from {
                                             #[cfg(target_arch = "wasm32")]
                                             web_sys::console::log_1(&format!("Drag drop: from build {} to build {}", f, build.id).into());
-
+                                            
                                             let actions = queue_drag_reorder_actions(
                                                 &queued_ids_for_drop,
                                                 f,
                                                 build.id,
                                             );
-
+                                            
                                             #[cfg(target_arch = "wasm32")]
                                             web_sys::console::log_1(&format!("Generated {} reorder actions", actions.len()).into());
-
+                                            
+                                            // Call each action individually. The handler will process them,
+                                            // but they may race. A better solution would be a bulk reorder API.
+                                            // For now, calling them in sequence is better than nothing.
                                             for action in actions {
-                                                #[cfg(target_arch = "wasm32")]
-                                                web_sys::console::log_1(&format!("Calling action {:?} for build {}", action, f).into());
                                                 on_build_action.call((f, action));
                                             }
                                         }
