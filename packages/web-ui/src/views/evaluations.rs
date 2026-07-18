@@ -159,6 +159,12 @@ fn EvaluationsPage() -> Element {
         .filter(|item| item.evaluation_status == "failed")
         .count() as i64;
     let total_count = queue_items.read().len() as i64;
+    let history_count = history_resource
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|page| page.total_count)
+        .unwrap_or(0);
     use_effect(move || {
         if active_tab() == EvaluationsTab::History && !evals_ack_sent() {
             if let Some(Ok(page_data)) = history_resource.read().as_ref() {
@@ -430,7 +436,7 @@ fn EvaluationsPage() -> Element {
                                 "sd-tab focus-ring"
                             },
                             onclick: move |_| { active_tab.set(EvaluationsTab::ActiveQueue); focused_index.set(None); },
-                            "Active Queue "
+                            "Active Queue"
                             span { class: "sd-tab-badge", "{active_count}" }
                         }
                         button {
@@ -449,9 +455,7 @@ fn EvaluationsPage() -> Element {
                                 evals_ack_sent.set(false);
                             },
                             "History"
-                            if evals_failed_new > 0 {
-                                span { class: "sd-tab-badge", "{evals_failed_new}" }
-                            }
+                            span { class: "sd-tab-badge", "{history_count}" }
                         }
                     }
 

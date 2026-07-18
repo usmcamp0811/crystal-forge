@@ -601,7 +601,7 @@ pub fn BuildsView() -> Element {
                             log_open.set(false);
                             search_query.set(String::new());
                         },
-                        "Active "
+                        "Active"
                         span { class: "sd-tab-badge", "{queue_data.len()}" }
                     }
                     button {
@@ -634,10 +634,8 @@ pub fn BuildsView() -> Element {
                             // (persists server-side — TASK-385 follow-up).
                             builds_ack_sent.set(false);
                         },
-                        "Completed ({build_history.read().len()})"
-                        if builds_failed_new > 0 {
-                            span { class: "sd-tab-badge", "{builds_failed_new}" }
-                        }
+                        "Completed"
+                        span { class: "sd-tab-badge", "{build_history.read().len()}" }
                     }
                     // JSX: {selectableIds.length > 0 && <MultiSelectHint />}
                     // selectableIds = cancellable builds on Active, filteredList on Completed.
