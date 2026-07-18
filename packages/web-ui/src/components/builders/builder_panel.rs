@@ -4,7 +4,7 @@
 use dioxus::prelude::*;
 
 use crate::api::models::BuilderSummary;
-use crate::components::{Icon, IconName};
+use crate::components::{EnvBadge, Icon, IconName};
 
 fn builder_status_chip(builder: &BuilderSummary) -> Element {
     let (chip_class, dot_color, label) = if !builder.enabled {
@@ -78,11 +78,7 @@ pub fn BuilderPanel(
         .map(|mb| format!("{} GiB", mb / 1024))
         .unwrap_or_else(|| "∞".to_string());
 
-    let environments_text = if builder.assigned_environment_count > 0 {
-        format!("{} assigned", builder.assigned_environment_count)
-    } else {
-        "All / wildcard".to_string()
-    };
+    let has_environments = !builder.assigned_environments.is_empty();
 
     rsx! {
         // Backdrop
@@ -186,10 +182,22 @@ pub fn BuilderPanel(
                 // Environments section
                 section {
                     class: "panel-section",
-                    h3 { "Environments" }
+                    h3 { "Environments ({builder.assigned_environments.len()})" }
                     div {
-                        style: "font-size: 12px; color: var(--cf-text-muted);",
-                        "{environments_text}"
+                        style: "display: flex; gap: 6px; flex-wrap: wrap;",
+                        if has_environments {
+                            for env in &builder.assigned_environments {
+                                EnvBadge {
+                                    name: env.name.clone(),
+                                    fg: Some(env.color_hex.clone()),
+                                }
+                            }
+                        } else {
+                            span {
+                                style: "font-size: 12px; color: var(--cf-text-muted);",
+                                "none assigned"
+                            }
+                        }
                     }
                 }
             }

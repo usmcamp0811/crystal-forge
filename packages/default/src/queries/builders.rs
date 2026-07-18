@@ -295,7 +295,17 @@ pub async fn list_builders(pool: &PgPool) -> Result<Vec<BuilderSummary>> {
                     qj.environment_id IS NULL
                     OR qj.environment_id IN (SELECT environment_id FROM builder_environment_assignments WHERE builder_id = b.id)
                   )
-            ), 0)::int as queued_jobs
+            ), 0)::int as queued_jobs,
+            -- JSON array of assigned environments with name and color
+            COALESCE(
+                (
+                    SELECT json_agg(json_build_object('name', e.name, 'color_hex', e.color_hex))
+                    FROM builder_environment_assignments bea_inner
+                    JOIN environments e ON e.id = bea_inner.environment_id
+                    WHERE bea_inner.builder_id = b.id
+                ),
+                '[]'::json
+            ) as assigned_environments
         FROM builders b
         LEFT JOIN builder_environment_assignments bea ON bea.builder_id = b.id
         LEFT JOIN build_jobs bj ON bj.builder_id = b.id AND bj.status = 'building'

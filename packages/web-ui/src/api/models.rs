@@ -2319,6 +2319,13 @@ impl BuilderStatus {
     }
 }
 
+/// Builder assigned environment info
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BuilderEnvironmentInfo {
+    pub name: String,
+    pub color_hex: String,
+}
+
 /// Builder summary for list view
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BuilderSummary {
@@ -2338,6 +2345,8 @@ pub struct BuilderSummary {
     pub active_jobs: i32,
     #[serde(default)]
     pub queued_jobs: i32,
+    #[serde(default)]
+    pub assigned_environments: Vec<BuilderEnvironmentInfo>,
 }
 
 /// Full builder details

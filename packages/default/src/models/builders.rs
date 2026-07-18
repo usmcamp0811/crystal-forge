@@ -82,6 +82,13 @@ pub struct Builder {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Builder assigned environment info for summary view
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuilderEnvironmentInfo {
+    pub name: String,
+    pub color_hex: String,
+}
+
 /// Summary view of a builder (for list endpoints)
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct BuilderSummary {
@@ -100,6 +107,9 @@ pub struct BuilderSummary {
     pub active_jobs: i32,
     #[sqlx(default)]
     pub queued_jobs: i32,
+    #[serde(default)]
+    #[sqlx(default, json)]
+    pub assigned_environments: Vec<BuilderEnvironmentInfo>,
 }
 
 impl Builder {
