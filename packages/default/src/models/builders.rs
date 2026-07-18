@@ -110,6 +110,8 @@ pub struct BuilderSummary {
     #[serde(default)]
     #[sqlx(default, json)]
     pub assigned_environments: Vec<BuilderEnvironmentInfo>,
+    pub public_key_fingerprint: String,
+    pub registered: bool,
 }
 
 impl Builder {

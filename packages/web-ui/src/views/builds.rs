@@ -730,7 +730,7 @@ pub fn BuildsView() -> Element {
                                  BuildAction::MoveUp | BuildAction::MoveDown => {
                                     #[cfg(target_arch = "wasm32")]
                                     web_sys::console::log_1(&format!("Move action triggered: {:?} for build_id {}", action, build_id).into());
-                                    
+
                                     let queue_snapshot = builds.read().clone();
                                     let mut action_error = action_error;
                                     let mut last_action_note = last_action_note;
@@ -738,7 +738,7 @@ pub fn BuildsView() -> Element {
                                     spawn(async move {
                                         #[cfg(target_arch = "wasm32")]
                                         web_sys::console::log_1(&format!("Move action: searching for build_id {} in {} builds", build_id, queue_snapshot.len()).into());
-                                        
+
                                         let selected = queue_snapshot.iter().find(|b| b.id == build_id);
                                         let Some(selected) = selected else {
                                             let err = format!("Build row #{} not found", build_id);
@@ -747,10 +747,10 @@ pub fn BuildsView() -> Element {
                                             action_error.set(Some(err));
                                             return;
                                         };
-                                        
+
                                         #[cfg(target_arch = "wasm32")]
                                         web_sys::console::log_1(&format!("Found build, job_id: {:?}, status: {:?}", selected.job_id, selected.status).into());
-                                        
+
                                         let Some(job_id) = selected.job_id else {
                                             let err = "Queue item has no job id; cannot reorder".to_string();
                                             #[cfg(target_arch = "wasm32")]
@@ -772,7 +772,7 @@ pub fn BuildsView() -> Element {
                                             Ok(_) => {
                                                 #[cfg(target_arch = "wasm32")]
                                                 web_sys::console::log_1(&format!("Move succeeded for job {}", job_id).into());
-                                                
+
                                                 action_error.set(None);
                                                 last_action_note.set(Some(
                                                     if action == BuildAction::MoveUp {

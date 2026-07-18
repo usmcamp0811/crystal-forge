@@ -127,6 +127,54 @@ pub fn BuilderPanel(
                             class: "chip chip-unknown mono",
                             "{builder.arch}"
                         }
+                        if !builder.registered {
+                            span {
+                                class: "chip chip-warning",
+                                "unregistered"
+                            }
+                        }
+                    }
+                }
+
+                // Unregistered warning banner
+                if !builder.registered {
+                    section {
+                        class: "panel-section",
+                        div {
+                            class: "builder-pending-banner",
+                            style: "flex-direction: column; align-items: stretch; gap: 6px;",
+                            span {
+                                style: "display: flex; align-items: center; gap: 7px;",
+                                Icon { name: IconName::Warn, size: 12 }
+                                span {
+                                    "Connected but "
+                                    strong { "not registered" }
+                                    " — match this key to recognize it."
+                                }
+                            }
+                            // Fingerprint chip
+                            button {
+                                class: "builder-id-chip focus-ring",
+                                title: "Copy key fingerprint",
+                                onclick: move |_| {
+                                    #[cfg(target_arch = "wasm32")]
+                                    {
+                                        use wasm_bindgen::JsCast;
+                                        if let Some(window) = web_sys::window() {
+                                            if let Some(clipboard) = window.navigator().clipboard() {
+                                                let _ = clipboard.write_text(&builder.public_key_fingerprint);
+                                            }
+                                        }
+                                    }
+                                },
+                                Icon { name: IconName::Key, size: 10 }
+                                span {
+                                    class: "mono",
+                                    "{builder.public_key_fingerprint}"
+                                }
+                                Icon { name: IconName::File, size: 10, }
+                            }
+                        }
                     }
                 }
 
@@ -202,16 +250,21 @@ pub fn BuilderPanel(
                 }
             }
 
-            // Panel actions
-            div {
-                class: "panel-actions",
-                button {
-                    class: "btn btn-primary focus-ring",
-                    onclick: move |_| on_edit.call(()),
-                    Icon { name: IconName::Gear, size: 12 }
-                    " Edit builder"
+                // Panel actions
+                div {
+                    class: "panel-actions",
+                    button {
+                        class: "btn btn-primary focus-ring",
+                        onclick: move |_| on_edit.call(()),
+                        if builder.registered {
+                            Icon { name: IconName::Gear, size: 12 }
+                            " Edit builder"
+                        } else {
+                            Icon { name: IconName::Key, size: 12 }
+                            " Register"
+                        }
+                    }
                 }
-            }
         }
     }
 }

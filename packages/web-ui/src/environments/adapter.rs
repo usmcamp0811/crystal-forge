@@ -395,11 +395,13 @@ pub fn api_to_environment_item(
         requires_approval: env.requires_approval,
         is_production: env.is_production,
         role_assignment_count: env.role_assignment_count.map(|count| count.max(0) as usize),
-        compliance_bundle: env.compliance_bundle.map(|bundle| EnvironmentComplianceSummary {
-            id: bundle.id,
-            name: bundle.name,
-            framework: bundle.framework,
-        }),
+        compliance_bundle: env
+            .compliance_bundle
+            .map(|bundle| EnvironmentComplianceSummary {
+                id: bundle.id,
+                name: bundle.name,
+                framework: bundle.framework,
+            }),
     }
 }
 

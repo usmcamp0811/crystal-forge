@@ -296,20 +296,22 @@ pub async fn list_builders(pool: &PgPool) -> Result<Vec<BuilderSummary>> {
                     OR qj.environment_id IN (SELECT environment_id FROM builder_environment_assignments WHERE builder_id = b.id)
                   )
             ), 0)::int as queued_jobs,
-            -- JSON array of assigned environments with name and color
+            -- JSON array of assigned environments with name and color (ordered by name)
             COALESCE(
                 (
-                    SELECT json_agg(json_build_object('name', e.name, 'color_hex', e.color_hex))
+                    SELECT json_agg(json_build_object('name', e.name, 'color_hex', e.color_hex) ORDER BY e.name)
                     FROM builder_environment_assignments bea_inner
                     JOIN environments e ON e.id = bea_inner.environment_id
                     WHERE bea_inner.builder_id = b.id
                 ),
                 '[]'::json
-            ) as assigned_environments
+            ) as assigned_environments,
+            b.public_key_fingerprint,
+            b.registered
         FROM builders b
         LEFT JOIN builder_environment_assignments bea ON bea.builder_id = b.id
         LEFT JOIN build_jobs bj ON bj.builder_id = b.id AND bj.status = 'building'
-        GROUP BY b.id, b.name, b.host, b.arch, b.status, b.max_cpu_cores, b.max_memory_mb, b.max_concurrent_jobs, b.enabled, b.last_heartbeat_at
+        GROUP BY b.id, b.name, b.host, b.arch, b.status, b.max_cpu_cores, b.max_memory_mb, b.max_concurrent_jobs, b.enabled, b.last_heartbeat_at, b.public_key_fingerprint, b.registered
         ORDER BY b.created_at DESC
         "#
     )

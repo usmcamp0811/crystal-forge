@@ -2347,6 +2347,8 @@ pub struct BuilderSummary {
     pub queued_jobs: i32,
     #[serde(default)]
     pub assigned_environments: Vec<BuilderEnvironmentInfo>,
+    pub public_key_fingerprint: String,
+    pub registered: bool,
 }
 
 /// Full builder details
