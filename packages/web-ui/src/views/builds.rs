@@ -18,6 +18,7 @@ use crate::components::builds::{
     DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
     WorkerStatus, WorkerStrip, extract_system_name, selected_build_data,
 };
+use crate::hooks::use_infinite_scroll;
 use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::theme;
@@ -531,6 +532,16 @@ pub fn BuildsView() -> Element {
     let base_len = base_list.len();
     let filtered_len = filtered_list.len();
 
+    // Infinite-scroll paging over the client-side filtered list.
+    let tab_key = if active_view() == BuildsTab::ActiveQueue {
+        "active"
+    } else {
+        "completed"
+    };
+    let paging = use_infinite_scroll(format!("{}|{}", tab_key, search_q), 20);
+    let paged_list: Vec<BuildItem> = filtered_list.iter().take(paging.count()).cloned().collect();
+    let has_more = paging.count() < filtered_list.len();
+
     let total_pages = {
         let t = queue_total();
         if t == 0 {
@@ -721,7 +732,7 @@ pub fn BuildsView() -> Element {
                     }
                 } else {
                     BuildQueuePane {
-                        builds: filtered_list.clone(),
+                        builds: paged_list.clone(),
                         selected_id: selected_build,
                         flash_failed: flash_hist_rows(),
                         can_requeue,
@@ -831,6 +842,15 @@ pub fn BuildsView() -> Element {
                             // TODO: Delete build history entries
                             action_error.set(Some("Delete builds not yet implemented".to_string()));
                         },
+                    }
+                    // Infinite-scroll sentinel — grows the paged slice when scrolled into view.
+                    if has_more {
+                        div {
+                            class: "infinite-sentinel",
+                            "data-sentinel": paging.sentinel_id(),
+                            onmounted: move |_| paging.check_and_register(),
+                            "Loading more builds…"
+                        }
                     }
                 }
             }

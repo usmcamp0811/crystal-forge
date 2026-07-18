@@ -18,6 +18,7 @@ use crate::api::{
     models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem},
 };
 use crate::components::{Icon, IconName};
+use crate::hooks::use_infinite_scroll;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EvaluationsTab {
@@ -141,6 +142,15 @@ fn EvaluationsPage() -> Element {
         .filter(|item| is_active_eval_status(&item.evaluation_status))
         .cloned()
         .collect::<Vec<_>>();
+
+    // Infinite-scroll paging for the active queue.
+    let active_paging = use_infinite_scroll("active".to_string(), 20);
+    let paged_active_items: Vec<EvalQueueItem> = active_items
+        .iter()
+        .take(active_paging.count())
+        .cloned()
+        .collect();
+    let active_has_more = active_paging.count() < active_items.len();
 
     let summary_snapshot = queue_resource
         .read()
@@ -461,13 +471,21 @@ fn EvaluationsPage() -> Element {
 
                     if active_tab() == EvaluationsTab::ActiveQueue {
                         EvalActiveQueue {
-                            evals: active_items.clone(),
+                            evals: paged_active_items.clone(),
                             refresh: refresh,
                             queue_items: queue_items,
                             drawer_target: drawer_target,
                             focused_index: focused_index,
                             active_selected_ids: active_selected_ids,
                             toast_msg: toast_msg,
+                        }
+                        if active_has_more {
+                            div {
+                                class: "infinite-sentinel",
+                                "data-sentinel": active_paging.sentinel_id(),
+                                onmounted: move |_| active_paging.check_and_register(),
+                                "Loading more…"
+                            }
                         }
                     }
 
@@ -897,6 +915,14 @@ fn EvalHistory(
 ) -> Element {
     let history_snapshot = history_resource.read();
 
+    // Infinite-scroll paging over the current server page's items.
+    let hist_reset_key = format!(
+        "hist|{}|{}",
+        history_status_filter(),
+        history_flake_filter()
+    );
+    let hist_paging = use_infinite_scroll(hist_reset_key, 20);
+
     rsx! {
         div {
             // Filter bar
@@ -958,7 +984,7 @@ fn EvalHistory(
                 if let Some(Ok(page_data)) = &*history_snapshot {
                     span {
                         class: "filter-count",
-                        "{page_data.items.len()} entries"
+                        "{page_data.total_count} entries"
                     }
                 }
             }
@@ -967,7 +993,9 @@ fn EvalHistory(
             match &*history_snapshot {
                 Some(Ok(page_data)) => rsx! {
                     {
-                        let commit_ids: Vec<i32> = page_data.items.iter().map(|item| item.commit_id).collect();
+                        let paged_items: Vec<EvalHistoryItem> = page_data.items.iter().take(hist_paging.count()).cloned().collect();
+                        let hist_has_more = hist_paging.count() < page_data.items.len();
+                        let commit_ids: Vec<i32> = paged_items.iter().map(|item| item.commit_id).collect();
                         let all_checked = commit_ids.iter().all(|id| history_selected_ids.read().contains(id))
                             && !commit_ids.is_empty();
                         rsx! {
@@ -1003,7 +1031,7 @@ fn EvalHistory(
                             }
                         }
                         tbody {
-                            for (row_i, ev) in page_data.items.iter().enumerate() {
+                            for (row_i, ev) in paged_items.iter().enumerate() {
                                 {
                                     let ev = ev.clone();
                                     let commit_id = ev.commit_id;
@@ -1117,6 +1145,14 @@ fn EvalHistory(
                                     }
                                 }
                             }
+                        }
+                    }
+                    if hist_has_more {
+                        div {
+                            class: "infinite-sentinel",
+                            "data-sentinel": hist_paging.sentinel_id(),
+                            onmounted: move |_| hist_paging.check_and_register(),
+                            "Loading more…"
                         }
                     }
                         }
