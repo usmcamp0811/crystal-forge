@@ -2,35 +2,54 @@
 -- TASK-393: Builders design delta - side panel and open-flow parity
 --
 -- This migration adds:
+-- - public_key_fingerprint: hex-encoded SHA256 fingerprint for display
 -- - registered: whether builder has completed bootstrap handshake
--- - load_avg: current load average (0.0 - 1.0)
---
--- public_key_fingerprint is NOT stored as a column; it is computed from
--- public_key in queries using encode(digest(decode(public_key,'base64'),'sha256'),'hex').
--- This avoids synchronization issues between stored and actual fingerprints.
+-- - load_avg: current load average (0.0 - 100.0+)
 
 -- =============================================================================
--- 1. ENABLE PGCRYPTO EXTENSION (for SHA256 hashing in queries)
+-- 1. ADD NEW COLUMNS
+-- =============================================================================
+
+-- SHA256 hex fingerprint of public key for UI display (32 bytes = 64 hex chars)
+ALTER TABLE builders
+    ADD COLUMN IF NOT EXISTS public_key_fingerprint TEXT;
+
+-- Whether builder has completed bootstrap/registration (starts false)
+ALTER TABLE builders
+    ADD COLUMN IF NOT EXISTS registered BOOLEAN NOT NULL DEFAULT false;
+
+-- Current load average percentage (nullable, updated via heartbeat)
+ALTER TABLE builders
+    ADD COLUMN IF NOT EXISTS load_avg DOUBLE PRECISION
+    CHECK (load_avg IS NULL OR (load_avg >= 0));
+
+-- =============================================================================
+-- 2. ADD COMMENTS
+-- =============================================================================
+
+COMMENT ON COLUMN builders.public_key_fingerprint IS 'SHA256 hex fingerprint of public_key for UI display (64 hex chars)';
+COMMENT ON COLUMN builders.registered IS 'Whether builder has completed bootstrap handshake';
+COMMENT ON COLUMN builders.load_avg IS 'Current load average percentage (0.0-100.0+), NULL if not reported';
+
+-- =============================================================================
+-- 3. ENABLE PGCRYPTO EXTENSION (for SHA256 hashing)
 -- =============================================================================
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- =============================================================================
--- 2. ADD NEW COLUMNS
+-- 4. BACKFILL FINGERPRINTS FOR EXISTING BUILDERS
 -- =============================================================================
+-- Compute SHA256 fingerprints for existing builders with public keys
+-- We decode base64 -> bytes, hash with SHA256, then encode as hex
 
--- Whether builder has completed bootstrap/registration (starts true for existing flow)
-ALTER TABLE builders
-    ADD COLUMN IF NOT EXISTS registered BOOLEAN NOT NULL DEFAULT true;
-
--- Current load average 0.0-1.0 (nullable, updated via heartbeat/metrics)
-ALTER TABLE builders
-    ADD COLUMN IF NOT EXISTS load_avg DOUBLE PRECISION
-    CHECK (load_avg IS NULL OR (load_avg >= 0.0 AND load_avg <= 1.0))
-    DEFAULT NULL;
+UPDATE builders
+SET public_key_fingerprint = encode(digest(decode(public_key, 'base64'), 'sha256'::text), 'hex')
+WHERE public_key IS NOT NULL
+  AND public_key_fingerprint IS NULL;
 
 -- =============================================================================
--- 3. ADD COMMENTS
+-- 5. CREATE INDEX FOR FINGERPRINT LOOKUPS
 -- =============================================================================
-
-COMMENT ON COLUMN builders.registered IS 'Whether builder has completed bootstrap handshake (default true for currently existing flow; reserved for future pending-builder state)';
-COMMENT ON COLUMN builders.load_avg IS 'System load average (0.0-1.0), derived from latest builder_metrics system_cpu_usage_percent, NULL if not yet reported';
+CREATE INDEX IF NOT EXISTS idx_builders_fingerprint
+    ON builders(public_key_fingerprint)
+    WHERE public_key_fingerprint IS NOT NULL;
