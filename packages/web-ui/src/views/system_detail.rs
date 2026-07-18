@@ -2292,7 +2292,7 @@ fn OverviewTab(
                     dt { "Commit" }
                     dd { class: "mono",
                         button {
-                            class: "tl-commit-link mono focus-ring",
+                            class: "chip chip-info sd-commit-sha-link mono focus-ring",
                             title: "Open this commit in Flakes",
                             onclick: move |_| {
                                 if let (Some(flake), false) = (flake_summary_for_commit.clone(), flake_commit_for_open == "unknown") {
