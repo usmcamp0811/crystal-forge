@@ -36,7 +36,7 @@ use dioxus::prelude::*;
 static SENTINEL_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Handle returned by [`use_infinite_scroll`].
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct InfiniteScroll {
     count: Signal<usize>,
     #[allow(dead_code)] // used inside #[cfg(target_arch = "wasm32")] blocks
@@ -127,13 +127,15 @@ impl InfiniteScroll {
 
             observer.observe(&sentinel);
 
-            // Store the observer reference on the sentinel element so the
-            // cleanup effect can retrieve and disconnect it.  We use a custom
-            // data attribute with the observer's JS value serialised as a
-            // property on the element's __io__ field to avoid a separate
-            // global map.  The simpler approach: store it in a thread-local.
+            // Store the observer reference in a thread-local so the cleanup
+            // effect can retrieve and disconnect it.  If a previous observer
+            // for this sentinel id already exists (e.g. the sentinel was
+            // remounted without a full key reset), disconnect it first.
             OBSERVER_REGISTRY.with(|reg| {
-                reg.borrow_mut().insert(id, (observer, cb));
+                let mut reg = reg.borrow_mut();
+                if let Some((old_observer, _)) = reg.insert(id, (observer, cb)) {
+                    old_observer.disconnect();
+                }
             });
         }
     }
@@ -180,23 +182,34 @@ pub fn use_infinite_scroll(reset_key: String, page_size: usize) -> InfiniteScrol
 
     let mut count = use_signal(|| page_size);
     let mut prev_key = use_signal(|| reset_key.clone());
+    #[allow(dead_code)]
+    let handle_id = *id.read();
 
     // Reset count and disconnect any active observer when the key changes.
-    let handle_id = *id.read();
-    use_effect(move || {
-        let key = reset_key.clone();
-        if *prev_key.read() != key {
-            prev_key.set(key);
-            count.set(page_size);
-            // Disconnect the observer; it will be re-registered when the
-            // sentinel remounts after the reset renders new items.
-            #[cfg(target_arch = "wasm32")]
-            OBSERVER_REGISTRY.with(|reg| {
-                if let Some((observer, _cb)) = reg.borrow_mut().remove(&handle_id) {
-                    observer.disconnect();
-                }
-            });
-        }
+    // Runs synchronously on every render (not inside a use_effect) so the
+    // comparison is always against the latest reset_key value and Dioxus
+    // does not need to track signal dependencies.
+    if *prev_key.read() != reset_key {
+        prev_key.set(reset_key);
+        count.set(page_size);
+        // Disconnect the observer; it will be re-registered when the
+        // sentinel remounts after the reset renders new items.
+        #[cfg(target_arch = "wasm32")]
+        OBSERVER_REGISTRY.with(|reg| {
+            if let Some((observer, _cb)) = reg.borrow_mut().remove(&handle_id) {
+                observer.disconnect();
+            }
+        });
+    }
+
+    // Disconnect observer on component unmount.
+    use_drop(move || {
+        #[cfg(target_arch = "wasm32")]
+        OBSERVER_REGISTRY.with(|reg| {
+            if let Some((observer, _cb)) = reg.borrow_mut().remove(&handle_id) {
+                observer.disconnect();
+            }
+        });
     });
 
     InfiniteScroll {

@@ -225,6 +225,8 @@ pub fn BuildsView() -> Element {
     let mut filter_time_range = use_signal(String::new);
 
     // Reset to page 1 whenever filters change so accumulated rows are cleared.
+    // NB: `refresh_trigger` is deliberately excluded — polling ticks every 5 s
+    // and must not erase previously loaded pages (review finding #8).
     use_effect(move || {
         let _ = (
             filter_status(),
@@ -232,7 +234,6 @@ pub fn BuildsView() -> Element {
             filter_flake(),
             filter_config(),
             filter_time_range(),
-            refresh_trigger(),
         );
         queue_page.set(1);
     });
@@ -333,11 +334,14 @@ pub fn BuildsView() -> Element {
     use_effect(move || {
         if let Some(Ok(page_resp)) = &*queue_resource.read() {
             let page = queue_page();
+            // Offset the enumerate by the page so row IDs are globally
+            // unique across server pages (review finding #3).
+            let offset = ((page - 1) * PAGE_SIZE) as usize;
             let mapped = page_resp
                 .items
                 .iter()
                 .enumerate()
-                .map(|(idx, item)| map_queue_item(item, idx))
+                .map(|(idx, item)| map_queue_item(item, offset + idx))
                 .collect::<Vec<_>>();
             if page == 1 {
                 // First page or filter reset: replace.
@@ -569,16 +573,51 @@ pub fn BuildsView() -> Element {
         || (active_view() == BuildsTab::ActiveQueue && server_has_more);
 
     // Advance the server page when the client-side paging count has caught up
-    // with all loaded rows and the server still has more to fetch.  This fires
-    // whenever paging.count() or the loaded length changes.
-    let paging_count = paging.count();
+    // with all visible (search-filtered) loaded rows and the server still has
+    // more to fetch.  All signal reads are *inside* the closure so Dioxus
+    // subscribes to them reactively (review finding #1).
+    // The threshold is the number of loaded items that match the search filter,
+    // ensuring that client-side searching does not block server-page fetches
+    // (review finding #5).
     use_effect(move || {
-        if active_view() == BuildsTab::ActiveQueue
-            && paging_count >= loaded_active_len
-            && loaded_active_len > 0
-            && server_has_more
-        {
-            queue_page.with_mut(|p| *p += 1);
+        if active_view() == BuildsTab::ActiveQueue {
+            let loaded_len = builds.read().len();
+            let total = queue_total();
+            let server_has_more = (loaded_len as i64) < total;
+            let paging_count = paging.count();
+
+            // Determine how many loaded items pass the search filter.
+            let sq = search_query();
+            let q = sq.trim().to_lowercase();
+            let threshold = if q.is_empty() {
+                loaded_len
+            } else {
+                builds
+                    .read()
+                    .iter()
+                    .filter(|b| {
+                        [
+                            Some(extract_system_name(&b.hostname).to_lowercase()),
+                            Some(b.flake.to_lowercase()),
+                            Some(b.commit.to_lowercase()),
+                            if b.worker_id == "unassigned" {
+                                None
+                            } else {
+                                Some(b.worker_id.to_lowercase())
+                            },
+                            Some(b.arch.to_lowercase()),
+                            Some(b.status.label().to_lowercase()),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .any(|v| v.contains(&q))
+                    })
+                    .count()
+            };
+
+            if paging_count >= threshold && threshold > 0 && server_has_more {
+                queue_page.with_mut(|p| *p += 1);
+            }
         }
     });
 

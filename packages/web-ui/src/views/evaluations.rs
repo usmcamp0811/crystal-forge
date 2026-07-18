@@ -18,7 +18,7 @@ use crate::api::{
     models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem},
 };
 use crate::components::{Icon, IconName};
-use crate::hooks::use_infinite_scroll;
+use crate::hooks::{InfiniteScroll, use_infinite_scroll};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EvaluationsTab {
@@ -151,6 +151,28 @@ fn EvaluationsPage() -> Element {
         }
     });
 
+    // Infinite-scroll paging for history — created in the parent so the
+    // parent knows the visible row count for keyboard navigation (review
+    // finding #4) and can own the server-page advancement effect.
+    let hist_reset_key = format!(
+        "hist|{}|{}",
+        history_status_filter(),
+        history_flake_filter()
+    );
+    let hist_paging = use_infinite_scroll(hist_reset_key, 20);
+
+    // Server-page advancement for history, reactive because all signal reads
+    // are inside the closure (review finding #1).
+    use_effect(move || {
+        let loaded_history_len = history_items_acc.read().len();
+        let history_total = history_total_acc();
+        let hist_server_has_more = (loaded_history_len as i64) < history_total;
+        let hist_count = hist_paging.count();
+        if hist_count >= loaded_history_len && loaded_history_len > 0 && hist_server_has_more {
+            history_page.with_mut(|p| *p += 1);
+        }
+    });
+
     let active_items = queue_items
         .read()
         .iter()
@@ -230,18 +252,15 @@ fn EvaluationsPage() -> Element {
         }
     });
     let selected_count = history_selected_ids.read().len();
-    let selected_history_rows = history_resource
-        .read()
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .map(|page| {
-            page.items
-                .iter()
-                .filter(|item| history_selected_ids.read().contains(&item.commit_id))
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let selected_history_rows = {
+        let items = history_items_acc.read();
+        let ids = history_selected_ids.read();
+        items
+            .iter()
+            .filter(|item| ids.contains(&item.commit_id))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let same_flake_pair = selected_history_rows.len() == 2
         && selected_history_rows[0].flake_name == selected_history_rows[1].flake_name;
     let compare_disabled = selected_count != 2 || !same_flake_pair;
@@ -288,16 +307,12 @@ fn EvaluationsPage() -> Element {
 
                     // Keyboard nav is bounded to the currently *rendered* slice so
                     // focus never lands on an invisible row (review finding #4).
-                    // For the active queue, `paged_active_items` is the rendered
-                    // slice.  For history, the rendered slice is managed inside
-                    // EvalHistory but we bound to history_items_acc (all loaded
-                    // rows) as a safe upper limit — at least all loaded rows are
-                    // reachable via keyboard even if not yet visible, which is the
-                    // existing pre-paging behaviour.
+                    // `hist_paging` is created in the parent so the visible count
+                    // is directly accessible here.
                     let list_len = if active_tab() == EvaluationsTab::ActiveQueue {
                         paged_active_items.len()
                     } else {
-                        history_items_acc.read().len()
+                        hist_paging.count()
                     };
 
                     match evt.key() {
@@ -581,6 +596,7 @@ fn EvaluationsPage() -> Element {
                             flash_evals: flash_evals,
                             history_items_acc: history_items_acc,
                             history_total_acc: history_total_acc,
+                            hist_paging: hist_paging,
                         }
                     }
                 }
@@ -932,29 +948,16 @@ fn EvalHistory(
     flash_evals: bool,
     history_items_acc: Signal<Vec<EvalHistoryItem>>,
     history_total_acc: Signal<i64>,
+    hist_paging: InfiniteScroll,
 ) -> Element {
     let history_snapshot = history_resource.read();
 
-    // Infinite-scroll paging over the accumulated loaded items.
-    // Reset key includes filter state so paging resets on filter change.
-    let hist_reset_key = format!(
-        "hist|{}|{}",
-        history_status_filter(),
-        history_flake_filter()
-    );
-    let hist_paging = use_infinite_scroll(hist_reset_key, 20);
-
-    // When paging has consumed all accumulated rows and more exist on the
-    // server, advance to the next server page.
-    let loaded_history_len = history_items_acc.read().len();
-    let history_total = history_total_acc();
-    let hist_server_has_more = (loaded_history_len as i64) < history_total;
-    let hist_count = hist_paging.count();
-    use_effect(move || {
-        if hist_count >= loaded_history_len && loaded_history_len > 0 && hist_server_has_more {
-            history_page.with_mut(|p| *p += 1);
-        }
-    });
+    // Compute server-more state locally for the render (sentinel visibility).
+    let hist_server_has_more = {
+        let loaded = history_items_acc.read().len();
+        let total = history_total_acc();
+        (loaded as i64) < total
+    };
 
     rsx! {
         div {
@@ -1014,10 +1017,10 @@ fn EvalHistory(
                     }
                 }
 
-                if history_total > 0 {
+                if history_total_acc() > 0 {
                     span {
                         class: "filter-count",
-                        "{history_total} entries"
+                        "{history_total_acc()} entries"
                     }
                 }
             }
