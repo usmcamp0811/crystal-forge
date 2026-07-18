@@ -57,6 +57,15 @@ pub fn BuildQueuePane(
         .filter(|b| b.status == BuildStatus::Queued)
         .map(|b| b.id)
         .collect();
+    
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::console::log_1(&format!("BuildQueuePane: {} total builds, {} queued, reorderable={}", 
+            builds.len(), queued_ids.len(), reorderable).into());
+        if !queued_ids.is_empty() {
+            web_sys::console::log_1(&format!("Queued IDs: {:?}", queued_ids).into());
+        }
+    }
 
     let bulk_count = selected_ids.read().len();
 
@@ -183,11 +192,21 @@ pub fn BuildQueuePane(
                                         }
                                         let from = dragged_id();
                                         if let Some(f) = from {
-                                            for action in queue_drag_reorder_actions(
+                                            #[cfg(target_arch = "wasm32")]
+                                            web_sys::console::log_1(&format!("Drag drop: from build {} to build {}", f, build.id).into());
+                                            
+                                            let actions = queue_drag_reorder_actions(
                                                 &queued_ids_for_drop,
                                                 f,
                                                 build.id,
-                                            ) {
+                                            );
+                                            
+                                            #[cfg(target_arch = "wasm32")]
+                                            web_sys::console::log_1(&format!("Generated {} reorder actions", actions.len()).into());
+                                            
+                                            for action in actions {
+                                                #[cfg(target_arch = "wasm32")]
+                                                web_sys::console::log_1(&format!("Calling action {:?} for build {}", action, f).into());
                                                 on_build_action.call((f, action));
                                             }
                                         }
