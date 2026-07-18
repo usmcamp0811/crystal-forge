@@ -42,18 +42,26 @@ pub async fn get_targets_needing_cve_scan(
         FROM derivations d
         JOIN derivation_statuses ds ON d.status_id = ds.id
         WHERE ds.name IN ('build-complete', 'complete')
+            AND d.derivation_type = 'nixos'
             AND d.store_path IS NOT NULL
+            -- Exclude derivations that already have a completed scan
             AND NOT EXISTS (
                 SELECT 1 FROM cve_scans cs
                 WHERE cs.derivation_id = d.id
                 AND cs.status = 'completed'
             )
+            -- Exclude derivations with an active (pending/in_progress) scan
             AND NOT EXISTS (
                 SELECT 1 FROM cve_scans cs
                 WHERE cs.derivation_id = d.id
-                AND cs.status = 'failed'
-                AND cs.attempts >= 5
+                AND cs.status IN ('pending', 'in_progress')
             )
+            -- Exclude derivations that have failed 5+ times (total across every row)
+            AND (
+                SELECT COUNT(*) FROM cve_scans cs
+                WHERE cs.derivation_id = d.id
+                AND cs.status = 'failed'
+            ) < 5
         ORDER BY d.completed_at ASC NULLS LAST
         LIMIT $1
         "#,
@@ -713,19 +721,25 @@ pub async fn resolve_system_cve_scan_target(
 /// Get derivations whose most recent completed CVE scan is stale according to
 /// the configured `scan_schedule_policy` intervals.
 ///
-/// A derivation is stale when the time elapsed since its last `completed` scan
-/// exceeds the policy interval for its freshness class:
-/// - **deployed** (last scan ≤ 24 h ago): uses `deployed_interval`
-/// - **recent** (last scan 24 h–30 d ago): uses `recent_interval`
-/// - **archived** (last scan > 30 d ago): uses `archived_interval` (only when
-///   `archived_enabled = TRUE`)
+/// The lifecycle class (deployed / recent / archived) is derived from actual
+/// system and build state, **not** from scan age:
+///
+/// - **deployed** — the derivation name matches an active system row
+///   (`systems.is_active = TRUE`).  Uses `deployed_interval`.
+/// - **recent** — the derivation was built within the last 30 days but is not
+///   currently deployed.  Uses `recent_interval`.
+/// - **archived** — built more than 30 days ago and not deployed.  Uses
+///   `archived_interval` (only when `archived_enabled = TRUE`).
+///
+/// Each class’s interval can be set to `never` in the UI, in which case that
+/// class is never selected for rescan.
+///
+/// Derivations with an active pending/in_progress scan or with ≥ 5 total failed
+/// scan rows are excluded to avoid double-scanning or hammering
+/// permanently-failing targets.
 ///
 /// Uses dynamic SQL (not `query!`) because interval strings are stored as text
-/// in the `scan_schedule_policy` singleton row — the same approach used by
-/// `queries/scanning.rs`.  PostgreSQL accepts e.g. `'24h'::INTERVAL` directly.
-///
-/// Derivations with an active in-progress scan or with ≥ 5 failed attempts are
-/// excluded to avoid double-scanning or hammering permanently-failing targets.
+/// in the `scan_schedule_policy` singleton row.
 pub async fn get_targets_needing_cve_rescan(
     pool: &PgPool,
     limit: Option<i64>,
@@ -742,6 +756,21 @@ pub async fn get_targets_needing_cve_rescan(
                 archived_enabled
             FROM scan_schedule_policy
             WHERE id = 1
+        ),
+        -- Lifecycle class derived from system deployment + build freshness,
+        -- NOT from scan age.
+        lifecycle AS (
+            SELECT
+                d.id AS derivation_id,
+                CASE
+                    WHEN s.id IS NOT NULL AND s.is_active = TRUE THEN 'deployed'
+                    WHEN d.completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
+                    ELSE 'archived'
+                END AS lifecycle_class
+            FROM derivations d
+            LEFT JOIN systems s ON s.hostname = d.derivation_name
+            WHERE d.derivation_type = 'nixos'
+              AND d.store_path IS NOT NULL
         ),
         latest_completed AS (
             SELECT DISTINCT ON (derivation_id)
@@ -775,34 +804,40 @@ pub async fn get_targets_needing_cve_rescan(
             d.store_path
         FROM derivations d
         JOIN derivation_statuses ds ON d.status_id = ds.id
-        JOIN latest_completed lc ON lc.derivation_id = d.id
+        JOIN lifecycle lc ON lc.derivation_id = d.id
+        JOIN latest_completed lcs ON lcs.derivation_id = d.id
         CROSS JOIN policy p
         WHERE ds.name IN ('build-complete', 'complete')
+            AND d.derivation_type = 'nixos'
             AND d.store_path IS NOT NULL
+            -- Exclude derivations with an active scan already under way
             AND NOT EXISTS (
                 SELECT 1 FROM cve_scans cs
                 WHERE cs.derivation_id = d.id
                   AND cs.status IN ('pending', 'in_progress')
             )
-            AND NOT EXISTS (
-                SELECT 1 FROM cve_scans cs
+            -- Exclude derivations that have failed 5+ times (total across every row)
+            AND (
+                SELECT COUNT(*) FROM cve_scans cs
                 WHERE cs.derivation_id = d.id
                   AND cs.status = 'failed'
-                  AND cs.attempts >= 5
-            )
+            ) < 5
+            -- Staleness check per lifecycle class, skipping 'never' intervals
             AND (
-                (NOW() - lc.completed_at <= INTERVAL '24 hours'
-                    AND NOW() - lc.completed_at > p.deployed_interval::INTERVAL)
+                (lc.lifecycle_class = 'deployed'
+                    AND p.deployed_interval != 'never'
+                    AND NOW() - lcs.completed_at > p.deployed_interval::INTERVAL)
                 OR
-                (NOW() - lc.completed_at > INTERVAL '24 hours'
-                    AND NOW() - lc.completed_at <= INTERVAL '30 days'
-                    AND NOW() - lc.completed_at > p.recent_interval::INTERVAL)
+                (lc.lifecycle_class = 'recent'
+                    AND p.recent_interval != 'never'
+                    AND NOW() - lcs.completed_at > p.recent_interval::INTERVAL)
                 OR
-                (NOW() - lc.completed_at > INTERVAL '30 days'
+                (lc.lifecycle_class = 'archived'
                     AND p.archived_enabled = TRUE
-                    AND NOW() - lc.completed_at > p.archived_interval::INTERVAL)
+                    AND p.archived_interval != 'never'
+                    AND NOW() - lcs.completed_at > p.archived_interval::INTERVAL)
             )
-        ORDER BY lc.completed_at ASC
+        ORDER BY lcs.completed_at ASC
         LIMIT $1
         "#,
     )

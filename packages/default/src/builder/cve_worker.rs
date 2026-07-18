@@ -26,14 +26,14 @@ use crate::queries::cve_scans::{
     create_cve_scan, get_targets_needing_cve_rescan, get_targets_needing_cve_scan,
     mark_cve_scan_failed, mark_scan_in_progress, save_scan_results,
 };
-use crate::queries::derivations::{EvaluationStatus, update_derivation_status};
 use crate::queries::scanning::get_scan_schedule_policy;
 use crate::server::jobs::BackgroundJobHandle;
 use crate::vulnix::vulnix_runner::VulnixRunner;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use sqlx::PgPool;
 use tokio::fs;
+use tokio::process::Command as TokioCommand;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
@@ -50,7 +50,7 @@ use tracing::{debug, error, info, warn};
 pub async fn run_cve_scan_loop(
     pool: PgPool,
     job: BackgroundJobHandle,
-    mut run_now_rx: tokio::sync::watch::Receiver<bool>,
+    mut run_now_rx: tokio::sync::watch::Receiver<u64>,
 ) {
     let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
         warn!("Failed to load Crystal Forge config: {}, using defaults", e);
@@ -92,7 +92,8 @@ pub async fn run_cve_scan_loop(
                         .unwrap_or(chrono::Duration::seconds(60)),
             );
             sleep(vulnix_config.poll_interval).await;
-            // Drain any stale run-now signal while disabled.
+            // Mark the current counter value as seen so a stale signal does
+            // not trigger an immediate cycle on re-enable.
             let _ = run_now_rx.borrow_and_update();
             continue;
         }
@@ -114,15 +115,12 @@ pub async fn run_cve_scan_loop(
         );
 
         // Wait for either the poll interval or a run-now signal.
+        // The run-now channel uses a monotonically increasing counter so every
+        // trigger fires `changed()` exactly once — no double-cycle.
         tokio::select! {
             _ = sleep(vulnix_config.poll_interval) => {}
             _ = run_now_rx.changed() => {
-                // Consume the signal and reset it so the next `changed()` only
-                // fires for a genuinely new trigger.
-                if *run_now_rx.borrow_and_update() {
-                    info!("⚡ CVE scan loop: run-now signal received — starting immediate cycle");
-                    let _ = job.run_now_tx.send(false);
-                }
+                info!("⚡ CVE scan loop: run-now signal received — starting immediate cycle");
             }
         }
     }
@@ -160,7 +158,6 @@ async fn scan_cycle(
                     derivation.derivation_name
                 );
                 scan_one(pool, vulnix_runner, vulnix_version.clone(), derivation).await?;
-                return Ok(());
             }
             Ok(_) => {
                 debug!("🔍 No newly built derivations need CVE scanning");
@@ -192,6 +189,12 @@ async fn scan_cycle(
 }
 
 /// Scan a single derivation: create a scan record, run vulnix, save results.
+///
+/// If the store path is not present in the local Nix store, the function
+/// attempts to copy it from a configured cache destination (using the first
+/// completed cache push job's destination URL).  If materialization fails, the
+/// scan is marked as failed — the derivation's build status is **never**
+/// rewritten.
 async fn scan_one(
     pool: &PgPool,
     vulnix_runner: &VulnixRunner,
@@ -200,65 +203,170 @@ async fn scan_one(
 ) -> Result<()> {
     set_cve_status_working(&format!("scanning {}", derivation.derivation_name)).await;
 
-    if let Some(ref path) = derivation.store_path {
-        match fs::try_exists(path).await {
-            Ok(true) => {
-                let scan_id =
-                    create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone()).await?;
-                mark_scan_in_progress(pool, scan_id).await?;
-
-                let start = std::time::Instant::now();
-                match vulnix_runner
-                    .scan_derivation(pool, derivation.id, vulnix_version)
-                    .await
-                {
-                    Ok(entries) => {
-                        let elapsed_ms = Some(start.elapsed().as_millis() as i32);
-                        let stats =
-                            crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(&entries);
-                        save_scan_results(pool, scan_id, &entries, elapsed_ms).await?;
-                        info!(
-                            "✅ CVE scan completed for {}: {}",
-                            derivation.derivation_name, stats
-                        );
-                    }
-                    Err(e) => {
-                        error!(
-                            "❌ CVE scan failed for {}: {}",
-                            derivation.derivation_name, e
-                        );
-                        if let Err(save_err) =
-                            mark_cve_scan_failed(pool, derivation, &e.to_string()).await
-                        {
-                            error!("❌ Failed to mark CVE scan as failed: {save_err}");
-                        }
-                    }
-                }
-            }
-            Ok(false) => {
-                warn!("❌ Derivation path does not exist: {}", path);
-                update_derivation_status(
-                    pool,
-                    derivation.id,
-                    EvaluationStatus::DryRunComplete,
-                    derivation.derivation_path.as_deref(),
-                    Some("Missing Nix Store Path"),
-                    derivation.store_path.as_deref(),
-                )
-                .await?;
-            }
-            Err(e) => {
-                error!("❌ Error checking derivation path {}: {}", path, e);
-            }
-        }
-    } else {
+    let Some(ref path) = derivation.store_path else {
         warn!(
             "❌ No store_path set for derivation {}",
             derivation.derivation_name
         );
+        return Ok(());
+    };
+
+    // 1. Check local presence.
+    let locally_present = match fs::try_exists(path).await {
+        Ok(exists) => exists,
+        Err(e) => {
+            error!("❌ Error checking derivation path {}: {}", path, e);
+            // Treat as not present — try cache materialization below.
+            false
+        }
+    };
+
+    // 2. Materialize from cache if not present locally.
+    if !locally_present {
+        warn!(
+            "Store path {} not found locally — attempting cache materialization",
+            path
+        );
+        match materialize_store_path_from_cache(pool, derivation, path).await {
+            Ok(true) => {
+                info!("✅ Successfully materialized {} from cache", path);
+            }
+            Ok(false) => {
+                warn!(
+                    "❌ Could not materialize {} from any cache — marking scan as failed",
+                    path
+                );
+                // Record a failed scan (do NOT rewrite build status).
+                mark_cve_scan_failed(
+                    pool,
+                    derivation,
+                    &format!(
+                        "Store path {} not present locally and no cache could provide it",
+                        path
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
+            Err(e) => {
+                error!("❌ Error materializing {} from cache: {}", path, e);
+                mark_cve_scan_failed(
+                    pool,
+                    derivation,
+                    &format!("Cache materialization error: {}", e),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    }
+
+    // 3. Create scan record and run vulnix.
+    let scan_id = create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone()).await?;
+    mark_scan_in_progress(pool, scan_id).await?;
+
+    let start = std::time::Instant::now();
+    match vulnix_runner
+        .scan_derivation(pool, derivation.id, vulnix_version)
+        .await
+    {
+        Ok(entries) => {
+            let elapsed_ms = Some(start.elapsed().as_millis() as i32);
+            let stats = crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(&entries);
+            save_scan_results(pool, scan_id, &entries, elapsed_ms).await?;
+            info!(
+                "✅ CVE scan completed for {}: {}",
+                derivation.derivation_name, stats
+            );
+        }
+        Err(e) => {
+            error!(
+                "❌ CVE scan failed for {}: {}",
+                derivation.derivation_name, e
+            );
+            if let Err(save_err) = mark_cve_scan_failed(pool, derivation, &e.to_string()).await {
+                error!("❌ Failed to mark CVE scan as failed: {save_err}");
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Try to copy a store path from a configured cache destination.
+///
+/// Queries for completed `cache_push_jobs` for this derivation, resolves the
+/// cache destination's `push_to` URL, and runs `nix copy --from <url> <path>`
+/// for the first eligible cache.  Returns `Ok(true)` if materialization
+/// succeeded, `Ok(false)` if no cache could provide the path, or `Err` on a
+/// fatal error.
+async fn materialize_store_path_from_cache(
+    pool: &PgPool,
+    derivation: &crate::derivations::Derivation,
+    store_path: &str,
+) -> Result<bool> {
+    // Find cache URLs that previously received a completed push for this derivation.
+    let cache_urls: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT cd.push_to
+        FROM cache_push_jobs cpj
+        JOIN cache_destinations cd ON cd.name = cpj.cache_destination
+        WHERE cpj.derivation_id = $1
+          AND cpj.status = 'completed'
+          AND cd.push_to IS NOT NULL
+        "#,
+    )
+    .bind(derivation.id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to query cache destinations for materialization")?;
+
+    if cache_urls.is_empty() {
+        debug!(
+            "No completed cache push found for derivation {} — cannot materialize",
+            derivation.id
+        );
+        return Ok(false);
+    }
+
+    for url in &cache_urls {
+        debug!("Trying nix copy --from {} {}", url, store_path);
+        let output = TokioCommand::new("nix")
+            .args(["copy", "--from", url, store_path])
+            .output()
+            .await
+            .with_context(|| format!("Failed to spawn nix copy from {}", url))?;
+
+        if output.status.success() {
+            // Verify the path is now present.
+            match fs::try_exists(store_path).await {
+                Ok(true) => return Ok(true),
+                Ok(false) => {
+                    warn!(
+                        "nix copy from {} reported success but {} is still absent",
+                        url, store_path
+                    );
+                    // Continue trying other caches.
+                }
+                Err(e) => {
+                    warn!(
+                        "nix copy from {} succeeded but path check failed: {}",
+                        url, e
+                    );
+                }
+            }
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                "nix copy from {} failed for {}: {}",
+                url,
+                store_path,
+                stderr.trim()
+            );
+        }
+    }
+
+    Ok(false)
 }
 
 async fn set_cve_status_working(task: &str) {

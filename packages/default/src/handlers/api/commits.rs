@@ -701,6 +701,7 @@ mod tests {
             pool,
             ServerConfig::default(),
             std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
         )
     }
 

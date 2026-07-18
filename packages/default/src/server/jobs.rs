@@ -12,11 +12,11 @@
 //! - No dynamic dispatch / trait objects required for the common case.
 //! - Each job carries its own `Arc<BackgroundJobState>` which is cloned into
 //!   both the background task and the registry so both sides see live state.
-//! - `run_now_tx` is a `tokio::sync::watch::Sender<bool>` — the background
-//!   task selects on it and starts an immediate cycle when it flips to `true`.
-//!   After handling the signal the task resets the channel to `false`.
-//! - The registry is stored on `CFState` (or wherever the server state lives)
-//!   so HTTP handlers can reach it.
+//! - `run_now_tx` is a `tokio::sync::watch::Sender<u64>` — the background task
+//!   selects on it and starts an immediate cycle whenever the counter changes.
+//!   A monotonically increasing counter avoids the double-cycle that a
+//!   resetting boolean would cause (the review finding that motivated this).
+//! - The registry is stored on `CFState` so HTTP handlers can reach it.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -59,8 +59,10 @@ pub struct BackgroundJobHandle {
     pub interval: Duration,
     /// Shared mutable state visible to both the task and HTTP handlers.
     pub state: Arc<BackgroundJobState>,
-    /// Send `true` to trigger an immediate run cycle; the task resets to `false`.
-    pub run_now_tx: watch::Sender<bool>,
+    /// Monotonically increasing counter — send a new value to trigger an
+    /// immediate run cycle.  Using a counter (rather than a resetting bool)
+    /// ensures each trigger fires exactly one `changed()` on the receiver.
+    pub run_now_tx: watch::Sender<u64>,
 }
 
 impl BackgroundJobHandle {
@@ -71,8 +73,8 @@ impl BackgroundJobHandle {
         name: &'static str,
         interval: Duration,
         enabled: bool,
-    ) -> (Self, watch::Receiver<bool>) {
-        let (run_now_tx, run_now_rx) = watch::channel(false);
+    ) -> (Self, watch::Receiver<u64>) {
+        let (run_now_tx, run_now_rx) = watch::channel(0u64);
         let state = Arc::new(BackgroundJobState::new(enabled));
         let handle = Self {
             id,
@@ -84,9 +86,12 @@ impl BackgroundJobHandle {
         (handle, run_now_rx)
     }
 
-    /// Trigger an immediate run cycle.
+    /// Trigger an immediate run cycle by incrementing the monotonic counter.
+    /// Each call produces a value the receiver has not seen, so `changed()`
+    /// fires exactly once per trigger.
     pub fn trigger_run_now(&self) {
-        let _ = self.run_now_tx.send(true);
+        let prev = *self.run_now_tx.borrow();
+        let _ = self.run_now_tx.send(prev.wrapping_add(1));
         info!(
             "🔔 Background job '{}' triggered for immediate run",
             self.id

@@ -160,13 +160,18 @@ async fn main() -> anyhow::Result<()> {
     let queue_notifier = Arc::new(QueueNotifier::new());
     info!("🔔 Initialized event-driven queue notification system");
 
-    let state = CFState::new(pool, server_cfg.clone(), queue_notifier.clone());
-    let state_arc = Arc::new(state.clone());
-
-    // Create the background job registry.  Jobs register themselves during
-    // spawn_background_tasks.  The registry will be stored on server state in
-    // TASK-336.5 so the Admin Background Jobs tab can expose live controls.
+    // Create the background job registry before CFState so the registry is
+    // available on server state from the start.  Jobs register themselves
+    // during spawn_background_tasks; the registry clone shares the same
+    // inner Arc so both CFState and spawn see the same registered handles.
     let job_registry = BackgroundJobRegistry::new();
+    let state = CFState::new(
+        pool,
+        server_cfg.clone(),
+        queue_notifier.clone(),
+        job_registry.clone(),
+    );
+    let state_arc = Arc::new(state.clone());
 
     spawn_background_tasks(
         cfg.clone(),
