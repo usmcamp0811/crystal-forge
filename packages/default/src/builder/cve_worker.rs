@@ -38,7 +38,6 @@ use anyhow::{Context, Result};
 use axum::async_trait;
 use chrono::Utc;
 use sqlx::{PgPool, Row};
-use std::collections::HashSet;
 use tokio::fs;
 use tokio::process::Command as TokioCommand;
 use tokio::time::{sleep, timeout};
@@ -289,15 +288,24 @@ pub async fn run_cve_scan_loop(
     }
 }
 
-const BATCH_SIZE: i64 = 5;
-const POST_BUILD_CONCURRENCY: usize = 1;
+/// Maximum derivations scanned per cycle phase (post-build or rescan).
+///
+/// Processing is bounded per cycle so that a large historical backlog does not
+/// monopolise the database for an extended period. At 1 scan/cycle with a
+/// 60-second poll interval a backlog of N derivations clears in ~N minutes,
+/// which is acceptable. Raise this constant once bulk-persistence lands and
+/// the write amplification per scan is addressed.
+const MAX_SCANS_PER_CYCLE: i64 = 1;
 
 /// One full scan cycle: post-build scans followed by periodic rescans.
 ///
-/// Phase 1 (post-build) drains the queue in batches until empty, tracking
-/// attempted derivation IDs in a [`HashSet`] so that a failing derivation is
-/// not retried within the same cycle.  This guarantees every eligible,
-/// non-failing derivation is scanned within one poll interval.
+/// Phase 1 (post-build) processes at most [`MAX_SCANS_PER_CYCLE`] derivations
+/// and returns — it does **not** loop until the queue is empty. The remaining
+/// backlog is processed across subsequent poll cycles, which prevents a large
+/// historical backlog from monopolising the database for many minutes.
+///
+/// Phase 2 (rescan) likewise processes at most [`MAX_SCANS_PER_CYCLE`] stale
+/// derivations per cycle.
 async fn scan_cycle(
     pool: &PgPool,
     vulnix_config: &crate::config::VulnixConfig,
@@ -337,96 +345,75 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
         Err(e) => error!("Failed to recover stale CVE scans: {e}"),
     }
 
-    // Read scan schedule policy to check on_build flag.
-    let policy = get_scan_schedule_policy(pool).await.unwrap_or_else(|e| {
-        warn!("Failed to load scan schedule policy: {e}, using defaults");
-        crate::queries::scanning::ScanSchedulePolicyRow {
-            on_build: true,
-            deployed_interval: "24h".to_string(),
-            recent_interval: "24h".to_string(),
-            archived_interval: "168h".to_string(),
-            archived_enabled: true,
-            rebuild_to_scan: false,
-            updated_at: Utc::now(),
+    // Read scan schedule policy. Fail closed: if the policy cannot be loaded
+    // we skip this cycle rather than applying aggressive hardcoded defaults.
+    // This prevents a database configuration failure from silently triggering
+    // a full historical backfill on first deployment.
+    let policy = match get_scan_schedule_policy(pool).await {
+        Ok(p) => p,
+        Err(e) => {
+            error!("Failed to load scan schedule policy: {e} — skipping cycle");
+            return Ok(());
         }
-    });
+    };
 
-    // --- Phase 1: post-build scans (drain queue until empty) ---
+    // --- Phase 1: post-build scans (bounded — at most MAX_SCANS_PER_CYCLE per cycle) ---
+    //
+    // We intentionally do NOT loop until the queue is empty. A large historical
+    // backlog would otherwise monopolise the database for minutes. Each cycle
+    // advances the backlog by MAX_SCANS_PER_CYCLE; subsequent poll cycles
+    // continue draining it at a controlled rate.
     if policy.on_build {
+        if !*enabled_rx.read().await {
+            info!("🛑 CVE scan loop disabled — skipping post-build phase");
+            return Ok(());
+        }
+
         let snapshot_cutoff = Utc::now();
-        let mut attempted: HashSet<i32> = HashSet::new();
-        loop {
-            // Respect mid-cycle disable: stop selecting new targets.
-            if !*enabled_rx.read().await {
-                info!("🛑 CVE scan loop disabled mid-cycle — stopping post-build phase");
-                return Ok(());
-            }
-
-            let excluded_ids: Vec<i32> = attempted.iter().copied().collect();
-            match get_targets_needing_cve_scan(
-                pool,
-                Some(BATCH_SIZE),
-                &excluded_ids,
-                Some(snapshot_cutoff),
-            )
-            .await
-            {
-                Ok(targets) if !targets.is_empty() => {
-                    let batch: Vec<_> = targets.into_iter().take(BATCH_SIZE as usize).collect();
-
-                    if batch.is_empty() {
-                        debug!(
-                            "🔍 Post-build queue drained ({} attempted)",
-                            attempted.len()
-                        );
-                        break;
+        match get_targets_needing_cve_scan(
+            pool,
+            Some(MAX_SCANS_PER_CYCLE),
+            &[],
+            Some(snapshot_cutoff),
+        )
+        .await
+        {
+            Ok(targets) if !targets.is_empty() => {
+                info!(
+                    "🔍 [post-build] Processing {} target(s) this cycle (limit {})",
+                    targets.len(),
+                    MAX_SCANS_PER_CYCLE
+                );
+                for derivation in &targets {
+                    if !*enabled_rx.read().await {
+                        info!("🛑 CVE scan loop disabled mid-batch — stopping post-build phase");
+                        return Ok(());
                     }
-
-                    for derivation in &batch {
-                        attempted.insert(derivation.id);
-                    }
-
-                    for chunk in batch.chunks(POST_BUILD_CONCURRENCY) {
-                        // Check again before each chunk so a disable mid-batch is
-                        // honoured without waiting for the entire concurrent batch.
-                        if !*enabled_rx.read().await {
-                            info!("🛑 CVE scan loop disabled — stopping mid-batch");
-                            return Ok(());
-                        }
-                        let futures = chunk.iter().map(|derivation| async {
-                            info!(
-                                "🔍 [post-build] Scanning newly built derivation: {}",
-                                derivation.derivation_name
-                            );
-                            if let Err(e) = scan_one(
-                                pool,
-                                vulnix_runner,
-                                vulnix_version.clone(),
-                                derivation,
-                                enabled_rx,
-                            )
-                            .await
-                            {
-                                error!(
-                                    "❌ [post-build] Scan failed for {}: {e}",
-                                    derivation.derivation_name
-                                );
-                            }
-                        });
-                        futures::future::join_all(futures).await;
-                    }
-                }
-                Ok(_) => {
-                    debug!(
-                        "🔍 Post-build queue drained ({} attempted)",
-                        attempted.len()
+                    info!(
+                        "🔍 [post-build] Scanning newly built derivation: {}",
+                        derivation.derivation_name
                     );
-                    break;
+                    if let Err(e) = scan_one(
+                        pool,
+                        vulnix_runner,
+                        vulnix_version.clone(),
+                        derivation,
+                        enabled_rx,
+                    )
+                    .await
+                    {
+                        error!(
+                            "❌ [post-build] Scan failed for {}: {e}",
+                            derivation.derivation_name
+                        );
+                    }
                 }
-                Err(e) => {
-                    error!("❌ Failed to get post-build scan targets: {e}");
-                    break;
-                }
+            }
+            Ok(_) => {
+                debug!("🔍 No post-build scan targets this cycle");
+            }
+            Err(e) => {
+                error!("❌ Failed to get post-build scan targets: {e}");
             }
         }
     } else {
@@ -439,8 +426,8 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
         return Ok(());
     }
 
-    // --- Phase 2: periodic rescan (stale completed scans) ---
-    match get_targets_needing_cve_rescan(pool, Some(BATCH_SIZE)).await {
+    // --- Phase 2: periodic rescan (stale completed scans, bounded) ---
+    match get_targets_needing_cve_rescan(pool, Some(MAX_SCANS_PER_CYCLE)).await {
         Ok(targets) if !targets.is_empty() => {
             info!(
                 "🔄 [rescan] Re-scanning {} stale derivation(s)",

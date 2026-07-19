@@ -354,22 +354,119 @@ pub(crate) async fn save_scan_results_with_store_path_override(
     // Calculate statistics from vulnix results
     let stats = VulnixParser::calculate_stats(vulnix_results);
 
-    // Resolve store paths before opening the transaction. This invokes
-    // `nix-store` for each result and can take long enough that holding a pool
-    // connection here starves latency-sensitive API requests.
-    let mut resolved_results = Vec::with_capacity(vulnix_results.len());
+    // --- Step 1: resolve all store paths outside the transaction ---
+    // `nix-store --query --outputs` can be slow; holding a connection
+    // while iterating them starves latency-sensitive API requests.
+    let mut resolved: Vec<(&crate::vulnix::vulnix_parser::VulnixEntry, String)> =
+        Vec::with_capacity(vulnix_results.len());
     for entry in vulnix_results {
         let store_path = match store_path_override {
             Some(path) => path.to_string(),
             None => get_store_path_from_drv(&entry.derivation).await?,
         };
-        resolved_results.push((entry, store_path));
+        debug!(
+            "CVE Scan Entry - name: '{}', pname: {:?}, version: {:?}, derivation: '{}', affected_by: {:?}",
+            entry.name, entry.pname, entry.version, entry.derivation, entry.affected_by
+        );
+        resolved.push((entry, store_path));
     }
 
-    // Start a transaction
+    // --- Step 2: build in-memory deduplicated arrays for bulk SQL ---
+
+    // Package derivation arrays (one row per vulnix entry)
+    let pkg_names: Vec<&str> = resolved.iter().map(|(e, _)| e.name.as_str()).collect();
+    let pkg_drv_paths: Vec<&str> = resolved.iter().map(|(e, _)| e.derivation.as_str()).collect();
+    let pkg_pnames: Vec<Option<&str>> = resolved
+        .iter()
+        .map(|(e, _)| e.pname.as_deref())
+        .collect();
+    let pkg_versions: Vec<String> = resolved
+        .iter()
+        .map(|(e, _)| truncate_for_varchar(&e.version, 100).into_owned())
+        .collect();
+    let pkg_store_paths: Vec<&str> = resolved.iter().map(|(_, sp)| sp.as_str()).collect();
+
+    // Collect all (cve_id, cvss_score, is_whitelisted, whitelist_reason) tuples
+    // deduplicated by cve_id — whitelisted status from any entry wins.
+    use std::collections::HashMap;
+    #[derive(Debug)]
+    struct CveRecord {
+        cvss: Option<BigDecimal>,
+        is_whitelisted: bool,
+        whitelist_reason: Option<String>,
+    }
+    let mut cve_map: HashMap<String, CveRecord> = HashMap::new();
+
+    // (pkg_name, cve_id, is_whitelisted, whitelist_reason) tuples for package_vulnerabilities
+    // We'll resolve derivation_id after the bulk package upsert.
+    struct PkgVuln {
+        pkg_name: String,
+        cve_id: String,
+        is_whitelisted: bool,
+        whitelist_reason: Option<String>,
+    }
+    let mut pkg_vulns: Vec<PkgVuln> = Vec::new();
+
+    for (entry, _) in &resolved {
+        for cve_id in &entry.affected_by {
+            let cvss = entry
+                .cvssv3_basescore
+                .get(cve_id)
+                .copied()
+                .and_then(BigDecimal::from_f32);
+            cve_map
+                .entry(cve_id.clone())
+                .and_modify(|r| {
+                    if r.cvss.is_none() {
+                        r.cvss = cvss.clone();
+                    }
+                })
+                .or_insert(CveRecord {
+                    cvss,
+                    is_whitelisted: false,
+                    whitelist_reason: None,
+                });
+            pkg_vulns.push(PkgVuln {
+                pkg_name: entry.name.clone(),
+                cve_id: cve_id.clone(),
+                is_whitelisted: false,
+                whitelist_reason: None,
+            });
+        }
+        for cve_id in &entry.whitelisted {
+            let cvss = entry
+                .cvssv3_basescore
+                .get(cve_id)
+                .copied()
+                .and_then(BigDecimal::from_f32);
+            cve_map
+                .entry(cve_id.clone())
+                .and_modify(|r| {
+                    if r.cvss.is_none() {
+                        r.cvss = cvss.clone();
+                    }
+                    // Whitelisted status wins on conflict
+                    r.is_whitelisted = true;
+                    r.whitelist_reason = Some("vulnix whitelist".to_string());
+                })
+                .or_insert(CveRecord {
+                    cvss,
+                    is_whitelisted: true,
+                    whitelist_reason: Some("vulnix whitelist".to_string()),
+                });
+            pkg_vulns.push(PkgVuln {
+                pkg_name: entry.name.clone(),
+                cve_id: cve_id.clone(),
+                is_whitelisted: true,
+                whitelist_reason: Some("vulnix whitelist".to_string()),
+            });
+        }
+    }
+
+    // --- Step 3: single transaction with ~5 bulk statements ---
     let mut tx = pool.begin().await?;
 
-    // Update the scan record with completion data
+    // 3a. Mark scan complete
     sqlx::query!(
         r#"
         UPDATE cve_scans
@@ -398,168 +495,151 @@ pub(crate) async fn save_scan_results_with_store_path_override(
     .execute(&mut *tx)
     .await?;
 
-    // Insert packages and vulnerabilities found during scan
-    for (entry, store_path) in resolved_results {
-        debug!(
-            "CVE Scan Entry - name: '{}', pname: {:?}, version: {:?}, derivation: '{}', affected_by: {:?}",
-            entry.name, entry.pname, entry.version, entry.derivation, entry.affected_by
-        );
-
-        let package_version = truncate_for_varchar(&entry.version, 100);
-        if package_version != entry.version {
-            debug!(
-                "Truncated package version for DB insert (max=100): original='{}', truncated='{}'",
-                entry.version, package_version
-            );
-        }
-        // Insert package as a derivation with type 'package' and NULL commit_id
-        let package_derivation_id = sqlx::query!(
-            r#"
-            INSERT INTO derivations (
-                commit_id,        -- NULL for packages
-                derivation_type, 
-                derivation_name, 
-                derivation_path, 
-                derivation_target, -- NULL for packages discovered during scanning
-                pname, 
-                version, 
-                status_id, 
-                store_path,
-                attempt_count
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0)
-            ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) DO UPDATE SET
-                pname = EXCLUDED.pname,
-                version = EXCLUDED.version,
-                status_id = EXCLUDED.status_id
-            RETURNING id
-            "#,
-            None::<i32>, // commit_id is NULL for packages
-            "package",
-            entry.name,       // Use derivation path as name to ensure uniqueness
-            entry.derivation, // This is the derivation path from vulnix
-            None::<String>,   // derivation_target is NULL for packages discovered during scanning
-            entry.pname,
-            package_version,
-            11i32, // Status ID for 'complete'
+    // 3b. Bulk-upsert package derivations and return their IDs in insertion order.
+    // UNNEST keeps positional alignment; we return id + name so we can build the
+    // pkg_name → derivation_id map needed for package_vulnerabilities.
+    let pkg_rows = sqlx::query!(
+        r#"
+        INSERT INTO derivations (
+            commit_id,
+            derivation_type,
+            derivation_name,
+            derivation_path,
+            derivation_target,
+            pname,
+            version,
+            status_id,
             store_path,
+            attempt_count
         )
-        .fetch_one(&mut *tx)
-        .await?
-        .id;
+        SELECT
+            NULL::int,
+            'package',
+            name,
+            drv_path,
+            NULL::text,
+            pname,
+            version,
+            11,
+            store_path,
+            0
+        FROM UNNEST(
+            $1::text[],
+            $2::text[],
+            $3::text[],
+            $4::text[],
+            $5::text[]
+        ) AS t(name, drv_path, pname, version, store_path)
+        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) DO UPDATE SET
+            pname    = EXCLUDED.pname,
+            version  = EXCLUDED.version,
+            status_id = EXCLUDED.status_id
+        RETURNING id, derivation_name
+        "#,
+        &pkg_names as &[&str],
+        &pkg_drv_paths as &[&str],
+        &pkg_pnames as &[Option<&str>],
+        &pkg_versions as &[String],
+        &pkg_store_paths as &[&str],
+    )
+    .fetch_all(&mut *tx)
+    .await?;
 
-        // Link package to scan using the new derivation_id
-        // First check if it already exists
-        let existing = sqlx::query!(
+    // Build name → derivation_id map (last write wins for duplicate names, which
+    // matches upsert semantics above).
+    let mut name_to_id: HashMap<String, i32> = HashMap::with_capacity(pkg_rows.len());
+    let mut pkg_drv_ids: Vec<i32> = Vec::with_capacity(pkg_rows.len());
+    for row in &pkg_rows {
+        name_to_id.insert(row.derivation_name.clone(), row.id);
+        pkg_drv_ids.push(row.id);
+    }
+
+    // 3c. Bulk-insert scan_packages (ignore duplicates).
+    sqlx::query!(
+        r#"
+        INSERT INTO scan_packages (scan_id, derivation_id, is_runtime_dependency, dependency_depth)
+        SELECT $1, id, true, 0
+        FROM UNNEST($2::int[]) AS t(id)
+        ON CONFLICT (scan_id, derivation_id) DO NOTHING
+        "#,
+        scan_id,
+        &pkg_drv_ids as &[i32],
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // 3d. Bulk-upsert CVEs (skip unchanged rows with WHERE clause).
+    if !cve_map.is_empty() {
+        let cve_ids: Vec<String> = cve_map.keys().cloned().collect();
+        let cve_scores: Vec<Option<BigDecimal>> =
+            cve_ids.iter().map(|k| cve_map[k].cvss.clone()).collect();
+        sqlx::query!(
             r#"
-            SELECT id FROM scan_packages 
-            WHERE scan_id = $1 AND derivation_id = $2
+            INSERT INTO cves (id, cvss_v3_score)
+            SELECT id, score
+            FROM UNNEST($1::text[], $2::numeric[]) AS t(id, score)
+            ON CONFLICT (id) DO UPDATE SET
+                cvss_v3_score = COALESCE(EXCLUDED.cvss_v3_score, cves.cvss_v3_score),
+                updated_at    = NOW()
+            WHERE cves.cvss_v3_score IS DISTINCT FROM COALESCE(EXCLUDED.cvss_v3_score, cves.cvss_v3_score)
             "#,
-            scan_id,
-            package_derivation_id
+            &cve_ids as &[String],
+            &cve_scores as &[Option<BigDecimal>],
         )
-        .fetch_optional(&mut *tx)
+        .execute(&mut *tx)
         .await?;
+    }
 
-        if existing.is_none() {
-            sqlx::query!(
-                r#"
-                INSERT INTO scan_packages (scan_id, derivation_id, is_runtime_dependency, dependency_depth)
-                VALUES ($1, $2, $3, $4)
-                "#,
-                scan_id,
-                package_derivation_id,
-                true,  // Assume runtime dependency for now
-                0i32   // Assume direct dependency for now
-            )
-            .execute(&mut *tx)
-            .await?;
+    // 3e. Bulk-upsert package_vulnerabilities.
+    if !pkg_vulns.is_empty() {
+        let mut pv_drv_ids: Vec<i32> = Vec::with_capacity(pkg_vulns.len());
+        let mut pv_cve_ids: Vec<String> = Vec::with_capacity(pkg_vulns.len());
+        let mut pv_whitelisted: Vec<bool> = Vec::with_capacity(pkg_vulns.len());
+        let mut pv_reasons: Vec<Option<String>> = Vec::with_capacity(pkg_vulns.len());
+
+        for pv in &pkg_vulns {
+            // Skip rows whose package name didn't resolve (shouldn't happen
+            // but guard defensively rather than panic).
+            if let Some(&drv_id) = name_to_id.get(&pv.pkg_name) {
+                pv_drv_ids.push(drv_id);
+                pv_cve_ids.push(pv.cve_id.clone());
+                pv_whitelisted.push(pv.is_whitelisted);
+                pv_reasons.push(pv.whitelist_reason.clone());
+            }
         }
 
-        // Insert CVEs from this entry
-        for cve_id in &entry.affected_by {
-            // Get CVSS score for this CVE from the entry
-            let cvss_score = entry.cvssv3_basescore.get(cve_id).copied();
-
-            // Insert or update CVE (minimal data from vulnix)
-            sqlx::query!(
-                r#"
-                INSERT INTO cves (id, cvss_v3_score)
-                VALUES ($1, $2)
-                ON CONFLICT (id) DO UPDATE SET
-                    cvss_v3_score = COALESCE(EXCLUDED.cvss_v3_score, cves.cvss_v3_score),
-                    updated_at = NOW()
-                "#,
-                cve_id,
-                cvss_score.and_then(BigDecimal::from_f32)
-            )
-            .execute(&mut *tx)
-            .await?;
-
-            // Insert package vulnerability relationship using derivation_id
+        if !pv_drv_ids.is_empty() {
             sqlx::query!(
                 r#"
                 INSERT INTO package_vulnerabilities (
-                    derivation_id, cve_id, detection_method, is_whitelisted
+                    derivation_id, cve_id, detection_method,
+                    is_whitelisted, whitelist_reason
                 )
-                VALUES ($1, $2, $3, $4)
+                SELECT drv_id, cve_id, 'vulnix', is_wl, reason
+                FROM UNNEST(
+                    $1::int[],
+                    $2::text[],
+                    $3::bool[],
+                    $4::text[]
+                ) AS t(drv_id, cve_id, is_wl, reason)
                 ON CONFLICT (derivation_id, cve_id) DO UPDATE SET
-                    detection_method = EXCLUDED.detection_method,
-                    updated_at = NOW()
+                    detection_method  = EXCLUDED.detection_method,
+                    is_whitelisted    = EXCLUDED.is_whitelisted,
+                    whitelist_reason  = EXCLUDED.whitelist_reason,
+                    updated_at        = NOW()
+                WHERE package_vulnerabilities.is_whitelisted IS DISTINCT FROM EXCLUDED.is_whitelisted
+                   OR package_vulnerabilities.whitelist_reason IS DISTINCT FROM EXCLUDED.whitelist_reason
                 "#,
-                package_derivation_id,
-                cve_id,
-                "vulnix",
-                false // Not whitelisted by default
-            )
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        // Handle whitelisted CVEs (still track them but mark as whitelisted)
-        for cve_id in &entry.whitelisted {
-            let cvss_score = entry.cvssv3_basescore.get(cve_id).copied();
-
-            // Insert or update CVE
-            sqlx::query!(
-                r#"
-                INSERT INTO cves (id, cvss_v3_score)
-                VALUES ($1, $2)
-                ON CONFLICT (id) DO UPDATE SET
-                    cvss_v3_score = COALESCE(EXCLUDED.cvss_v3_score, cves.cvss_v3_score),
-                    updated_at = NOW()
-                "#,
-                cve_id,
-                cvss_score.and_then(BigDecimal::from_f32)
-            )
-            .execute(&mut *tx)
-            .await?;
-
-            // Insert whitelisted vulnerability relationship using derivation_id
-            sqlx::query!(
-                r#"
-                INSERT INTO package_vulnerabilities (
-                    derivation_id, cve_id, detection_method, is_whitelisted, whitelist_reason
-                )
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (derivation_id, cve_id) DO UPDATE SET
-                    detection_method = EXCLUDED.detection_method,
-                    is_whitelisted = EXCLUDED.is_whitelisted,
-                    whitelist_reason = EXCLUDED.whitelist_reason,
-                    updated_at = NOW()
-                "#,
-                package_derivation_id,
-                cve_id,
-                "vulnix",
-                true,
-                "vulnix whitelist"
+                &pv_drv_ids as &[i32],
+                &pv_cve_ids as &[String],
+                &pv_whitelisted as &[bool],
+                &pv_reasons as &[Option<String>],
             )
             .execute(&mut *tx)
             .await?;
         }
     }
 
-    // Commit the transaction
     tx.commit().await?;
 
     Ok(())

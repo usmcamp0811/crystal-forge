@@ -449,11 +449,15 @@ pub fn spawn_background_tasks(
     // tab (TASK-336.5) can list it, toggle enabled/disabled, and trigger run-now.
     // vulnix poll_interval comes from [vulnix] config (default: 60 s).
     let vulnix_poll_interval = cfg.get_vulnix_config().poll_interval;
+    // The CVE scan worker starts DISABLED by default so that a first deployment
+    // against an established database does not immediately begin an unbounded
+    // historical backfill. An operator must explicitly enable it via the
+    // Admin → Background Jobs tab (TASK-336.5) or the scanning schedule API.
     let (cve_job_handle, cve_run_now_rx) = BackgroundJobHandle::new(
         "cve_scan",
         "CVE Scan",
         vulnix_poll_interval,
-        true, // enabled by default
+        false, // disabled by default — operator must enable
     );
     let cve_job_for_task = cve_job_handle.clone();
     let registry_for_spawn = job_registry.clone();
