@@ -129,16 +129,21 @@ pub async fn run_cve_scan_loop(
     }
 }
 
-/// Number of targets to process per phase in each poll cycle.
+/// Maximum derivations to drain from the post-build queue per cycle.  The
+/// post-build loop claims bounded batches repeatedly until the queue is empty
+/// or this limit is reached, guaranteeing all recently-built derivations are
+/// scanned within one poll interval (up to the cap).  The rescan phase has its
+/// own per-cycle limit so that periodic rescans cannot starve post-build work
+/// across cycles.
+const DRAIN_MAX_PER_CYCLE: i64 = 50;
 const BATCH_SIZE: i64 = 5;
 
 /// One full scan cycle: post-build scans followed by periodic rescans.
 ///
-/// Each phase processes up to [`BATCH_SIZE`] targets per cycle so that
-/// targets do not pile up across poll intervals.  An individual scan
-/// (`scan_one`) may itself take a while (vulnix fetches NVD data each
-/// invocation), so the batch limit prevents a single phase from blocking
-/// the other indefinitely.
+/// Phase 1 (post-build) drains the queue in batches until empty or
+/// `DRAIN_MAX_PER_CYCLE` is reached, ensuring newly completed derivations are
+/// scanned within one poll interval.  Phase 2 (rescan) processes a single batch
+/// of stale derivations.
 async fn scan_cycle(
     pool: &PgPool,
     vulnix_runner: &VulnixRunner,
@@ -168,33 +173,58 @@ async fn scan_cycle(
         }
     });
 
-    // --- Phase 1: post-build scans (newly unscanned derivations) ---
+    // --- Phase 1: post-build scans (drain queue until empty) ---
     if policy.on_build {
-        match get_targets_needing_cve_scan(pool, Some(BATCH_SIZE)).await {
-            Ok(targets) if !targets.is_empty() => {
-                info!(
-                    "🔍 [post-build] Scanning {} newly built derivation(s)",
-                    targets.len()
-                );
-                for derivation in &targets {
+        let mut total_scanned: i64 = 0;
+        loop {
+            match get_targets_needing_cve_scan(pool, Some(BATCH_SIZE)).await {
+                Ok(targets) if !targets.is_empty() => {
+                    let remaining = DRAIN_MAX_PER_CYCLE - total_scanned;
+                    let batch = if targets.len() as i64 > remaining {
+                        &targets[..remaining as usize]
+                    } else {
+                        &targets[..]
+                    };
+                    if batch.is_empty() {
+                        break;
+                    }
+                    total_scanned += batch.len() as i64;
                     info!(
-                        "🔍 [post-build] Scanning newly built derivation: {}",
-                        derivation.derivation_name
+                        "🔍 [post-build] Scanning {} newly built derivation(s) (total this cycle: {})",
+                        batch.len(),
+                        total_scanned
                     );
-                    if let Err(e) =
-                        scan_one(pool, vulnix_runner, vulnix_version.clone(), derivation).await
-                    {
-                        error!(
-                            "❌ [post-build] Scan failed for {}: {e}",
+                    for derivation in batch {
+                        info!(
+                            "🔍 [post-build] Scanning newly built derivation: {}",
                             derivation.derivation_name
                         );
+                        if let Err(e) =
+                            scan_one(pool, vulnix_runner, vulnix_version.clone(), derivation).await
+                        {
+                            error!(
+                                "❌ [post-build] Scan failed for {}: {e}",
+                                derivation.derivation_name
+                            );
+                        }
+                    }
+                    if total_scanned >= DRAIN_MAX_PER_CYCLE {
+                        warn!(
+                            "Post-build drain reached cap of {}; {} may remain for next cycle",
+                            DRAIN_MAX_PER_CYCLE, DRAIN_MAX_PER_CYCLE
+                        );
+                        break;
                     }
                 }
+                Ok(_) => {
+                    debug!("🔍 Post-build queue drained ({} scanned)", total_scanned);
+                    break;
+                }
+                Err(e) => {
+                    error!("❌ Failed to get post-build scan targets: {e}");
+                    break;
+                }
             }
-            Ok(_) => {
-                debug!("🔍 No newly built derivations need CVE scanning");
-            }
-            Err(e) => error!("❌ Failed to get post-build scan targets: {e}"),
         }
     } else {
         debug!("🔍 on_build = false — skipping post-build scan phase");
@@ -350,16 +380,20 @@ async fn materialize_store_path_from_cache(
     store_path: &str,
 ) -> Result<bool> {
     // Find cache URLs that previously received a completed push for this derivation.
-    // NOTE: `cpj.cache_destination` stores the `push_to` URL (not the cache
-    // destination name), so we join against `cd.push_to`.
+    //
+    // The LEFT JOIN handles two cases:
+    //   1. DB-configured cache destination — use `cd.push_to` (which may carry
+    //      credentials, type-specific config, etc.).
+    //   2. `server.toml`-configured cache (no matching `cache_destinations` row)
+    //      — fall back to the raw URL stored in `cpj.cache_destination`.
     let cache_urls: Vec<String> = sqlx::query_scalar(
         r#"
-        SELECT DISTINCT cd.push_to
+        SELECT DISTINCT COALESCE(cd.push_to, cpj.cache_destination)
         FROM cache_push_jobs cpj
-        JOIN cache_destinations cd ON cd.push_to = cpj.cache_destination
+        LEFT JOIN cache_destinations cd ON cd.push_to = cpj.cache_destination
         WHERE cpj.derivation_id = $1
           AND cpj.status = 'completed'
-          AND cd.push_to IS NOT NULL
+          AND COALESCE(cd.push_to, cpj.cache_destination) IS NOT NULL
         "#,
     )
     .bind(derivation.id)
@@ -381,29 +415,35 @@ async fn materialize_store_path_from_cache(
 
     for url in &cache_urls {
         debug!("Trying nix copy --from {} {}", url, store_path);
-        let output = match timeout(
-            NIX_COPY_TIMEOUT,
-            TokioCommand::new("nix")
-                .args(["copy", "--from", url, store_path])
-                .output(),
-        )
-        .await
-        {
-            Ok(result) => {
-                result.with_context(|| format!("Failed to spawn nix copy from {}", url))?
-            }
+
+        // Spawn with kill_on_drop(true) so the child is guaranteed to be
+        // terminated if the child handle is dropped.
+        let mut child = TokioCommand::new("nix")
+            .args(["copy", "--from", url, store_path])
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("Failed to spawn nix copy from {}", url))?;
+
+        // Use `child.wait()` (borrows `&mut self`) instead of
+        // `wait_with_output()` (consumes `self`) so we can still kill the
+        // child if the timeout fires.
+        let wait_result = match timeout(NIX_COPY_TIMEOUT, child.wait()).await {
+            Ok(result) => result?,
             Err(_elapsed) => {
                 warn!(
-                    "nix copy from {} timed out after {}s for {}",
+                    "nix copy from {} timed out after {}s for {} — killing process",
                     url,
                     NIX_COPY_TIMEOUT.as_secs(),
                     store_path
                 );
+                // Kill and reap to avoid zombies.
+                let _ = child.kill().await;
+                let _ = child.wait().await;
                 continue; // Try the next cache URL.
             }
         };
 
-        if output.status.success() {
+        if wait_result.success() {
             // Verify the path is now present.
             match fs::try_exists(store_path).await {
                 Ok(true) => return Ok(true),
@@ -422,12 +462,11 @@ async fn materialize_store_path_from_cache(
                 }
             }
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             warn!(
-                "nix copy from {} failed for {}: {}",
+                "nix copy from {} failed for {} (exit code: {:?})",
                 url,
                 store_path,
-                stderr.trim()
+                wait_result.code()
             );
         }
     }

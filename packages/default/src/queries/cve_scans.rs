@@ -56,19 +56,37 @@ pub async fn get_targets_needing_cve_scan(
                 WHERE cs.derivation_id = d.id
                 AND cs.status IN ('pending', 'in_progress')
             )
-            -- Exclude derivations with 5+ consecutive failures since the last
-            -- successful scan (prevents hammering permanently-failing targets
-            -- while allowing recovery once the root cause is fixed).
-            AND (
-                SELECT COUNT(*) FROM cve_scans cs
-                WHERE cs.derivation_id = d.id
-                  AND cs.status = 'failed'
-                  AND (cs.created_at > COALESCE(
-                      (SELECT MAX(created_at) FROM cve_scans
-                       WHERE derivation_id = d.id AND status = 'completed'),
-                      '1970-01-01'::timestamp
-                  ))
-            ) < 5
+            -- Exclude derivations only when there are 5+ consecutive failures
+            -- AND the backoff window hasn't elapsed yet (min(30min × failures,
+            -- 24h)).  Once the backoff expires the derivation becomes eligible
+            -- again — there is no permanent exclusion.
+            AND NOT (
+                (SELECT COUNT(*) FROM cve_scans cs
+                 WHERE cs.derivation_id = d.id
+                   AND cs.status = 'failed'
+                   AND (cs.created_at > COALESCE(
+                       (SELECT MAX(created_at) FROM cve_scans
+                        WHERE derivation_id = d.id AND status = 'completed'),
+                       '1970-01-01'::timestamp
+                   ))
+                ) >= 5
+                AND NOW() - (
+                    SELECT MAX(created_at) FROM cve_scans
+                    WHERE derivation_id = d.id AND status = 'failed'
+                ) < LEAST(
+                    (
+                        SELECT COUNT(*) FROM cve_scans cs
+                        WHERE cs.derivation_id = d.id
+                          AND cs.status = 'failed'
+                          AND (cs.created_at > COALESCE(
+                              (SELECT MAX(created_at) FROM cve_scans
+                               WHERE derivation_id = d.id AND status = 'completed'),
+                              '1970-01-01'::timestamp
+                          ))
+                    ) * INTERVAL '30 minutes',
+                    INTERVAL '24 hours'
+                )
+            )
         ORDER BY d.completed_at ASC NULLS LAST
         LIMIT $1
         "#,
@@ -725,11 +743,12 @@ pub async fn resolve_system_cve_scan_target(
     }))
 }
 
-/// Reset scans that have been stuck `in_progress` for more than the given
-/// threshold.  This prevents a server crash between `mark_scan_in_progress` and
+/// Mark scans that have been stuck `in_progress` for more than the given
+/// threshold as `failed` so the derivation becomes eligible for re-scanning.
+/// This prevents a server crash between `mark_scan_in_progress` and
 /// `save_scan_results` from permanently poisoning a derivation.
 ///
-/// Returns the number of scans that were reset so callers can log the event.
+/// Returns the number of scans that were recovered so callers can log the event.
 pub async fn recover_stale_scans(
     pool: &PgPool,
     stale_threshold: std::time::Duration,
@@ -737,10 +756,12 @@ pub async fn recover_stale_scans(
     let result = sqlx::query!(
         r#"
         UPDATE cve_scans
-        SET status = 'pending',
+        SET status = 'failed',
+            completed_at = NOW(),
             attempts = attempts + 1,
             scan_metadata = COALESCE(scan_metadata, '{}'::jsonb) || 
-                           jsonb_build_object('stale_recovered_at', NOW()::text)
+                           jsonb_build_object('stale_recovered_at', NOW()::text,
+                                              'stale_recovery_reason', 'server-crash-recovery')
         WHERE status = 'in_progress'
           AND created_at < NOW() - $1 * INTERVAL '1 second'
         "#,
@@ -797,8 +818,9 @@ pub async fn get_targets_needing_cve_rescan(
         -- "deployed" uses an EXISTS check against active systems, matching on:
         --   - flake (via commits → systems.flake_id)
         --   - effective configuration name (system_configuration_name or hostname)
-        -- This prevents derivations from other flakes or with different names
-        -- from being classified as deployed.
+        --   - the derivation's .drv path matches the latest system_states row
+        --     for that hostname (ensures only the currently deployed generation
+        --     is classified as deployed, not every historical build).
         lifecycle AS (
             SELECT
                 d.id AS derivation_id,
@@ -810,6 +832,14 @@ pub async fn get_targets_needing_cve_rescan(
                         WHERE c.id = d.commit_id
                           AND s.is_active = TRUE
                           AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = d.derivation_name
+                          AND d.derivation_path IS NOT NULL
+                          AND d.derivation_path = (
+                              SELECT ss.derivation_path
+                              FROM system_states ss
+                              WHERE ss.hostname = s.hostname
+                              ORDER BY ss.timestamp DESC
+                              LIMIT 1
+                          )
                     ) THEN 'deployed'
                     WHEN d.completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
                     ELSE 'archived'
@@ -862,19 +892,37 @@ pub async fn get_targets_needing_cve_rescan(
                 WHERE cs.derivation_id = d.id
                   AND cs.status IN ('pending', 'in_progress')
             )
-            -- Exclude derivations with 5+ consecutive failures since the last
-            -- successful scan (prevents hammering permanently-failing targets
-            -- while allowing recovery once the root cause is fixed).
-            AND (
-                SELECT COUNT(*) FROM cve_scans cs
-                WHERE cs.derivation_id = d.id
-                  AND cs.status = 'failed'
-                  AND (cs.created_at > COALESCE(
-                      (SELECT MAX(created_at) FROM cve_scans
-                       WHERE derivation_id = d.id AND status = 'completed'),
-                      '1970-01-01'::timestamp
-                  ))
-            ) < 5
+            -- Exclude derivations only when there are 5+ consecutive failures
+            -- AND the backoff window hasn't elapsed yet (min(30min × failures,
+            -- 24h)).  Once the backoff expires the derivation becomes eligible
+            -- again — there is no permanent exclusion.
+            AND NOT (
+                (SELECT COUNT(*) FROM cve_scans cs
+                 WHERE cs.derivation_id = d.id
+                   AND cs.status = 'failed'
+                   AND (cs.created_at > COALESCE(
+                       (SELECT MAX(created_at) FROM cve_scans
+                        WHERE derivation_id = d.id AND status = 'completed'),
+                       '1970-01-01'::timestamp
+                   ))
+                ) >= 5
+                AND NOW() - (
+                    SELECT MAX(created_at) FROM cve_scans
+                    WHERE derivation_id = d.id AND status = 'failed'
+                ) < LEAST(
+                    (
+                        SELECT COUNT(*) FROM cve_scans cs
+                        WHERE cs.derivation_id = d.id
+                          AND cs.status = 'failed'
+                          AND (cs.created_at > COALESCE(
+                              (SELECT MAX(created_at) FROM cve_scans
+                               WHERE derivation_id = d.id AND status = 'completed'),
+                              '1970-01-01'::timestamp
+                          ))
+                    ) * INTERVAL '30 minutes',
+                    INTERVAL '24 hours'
+                )
+            )
             -- Staleness check per lifecycle class, skipping 'never' intervals
             AND (
                 (lc.lifecycle_class = 'deployed'
@@ -933,4 +981,217 @@ pub async fn get_targets_needing_cve_rescan(
         .collect();
 
     Ok(derivations)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::queries::commits::insert_commit;
+    use crate::queries::derivations::{EvaluationStatus, insert_derivation};
+    use crate::queries::flakes::insert_flake;
+
+    /// Helper to create a minimal flake, commit, and derivation for testing.
+    async fn setup_test_derivation(pool: &PgPool) -> (i32, String) {
+        let flake = insert_flake(
+            pool,
+            "test-flake",
+            "https://example.com/test.git",
+            "main",
+            "nixos",
+        )
+        .await
+        .expect("flake should be created");
+
+        insert_commit(
+            pool,
+            "abcdef1234567890abcdef1234567890abcdef12",
+            "https://example.com/test.git",
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("commit should be created");
+
+        // Create a derivation with build-complete status
+        let derivation = insert_derivation(
+            pool,
+            None, // no commit needed for this test
+            "test-host",
+            "nixos",
+        )
+        .await
+        .expect("derivation should be created");
+
+        // Update to build-complete with a store path so the scan queries pick it up
+        sqlx::query!(
+            r#"
+            UPDATE derivations
+            SET status_id = $1,
+                store_path = '/nix/store/00000000000000000000000000000000-test',
+                completed_at = NOW(),
+                derivation_path = '/nix/store/00000000000000000000000000000000-test.drv'
+            WHERE id = $2
+            "#,
+            EvaluationStatus::BuildComplete.as_id(),
+            derivation.id,
+        )
+        .execute(pool)
+        .await
+        .expect("derivation status should be updated");
+        // Insert a scan_schedule_policy row so the rescan query doesn't fail.
+        sqlx::query!(
+            r#"
+            INSERT INTO scan_schedule_policy (id, on_build, deployed_interval, recent_interval, archived_interval, archived_enabled)
+            VALUES (1, true, '24h', '24h', '168h', true)
+            ON CONFLICT (id) DO NOTHING
+            "#,
+        )
+        .execute(pool)
+        .await
+        .expect("scan schedule policy should be inserted");
+
+        (derivation.id, derivation.derivation_name)
+    }
+
+    /// An unscanned derivation with build-complete status should be selected
+    /// for post-build scanning.
+    #[sqlx::test]
+    #[ignore = "requires live database connection"]
+    async fn get_targets_needing_cve_scan_selects_unscanned_derivation(pool: PgPool) {
+        setup_test_derivation(&pool).await;
+
+        let targets = get_targets_needing_cve_scan(&pool, Some(10))
+            .await
+            .expect("should fetch targets");
+
+        assert!(
+            !targets.is_empty(),
+            "unscanned derivation should be selected"
+        );
+        assert!(
+            targets.iter().any(|d| d.derivation_name == "test-host"),
+            "test-host should be among targets"
+        );
+    }
+
+    /// A derivation with an in_progress scan should NOT be selected.
+    #[sqlx::test]
+    #[ignore = "requires live database connection"]
+    async fn get_targets_needing_cve_scan_excludes_in_progress(pool: PgPool) {
+        let (derivation_id, _) = setup_test_derivation(&pool).await;
+
+        let scan_id = create_cve_scan(&pool, derivation_id, "vulnix", None)
+            .await
+            .expect("scan should be created");
+        mark_scan_in_progress(&pool, scan_id)
+            .await
+            .expect("scan should be marked in_progress");
+
+        let targets = get_targets_needing_cve_scan(&pool, Some(10))
+            .await
+            .expect("should fetch targets");
+
+        assert!(
+            !targets.iter().any(|d| d.id == derivation_id),
+            "derivation with in_progress scan should be excluded"
+        );
+    }
+
+    /// recover_stale_scans should mark old in_progress scans as failed,
+    /// making the derivation eligible again.
+    #[sqlx::test]
+    #[ignore = "requires live database connection"]
+    async fn recover_stale_scans_unblocks_derivation(pool: PgPool) {
+        let (derivation_id, _) = setup_test_derivation(&pool).await;
+
+        // Create a scan and mark it in_progress with an old timestamp.
+        let scan_id = create_cve_scan(&pool, derivation_id, "vulnix", None)
+            .await
+            .expect("scan should be created");
+        mark_scan_in_progress(&pool, scan_id)
+            .await
+            .expect("scan should be marked in_progress");
+
+        // Artificially age the scan so it appears stale.
+        sqlx::query!(
+            r#"
+            UPDATE cve_scans
+            SET created_at = NOW() - '2 hours'::INTERVAL
+            WHERE id = $1
+            "#,
+            scan_id,
+        )
+        .execute(&pool)
+        .await
+        .expect("scan should be aged");
+
+        // Derivation should be excluded while scan is in_progress.
+        let targets_before = get_targets_needing_cve_scan(&pool, Some(10))
+            .await
+            .expect("should fetch targets");
+        assert!(
+            !targets_before.iter().any(|d| d.id == derivation_id),
+            "derivation should be excluded with in_progress scan"
+        );
+
+        // Recover stale scans (30-minute threshold → the 2-hour-old scan is stale).
+        let recovered = recover_stale_scans(&pool, std::time::Duration::from_secs(1800))
+            .await
+            .expect("recovery should succeed");
+        assert_eq!(recovered, 1, "one scan should be recovered");
+
+        // Verify the scan is now marked as failed.
+        let scan = get_scan_by_id(&pool, scan_id)
+            .await
+            .expect("should fetch scan")
+            .expect("scan should exist");
+        assert_eq!(
+            scan.status,
+            ScanStatus::Failed,
+            "recovered scan should be failed"
+        );
+
+        // Derivation should now be eligible again.
+        let targets_after = get_targets_needing_cve_scan(&pool, Some(10))
+            .await
+            .expect("should fetch targets");
+        assert!(
+            targets_after.iter().any(|d| d.id == derivation_id),
+            "derivation should be eligible again after recovery"
+        );
+    }
+
+    /// A stale completed scan should be selected for rescan when the policy
+    /// interval has elapsed.
+    #[sqlx::test]
+    #[ignore = "requires live database connection"]
+    async fn get_targets_needing_cve_rescan_selects_stale_scan(pool: PgPool) {
+        let (derivation_id, _) = setup_test_derivation(&pool).await;
+
+        // Create a completed scan that is old enough to be stale.
+        let scan_id = create_cve_scan(&pool, derivation_id, "vulnix", None)
+            .await
+            .expect("scan should be created");
+        sqlx::query!(
+            r#"
+            UPDATE cve_scans
+            SET status = 'completed',
+                completed_at = NOW() - '48 hours'::INTERVAL,
+                created_at = NOW() - '48 hours'::INTERVAL
+            WHERE id = $1
+            "#,
+            scan_id,
+        )
+        .execute(&pool)
+        .await
+        .expect("scan should be aged as completed");
+
+        // Rescan query should pick it up (deployed_interval is 24h, scan is 48h old).
+        let targets = get_targets_needing_cve_rescan(&pool, Some(10))
+            .await
+            .expect("should fetch rescan targets");
+        assert!(
+            targets.iter().any(|d| d.id == derivation_id),
+            "stale completed scan should be selected for rescan"
+        );
+    }
 }
