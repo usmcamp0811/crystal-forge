@@ -12,6 +12,7 @@ use super::types::{
 #[component]
 pub fn PolicyCard(
     policy: PolicyDefinition,
+    on_open: EventHandler<PolicyDefinition>,
     on_edit: EventHandler<PolicyDefinition>,
     on_delete: EventHandler<Uuid>,
     #[props(default = false)] highlighted: bool,
@@ -29,18 +30,20 @@ pub fn PolicyCard(
     };
     let category_color = category.color();
     let opacity = if enabled { "1" } else { "0.72" };
+    let policy_for_open = policy.clone();
     let policy_for_edit = policy.clone();
     let policy_id = policy.id;
 
     rsx! {
         div {
             class: "sys-card",
+            onclick: move |_| on_open.call(policy_for_open.clone()),
             style: if highlighted {
                 format!(
                     "--status-color: {category_color}; opacity: {opacity}; box-shadow: inset 0 0 0 1px color-mix(in oklab, {category_color} 55%, transparent), 0 0 0 2px color-mix(in oklab, {category_color} 22%, transparent); background: color-mix(in oklab, {category_color} 7%, var(--cf-card-bg));"
                 )
             } else {
-                format!("--status-color: {category_color}; opacity: {opacity};")
+                format!("--status-color: {category_color}; opacity: {opacity}; cursor: pointer;")
             },
             "data-policy-card": "true",
             "data-policy-name": "{policy.name}",

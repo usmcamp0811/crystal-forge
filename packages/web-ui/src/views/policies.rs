@@ -28,6 +28,7 @@ pub fn PoliciesView() -> Element {
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let mut policy_library: Signal<Vec<PolicyDefinition>> = use_signal(Vec::new);
     let mut show_editor = use_signal(|| false);
+    let mut drawer_policy = use_signal(|| None::<PolicyDefinition>);
 
     use_effect(move || {
         spawn(async move {
@@ -74,6 +75,7 @@ pub fn PoliciesView() -> Element {
             type_filter.set("all".to_string());
             search_query.set(String::new());
             focused_policy_name.set(Some(policy.name.clone()));
+            drawer_policy.set(Some(policy.clone()));
 
             #[cfg(target_arch = "wasm32")]
             {
@@ -275,6 +277,9 @@ pub fn PoliciesView() -> Element {
                                 PolicyCard {
                                     key: "{policy.id}",
                                     policy: policy.clone(),
+                                    on_open: move |p: PolicyDefinition| {
+                                        drawer_policy.set(Some(p));
+                                    },
                                     highlighted: focused_policy_name.read().as_ref() == Some(&policy.name),
                                     on_edit: move |p: PolicyDefinition| {
                                         editing_policy_id.set(Some(p.id));
@@ -306,6 +311,22 @@ pub fn PoliciesView() -> Element {
                 }
             }
 
+            if let Some(policy) = drawer_policy.read().clone() {
+                PolicyDrawer {
+                    policy,
+                    on_close: move |_| drawer_policy.set(None),
+                    on_edit: move |policy: PolicyDefinition| {
+                        drawer_policy.set(None);
+                        editing_policy_id.set(Some(policy.id));
+                        edit_name.set(policy.name.clone());
+                        edit_description.set(policy.description.clone());
+                        edit_body.set(policy.body.clone());
+                        edit_format.set(policy.format);
+                        show_editor.set(true);
+                    },
+                }
+            }
+
             if let Some(id) = *delete_confirm.read() {
                 DeleteConfirmModal {
                     policy_id: id,
@@ -327,6 +348,99 @@ pub fn PoliciesView() -> Element {
                         });
                     },
                     on_cancel: move |_| delete_confirm.set(None),
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn PolicyDrawer(
+    policy: PolicyDefinition,
+    on_close: EventHandler<MouseEvent>,
+    on_edit: EventHandler<PolicyDefinition>,
+) -> Element {
+    let category = policy_category(&policy);
+    let rules = crate::components::policy::policy_rule_summaries(&policy);
+    let is_core = is_core_policy(&policy);
+    let policy_for_edit = policy.clone();
+
+    rsx! {
+        div {
+            class: "fl-tray-backdrop",
+            onclick: move |evt| on_close.call(evt),
+        }
+        aside {
+            class: "fl-tray",
+            role: "dialog",
+            "aria-label": "Policy detail",
+            header {
+                class: "fl-tray-head",
+                div {
+                    style: "display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;",
+                    div { style: "min-width: 0;",
+                        div {
+                            style: "display: flex; align-items: center; gap: 8px; flex-wrap: wrap;",
+                            span { class: "mono", style: "font-weight: 700; font-size: 15px;", "{policy.name}" }
+                            span {
+                                class: "chip",
+                                style: "color: {category.color()}; background: color-mix(in oklab, {category.color()} 14%, transparent);",
+                                "{category.label()}"
+                            }
+                            if is_core {
+                                span { class: "chip chip-info", "built-in" }
+                            } else {
+                                span { class: "chip chip-healthy", "custom" }
+                            }
+                        }
+                        div {
+                            style: "font-size: 12px; color: var(--cf-text-muted); margin-top: 4px;",
+                            "{policy.description}"
+                        }
+                    }
+                }
+                div { style: "display: flex; gap: 6px; align-items: center;",
+                    if !is_core {
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| on_edit.call(policy_for_edit.clone()),
+                            "Edit"
+                        }
+                    }
+                    button {
+                        class: "btn-icon focus-ring",
+                        onclick: move |evt| on_close.call(evt),
+                        title: "Close",
+                        crate::components::icon::Icon { name: crate::components::icon::IconName::X, size: 16 }
+                    }
+                }
+            }
+            div {
+                class: "ed-body",
+                div { style: "display: flex; flex-direction: column; gap: 16px;",
+                    div {
+                        h3 { style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 8px;", "Rules" }
+                        if rules.is_empty() {
+                            div { style: "font-size: 12px; color: var(--cf-text-muted);", "No automated rules — operator approves directly." }
+                        } else {
+                            div { style: "display: flex; flex-direction: column; gap: 8px;",
+                                for rule in rules {
+                                    div {
+                                        style: "font-size: 12px; color: var(--cf-text-primary);",
+                                        "{rule.label}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div {
+                        h3 { style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 8px;", "Definition" }
+                        pre {
+                            class: "mono",
+                            style: "margin: 0; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; padding: 12px; border-radius: 8px; background: var(--cf-subtle-bg);",
+                            "{policy.body}"
+                        }
+                    }
                 }
             }
         }
