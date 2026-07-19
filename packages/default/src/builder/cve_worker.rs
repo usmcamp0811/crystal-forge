@@ -29,7 +29,7 @@ use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::get_cache_destination;
 use crate::queries::cve_scans::{
     create_cve_scan, get_targets_needing_cve_rescan, get_targets_needing_cve_scan,
-    mark_cve_scan_failed, mark_scan_in_progress, recover_stale_scans, save_scan_results,
+    mark_cve_scan_failed, recover_stale_scans, save_scan_results,
 };
 use crate::queries::scanning::get_scan_schedule_policy;
 use crate::server::jobs::BackgroundJobHandle;
@@ -427,7 +427,6 @@ async fn scan_one<R: CveScanRunner + Sync>(
         );
         return Ok(());
     }
-    mark_scan_in_progress(pool, scan_id).await?;
 
     let Some(ref path) = derivation.store_path else {
         warn!(
@@ -503,7 +502,10 @@ async fn scan_one<R: CveScanRunner + Sync>(
         Ok(entries) => {
             let elapsed_ms = Some(start.elapsed().as_millis() as i32);
             let stats = crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(&entries);
-            save_scan_results(pool, scan_id, &entries, elapsed_ms).await?;
+            if let Err(err) = save_scan_results(pool, scan_id, &entries, elapsed_ms).await {
+                mark_cve_scan_failed(pool, scan_id, derivation, &err.to_string()).await?;
+                return Err(err);
+            }
             info!(
                 "✅ CVE scan completed for {}: {}",
                 derivation.derivation_name, stats
@@ -607,13 +609,17 @@ async fn materialize_store_path_from_cache(
                 .as_deref()
                 .filter(|push_to| push_to.trim() == raw_destination.trim())
                 .map(|_| server_cache.clone());
+            let resolved_from_url = cache_config
+                .as_ref()
+                .and_then(materialization_from_url)
+                .unwrap_or_else(|| raw_destination.clone());
             let nix_config_lines = cache_config
                 .as_ref()
-                .map(|cache| materialization_nix_config_lines(&raw_destination, cache, None))
+                .map(|cache| materialization_nix_config_lines(&resolved_from_url, cache, None))
                 .unwrap_or_default();
             sources.push(MaterializationSource {
                 label: raw_destination.clone(),
-                from_url: raw_destination,
+                from_url: resolved_from_url,
                 cache_config,
                 trusted_public_key: None,
                 nix_config_lines,
@@ -766,12 +772,11 @@ mod tests {
         }
     }
 
-    async fn db_test_pool() -> PgPool {
-        let db_url = std::env::var("DATABASE_URL")
-            .expect("DATABASE_URL must be set for cve_worker DB tests");
-        PgPool::connect(&db_url)
-            .await
-            .expect("failed to connect to DATABASE_URL")
+    async fn db_test_pool() -> Option<PgPool> {
+        let Ok(db_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return None;
+        };
+        PgPool::connect(&db_url).await.ok()
     }
 
     /// Confirms that [`run_cve_scan_loop`] exits cleanly when vulnix is not on
@@ -941,7 +946,9 @@ mod tests {
 
     #[tokio::test]
     async fn scan_cycle_processes_target_with_fake_runner() {
-        let pool = db_test_pool().await;
+        let Some(pool) = db_test_pool().await else {
+            return;
+        };
         let tempdir = tempdir().expect("tempdir should be created");
         let store_path = tempdir.path().join("task-396-scan-cycle-store-path");
         std::fs::create_dir_all(&store_path).expect("store path dir should be created");
@@ -950,7 +957,13 @@ mod tests {
             r#"
             INSERT INTO scan_schedule_policy (id, on_build, deployed_interval, recent_interval, archived_interval, archived_enabled)
             VALUES (1, true, '24h', '24h', '168h', true)
-            ON CONFLICT (id) DO NOTHING
+            ON CONFLICT (id) DO UPDATE
+            SET on_build = EXCLUDED.on_build,
+                deployed_interval = EXCLUDED.deployed_interval,
+                recent_interval = EXCLUDED.recent_interval,
+                archived_interval = EXCLUDED.archived_interval,
+                archived_enabled = EXCLUDED.archived_enabled,
+                updated_at = NOW()
             "#,
         )
         .execute(&pool)

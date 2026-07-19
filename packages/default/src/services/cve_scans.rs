@@ -1,7 +1,6 @@
 use crate::config::CrystalForgeConfig;
 use crate::queries::cve_scans::{
-    create_cve_scan, get_active_scan_for_derivation, mark_cve_scan_failed, mark_scan_in_progress,
-    save_scan_results,
+    create_cve_scan, get_active_scan_for_derivation, mark_cve_scan_failed, save_scan_results,
 };
 use crate::queries::derivations::get_derivation_by_id;
 use crate::vulnix::vulnix_runner::VulnixRunner;
@@ -73,7 +72,6 @@ pub async fn trigger_immediate_cve_scan(
             let vulnix_config = cfg.get_vulnix_config();
             let runner = VulnixRunner::with_config(vulnix_config);
 
-            mark_scan_in_progress(&spawn_pool, scan_id).await?;
             let started = std::time::Instant::now();
 
             match runner
@@ -82,8 +80,14 @@ pub async fn trigger_immediate_cve_scan(
             {
                 Ok(vulnix_entries) => {
                     let scan_duration_ms = Some(started.elapsed().as_millis() as i32);
-                    save_scan_results(&spawn_pool, scan_id, &vulnix_entries, scan_duration_ms)
-                        .await?;
+                    if let Err(err) =
+                        save_scan_results(&spawn_pool, scan_id, &vulnix_entries, scan_duration_ms)
+                            .await
+                    {
+                        mark_cve_scan_failed(&spawn_pool, scan_id, &derivation, &err.to_string())
+                            .await?;
+                        return Err(err);
+                    }
                 }
                 Err(err) => {
                     mark_cve_scan_failed(&spawn_pool, scan_id, &derivation, &err.to_string())

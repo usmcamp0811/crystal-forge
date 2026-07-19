@@ -126,9 +126,11 @@ pub async fn get_targets_needing_cve_scan(
 ///
 /// Uses `ON CONFLICT DO NOTHING` with the partial unique index
 /// `idx_cve_scans_unique_active` to make the claim atomic across concurrent
-/// callers (background loop vs. on-demand request).  If a pending or in-progress
-/// scan already exists for the same derivation, this returns the existing scan's
-/// ID instead of creating a duplicate.
+/// callers (background loop vs. on-demand request). New claims start in
+/// `in_progress` immediately so crashes cannot strand a derivation behind a
+/// never-recovered `pending` row. If a pending or in-progress scan already
+/// exists for the same derivation, this returns the existing scan's ID instead
+/// of creating a duplicate.
 pub async fn create_cve_scan(
     pool: &PgPool,
     derivation_id: i32,
@@ -152,14 +154,14 @@ pub async fn create_cve_scan(
         derivation_id,
         scanner_name,
         scanner_version,
-        "pending" as &str,
+        "in_progress" as &str,
         0i32,
         0i32,
         0i32,
         0i32,
         0i32,
         0i32,
-        0i32
+        1i32
     )
     .execute(pool)
     .await?;
