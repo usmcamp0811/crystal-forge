@@ -356,6 +356,7 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
             return Ok(());
         }
     };
+    let mut scans_remaining = MAX_SCANS_PER_CYCLE;
 
     // --- Phase 1: post-build scans (bounded — at most MAX_SCANS_PER_CYCLE per cycle) ---
     //
@@ -407,6 +408,7 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                             derivation.derivation_name
                         );
                     }
+                    scans_remaining = scans_remaining.saturating_sub(1);
                 }
             }
             Ok(_) => {
@@ -420,6 +422,11 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
         debug!("🔍 on_build = false — skipping post-build phase");
     }
 
+    if scans_remaining == 0 {
+        debug!("🔍 Per-cycle CVE scan budget exhausted — deferring rescans");
+        return Ok(());
+    }
+
     // Check enabled before entering Phase 2.
     if !*enabled_rx.read().await {
         info!("🛑 CVE scan loop disabled — skipping periodic rescan phase");
@@ -427,7 +434,7 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
     }
 
     // --- Phase 2: periodic rescan (stale completed scans, bounded) ---
-    match get_targets_needing_cve_rescan(pool, Some(MAX_SCANS_PER_CYCLE)).await {
+    match get_targets_needing_cve_rescan(pool, Some(scans_remaining)).await {
         Ok(targets) if !targets.is_empty() => {
             info!(
                 "🔄 [rescan] Re-scanning {} stale derivation(s)",

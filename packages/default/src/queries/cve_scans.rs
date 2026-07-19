@@ -375,7 +375,10 @@ pub(crate) async fn save_scan_results_with_store_path_override(
 
     // Package derivation arrays (one row per vulnix entry)
     let pkg_names: Vec<&str> = resolved.iter().map(|(e, _)| e.name.as_str()).collect();
-    let pkg_drv_paths: Vec<&str> = resolved.iter().map(|(e, _)| e.derivation.as_str()).collect();
+    let pkg_drv_paths: Vec<&str> = resolved
+        .iter()
+        .map(|(e, _)| e.derivation.as_str())
+        .collect();
     let pkg_pnames: Vec<Option<&str>> = resolved
         .iter()
         .map(|(e, _)| Some(e.pname.as_str()))
@@ -495,10 +498,10 @@ pub(crate) async fn save_scan_results_with_store_path_override(
     .execute(&mut *tx)
     .await?;
 
-    // 3b. Bulk-upsert package derivations and return their IDs in insertion order.
+    // 3b. Bulk-insert new package derivations without rewriting unchanged rows.
     // Uses sqlx::query (not sqlx::query!) because UNNEST with multi-column SELECT
     // cannot be represented in the offline SQLx metadata cache.
-    let pkg_rows = sqlx::query(
+    sqlx::query(
         r#"
         INSERT INTO derivations (
             commit_id,
@@ -530,11 +533,7 @@ pub(crate) async fn save_scan_results_with_store_path_override(
             $4::text[],
             $5::text[]
         ) AS t(name, drv_path, pname, version, store_path)
-        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) DO UPDATE SET
-            pname     = EXCLUDED.pname,
-            version   = EXCLUDED.version,
-            status_id = EXCLUDED.status_id
-        RETURNING id, derivation_name
+        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) DO NOTHING
         "#,
     )
     .bind(&pkg_names as &[&str])
@@ -542,13 +541,26 @@ pub(crate) async fn save_scan_results_with_store_path_override(
     .bind(&pkg_pnames as &[Option<&str>])
     .bind(&pkg_versions as &[String])
     .bind(&pkg_store_paths as &[&str])
+    .execute(&mut *tx)
+    .await?;
+
+    // Fetch IDs for both newly inserted and pre-existing packages in one query.
+    let pkg_rows = sqlx::query(
+        r#"
+        SELECT id, derivation_name
+        FROM derivations
+        WHERE commit_id IS NULL
+          AND derivation_type = 'package'
+          AND derivation_name = ANY($1::text[])
+        "#,
+    )
+    .bind(&pkg_names as &[&str])
     .fetch_all(&mut *tx)
     .await?;
 
-    // Build name → derivation_id map.
     let mut name_to_id: HashMap<String, i32> = HashMap::with_capacity(pkg_rows.len());
     let mut pkg_drv_ids: Vec<i32> = Vec::with_capacity(pkg_rows.len());
-    for row in &pkg_rows {
+    for row in pkg_rows {
         let id: i32 = row.get("id");
         let name: String = row.get("derivation_name");
         name_to_id.insert(name, id);
