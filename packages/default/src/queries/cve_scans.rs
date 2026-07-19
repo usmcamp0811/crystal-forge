@@ -378,11 +378,11 @@ pub(crate) async fn save_scan_results_with_store_path_override(
     let pkg_drv_paths: Vec<&str> = resolved.iter().map(|(e, _)| e.derivation.as_str()).collect();
     let pkg_pnames: Vec<Option<&str>> = resolved
         .iter()
-        .map(|(e, _)| e.pname.as_deref())
+        .map(|(e, _)| Some(e.pname.as_str()))
         .collect();
     let pkg_versions: Vec<String> = resolved
         .iter()
-        .map(|(e, _)| truncate_for_varchar(&e.version, 100).into_owned())
+        .map(|(e, _)| truncate_for_varchar(&e.version, 100))
         .collect();
     let pkg_store_paths: Vec<&str> = resolved.iter().map(|(_, sp)| sp.as_str()).collect();
 
