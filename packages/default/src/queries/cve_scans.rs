@@ -295,6 +295,38 @@ pub async fn mark_cve_scan_failed(
     Ok(())
 }
 
+/// Mark a specific CVE scan as failed when the full derivation row is not
+/// available (for example, if loading the derivation itself failed).
+pub async fn mark_cve_scan_failed_by_id(
+    pool: &PgPool,
+    scan_id: Uuid,
+    derivation_id: i32,
+    error_message: &str,
+) -> Result<()> {
+    let metadata = serde_json::json!({
+        "error": error_message,
+        "derivation_id": derivation_id,
+    });
+
+    sqlx::query!(
+        r#"
+        UPDATE cve_scans
+        SET
+            status = $1,
+            completed_at = NOW(),
+            scan_metadata = $2
+        WHERE id = $3
+        "#,
+        "failed" as &str,
+        metadata,
+        scan_id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 /// Save complete scan results to database
 pub async fn save_scan_results(
     pool: &PgPool,

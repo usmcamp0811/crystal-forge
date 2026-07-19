@@ -100,6 +100,7 @@ fn cache_destination_to_config(dest: &CacheDestination) -> CacheConfig {
         s3_endpoint_url: dest.s3_endpoint_url.clone(),
         attic_token: dest.attic_token.clone(),
         attic_cache_name: dest.attic_cache_name.clone(),
+        attic_public_key: dest.attic_public_key.clone(),
         attic_ignore_upstream_cache_filter: dest.attic_ignore_upstream_cache_filter.unwrap_or(true),
         attic_jobs: dest.attic_jobs.unwrap_or(5) as u32,
         max_retries: dest.max_retries.unwrap_or(3) as u32,
@@ -135,6 +136,10 @@ fn materialization_nix_config_lines(
     trusted_public_key: Option<&str>,
 ) -> Vec<String> {
     let mut lines = vec![format!("extra-substituters = {from_url}")];
+
+    if !cache_config.require_sigs {
+        lines.push("require-sigs = false".to_string());
+    }
 
     if let Some(public_key) = trusted_public_key
         .map(str::trim)
@@ -280,11 +285,12 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
 ) -> Result<()> {
     set_cve_status_working("finding scan targets").await;
 
-    // Derive stale-recovery threshold from the vulnix timeout rather than a
-    // hardcoded constant.  A legitimate in-progress scan may take up to the
-    // configured timeout to complete; we add a 120 s safety margin on top.
+    // Derive stale-recovery threshold from both the vulnix timeout and the
+    // worst-case single-cache materialization timeout, plus a small margin.
+    const MATERIALIZATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
     let stale_threshold = vulnix_config
         .timeout
+        .saturating_add(MATERIALIZATION_TIMEOUT)
         .saturating_add(std::time::Duration::from_secs(120));
     match recover_stale_scans(pool, stale_threshold).await {
         Ok(n) if n > 0 => warn!("Recovered {n} stale in_progress CVE scan(s)"),
@@ -621,7 +627,7 @@ async fn materialize_store_path_from_cache(
                 label: raw_destination.clone(),
                 from_url: resolved_from_url,
                 cache_config,
-                trusted_public_key: None,
+                trusted_public_key: server_cache.attic_public_key.clone(),
                 nix_config_lines,
             });
         }
@@ -776,7 +782,11 @@ mod tests {
         let Ok(db_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
             return None;
         };
-        PgPool::connect(&db_url).await.ok()
+        Some(
+            PgPool::connect(&db_url)
+                .await
+                .expect("failed to connect to CRYSTAL_FORGE_TEST_DATABASE_URL"),
+        )
     }
 
     /// Confirms that [`run_cve_scan_loop`] exits cleanly when vulnix is not on

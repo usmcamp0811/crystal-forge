@@ -1,6 +1,7 @@
 use crate::config::CrystalForgeConfig;
 use crate::queries::cve_scans::{
-    create_cve_scan, get_active_scan_for_derivation, mark_cve_scan_failed, save_scan_results,
+    create_cve_scan, get_active_scan_for_derivation, mark_cve_scan_failed,
+    mark_cve_scan_failed_by_id, save_scan_results,
 };
 use crate::queries::derivations::get_derivation_by_id;
 use crate::vulnix::vulnix_runner::VulnixRunner;
@@ -100,6 +101,14 @@ pub async fn trigger_immediate_cve_scan(
         .await;
 
         if let Err(err) = result {
+            if let Err(mark_err) =
+                mark_cve_scan_failed_by_id(&spawn_pool, scan_id, derivation_id, &err.to_string())
+                    .await
+            {
+                error!(
+                    "Failed to mark immediate CVE scan {scan_id} as failed after setup error: {mark_err:#}"
+                );
+            }
             error!("Immediate CVE scan task failed for derivation {derivation_id}: {err:#}");
         }
     });

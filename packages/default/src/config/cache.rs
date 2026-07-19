@@ -25,6 +25,7 @@ pub struct CacheConfig {
     // Attic-specific
     pub attic_token: Option<String>,
     pub attic_cache_name: Option<String>,
+    pub attic_public_key: Option<String>,
     pub attic_ignore_upstream_cache_filter: bool, // Fixed typo: upsream -> upstream
     pub attic_jobs: u32,                          // parallel upload method in attic
     // Retry configuration
@@ -197,6 +198,7 @@ impl Default for CacheConfig {
             s3_endpoint_url: None,
             attic_token: None,
             attic_cache_name: None,
+            attic_public_key: None,
             attic_ignore_upstream_cache_filter: true, // Fixed typo
             attic_jobs: 5,                            // the same as the attic default
             max_retries: 3,

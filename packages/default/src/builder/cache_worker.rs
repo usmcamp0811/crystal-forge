@@ -46,6 +46,7 @@ fn cache_destination_to_config(dest: &CacheDestination) -> CacheConfig {
         s3_endpoint_url: dest.s3_endpoint_url.clone(),
         attic_token: dest.attic_token.clone(),
         attic_cache_name: dest.attic_cache_name.clone(),
+        attic_public_key: dest.attic_public_key.clone(),
         attic_ignore_upstream_cache_filter: dest.attic_ignore_upstream_cache_filter.unwrap_or(true),
         attic_jobs: dest.attic_jobs.unwrap_or(5) as u32,
         max_retries: dest.max_retries.unwrap_or(3) as u32,
