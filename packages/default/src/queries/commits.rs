@@ -235,6 +235,7 @@ pub async fn mark_commit_evaluation_started(pool: &PgPool, commit_id: i32) -> Re
         SET 
             evaluation_status = 'in_progress',
             evaluation_started_at = NOW(),
+            evaluation_completed_at = NULL,
             evaluation_attempt_count = COALESCE(evaluation_attempt_count, 0) + 1
         WHERE id = $1
         "#,
@@ -299,6 +300,10 @@ pub async fn mark_commit_evaluation_failed(
                 WHEN COALESCE(evaluation_attempt_count, 0) >= 3 THEN 'failed'
                 ELSE 'pending'
             END,
+            evaluation_completed_at = CASE
+                WHEN COALESCE(evaluation_attempt_count, 0) >= 3 THEN NOW()
+                ELSE NULL
+            END,
             evaluation_error_message = $2
         WHERE id = $1
         "#,
@@ -333,6 +338,7 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
             evaluation_status = 'pending',
             evaluation_attempt_count = 0,
             evaluation_started_at = NULL,
+            evaluation_completed_at = NULL,
             evaluation_error_message = NULL
         WHERE id = $1
         RETURNING id, git_commit_hash
