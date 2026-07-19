@@ -105,13 +105,18 @@ impl BackgroundJobHandle {
 
     /// Enable or disable the job.
     ///
-    /// After updating the flag, fires `enabled_changed_tx` so the background
-    /// task's disabled-sleep wakes up immediately rather than waiting out the
-    /// full poll interval.
+    /// Fires `enabled_changed_tx` only when the value actually changes so that
+    /// redundant calls (e.g. `set_enabled(true)` while already enabled) do not
+    /// spuriously wake the background loop.
     pub async fn set_enabled(&self, enabled: bool) {
-        *self.state.enabled.write().await = enabled;
-        // Best-effort wake — ignore if no receivers are listening.
-        let _ = self.state.enabled_changed_tx.send(());
+        let mut guard = self.state.enabled.write().await;
+        let changed = *guard != enabled;
+        *guard = enabled;
+        drop(guard);
+        if changed {
+            // Best-effort wake — ignore if no receivers are listening.
+            let _ = self.state.enabled_changed_tx.send(());
+        }
         info!(
             "⚙️  Background job '{}' {}",
             self.id,

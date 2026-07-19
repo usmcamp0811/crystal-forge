@@ -232,6 +232,7 @@ pub async fn run_cve_scan_loop(
             tokio::select! {
                 _ = sleep(vulnix_config.poll_interval) => {}
                 _ = run_now_rx.changed() => {}
+                _ = enabled_changed_rx.changed() => {}
             }
             let _ = run_now_rx.borrow_and_update();
             continue;
@@ -274,17 +275,16 @@ pub async fn run_cve_scan_loop(
                     .unwrap_or(chrono::Duration::seconds(60)),
         );
 
-        // Wait for either the poll interval or a run-now signal.
-        // The run-now channel uses a monotonically increasing counter so every
-        // trigger fires `changed()` **at least once**.  Rapid consecutive
-        // triggers may coalesce because `watch::Receiver::changed()` coalesces
-        // intermediate values, but this is harmless — the loop will pick up any
-        // remaining work on the next cycle.
+        // Wait for the poll interval, a run-now signal, or an enable/disable
+        // change — whichever comes first.  All three sources can legitimately
+        // cut the wait short; the top of the loop re-reads `enabled` so a
+        // spurious wake from the enabled-changed channel is harmless.
         tokio::select! {
             _ = sleep(vulnix_config.poll_interval) => {}
             _ = run_now_rx.changed() => {
                 info!("⚡ CVE scan loop: run-now signal received — starting immediate cycle");
             }
+            _ = enabled_changed_rx.changed() => {}
         }
     }
 }
