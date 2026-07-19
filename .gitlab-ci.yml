@@ -375,6 +375,10 @@ cve-processing-test:
   services:
     - name: postgres:16-alpine
       alias: postgres
+      entrypoint:
+        - /usr/local/bin/docker-entrypoint.sh
+      command:
+        - postgres
   variables:
     POSTGRES_DB: cf_cve_test
     POSTGRES_USER: cf_cve_test
