@@ -304,26 +304,30 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
     })
 }
 
-/// Fetch recent completed/failed builds for history views.
-pub async fn fetch_recent_build_history(pool: &PgPool, limit: i64) -> Result<Vec<BuildQueueItem>> {
-    let rows = sqlx::query_as::<
-        _,
-        (
-            Option<Uuid>,
-            Option<Uuid>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            String,
-            Option<String>,
-            DateTime<Utc>,
-            Option<DateTime<Utc>>,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-        ),
-    >(
+/// Fetch recent completed/failed builds for history views as a growing prefix.
+pub async fn fetch_recent_build_history(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<BuildQueuePageResponse> {
+    #[derive(sqlx::FromRow)]
+    struct RecentBuildRow {
+        job_id: Option<Uuid>,
+        system_id: Option<Uuid>,
+        hostname: Option<String>,
+        flake_name: Option<String>,
+        commit_hash: Option<String>,
+        commit_message: Option<String>,
+        status: String,
+        builder_name: Option<String>,
+        queued_at: DateTime<Utc>,
+        started_at: Option<DateTime<Utc>>,
+        elapsed_secs: Option<i64>,
+        logs: Option<String>,
+        environment: Option<String>,
+        total_count: i64,
+    }
+
+    let rows = sqlx::query_as::<_, RecentBuildRow>(
         r#"
         SELECT
             bj.id AS job_id,
@@ -341,7 +345,8 @@ pub async fn fetch_recent_build_history(pool: &PgPool, limit: i64) -> Result<Vec
                 ELSE EXTRACT(EPOCH FROM (bj.completed_at - bj.started_at))::BIGINT
             END AS elapsed_secs,
             bj.logs,
-            e.name AS environment
+            e.name AS environment,
+            COUNT(*) OVER () AS total_count
         FROM build_jobs bj
         JOIN derivations d ON d.id = bj.derivation_id
         LEFT JOIN commits c ON c.id = d.commit_id
@@ -358,55 +363,48 @@ pub async fn fetch_recent_build_history(pool: &PgPool, limit: i64) -> Result<Vec
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(
-            |(
-                job_id,
-                system_id,
-                hostname,
-                flake_name,
-                commit_hash,
-                commit_message,
-                status,
-                builder_name,
-                queued_at,
-                started_at,
-                elapsed_secs,
-                logs,
-                environment,
-            )| {
-                let status = match status.as_str() {
-                    "failed" => BuildStatus::Failed,
-                    "success" => BuildStatus::Complete,
-                    "cancelled" => BuildStatus::Cancelled,
-                    "building" => BuildStatus::Building,
-                    "cancelling" => BuildStatus::Cancelling,
-                    "queued" => BuildStatus::Queued,
-                    _ => BuildStatus::Idle,
-                };
+    let total = rows.first().map(|row| row.total_count).unwrap_or(0);
 
-                BuildQueueItem {
-                    job_id,
-                    system_id,
-                    hostname: hostname.unwrap_or_else(|| "unknown".to_string()),
-                    flake_name: flake_name.unwrap_or_else(|| "unknown".to_string()),
-                    commit_hash: commit_hash.unwrap_or_else(|| "unknown".to_string()),
-                    commit_message,
-                    status,
-                    builder_name,
-                    queued_at,
-                    started_at,
-                    elapsed_secs,
-                    logs,
-                    environment,
-                    total_derivs: 0,
-                    built_derivs: 0,
-                    cached_derivs: 0,
-                }
-            },
-        )
-        .collect())
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            let status = match row.status.as_str() {
+                "failed" => BuildStatus::Failed,
+                "success" => BuildStatus::Complete,
+                "cancelled" => BuildStatus::Cancelled,
+                "building" => BuildStatus::Building,
+                "cancelling" => BuildStatus::Cancelling,
+                "queued" => BuildStatus::Queued,
+                _ => BuildStatus::Idle,
+            };
+
+            BuildQueueItem {
+                job_id: row.job_id,
+                system_id: row.system_id,
+                hostname: row.hostname.unwrap_or_else(|| "unknown".to_string()),
+                flake_name: row.flake_name.unwrap_or_else(|| "unknown".to_string()),
+                commit_hash: row.commit_hash.unwrap_or_else(|| "unknown".to_string()),
+                commit_message: row.commit_message,
+                status,
+                builder_name: row.builder_name,
+                queued_at: row.queued_at,
+                started_at: row.started_at,
+                elapsed_secs: row.elapsed_secs,
+                logs: row.logs,
+                environment: row.environment,
+                total_derivs: 0,
+                built_derivs: 0,
+                cached_derivs: 0,
+            }
+        })
+        .collect();
+
+    Ok(BuildQueuePageResponse {
+        total,
+        page: 1,
+        limit,
+        items,
+    })
 }
 
 /// Fetch build jobs with pagination, filtering, and newest-first ordering.
@@ -417,9 +415,11 @@ pub async fn list_build_queue_paginated(
     pool: &PgPool,
     params: &BuildQueueParams,
 ) -> Result<BuildQueuePageResponse> {
-    let limit = params.limit.min(200).max(1);
+    let limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
     let page = params.page.max(1);
-    let offset = (page - 1) * limit;
+    let offset = (page - 1)
+        .checked_mul(limit)
+        .ok_or_else(|| anyhow::anyhow!("offset overflow: page={} limit={}", page, limit))?;
 
     // Build status filter list. Empty means "all statuses".
     let status_filter: Vec<String> = params

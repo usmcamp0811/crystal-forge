@@ -18,6 +18,9 @@ use crate::api::{
     models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem},
 };
 use crate::components::{Icon, IconName};
+use crate::hooks::{InfiniteScroll, use_infinite_scroll};
+
+const FETCH_LIMIT_MAX: i64 = 10_000; // must match backend LIMIT_MAX
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EvaluationsTab {
@@ -45,7 +48,9 @@ pub fn EvaluationsCommitView(commit_id: i32) -> Element {
 #[component]
 fn EvaluationsPage() -> Element {
     let mut queue_items = use_signal(Vec::<EvalQueueItem>::new);
-    let mut refresh = use_signal(|| 0_u64);
+    let mut active_fetch_limit = use_signal(|| 200_i64);
+    let mut active_refresh = use_signal(|| 0_u64);
+    let mut history_refresh = use_signal(|| 0_u64);
     let mut active_tab = use_signal(|| EvaluationsTab::ActiveQueue);
     let mut drawer_target = use_signal(|| None::<EvalDrawerTarget>);
     let mut history_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
@@ -60,21 +65,24 @@ fn EvaluationsPage() -> Element {
     let mut toast_msg = use_signal(|| None::<String>);
 
     // History tab state
-    let mut history_page = use_signal(|| 1_i64);
+    let mut history_fetch_limit = use_signal(|| 50_i64);
     let mut history_status_filter = use_signal(|| String::from("all"));
     let mut history_flake_filter = use_signal(|| String::from("all"));
-    let mut history_auto_selected = use_signal(|| false);
+    let mut history_select_all_loaded = use_signal(|| true);
     let mut history_ack_cursor = use_signal(|| None::<String>);
     let mut evals_ack_sent = use_signal(|| false);
+    // Accumulated history items across the current page-1 fetch window.
+    let mut history_items_acc: Signal<Vec<EvalHistoryItem>> = use_signal(Vec::new);
+    let mut history_total_acc = use_signal(|| 0_i64);
 
     let history_resource = use_resource(move || async move {
-        let _ = refresh();
-        let page = history_page();
+        let _ = history_refresh();
+        let limit = history_fetch_limit();
         let status = history_status_filter();
         let flake = history_flake_filter();
         fetch_eval_history(
-            page,
-            50,
+            1,
+            limit,
             if status.is_empty() || status == "all" {
                 None
             } else {
@@ -90,23 +98,29 @@ fn EvaluationsPage() -> Element {
     });
 
     let queue_resource = use_resource(move || async move {
-        let _ = refresh();
-        fetch_eval_queue().await
+        let _ = active_refresh();
+        fetch_eval_queue(active_fetch_limit()).await
     });
 
     {
-        let mut refresh = refresh.clone();
+        let mut active_refresh = active_refresh.clone();
+        let mut history_refresh = history_refresh.clone();
+        let mut active_tab = active_tab;
         use_future(move || async move {
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
                     TimeoutFuture::new(3000).await;
-                    refresh.set(refresh() + 1);
+                    if active_tab() == EvaluationsTab::ActiveQueue {
+                        active_refresh.set(active_refresh() + 1);
+                    } else {
+                        history_refresh.set(history_refresh() + 1);
+                    }
                 }
 
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    let _ = refresh;
+                    let _ = (active_refresh, history_refresh);
                     break;
                 }
             }
@@ -119,20 +133,60 @@ fn EvaluationsPage() -> Element {
         }
     });
 
-    // Auto-select all history items on first successful data load.
+    // Replace the loaded history window atomically on each refresh. Fetching
+    // from page 1 with a growing limit avoids inconsistencies from mutable
+    // offset pagination (review finding #1).
     use_effect(move || {
-        let already = *history_auto_selected.read();
+        if let Some(Ok(page_data)) = &*history_resource.read() {
+            history_total_acc.set(page_data.total_count);
+            history_items_acc.set(page_data.items.clone());
+        }
+    });
+
+    // Keep "select all loaded" in sync with newly fetched history rows until
+    // the user manually changes the selection.
+    use_effect(move || {
         if let Some(Ok(page_data)) = &*history_resource.read() {
             history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
-            if !already {
+            if history_select_all_loaded() {
                 let ids: std::collections::HashSet<i32> =
                     page_data.items.iter().map(|item| item.commit_id).collect();
                 if !ids.is_empty() {
                     history_selected_ids.set(ids);
-                    history_auto_selected.set(true);
                 }
             }
         }
+    });
+
+    // Infinite-scroll paging for history — created in the parent so the
+    // parent knows the visible row count for keyboard navigation (review
+    // finding #4) and can own the server-page advancement effect.
+    let hist_reset_key = format!(
+        "hist|{}|{}",
+        history_status_filter(),
+        history_flake_filter()
+    );
+    let hist_paging = use_infinite_scroll(hist_reset_key, 20);
+
+    // Grow the server fetch limit for history, reactive because all signal
+    // reads are inside the closure (review finding #1).
+    use_effect(move || {
+        let loaded_history_len = history_items_acc.read().len();
+        let history_total = history_total_acc();
+        let requested_len = history_fetch_limit();
+        let hist_server_has_more = (loaded_history_len as i64) < history_total.min(FETCH_LIMIT_MAX);
+        let hist_count = hist_paging.count();
+        if (loaded_history_len as i64) >= requested_len
+            && hist_count >= loaded_history_len
+            && loaded_history_len > 0
+            && hist_server_has_more
+        {
+            history_fetch_limit.with_mut(|limit| {
+                *limit = (*limit + 50).min(FETCH_LIMIT_MAX);
+            });
+        }
+        // Re-evaluate the sentinel after the list may have grown.
+        hist_paging.recheck(hist_paging.count().min(loaded_history_len));
     });
 
     let active_items = queue_items
@@ -142,23 +196,69 @@ fn EvaluationsPage() -> Element {
         .cloned()
         .collect::<Vec<_>>();
 
+    // Infinite-scroll paging for the active queue.
+    let active_paging = use_infinite_scroll("active".to_string(), 20);
+    let paged_active_items: Vec<EvalQueueItem> = active_items
+        .iter()
+        .take(active_paging.count())
+        .cloned()
+        .collect();
+    let active_total = queue_resource
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|summary| summary.active_count)
+        .unwrap_or(0);
+    let active_has_more =
+        active_paging.count() < active_items.len()
+        || (active_items.len() as i64) < active_total.min(FETCH_LIMIT_MAX);
+
+    use_effect(move || {
+        if active_tab() == EvaluationsTab::ActiveQueue {
+            let loaded_active_len = queue_items
+                .read()
+                .iter()
+                .filter(|item| is_active_eval_status(&item.evaluation_status))
+                .count();
+            let requested_len = active_fetch_limit();
+            let active_total = queue_resource
+                .read()
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .map(|summary| summary.active_count)
+                .unwrap_or(0);
+            if (loaded_active_len as i64) >= requested_len
+                && active_paging.count() >= loaded_active_len
+                && (loaded_active_len as i64) < active_total.min(FETCH_LIMIT_MAX)
+            {
+                active_fetch_limit.with_mut(|limit| {
+                    *limit = (*limit + 200).min(FETCH_LIMIT_MAX);
+                });
+            }
+            // Re-evaluate the sentinel after the list may have grown.
+            active_paging.recheck(active_paging.count().min(loaded_active_len));
+        }
+    });
+
     let summary_snapshot = queue_resource
         .read()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .cloned();
 
-    let active_count = active_items.len() as i64;
+    let active_count = summary_snapshot
+        .as_ref()
+        .map(|s| s.active_count)
+        .unwrap_or(0);
     let completed_count = summary_snapshot
         .as_ref()
         .map(|s| s.completed_count)
         .unwrap_or(0);
-    let failed_count = queue_items
-        .read()
-        .iter()
-        .filter(|item| item.evaluation_status == "failed")
-        .count() as i64;
-    let total_count = queue_items.read().len() as i64;
+    let failed_count = summary_snapshot
+        .as_ref()
+        .map(|s| s.failed_count)
+        .unwrap_or(0);
+    let total_count = active_count + completed_count;
     let history_count = history_resource
         .read()
         .as_ref()
@@ -168,10 +268,14 @@ fn EvaluationsPage() -> Element {
     use_effect(move || {
         if active_tab() == EvaluationsTab::History && !evals_ack_sent() {
             if let Some(Ok(page_data)) = history_resource.read().as_ref() {
-                let unfiltered_first_page = history_page() == 1
-                    && history_status_filter() == "all"
-                    && history_flake_filter() == "all";
-                let complete_page = page_data.total_count <= page_data.items.len() as i64;
+                let unfiltered_first_page =
+                    history_status_filter() == "all" && history_flake_filter() == "all";
+                // Acknowledge when the page is complete OR when we've reached the
+                // frontend fetch limit (10,000 rows). Beyond that cap, the UI cannot
+                // load more history, so acknowledge what we have rather than blocking
+                // acknowledgement permanently (review finding #2).
+                let complete_page = page_data.total_count <= page_data.items.len() as i64
+                    || page_data.items.len() as i64 >= FETCH_LIMIT_MAX;
                 if unfiltered_first_page && complete_page {
                     let history_failed_count = page_data
                         .items
@@ -185,7 +289,7 @@ fn EvaluationsPage() -> Element {
                         .items
                         .iter()
                         .filter(|item| item.evaluation_status == "failed")
-                        .map(|item| item.commit_id.to_string())
+                        .map(|item| item.alert_occurrence_id.clone())
                         .collect::<Vec<_>>();
                     spawn(async move {
                         if acknowledge_with_cursor_and_ids_async(
@@ -205,18 +309,15 @@ fn EvaluationsPage() -> Element {
         }
     });
     let selected_count = history_selected_ids.read().len();
-    let selected_history_rows = history_resource
-        .read()
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .map(|page| {
-            page.items
-                .iter()
-                .filter(|item| history_selected_ids.read().contains(&item.commit_id))
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let selected_history_rows = {
+        let items = history_items_acc.read();
+        let ids = history_selected_ids.read();
+        items
+            .iter()
+            .filter(|item| ids.contains(&item.commit_id))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let same_flake_pair = selected_history_rows.len() == 2
         && selected_history_rows[0].flake_name == selected_history_rows[1].flake_name;
     let compare_disabled = selected_count != 2 || !same_flake_pair;
@@ -261,15 +362,16 @@ fn EvaluationsPage() -> Element {
                         return;
                     }
 
+                    // Keyboard nav is bounded to the currently *rendered* slice so
+                    // focus never lands on an invisible row (review finding #4).
+                    // `hist_paging` is created in the parent so the visible count
+                    // is directly accessible here, but it may briefly exceed the
+                    // number of actually loaded rows while a server page is in
+                    // flight — cap to the accumulated items count (finding #4).
                     let list_len = if active_tab() == EvaluationsTab::ActiveQueue {
-                        active_items.len()
+                        paged_active_items.len()
                     } else {
-                        history_resource
-                            .read()
-                            .as_ref()
-                            .and_then(|r| r.as_ref().ok())
-                            .map(|p| p.items.len())
-                            .unwrap_or(0)
+                        hist_paging.count().min(history_items_acc.read().len())
                     };
 
                     match evt.key() {
@@ -306,15 +408,13 @@ fn EvaluationsPage() -> Element {
                         Key::Enter => {
                             if let Some(idx) = focused_index() {
                                 if active_tab() == EvaluationsTab::ActiveQueue {
-                                    if let Some(ev) = active_items.get(idx) {
+                                    // Use paged slice — idx is clamped to its length above.
+                                    if let Some(ev) = paged_active_items.get(idx) {
                                         drawer_target.set(Some(EvalDrawerTarget::Queue(ev.clone())));
                                     }
                                 } else {
-                                    let item = history_resource
-                                        .read()
-                                        .as_ref()
-                                        .and_then(|r| r.as_ref().ok())
-                                        .and_then(|p| p.items.get(idx).cloned());
+                                    // Use accumulated history items.
+                                    let item = history_items_acc.read().get(idx).cloned();
                                     if let Some(ev) = item {
                                         drawer_target.set(Some(EvalDrawerTarget::History(ev)));
                                     }
@@ -324,14 +424,14 @@ fn EvaluationsPage() -> Element {
                         Key::Character(ref c) if c == "c" => {
                             if active_tab() == EvaluationsTab::ActiveQueue {
                                 if let Some(idx) = focused_index() {
-                                    if let Some(ev) = active_items.get(idx) {
+                                    if let Some(ev) = paged_active_items.get(idx) {
                                         let commit_id = ev.commit_id;
                                         let can_cancel = matches!(
                                             ev.evaluation_status.as_str(),
                                             "pending" | "in_progress"
                                         );
                                         if can_cancel {
-                                            let mut refresh_sig = refresh;
+                                            let mut refresh_sig = active_refresh;
                                             let mut toast = toast_msg;
                                             spawn(async move {
                                                 if let Err(e) = cancel_commit_evaluation(commit_id).await {
@@ -461,13 +561,21 @@ fn EvaluationsPage() -> Element {
 
                     if active_tab() == EvaluationsTab::ActiveQueue {
                         EvalActiveQueue {
-                            evals: active_items.clone(),
-                            refresh: refresh,
+                            evals: paged_active_items.clone(),
+                            refresh: active_refresh,
                             queue_items: queue_items,
                             drawer_target: drawer_target,
                             focused_index: focused_index,
                             active_selected_ids: active_selected_ids,
                             toast_msg: toast_msg,
+                        }
+                        if active_has_more {
+                            div {
+                                class: "infinite-sentinel",
+                                "data-sentinel": active_paging.sentinel_id(),
+                                onmounted: move |_| active_paging.check_and_register(),
+                                "Loading more…"
+                            }
                         }
                     }
 
@@ -484,8 +592,9 @@ fn EvaluationsPage() -> Element {
                                     class: "btn btn-ghost focus-ring xs",
                                     onclick: move |_| {
                                         let selected_ids: Vec<i32> = history_selected_ids.read().iter().copied().collect();
-                                        let mut refresh_sig = refresh.clone();
+                                        let mut refresh_sig = history_refresh.clone();
                                         let mut selected_sig = history_selected_ids.clone();
+                                        let mut select_all_sig = history_select_all_loaded.clone();
                                         let mut toast = toast_msg.clone();
                                         spawn(async move {
                                             let mut success = 0u32;
@@ -499,6 +608,9 @@ fn EvaluationsPage() -> Element {
                                             if success > 0 {
                                                 toast.set(Some(format!("Re-queued {} evaluation{}", success, if success == 1 { "" } else { "s" })));
                                                 selected_sig.set(failed.into_iter().collect());
+                                                // Disable auto-select so the next poll doesn't repopulate
+                                                // the selection with successful rows (review finding #3).
+                                                select_all_sig.set(false);
                                             } else {
                                                 toast.set(Some("Re-evaluate failed — see server logs".to_string()));
                                             }
@@ -528,6 +640,7 @@ fn EvaluationsPage() -> Element {
                                     class: "btn-icon focus-ring",
                                     onclick: move |_| {
                                         history_selected_ids.write().clear();
+                                        history_select_all_loaded.set(false);
                                     },
                                     title: "Clear",
                                     Icon { name: IconName::X, size: 14 }
@@ -539,12 +652,16 @@ fn EvaluationsPage() -> Element {
                             history_resource: history_resource,
                             history_status_filter: history_status_filter,
                             history_flake_filter: history_flake_filter,
-                            history_page: history_page,
-                            refresh: refresh,
+                            history_fetch_limit: history_fetch_limit,
+                            history_select_all_loaded: history_select_all_loaded,
+                            refresh: history_refresh,
                             history_selected_ids: history_selected_ids,
                             drawer_target: drawer_target,
                             focused_index: focused_index,
                             flash_evals: flash_evals,
+                            history_items_acc: history_items_acc,
+                            history_total_acc: history_total_acc,
+                            hist_paging: hist_paging,
                         }
                     }
                 }
@@ -552,7 +669,7 @@ fn EvaluationsPage() -> Element {
                 if let Some(target) = drawer_target.read().clone() {
                     EvalDrawer {
                         target: target,
-                        refresh: refresh,
+                        refresh: active_refresh,
                         on_close: move |_| drawer_target.set(None),
                         toast_msg: toast_msg,
                     }
@@ -571,7 +688,7 @@ fn EvaluationsPage() -> Element {
                             class: "btn btn-danger xs focus-ring",
                             onclick: move |_| {
                                 let ids: Vec<i32> = active_selected_ids.read().iter().copied().collect();
-                                let mut refresh_sig = refresh.clone();
+                                let mut refresh_sig = active_refresh.clone();
                                 let mut selected_sig = active_selected_ids.clone();
                                 let mut toast = toast_msg.clone();
                                 spawn(async move {
@@ -888,14 +1005,27 @@ fn EvalHistory(
     history_resource: Resource<Result<EvalHistoryPage, ApiClientError>>,
     mut history_status_filter: Signal<String>,
     mut history_flake_filter: Signal<String>,
-    mut history_page: Signal<i64>,
+    mut history_fetch_limit: Signal<i64>,
+    mut history_select_all_loaded: Signal<bool>,
     mut refresh: Signal<u64>,
     mut history_selected_ids: Signal<std::collections::HashSet<i32>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
     focused_index: Signal<Option<usize>>,
     flash_evals: bool,
+    history_items_acc: Signal<Vec<EvalHistoryItem>>,
+    history_total_acc: Signal<i64>,
+    hist_paging: InfiniteScroll,
 ) -> Element {
     let history_snapshot = history_resource.read();
+
+    // Compute server-more state locally for the render (sentinel visibility).
+    // The server caps list queries at FETCH_LIMIT_MAX, so totals beyond that
+    // are unreachable — stop advertising "more" at the cap.
+    let hist_server_has_more = {
+        let loaded = history_items_acc.read().len();
+        let total = history_total_acc();
+        (loaded as i64) < total.min(FETCH_LIMIT_MAX)
+    };
 
     rsx! {
         div {
@@ -915,7 +1045,8 @@ fn EvalHistory(
                                     class: if is_active { "active" } else { "" },
                                     onclick: move |_| {
                                         history_status_filter.set(value_str.clone());
-                                        history_page.set(1);
+                                        history_fetch_limit.set(50);
+                                        history_select_all_loaded.set(true);
                                         refresh.set(refresh() + 1);
                                     },
                                     "{label}"
@@ -931,7 +1062,8 @@ fn EvalHistory(
                     value: "{history_flake_filter()}",
                     onchange: move |evt| {
                         history_flake_filter.set(evt.value().clone());
-                        history_page.set(1);
+                        history_fetch_limit.set(50);
+                        history_select_all_loaded.set(true);
                         refresh.set(refresh() + 1);
                     },
                     option { value: "all", "All flakes" }
@@ -955,10 +1087,10 @@ fn EvalHistory(
                     }
                 }
 
-                if let Some(Ok(page_data)) = &*history_snapshot {
+                if history_total_acc() > 0 {
                     span {
                         class: "filter-count",
-                        "{page_data.items.len()} entries"
+                        "{history_total_acc()} entries"
                     }
                 }
             }
@@ -967,9 +1099,17 @@ fn EvalHistory(
             match &*history_snapshot {
                 Some(Ok(page_data)) => rsx! {
                     {
-                        let commit_ids: Vec<i32> = page_data.items.iter().map(|item| item.commit_id).collect();
-                        let all_checked = commit_ids.iter().all(|id| history_selected_ids.read().contains(id))
-                            && !commit_ids.is_empty();
+                        // Use accumulated items (across server pages) for the table.
+                        // page_data is still used for the flake filter dropdown above
+                        // and for loading/error state detection.
+                        let all_loaded = history_items_acc.read().clone();
+                        let paged_items: Vec<EvalHistoryItem> = all_loaded.iter().take(hist_paging.count()).cloned().collect();
+                        let hist_has_more = hist_paging.count() < all_loaded.len() || hist_server_has_more;
+                        // Select-all operates on all loaded rows (not just the visible page)
+                        // so check/uncheck is symmetric and consistent (fixes review finding #5).
+                        let all_loaded_ids: Vec<i32> = all_loaded.iter().map(|item| item.commit_id).collect();
+                        let all_checked = !all_loaded_ids.is_empty()
+                            && all_loaded_ids.iter().all(|id| history_selected_ids.read().contains(id));
                         rsx! {
                     table {
                         class: "sys-table",
@@ -982,13 +1122,20 @@ fn EvalHistory(
                                         checked: all_checked,
                                         oninput: move |_| {
                                             if all_checked {
-                                                history_selected_ids.write().clear();
+                                                // Uncheck: remove only the loaded IDs.
+                                                let mut next = history_selected_ids.read().clone();
+                                                for id in &all_loaded_ids {
+                                                    next.remove(id);
+                                                }
+                                                history_selected_ids.set(next);
+                                                history_select_all_loaded.set(false);
                                             } else {
                                                 let mut next = history_selected_ids.read().clone();
-                                                for id in &commit_ids {
+                                                for id in &all_loaded_ids {
                                                     next.insert(*id);
                                                 }
                                                 history_selected_ids.set(next);
+                                                history_select_all_loaded.set(true);
                                             }
                                         }
                                     }
@@ -1003,7 +1150,7 @@ fn EvalHistory(
                             }
                         }
                         tbody {
-                            for (row_i, ev) in page_data.items.iter().enumerate() {
+                            for (row_i, ev) in paged_items.iter().enumerate() {
                                 {
                                     let ev = ev.clone();
                                     let commit_id = ev.commit_id;
@@ -1051,6 +1198,7 @@ fn EvalHistory(
                                                         next.insert(commit_id);
                                                     }
                                                     history_selected_ids.set(next);
+                                                    history_select_all_loaded.set(false);
                                                 },
                                                 input {
                                                     r#type: "checkbox",
@@ -1117,6 +1265,14 @@ fn EvalHistory(
                                     }
                                 }
                             }
+                        }
+                    }
+                    if hist_has_more {
+                        div {
+                            class: "infinite-sentinel",
+                            "data-sentinel": hist_paging.sentinel_id(),
+                            onmounted: move |_| hist_paging.check_and_register(),
+                            "Loading more…"
                         }
                     }
                         }

@@ -5286,6 +5286,9 @@ tr.attention-flash {
 }
 
 /* ─── Flake sync-error banner (TASK-385) ─── */
+/* Infinite-scroll sentinel — matches design reference styles.css */
+.infinite-sentinel { padding: 14px; text-align: center; font-size: 11px; color: var(--cf-text-muted); }
+
 .fl-sync-error {
   flex-shrink: 0;
   margin: 8px 12px 0;
