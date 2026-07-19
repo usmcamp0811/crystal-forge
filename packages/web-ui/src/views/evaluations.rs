@@ -270,7 +270,12 @@ fn EvaluationsPage() -> Element {
             if let Some(Ok(page_data)) = history_resource.read().as_ref() {
                 let unfiltered_first_page =
                     history_status_filter() == "all" && history_flake_filter() == "all";
-                let complete_page = page_data.total_count <= page_data.items.len() as i64;
+                // Acknowledge when the page is complete OR when we've reached the
+                // frontend fetch limit (10,000 rows). Beyond that cap, the UI cannot
+                // load more history, so acknowledge what we have rather than blocking
+                // acknowledgement permanently (review finding #2).
+                let complete_page = page_data.total_count <= page_data.items.len() as i64
+                    || page_data.items.len() as i64 >= FETCH_LIMIT_MAX;
                 if unfiltered_first_page && complete_page {
                     let history_failed_count = page_data
                         .items
@@ -631,6 +636,7 @@ fn EvaluationsPage() -> Element {
                                     class: "btn-icon focus-ring",
                                     onclick: move |_| {
                                         history_selected_ids.write().clear();
+                                        history_select_all_loaded.set(false);
                                     },
                                     title: "Clear",
                                     Icon { name: IconName::X, size: 14 }

@@ -594,7 +594,6 @@ pub fn BuildsView() -> Element {
             let loaded_len = builds.read().len();
             let total = queue_total();
             let requested_len = fetch_limit();
-            let server_has_more = (loaded_len as i64) < total;
             let paging_count = paging.count();
 
             // Determine how many loaded items pass the search filter.
@@ -629,14 +628,17 @@ pub fn BuildsView() -> Element {
             // NB: no `threshold > 0` guard — a zero-match search must still
             // advance through server pages until matches appear or the server
             // is exhausted (review finding #3).
-            if (loaded_len as i64) >= requested_len && paging_count >= threshold && server_has_more
+            let reachable_total = total.min(FETCH_LIMIT_MAX);
+            let server_has_more = (loaded_len as i64) < reachable_total;
+            if (loaded_len as i64) >= requested_len
+                && paging_count >= threshold
+                && server_has_more
+                && requested_len < FETCH_LIMIT_MAX
             {
-                fetch_limit.with_mut(|limit| {
-                    *limit = (*limit + PAGE_SIZE).min(FETCH_LIMIT_MAX);
-                });
+                fetch_limit.set((requested_len + PAGE_SIZE).min(FETCH_LIMIT_MAX));
             }
             // Re-evaluate the sentinel after the list may have grown.
-            paging.recheck(paging.count().min(loaded_len));
+            paging.recheck(paging.count().min(threshold));
         }
     });
 
@@ -674,16 +676,17 @@ pub fn BuildsView() -> Element {
                     .count()
             };
 
+            let reachable_total = total.min(FETCH_LIMIT_MAX);
+            let server_has_more = (loaded_len as i64) < reachable_total;
             if (loaded_len as i64) >= requested_len
                 && paging_count >= threshold
-                && (loaded_len as i64) < total
+                && server_has_more
+                && requested_len < FETCH_LIMIT_MAX
             {
-                build_history_fetch_limit.with_mut(|limit| {
-                    *limit = (*limit + 100).min(FETCH_LIMIT_MAX);
-                });
+                build_history_fetch_limit.set((requested_len + 100).min(FETCH_LIMIT_MAX));
             }
             // Re-evaluate the sentinel after the list may have grown.
-            paging.recheck(paging.count().min(loaded_len));
+            paging.recheck(paging.count().min(threshold));
         }
     });
 
