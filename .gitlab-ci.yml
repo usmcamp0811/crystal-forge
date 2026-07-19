@@ -360,9 +360,10 @@ web-ui-screenshots-mr-comment:
     - merge_requests
 
 # Runs the CVE scan loop processing test (scan_cycle_processes_target_with_fake_runner)
-# against an ephemeral PostgreSQL database started inside the Nix shell on the
-# existing nix runner.  Uses initdb/pg_ctl from the devShell so no Docker
-# service capability is required.
+# against a dedicated ephemeral PostgreSQL service provided by the Docker CI
+# runner.  The job uses the lightweight `.#sqlx` dev shell (not the default
+# dev shell) so it gets cargo/sqlx/postgresql tooling without the interactive
+# key-generation shellHook used for local development.
 #
 # The test inserts a single build-complete derivation, runs one scan cycle with
 # a fake vulnix runner, and asserts the derivation is processed exactly once and
@@ -371,6 +372,15 @@ cve-processing-test:
   stage: check
   tags:
     - nix
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    POSTGRES_DB: cf_cve_test
+    POSTGRES_USER: cf_cve_test
+    POSTGRES_PASSWORD: cf_cve_test
+    POSTGRES_HOST_AUTH_METHOD: trust
+    CRYSTAL_FORGE_TEST_DATABASE_URL: "postgres://cf_cve_test:cf_cve_test@postgres/cf_cve_test"
   before_script:
     - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
     - echo "login gitlab-ci-token" >> ~/.netrc
@@ -380,37 +390,17 @@ cve-processing-test:
     - |
       set -euo pipefail
 
-      nix develop .# -c bash -euo pipefail -c '
-        export PGDATA="$(mktemp -d)"
-        export PGPORT=15432
-        export PGHOST=localhost
+      nix develop .#sqlx -c bash -euo pipefail -c '
+        until pg_isready -h postgres -U cf_cve_test -d cf_cve_test; do sleep 0.2; done
 
-        # Initialise a fresh cluster owned by the current user.
-        initdb --pgdata="$PGDATA" --auth=trust --no-instructions
-
-        # Start postgres and wait until it is ready.
-        pg_ctl -D "$PGDATA" -l "$PGDATA/pg.log" -o "-p $PGPORT -k /tmp" start
-        until pg_isready -h "$PGHOST" -p "$PGPORT"; do sleep 0.2; done
-
-        # Create an isolated test database.
-        createdb -h "$PGHOST" -p "$PGPORT" cf_cve_test
-
-        export CRYSTAL_FORGE_TEST_DATABASE_URL="postgres://localhost:${PGPORT}/cf_cve_test"
-
-        # Apply migrations to the test database.
         DATABASE_URL="$CRYSTAL_FORGE_TEST_DATABASE_URL" \
           cargo sqlx migrate run \
           --source packages/default/migrations
 
-        # Run the targeted processing test.
         CRYSTAL_FORGE_TEST_DATABASE_URL="$CRYSTAL_FORGE_TEST_DATABASE_URL" \
           cargo test \
           --manifest-path packages/default/Cargo.toml \
           --lib builder::cve_worker::tests::scan_cycle_processes_target_with_fake_runner
-
-        # Shut down the cluster.
-        pg_ctl -D "$PGDATA" stop
-        rm -rf "$PGDATA"
       '
   only:
     - merge_requests
