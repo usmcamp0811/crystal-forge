@@ -9,9 +9,9 @@
 //!   `window`.
 //! * The observer is disconnected in effect cleanup so listeners never
 //!   multiply across sentinel remounts.
-//! * The check reruns automatically whenever the sentinel enters the
-//!   expanded root viewport (400 px root margin), including after `count`
-//!   grows and the sentinel is still visible.
+//! * The caller explicitly requests a re-evaluation (via [`InfiniteScroll::recheck`])
+//!   after the rendered list grows, which avoids the unbounded re-registration
+//!   loop that would occur if the hook re-registered on every `count` change.
 //!
 //! ## Usage
 //!
@@ -43,6 +43,15 @@ pub struct InfiniteScroll {
     page_size: usize,
     /// Unique numeric id for locating the sentinel in the DOM.
     id: u32,
+    /// Monotonically-increasing version bumped by [`recheck`]; a `use_effect`
+    /// inside [`use_infinite_scroll`] watches this and re-registers the
+    /// observer when it changes.
+    recheck_version: Signal<usize>,
+    /// The rendered-list length from the last successful recheck.  Only when
+    /// `min(count, rendered_len)` exceeds this value does [`recheck`] bump
+    /// `recheck_version`, preventing the feedback loop where re-registration
+    /// causes an initial IntersectionObserver fire that increments `count`.
+    last_render_len: Signal<usize>,
 }
 
 impl InfiniteScroll {
@@ -141,6 +150,31 @@ impl InfiniteScroll {
         }
     }
 
+    /// Re-evaluate the sentinel after the rendered list has grown.
+    ///
+    /// `rendered_count` should be `min(count, total_list_len)` — the actual
+    /// number of items currently displayed.  Only when this value has
+    /// increased since the last call is a re-registration triggered, which
+    /// prevents the feedback loop described in the module docs.
+    ///
+    /// Call from the server-response or advancement `use_effect` after
+    /// updating the backing list signal.
+    pub fn recheck(&self, rendered_count: usize) {
+        use std::cmp::min;
+        let current_display = min(*self.count.read(), rendered_count);
+        let last = *self.last_render_len.read();
+        if current_display > last {
+            // Copy the signals out of `&self` so we can call `.set()` on
+            // the owned copies (Signal<T> is Copy).
+            let mut last_render_len = self.last_render_len;
+            let mut recheck_version = self.recheck_version;
+            last_render_len.set(current_display);
+            // Bump the version so the internal use_effect re-registers.
+            let next_version = *recheck_version.read() + 1;
+            recheck_version.set(next_version);
+        }
+    }
+
     /// Disconnect any active observer for this sentinel.
     /// Called by the `use_effect` cleanup so old listeners don't survive
     /// key resets or unmounts.
@@ -183,6 +217,8 @@ pub fn use_infinite_scroll(reset_key: String, page_size: usize) -> InfiniteScrol
 
     let mut count = use_signal(|| page_size);
     let mut prev_key = use_signal(|| reset_key.clone());
+    let mut recheck_version = use_signal(|| 0_usize);
+    let mut last_render_len = use_signal(|| page_size);
     #[allow(dead_code)]
     let handle_id = *id.read();
 
@@ -199,18 +235,26 @@ pub fn use_infinite_scroll(reset_key: String, page_size: usize) -> InfiniteScrol
     if *prev_key.read() != reset_key {
         prev_key.set(reset_key);
         count.set(page_size);
+        last_render_len.set(page_size);
+        // Also bump the version so the sentinel gets a fresh observer
+        // after the reset, even if the caller does not explicitly recheck.
+        // Without this the observer from before the reset may target an
+        // element that no longer matches the current sentinel id.
+        recheck_version.set(recheck_version() + 1);
     }
 
-    // Re-register after each count change so the observer reevaluates the
-    // sentinel even when it remains inside the expanded root viewport after
-    // newly rendered rows push content downward. Without this, the browser may
-    // emit no new IntersectionObserver transition and paging stalls.
+    // Re-register the observer when recheck_version is bumped.
+    // This effect fires *at most once per explicit recheck() call*, never
+    // as a side-effect of the observer incrementing count, so there is no
+    // feedback loop.
     use_effect(move || {
-        let _ = count();
+        let _ = recheck_version();
         self::InfiniteScroll {
             count,
             page_size,
             id: handle_id,
+            recheck_version,
+            last_render_len,
         }
         .check_and_register();
     });
@@ -229,5 +273,7 @@ pub fn use_infinite_scroll(reset_key: String, page_size: usize) -> InfiniteScrol
         count,
         page_size,
         id: *id.read(),
+        recheck_version,
+        last_render_len,
     }
 }

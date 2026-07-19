@@ -24,6 +24,7 @@ use crate::state::auth;
 use crate::theme;
 
 const PAGE_SIZE: i64 = 50;
+const FETCH_LIMIT_MAX: i64 = 10_000; // must match backend LIMIT_MAX
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BuildsTab {
@@ -570,9 +571,13 @@ pub fn BuildsView() -> Element {
     // has_more is true when:
     //   (a) there are more client-side rows in the filtered list, OR
     //   (b) the active/completed backing resource still has unloaded rows.
+    // The server caps all list requests at FETCH_LIMIT_MAX, so totals
+    // beyond that cap are unreachable — stop advertising "more" at the cap.
     let loaded_active_len = queue_data.len();
-    let active_server_has_more = (loaded_active_len as i64) < queue_total();
-    let completed_server_has_more = (build_history.read().len() as i64) < build_history_total();
+    let active_server_has_more =
+        (loaded_active_len as i64) < queue_total().min(FETCH_LIMIT_MAX);
+    let completed_server_has_more =
+        (build_history.read().len() as i64) < build_history_total().min(FETCH_LIMIT_MAX);
     let has_more = paging.count() < filtered_list.len()
         || (active_view() == BuildsTab::ActiveQueue && active_server_has_more)
         || (active_view() == BuildsTab::Completed && completed_server_has_more);
@@ -627,9 +632,11 @@ pub fn BuildsView() -> Element {
             if (loaded_len as i64) >= requested_len && paging_count >= threshold && server_has_more
             {
                 fetch_limit.with_mut(|limit| {
-                    *limit += PAGE_SIZE;
+                    *limit = (*limit + PAGE_SIZE).min(FETCH_LIMIT_MAX);
                 });
             }
+            // Re-evaluate the sentinel after the list may have grown.
+            paging.recheck(paging.count().min(loaded_len));
         }
     });
 
@@ -672,9 +679,11 @@ pub fn BuildsView() -> Element {
                 && (loaded_len as i64) < total
             {
                 build_history_fetch_limit.with_mut(|limit| {
-                    *limit += 100;
+                    *limit = (*limit + 100).min(FETCH_LIMIT_MAX);
                 });
             }
+            // Re-evaluate the sentinel after the list may have grown.
+            paging.recheck(paging.count().min(loaded_len));
         }
     });
 

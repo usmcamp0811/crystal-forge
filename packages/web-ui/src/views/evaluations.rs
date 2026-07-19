@@ -20,6 +20,8 @@ use crate::api::{
 use crate::components::{Icon, IconName};
 use crate::hooks::{InfiniteScroll, use_infinite_scroll};
 
+const FETCH_LIMIT_MAX: i64 = 10_000; // must match backend LIMIT_MAX
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EvaluationsTab {
     ActiveQueue,
@@ -172,7 +174,7 @@ fn EvaluationsPage() -> Element {
         let loaded_history_len = history_items_acc.read().len();
         let history_total = history_total_acc();
         let requested_len = history_fetch_limit();
-        let hist_server_has_more = (loaded_history_len as i64) < history_total;
+        let hist_server_has_more = (loaded_history_len as i64) < history_total.min(FETCH_LIMIT_MAX);
         let hist_count = hist_paging.count();
         if (loaded_history_len as i64) >= requested_len
             && hist_count >= loaded_history_len
@@ -180,9 +182,11 @@ fn EvaluationsPage() -> Element {
             && hist_server_has_more
         {
             history_fetch_limit.with_mut(|limit| {
-                *limit += 50;
+                *limit = (*limit + 50).min(FETCH_LIMIT_MAX);
             });
         }
+        // Re-evaluate the sentinel after the list may have grown.
+        hist_paging.recheck(hist_paging.count().min(loaded_history_len));
     });
 
     let active_items = queue_items
@@ -206,7 +210,8 @@ fn EvaluationsPage() -> Element {
         .map(|summary| summary.active_count)
         .unwrap_or(0);
     let active_has_more =
-        active_paging.count() < active_items.len() || (active_items.len() as i64) < active_total;
+        active_paging.count() < active_items.len()
+        || (active_items.len() as i64) < active_total.min(FETCH_LIMIT_MAX);
 
     use_effect(move || {
         if active_tab() == EvaluationsTab::ActiveQueue {
@@ -224,12 +229,14 @@ fn EvaluationsPage() -> Element {
                 .unwrap_or(0);
             if (loaded_active_len as i64) >= requested_len
                 && active_paging.count() >= loaded_active_len
-                && (loaded_active_len as i64) < active_total
+                && (loaded_active_len as i64) < active_total.min(FETCH_LIMIT_MAX)
             {
                 active_fetch_limit.with_mut(|limit| {
-                    *limit += 200;
+                    *limit = (*limit + 200).min(FETCH_LIMIT_MAX);
                 });
             }
+            // Re-evaluate the sentinel after the list may have grown.
+            active_paging.recheck(active_paging.count().min(loaded_active_len));
         }
     });
 
@@ -1002,10 +1009,12 @@ fn EvalHistory(
     let history_snapshot = history_resource.read();
 
     // Compute server-more state locally for the render (sentinel visibility).
+    // The server caps list queries at FETCH_LIMIT_MAX, so totals beyond that
+    // are unreachable — stop advertising "more" at the cap.
     let hist_server_has_more = {
         let loaded = history_items_acc.read().len();
         let total = history_total_acc();
-        (loaded as i64) < total
+        (loaded as i64) < total.min(FETCH_LIMIT_MAX)
     };
 
     rsx! {

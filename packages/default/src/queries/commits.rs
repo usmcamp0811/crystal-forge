@@ -747,7 +747,7 @@ pub async fn list_eval_history(
     )
     .bind(status_filter)
     .bind(flake_filter)
-    .bind(limit)
+    .bind(safe_limit)
     .bind(offset)
     .fetch_all(pool)
     .await?;
@@ -778,8 +778,8 @@ pub async fn list_eval_history(
 
     Ok(EvalHistoryPage {
         total_count,
-        page,
-        limit,
+        page: safe_page,
+        limit: safe_limit,
         items,
     })
 }
