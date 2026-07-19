@@ -415,9 +415,11 @@ pub async fn list_build_queue_paginated(
     pool: &PgPool,
     params: &BuildQueueParams,
 ) -> Result<BuildQueuePageResponse> {
-    let limit = params.limit.max(1);
+    let limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
     let page = params.page.max(1);
-    let offset = (page - 1) * limit;
+    let offset = (page - 1)
+        .checked_mul(limit)
+        .ok_or_else(|| anyhow::anyhow!("offset overflow: page={} limit={}", page, limit))?;
 
     // Build status filter list. Empty means "all statuses".
     let status_filter: Vec<String> = params

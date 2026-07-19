@@ -74,7 +74,8 @@ pub async fn list_eval_queue(
         .get("limit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(200)
-        .max(1);
+        .max(1)
+        .min(crate::api::models::LIMIT_MAX);
 
     let rows = match crate::queries::commits::list_eval_queue(&state.pool, limit).await {
         Ok(rows) => rows,
@@ -667,7 +668,13 @@ pub async fn list_eval_history(
         .get("limit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(50)
-        .max(1);
+        .max(1)
+        .min(crate::api::models::LIMIT_MAX);
+
+    if (page - 1).checked_mul(limit).is_none() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
     let status_filter = params.get("status").map(|s| s.as_str());
     let flake_filter = params.get("flake").map(|s| s.as_str());
 

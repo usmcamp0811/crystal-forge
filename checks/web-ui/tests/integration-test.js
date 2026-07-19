@@ -568,9 +568,9 @@ async function fulfillBuildersRoute(route) {
   });
 }
 
-function mockRecentBuilds() {
+function mockRecentBuilds(limit) {
   const timestamp = nowIso();
-  return [
+  const items = [
     {
       job_id: "66666666-6666-4666-8666-666666666666",
       system_id: "77777777-7777-4777-8777-777777777777",
@@ -586,11 +586,12 @@ function mockRecentBuilds() {
       logs: null,
     },
   ];
+  return { total: items.length, page: 1, limit: limit || 100, items };
 }
 
-function mockRecentBuildsWithCancelled() {
+function mockRecentBuildsWithCancelled(limit) {
   const timestamp = nowIso();
-  return [
+  const items = [
     {
       job_id: "99999999-9999-4999-8999-999999999999",
       system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -620,6 +621,7 @@ function mockRecentBuildsWithCancelled() {
       logs: null,
     },
   ];
+  return { total: items.length, page: 1, limit: limit || 100, items };
 }
 
 async function routeBuildsData(page) {
@@ -6003,6 +6005,7 @@ const steps = [
       const evalQueueMock = {
         active_count: 3,
         completed_count: 12,
+        failed_count: 0,
         execution_mode: "standard",
         timestamp: new Date().toISOString(),
         items: [
@@ -6102,6 +6105,7 @@ const steps = [
       const evalQueueMock = {
         active_count: 0,
         completed_count: 15,
+        failed_count: 0,
         execution_mode: "standard",
         timestamp: new Date().toISOString(),
         items: [],

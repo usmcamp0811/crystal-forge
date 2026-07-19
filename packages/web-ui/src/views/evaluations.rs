@@ -47,7 +47,8 @@ pub fn EvaluationsCommitView(commit_id: i32) -> Element {
 fn EvaluationsPage() -> Element {
     let mut queue_items = use_signal(Vec::<EvalQueueItem>::new);
     let mut active_fetch_limit = use_signal(|| 200_i64);
-    let mut refresh = use_signal(|| 0_u64);
+    let mut active_refresh = use_signal(|| 0_u64);
+    let mut history_refresh = use_signal(|| 0_u64);
     let mut active_tab = use_signal(|| EvaluationsTab::ActiveQueue);
     let mut drawer_target = use_signal(|| None::<EvalDrawerTarget>);
     let mut history_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
@@ -73,7 +74,7 @@ fn EvaluationsPage() -> Element {
     let mut history_total_acc = use_signal(|| 0_i64);
 
     let history_resource = use_resource(move || async move {
-        let _ = refresh();
+        let _ = history_refresh();
         let limit = history_fetch_limit();
         let status = history_status_filter();
         let flake = history_flake_filter();
@@ -95,23 +96,29 @@ fn EvaluationsPage() -> Element {
     });
 
     let queue_resource = use_resource(move || async move {
-        let _ = refresh();
+        let _ = active_refresh();
         fetch_eval_queue(active_fetch_limit()).await
     });
 
     {
-        let mut refresh = refresh.clone();
+        let mut active_refresh = active_refresh.clone();
+        let mut history_refresh = history_refresh.clone();
+        let mut active_tab = active_tab;
         use_future(move || async move {
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
                     TimeoutFuture::new(3000).await;
-                    refresh.set(refresh() + 1);
+                    if active_tab() == EvaluationsTab::ActiveQueue {
+                        active_refresh.set(active_refresh() + 1);
+                    } else {
+                        history_refresh.set(history_refresh() + 1);
+                    }
                 }
 
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    let _ = refresh;
+                    let _ = (active_refresh, history_refresh);
                     break;
                 }
             }
@@ -412,7 +419,7 @@ fn EvaluationsPage() -> Element {
                                             "pending" | "in_progress"
                                         );
                                         if can_cancel {
-                                            let mut refresh_sig = refresh;
+                                            let mut refresh_sig = active_refresh;
                                             let mut toast = toast_msg;
                                             spawn(async move {
                                                 if let Err(e) = cancel_commit_evaluation(commit_id).await {
@@ -543,7 +550,7 @@ fn EvaluationsPage() -> Element {
                     if active_tab() == EvaluationsTab::ActiveQueue {
                         EvalActiveQueue {
                             evals: paged_active_items.clone(),
-                            refresh: refresh,
+                            refresh: active_refresh,
                             queue_items: queue_items,
                             drawer_target: drawer_target,
                             focused_index: focused_index,
@@ -573,7 +580,7 @@ fn EvaluationsPage() -> Element {
                                     class: "btn btn-ghost focus-ring xs",
                                     onclick: move |_| {
                                         let selected_ids: Vec<i32> = history_selected_ids.read().iter().copied().collect();
-                                        let mut refresh_sig = refresh.clone();
+                                        let mut refresh_sig = history_refresh.clone();
                                         let mut selected_sig = history_selected_ids.clone();
                                         let mut toast = toast_msg.clone();
                                         spawn(async move {
@@ -630,7 +637,7 @@ fn EvaluationsPage() -> Element {
                             history_flake_filter: history_flake_filter,
                             history_fetch_limit: history_fetch_limit,
                             history_select_all_loaded: history_select_all_loaded,
-                            refresh: refresh,
+                            refresh: history_refresh,
                             history_selected_ids: history_selected_ids,
                             drawer_target: drawer_target,
                             focused_index: focused_index,
@@ -645,7 +652,7 @@ fn EvaluationsPage() -> Element {
                 if let Some(target) = drawer_target.read().clone() {
                     EvalDrawer {
                         target: target,
-                        refresh: refresh,
+                        refresh: active_refresh,
                         on_close: move |_| drawer_target.set(None),
                         toast_msg: toast_msg,
                     }
@@ -664,7 +671,7 @@ fn EvaluationsPage() -> Element {
                             class: "btn btn-danger xs focus-ring",
                             onclick: move |_| {
                                 let ids: Vec<i32> = active_selected_ids.read().iter().copied().collect();
-                                let mut refresh_sig = refresh.clone();
+                                let mut refresh_sig = active_refresh.clone();
                                 let mut selected_sig = active_selected_ids.clone();
                                 let mut toast = toast_msg.clone();
                                 spawn(async move {

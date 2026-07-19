@@ -1767,11 +1767,18 @@ pub async fn get_job_status(
 pub async fn list_build_queue(
     State(state): State<CFState>,
     headers: HeaderMap,
-    Query(params): Query<crate::api::models::BuildQueueParams>,
+    Query(mut params): Query<crate::api::models::BuildQueueParams>,
 ) -> Result<Json<crate::api::models::BuildQueuePageResponse>, StatusCode> {
     let Some(_viewer) = require_viewer_or_above(&state.pool, &headers).await else {
         return Err(StatusCode::FORBIDDEN);
     };
+
+    // Clamp per-request limit to prevent unbounded result sets and overflow.
+    params.limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
+    params.page = params.page.max(1);
+    if (params.page - 1).checked_mul(params.limit).is_none() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let result = crate::queries::dashboard::list_build_queue_paginated(&state.pool, &params)
         .await
@@ -1797,7 +1804,8 @@ pub async fn list_recent_build_jobs(
         .get("limit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(100)
-        .max(1);
+        .max(1)
+        .min(crate::api::models::LIMIT_MAX);
 
     let items = crate::queries::dashboard::fetch_recent_build_history(&state.pool, limit)
         .await

@@ -674,7 +674,11 @@ pub async fn list_eval_history(
     status_filter: Option<&str>,
     flake_filter: Option<&str>,
 ) -> Result<EvalHistoryPage> {
-    let offset = (page.max(1) - 1) * limit.max(1);
+    let safe_limit = limit.max(1).min(crate::api::models::LIMIT_MAX);
+    let safe_page = page.max(1);
+    let offset = (safe_page - 1).checked_mul(safe_limit).ok_or_else(|| {
+        anyhow::anyhow!("offset overflow: page={} limit={}", safe_page, safe_limit)
+    })?;
 
     #[derive(sqlx::FromRow)]
     struct HistoryRow {

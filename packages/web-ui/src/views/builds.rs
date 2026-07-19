@@ -199,14 +199,26 @@ pub fn BuildsView() -> Element {
     let can_requeue = auth::is_operator_or_above(&app_state.read().auth);
 
     let mut workers = use_signal(Vec::<WorkerItem>::new);
-    let mut refresh_trigger = use_signal(|| 0_u64);
+    let mut active_refresh_trigger = use_signal(|| 0_u64);
+    let mut history_refresh_trigger = use_signal(|| 0_u64);
+    let mut active_view = use_signal(|| BuildsTab::ActiveQueue);
+    let mut selected_build = use_signal(|| None::<uuid::Uuid>);
+    let mut log_open = use_signal(|| false);
 
-    // Auto-refresh: bump refresh_trigger every 5 s so active builds, queue
-    // positions, and live log snapshots stay current without user interaction.
+    // Auto-refresh: bump the relevant refresh signal every 5 s depending on
+    // which tab is active.  When viewing the Active queue we only poll queue
+    // + builder data; when viewing Completed history we only poll the history
+    // endpoint.  This prevents unbounded polling cost growth — after scrolling
+    // through thousands of completed builds we do *not* re-request every
+    // loaded row (including logs) on every tick.
     use_future(move || async move {
         loop {
             gloo_timers::future::TimeoutFuture::new(5_000).await;
-            refresh_trigger.set(refresh_trigger() + 1);
+            if active_view() == BuildsTab::ActiveQueue {
+                active_refresh_trigger.set(active_refresh_trigger() + 1);
+            } else {
+                history_refresh_trigger.set(history_refresh_trigger() + 1);
+            }
         }
     });
 
@@ -240,7 +252,7 @@ pub fn BuildsView() -> Element {
 
     // Derived filter signals used to trigger resource re-fetch
     let queue_resource = use_resource(move || async move {
-        let _ = refresh_trigger();
+        let _ = active_refresh_trigger();
         let limit = fetch_limit();
         let status = filter_status();
         let commit = filter_commit();
@@ -289,13 +301,13 @@ pub fn BuildsView() -> Element {
     });
 
     let builders = use_resource(move || async move {
-        let _ = refresh_trigger();
+        let _ = active_refresh_trigger();
         api::client::fetch_builders().await
     });
     let mut build_history_fetch_limit = use_signal(|| 100_i64);
     let mut build_history_total = use_signal(|| 0_i64);
     let recent_builds = use_resource(move || async move {
-        let _ = refresh_trigger();
+        let _ = history_refresh_trigger();
         fetch_recent_build_jobs(build_history_fetch_limit()).await
     });
 
@@ -417,9 +429,6 @@ pub fn BuildsView() -> Element {
         }
     });
 
-    let mut selected_build = use_signal(|| None::<uuid::Uuid>);
-    let mut log_open = use_signal(|| false);
-    let mut active_view = use_signal(|| BuildsTab::ActiveQueue);
     let mut active_tab = use_signal(|| DetailTab::Details);
     let mut completed_status_filter = use_signal(|| CompletedStatusFilter::All);
     let mut completed_sort_order = use_signal(|| CompletedSortOrder::NewestFirst);
@@ -731,7 +740,7 @@ pub fn BuildsView() -> Element {
                             search_query.set(String::new());
                         },
                         "Active"
-                        span { class: "sd-tab-badge", "{queue_data.len()}" }
+                        span { class: "sd-tab-badge", "{queue_total()}" }
                     }
                     button {
                         // JSX: `sd-tab focus-ring${tab===t.k?" active":""}${flashTab && t.k==="history"?" attention-flash-tab":""}`
@@ -764,7 +773,7 @@ pub fn BuildsView() -> Element {
                             builds_ack_sent.set(false);
                         },
                         "Completed"
-                        span { class: "sd-tab-badge", "{build_history.read().len()}" }
+                        span { class: "sd-tab-badge", "{build_history_total()}" }
                     }
                     // JSX: {selectableIds.length > 0 && <MultiSelectHint />}
                     // selectableIds = cancellable builds on Active, filteredList on Completed.
@@ -863,7 +872,7 @@ pub fn BuildsView() -> Element {
                                     let queue_snapshot = builds.read().clone();
                                     let mut action_error = action_error;
                                     let mut last_action_note = last_action_note;
-                                    let mut refresh_trigger = refresh_trigger;
+                                    let mut active_refresh_trigger = active_refresh_trigger;
                                     spawn(async move {
                                         #[cfg(target_arch = "wasm32")]
                                         web_sys::console::log_1(&format!("Move action: searching for job_id {} in {} builds", job_id, queue_snapshot.len()).into());
@@ -902,7 +911,7 @@ pub fn BuildsView() -> Element {
                                                         format!("Moved job {} down", job_id)
                                                     },
                                                 ));
-                                                refresh_trigger.set(refresh_trigger() + 1);
+                                                active_refresh_trigger.set(active_refresh_trigger() + 1);
                                             }
                                             Err(e) => {
                                                 let err = format!("Failed to reorder: {}", e);
@@ -926,7 +935,7 @@ pub fn BuildsView() -> Element {
                             move |build_ids: Vec<uuid::Uuid>| {
                                 let mut action_error = action_error;
                                 let mut last_action_note = last_action_note;
-                                let mut refresh_trigger = refresh_trigger;
+                                let mut active_refresh_trigger = active_refresh_trigger;
                                 let filtered = filtered_list.clone();
                                 spawn(async move {
                                     let count = build_ids.len();
@@ -940,7 +949,7 @@ pub fn BuildsView() -> Element {
                                     action_error.set(None);
                                     let suffix = if count == 1 { "" } else { "s" };
                                     last_action_note.set(Some(format!("Re-queued {count} build{suffix}")));
-                                    refresh_trigger.set(refresh_trigger() + 1);
+                                    active_refresh_trigger.set(active_refresh_trigger() + 1);
                                 });
                             }
                         },
@@ -1115,7 +1124,7 @@ pub fn BuildsView() -> Element {
                                     let builders_snapshot = workers.read().clone();
                                     let mut last_action_note = last_action_note;
                                     let mut action_error = action_error;
-                                    let mut refresh_trigger = refresh_trigger;
+                                    let mut active_refresh_trigger = active_refresh_trigger;
                                     spawn(async move {
                                         let target_status = match queue_action {
                                             QueueAction::StartAll => BuilderStatus::Active,
@@ -1147,13 +1156,13 @@ pub fn BuildsView() -> Element {
 
                                         action_error.set(None);
                                         last_action_note.set(Some(format!("Applied {}", queue_action.label())));
-                                        refresh_trigger.set(refresh_trigger() + 1);
+                                        active_refresh_trigger.set(active_refresh_trigger() + 1);
                                     });
                                 }
                                 PendingAction::Worker { worker_id, action } => {
                                     let mut last_action_note = last_action_note;
                                     let mut action_error = action_error;
-                                    let mut refresh_trigger = refresh_trigger;
+                                    let mut active_refresh_trigger = active_refresh_trigger;
                                     spawn(async move {
                                         let target_status = match action {
                                             WorkerAction::Start => BuilderStatus::Active,
@@ -1183,7 +1192,7 @@ pub fn BuildsView() -> Element {
                                             Ok(_) => {
                                                 action_error.set(None);
                                                 last_action_note.set(Some(format!("Applied {} on {}", action.label(), worker_id)));
-                                                refresh_trigger.set(refresh_trigger() + 1);
+                                                active_refresh_trigger.set(active_refresh_trigger() + 1);
                                             }
                                             Err(e) => action_error.set(Some(format!("Failed applying {} on {}: {}", action.label(), worker_id, e))),
                                         }
@@ -1194,7 +1203,7 @@ pub fn BuildsView() -> Element {
                                     let history_snapshot = build_history.read().clone();
                                     let mut action_error = action_error;
                                     let mut last_action_note = last_action_note;
-                                    let mut refresh_trigger = refresh_trigger;
+                                    let mut active_refresh_trigger = active_refresh_trigger;
                                     spawn(async move {
                                         // Check both active queue and completed history
                                         let selected = queue_snapshot.iter().find(|b| b.job_id == Some(job_id))
@@ -1215,7 +1224,7 @@ pub fn BuildsView() -> Element {
                                                     Ok(_) => {
                                                         action_error.set(None);
                                                         last_action_note.set(Some(format!("Prioritized job {}", job_id)));
-                                                        refresh_trigger.set(refresh_trigger() + 1);
+                                                        active_refresh_trigger.set(active_refresh_trigger() + 1);
                                                     }
                                                     Err(e) => {
                                                         action_error.set(Some(format!("Failed to prioritize: {}", e)));
@@ -1230,7 +1239,7 @@ pub fn BuildsView() -> Element {
                                                         Ok(_) => {
                                                             action_error.set(None);
                                                             last_action_note.set(Some("Build re-queued".to_string()));
-                                                            refresh_trigger.set(refresh_trigger() + 1);
+                                                            active_refresh_trigger.set(active_refresh_trigger() + 1);
                                                         }
                                                         Err(e) => {
                                                             action_error.set(Some(format!("Failed to requeue: {}", e)));
@@ -1245,7 +1254,7 @@ pub fn BuildsView() -> Element {
                                                         Ok(_) => {
                                                             action_error.set(None);
                                                             last_action_note.set(Some(format!("Triggered build sync for system {}", system_id)));
-                                                            refresh_trigger.set(refresh_trigger() + 1);
+                                                            active_refresh_trigger.set(active_refresh_trigger() + 1);
                                                         }
                                                         Err(e) => {
                                                             action_error.set(Some(format!("Failed to trigger build: {}", e)));
@@ -1263,7 +1272,7 @@ pub fn BuildsView() -> Element {
                                                     Ok(_) => {
                                                         action_error.set(None);
                                                         last_action_note.set(Some(format!("Cancelled job {}", job_id)));
-                                                        refresh_trigger.set(refresh_trigger() + 1);
+                                                        active_refresh_trigger.set(active_refresh_trigger() + 1);
                                                     }
                                                     Err(e) => {
                                                         action_error.set(Some(format!("Failed to stop: {}", e)));
@@ -1280,7 +1289,7 @@ pub fn BuildsView() -> Element {
                                                     Ok(_) => {
                                                         action_error.set(None);
                                                         last_action_note.set(Some(format!("Force-cancelled job {}", job_id)));
-                                                        refresh_trigger.set(refresh_trigger() + 1);
+                                                        active_refresh_trigger.set(active_refresh_trigger() + 1);
                                                     }
                                                     Err(e) => {
                                                         action_error.set(Some(format!("Failed to force cancel: {}", e)));

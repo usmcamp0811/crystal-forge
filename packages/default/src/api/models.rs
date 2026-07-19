@@ -629,6 +629,19 @@ pub struct BuildQueueParams {
     pub queued_before: Option<DateTime<Utc>>,
 }
 
+/// Hard upper bound for per-request limit parameters.
+///
+/// Prevents a viewer from requesting an unbounded result set (e.g.
+/// `limit=9223372036854775807`) that would cause the server to query and
+/// serialize the entire matching dataset, risking memory exhaustion and
+/// long-running queries. All paginated and list endpoints that accept a
+/// `limit` query parameter clamp to this value.
+///
+/// Set to 10 000, which is well beyond any realistic on-screen viewport
+/// (infinite scroll loads 50–200 per page) while still providing headroom
+/// for bulk export or script usage.
+pub const LIMIT_MAX: i64 = 10_000;
+
 fn default_page() -> i64 {
     1
 }
