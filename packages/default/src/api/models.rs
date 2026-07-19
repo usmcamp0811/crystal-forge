@@ -606,7 +606,7 @@ pub struct BuildQueueParams {
     /// Page number (1-indexed, default 1).
     #[serde(default = "default_page")]
     pub page: i64,
-    /// Items per page (default 50, max 200).
+    /// Items per page (default 50).
     #[serde(default = "default_limit")]
     pub limit: i64,
     /// Filter by status: queued, building, success, failed (comma-separated or repeated).
@@ -628,6 +628,19 @@ pub struct BuildQueueParams {
     #[serde(default)]
     pub queued_before: Option<DateTime<Utc>>,
 }
+
+/// Hard upper bound for per-request limit parameters.
+///
+/// Prevents a viewer from requesting an unbounded result set (e.g.
+/// `limit=9223372036854775807`) that would cause the server to query and
+/// serialize the entire matching dataset, risking memory exhaustion and
+/// long-running queries. All paginated and list endpoints that accept a
+/// `limit` query parameter clamp to this value.
+///
+/// Set to 10 000, which is well beyond any realistic on-screen viewport
+/// (infinite scroll loads 50–200 per page) while still providing headroom
+/// for bulk export or script usage.
+pub const LIMIT_MAX: i64 = 10_000;
 
 fn default_page() -> i64 {
     1
@@ -654,6 +667,7 @@ pub struct BuildQueuePageResponse {
 pub struct EvalQueueSummary {
     pub active_count: i64,
     pub completed_count: i64,
+    pub failed_count: i64,
     pub execution_mode: String,
     pub items: Vec<EvalQueueItem>,
     pub timestamp: DateTime<Utc>,
@@ -725,6 +739,10 @@ pub struct EvalHistoryItem {
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
+    /// Unique identifier for this evaluation occurrence, including both commit
+    /// and completion timestamp. Used for alert acknowledgement to distinguish
+    /// between separate evaluation attempts of the same commit (review finding).
+    pub alert_occurrence_id: String,
 }
 
 /// Paginated response for GET /api/v1/commits/eval-history.

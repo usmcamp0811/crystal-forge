@@ -1404,6 +1404,7 @@ pub struct BuildQueueItem {
 pub struct EvalQueueSummary {
     pub active_count: i64,
     pub completed_count: i64,
+    pub failed_count: i64,
     pub execution_mode: String,
     pub items: Vec<EvalQueueItem>,
     pub timestamp: DateTime<Utc>,
@@ -1454,6 +1455,7 @@ pub struct EvalHistoryItem {
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
+    pub alert_occurrence_id: String,
 }
 
 /// Paginated response for GET /api/v1/commits/eval-history.

@@ -235,6 +235,7 @@ pub async fn mark_commit_evaluation_started(pool: &PgPool, commit_id: i32) -> Re
         SET 
             evaluation_status = 'in_progress',
             evaluation_started_at = NOW(),
+            evaluation_completed_at = NULL,
             evaluation_attempt_count = COALESCE(evaluation_attempt_count, 0) + 1
         WHERE id = $1
         "#,
@@ -299,6 +300,10 @@ pub async fn mark_commit_evaluation_failed(
                 WHEN COALESCE(evaluation_attempt_count, 0) >= 3 THEN 'failed'
                 ELSE 'pending'
             END,
+            evaluation_completed_at = CASE
+                WHEN COALESCE(evaluation_attempt_count, 0) >= 3 THEN NOW()
+                ELSE NULL
+            END,
             evaluation_error_message = $2
         WHERE id = $1
         "#,
@@ -333,6 +338,7 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
             evaluation_status = 'pending',
             evaluation_attempt_count = 0,
             evaluation_started_at = NULL,
+            evaluation_completed_at = NULL,
             evaluation_error_message = NULL
         WHERE id = $1
         RETURNING id, git_commit_hash
@@ -367,6 +373,9 @@ pub struct EvalQueueRow {
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
+    pub active_total_count: i64,
+    pub completed_total_count: i64,
+    pub failed_total_count: i64,
 }
 
 pub async fn list_eval_queue(pool: &PgPool, limit: i64) -> Result<Vec<EvalQueueRow>> {
@@ -402,7 +411,16 @@ pub async fn list_eval_queue(pool: &PgPool, limit: i64) -> Result<Vec<EvalQueueR
                 FROM derivations d
                 WHERE d.commit_id = c.id
                   AND d.status_id = 6
-            ), 0) AS eval_failed_count
+            ), 0) AS eval_failed_count,
+            COUNT(*) FILTER (
+                WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling')
+            ) OVER () AS active_total_count,
+            COUNT(*) FILTER (
+                WHERE COALESCE(c.evaluation_status, 'pending') NOT IN ('pending', 'in_progress', 'cancelling')
+            ) OVER () AS completed_total_count,
+            COUNT(*) FILTER (
+                WHERE COALESCE(c.evaluation_status, 'pending') = 'failed'
+            ) OVER () AS failed_total_count
         FROM commits c
         JOIN flakes f ON f.id = c.flake_id
         LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
@@ -662,7 +680,11 @@ pub async fn list_eval_history(
     status_filter: Option<&str>,
     flake_filter: Option<&str>,
 ) -> Result<EvalHistoryPage> {
-    let offset = (page.max(1) - 1) * limit;
+    let safe_limit = limit.max(1).min(crate::api::models::LIMIT_MAX);
+    let safe_page = page.max(1);
+    let offset = (safe_page - 1).checked_mul(safe_limit).ok_or_else(|| {
+        anyhow::anyhow!("offset overflow: page={} limit={}", safe_page, safe_limit)
+    })?;
 
     #[derive(sqlx::FromRow)]
     struct HistoryRow {
@@ -682,6 +704,7 @@ pub async fn list_eval_history(
         passed_count: i64,
         policy_failed_count: i64,
         eval_failed_count: i64,
+        alert_occurrence_id: String,
         total_count: i64,
     }
 
@@ -718,6 +741,15 @@ pub async fn list_eval_history(
                 SELECT COUNT(*)::BIGINT FROM derivations d
                 WHERE d.commit_id = c.id AND d.status_id = 6
             ), 0)                           AS eval_failed_count,
+            concat_ws(
+                ':',
+                'eval',
+                c.id::text,
+                COALESCE(
+                    (EXTRACT(EPOCH FROM c.evaluation_completed_at) * 1000000)::bigint::text,
+                    'unknown'
+                )
+            )                               AS alert_occurrence_id,
             COUNT(*) OVER ()                AS total_count
         FROM commits c
         JOIN flakes f ON f.id = c.flake_id
@@ -731,7 +763,7 @@ pub async fn list_eval_history(
     )
     .bind(status_filter)
     .bind(flake_filter)
-    .bind(limit)
+    .bind(safe_limit)
     .bind(offset)
     .fetch_all(pool)
     .await?;
@@ -757,13 +789,14 @@ pub async fn list_eval_history(
             passed_count: r.passed_count,
             policy_failed_count: r.policy_failed_count,
             eval_failed_count: r.eval_failed_count,
+            alert_occurrence_id: r.alert_occurrence_id,
         })
         .collect();
 
     Ok(EvalHistoryPage {
         total_count,
-        page,
-        limit,
+        page: safe_page,
+        limit: safe_limit,
         items,
     })
 }

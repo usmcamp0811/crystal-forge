@@ -230,7 +230,7 @@ pub enum PendingAction {
         action: WorkerAction,
     },
     Build {
-        build_id: i32,
+        job_id: uuid::Uuid,
         action: BuildAction,
     },
 }
@@ -304,7 +304,7 @@ pub fn apply_action(
     action: PendingAction,
     workers: &mut Signal<Vec<WorkerItem>>,
     builds: &mut Signal<Vec<BuildItem>>,
-    selected_build: &mut Signal<Option<i32>>,
+    selected_build: &mut Signal<Option<uuid::Uuid>>,
     note: &mut Signal<Option<String>>,
 ) {
     match action {
@@ -332,45 +332,49 @@ pub fn apply_action(
             workers.set(next_workers);
             note.set(Some(format!("Applied {} on {worker_id}", action.label())));
         }
-        PendingAction::Build { build_id, action } => {
+        PendingAction::Build { job_id, action } => {
             let mut next_builds = builds.read().clone();
             match action {
                 BuildAction::Stop => {
                     // Optimistic UI: show Stopping immediately; server will confirm.
-                    if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
+                    if let Some(target) = next_builds.iter_mut().find(|b| b.job_id == Some(job_id))
+                    {
                         target.status = BuildStatus::Stopping;
                     }
-                    if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
+                    if let Some(target) = next_builds.iter_mut().find(|b| b.job_id == Some(job_id))
+                    {
                         target.status = BuildStatus::Cancelled;
                     }
-                    note.set(Some(format!("Stopped build #{build_id}")));
+                    note.set(Some(format!("Stopped build {job_id}")));
                 }
                 BuildAction::ForceCancel => {
                     // Optimistic UI: show Cancelled immediately; server will confirm.
-                    if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
+                    if let Some(target) = next_builds.iter_mut().find(|b| b.job_id == Some(job_id))
+                    {
                         target.status = BuildStatus::Cancelled;
                     }
-                    note.set(Some(format!("Force-cancelled build #{build_id}")));
+                    note.set(Some(format!("Force-cancelled build {job_id}")));
                 }
                 BuildAction::Restart => {
                     // Optimistic UI: show Queued immediately; server will confirm.
-                    if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
+                    if let Some(target) = next_builds.iter_mut().find(|b| b.job_id == Some(job_id))
+                    {
                         target.status = BuildStatus::Building;
                         target.runtime = Some("00:00".to_string());
                         target.queued_for = "restarting".to_string();
                     }
-                    note.set(Some(format!("Restarted build #{build_id}")));
+                    note.set(Some(format!("Restarted build {job_id}")));
                 }
                 BuildAction::RunNext => {
-                    if let Some(index) = next_builds.iter().position(|b| b.id == build_id) {
+                    if let Some(index) = next_builds.iter().position(|b| b.job_id == Some(job_id)) {
                         let target = next_builds.remove(index);
                         let insert_idx = next_builds
                             .iter()
                             .position(|b| b.status == BuildStatus::Queued)
                             .unwrap_or(next_builds.len());
                         next_builds.insert(insert_idx, target);
-                        selected_build.set(Some(build_id));
-                        note.set(Some(format!("Prioritized build #{build_id}")));
+                        selected_build.set(Some(job_id));
+                        note.set(Some(format!("Prioritized build {job_id}")));
                     }
                 }
                 BuildAction::MoveUp | BuildAction::MoveDown => {
@@ -382,9 +386,12 @@ pub fn apply_action(
     }
 }
 
-pub fn selected_build_data(selected_id: Option<i32>, builds: &[BuildItem]) -> Option<BuildItem> {
+pub fn selected_build_data(
+    selected_id: Option<uuid::Uuid>,
+    builds: &[BuildItem],
+) -> Option<BuildItem> {
     if let Some(id) = selected_id {
-        builds.iter().find(|b| b.id == id).cloned()
+        builds.iter().find(|b| b.job_id == Some(id)).cloned()
     } else {
         // JSX: selected defaults to null, not first build
         None

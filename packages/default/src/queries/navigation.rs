@@ -527,12 +527,38 @@ pub async fn fetch_navigation_badges(
 
     // ── Evals: failed commit evaluations, new since evaluation_completed_at ──
     let evals_since = acks.get("evals").map(|b| b.last_seen_at);
+    // Retrieve failed IDs from the latest 10,000 *terminal* evaluations (complete,
+    // failed, cancelled), matching the UI's reachable history window. The UI loads
+    // all terminal statuses, then filters to failures for display. The badge must
+    // use the same universe or acknowledgement becomes ineffective (review finding #1).
     let eval_alert_ids: Vec<String> = match sqlx::query_scalar(
         r#"
-        SELECT c.id::text
-        FROM commits c
-        WHERE c.evaluation_status = 'failed'
-        ORDER BY c.evaluation_completed_at DESC NULLS LAST, c.id DESC
+        SELECT
+            concat_ws(
+                ':',
+                'eval',
+                recent.id::text,
+                COALESCE(
+                    (EXTRACT(EPOCH FROM recent.evaluation_completed_at) * 1000000)::bigint::text,
+                    'unknown'
+                )
+            )
+        FROM (
+            SELECT
+                c.id,
+                c.evaluation_status,
+                c.evaluation_completed_at
+            FROM commits c
+            WHERE c.evaluation_status IN ('complete', 'failed', 'cancelled')
+            ORDER BY
+                c.evaluation_completed_at DESC NULLS LAST,
+                c.id DESC
+            LIMIT 10000
+        ) recent
+        WHERE recent.evaluation_status = 'failed'
+        ORDER BY
+            recent.evaluation_completed_at DESC NULLS LAST,
+            recent.id DESC
         "#,
     )
     .fetch_all(pool)
@@ -548,13 +574,27 @@ pub async fn fetch_navigation_badges(
         if let Some(count) = new_since_by_occurrence_ids(&eval_alert_ids, acks.get("evals")) {
             count
         } else {
+            // Timestamp-based fallback (used when no occurrence-ID baseline exists).
+            // Also use the same bounded terminal-history window so the fallback and
+            // occurrence-ID paths have identical semantics.
             match sqlx::query_scalar(
                 r#"
         SELECT COUNT(*)::bigint
-        FROM commits
-        WHERE evaluation_status = 'failed'
-          AND ($1::timestamptz IS NULL OR evaluation_completed_at > $1)
-          AND evaluation_completed_at <= $2
+        FROM (
+            SELECT
+                c.id,
+                c.evaluation_status,
+                c.evaluation_completed_at
+            FROM commits c
+            WHERE c.evaluation_status IN ('complete', 'failed', 'cancelled')
+            ORDER BY
+                c.evaluation_completed_at DESC NULLS LAST,
+                c.id DESC
+            LIMIT 10000
+        ) recent
+        WHERE recent.evaluation_status = 'failed'
+          AND ($1::timestamptz IS NULL OR recent.evaluation_completed_at > $1)
+          AND recent.evaluation_completed_at <= $2
         "#,
             )
             .bind(evals_since)

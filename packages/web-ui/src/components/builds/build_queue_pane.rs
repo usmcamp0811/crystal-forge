@@ -10,9 +10,9 @@ use crate::alerts::{attention_row_class, dismiss_attention_item};
 use super::helpers::{BuildAction, BuildItem, BuildStatus, extract_system_name, short_commit};
 
 fn queue_drag_reorder_actions(
-    queued_ids: &[i32],
-    dragged_id: i32,
-    target_id: i32,
+    queued_ids: &[uuid::Uuid],
+    dragged_id: uuid::Uuid,
+    target_id: uuid::Uuid,
 ) -> Vec<BuildAction> {
     let from_pos = queued_ids.iter().position(|id| *id == dragged_id);
     let to_pos = queued_ids.iter().position(|id| *id == target_id);
@@ -34,28 +34,28 @@ fn queue_drag_reorder_actions(
 #[component]
 pub fn BuildQueuePane(
     builds: Vec<BuildItem>,
-    selected_id: Signal<Option<i32>>,
+    selected_id: Signal<Option<uuid::Uuid>>,
     /// When true, failed rows receive the attention-flash CSS class (one-shot).
     flash_failed: bool,
     can_requeue: bool,
-    on_build_action: EventHandler<(i32, BuildAction)>,
-    on_log: EventHandler<i32>,
+    on_build_action: EventHandler<(uuid::Uuid, BuildAction)>,
+    on_log: EventHandler<uuid::Uuid>,
     /// Bulk re-queue selected builds (Completed tab).
-    on_bulk_rerun: EventHandler<Vec<i32>>,
+    on_bulk_rerun: EventHandler<Vec<uuid::Uuid>>,
     /// Bulk download logs archive (Completed tab).
-    on_bulk_download_logs: EventHandler<Vec<i32>>,
+    on_bulk_download_logs: EventHandler<Vec<uuid::Uuid>>,
     /// Bulk delete build records (Completed tab).
-    on_bulk_delete: EventHandler<Vec<i32>>,
+    on_bulk_delete: EventHandler<Vec<uuid::Uuid>>,
 ) -> Element {
     // Multi-select state: set of selected build IDs (only operator-cancellable ones).
-    let mut selected_ids: Signal<Vec<i32>> = use_signal(Vec::new);
+    let mut selected_ids: Signal<Vec<uuid::Uuid>> = use_signal(Vec::new);
     let reorderable = builds
         .iter()
         .any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building));
-    let queued_ids: Vec<i32> = builds
+    let queued_ids: Vec<uuid::Uuid> = builds
         .iter()
         .filter(|b| b.status == BuildStatus::Queued)
-        .map(|b| b.id)
+        .filter_map(|b| b.job_id)
         .collect();
 
     #[cfg(target_arch = "wasm32")]
@@ -79,8 +79,8 @@ pub fn BuildQueuePane(
     // Drag-to-reorder state (JSX: dragId, overIdx). IDs identify backend
     // jobs, but movement must be calculated from queue positions because IDs
     // are not positional and completed rows may use negative IDs.
-    let mut dragged_id: Signal<Option<i32>> = use_signal(|| None);
-    let mut drag_over_id: Signal<Option<i32>> = use_signal(|| None);
+    let mut dragged_id: Signal<Option<uuid::Uuid>> = use_signal(|| None);
+    let mut drag_over_id: Signal<Option<uuid::Uuid>> = use_signal(|| None);
 
     // Detect Completed tab: all entries are terminal statuses
     let is_completed = builds.iter().all(|b| {
@@ -114,10 +114,16 @@ pub fn BuildQueuePane(
                     for (pos, build) in builds.iter().enumerate() {
                         {
                             let build = build.clone();
-                            let is_selected = *selected_id.read() == Some(build.id);
-                            let is_checked = selected_ids.read().contains(&build.id);
+                            let is_selected = build
+                                .job_id
+                                .is_some_and(|id| *selected_id.read() == Some(id));
+                            let is_checked = build
+                                .job_id
+                                .is_some_and(|id| selected_ids.read().contains(&id));
                             let can_cancel = can_requeue && is_cancellable(build.status);
-                            let queued_pos = queued_ids.iter().position(|id| *id == build.id);
+                            let queued_pos = build
+                                .job_id
+                                .and_then(|id| queued_ids.iter().position(|queued_id| *queued_id == id));
                             let queued_last_pos = queued_ids.len().saturating_sub(1);
                             let mut row_class = "q-row".to_string();
                             if is_selected { row_class.push_str(" selected"); }
@@ -152,17 +158,21 @@ pub fn BuildQueuePane(
                             let show_drop_before = reorderable
                                 && dragged_queue_pos.is_some()
                                 && queued_pos.is_some()
-                                && drag_over_id.read().as_ref() == Some(&build.id)
+                                && build.job_id.is_some_and(|id| drag_over_id.read().as_ref() == Some(&id))
                                 && dragged_queue_pos > queued_pos;
                             let show_drop_after = reorderable
                                 && dragged_queue_pos.is_some()
                                 && queued_pos.is_some()
-                                && drag_over_id.read().as_ref() == Some(&build.id)
+                                && build.job_id.is_some_and(|id| drag_over_id.read().as_ref() == Some(&id))
                                 && dragged_queue_pos < queued_pos;
                             let can_drag_reorder = reorderable && queued_pos.is_some();
                             let queued_ids_for_drop = queued_ids.clone();
+                            let row_key = build
+                                .job_id
+                                .map(|id| id.to_string())
+                                .unwrap_or_else(|| format!("legacy-{}", build.id));
                             // Drag visual states
-                            if dragged_id.read().as_ref() == Some(&build.id) {
+                            if build.job_id.is_some_and(|id| dragged_id.read().as_ref() == Some(&id)) {
                                 row_class.push_str(" q-dragging");
                             }
                             if show_drop_before { row_class.push_str(" q-drop-before"); }
@@ -170,26 +180,28 @@ pub fn BuildQueuePane(
 
                             rsx! {
                                 tr {
-                                    key: "{build.id}",
+                                    key: "{row_key}",
                                     class: "{row_class}",
                                     "data-testid": "build-queue-row",
                                     draggable: if can_drag_reorder { "true" } else { "false" },
                                     // HTML5 drag-and-drop events for reorder
                                     ondragstart: {
-                                        let bid = build.id;
+                                        let bid = build.job_id;
                                         move |evt| {
                                             if can_drag_reorder {
-                                                evt.data_transfer().set_data("text/plain", &bid.to_string()).ok();
-                                                dragged_id.set(Some(bid));
+                                                if let Some(bid) = bid {
+                                                    evt.data_transfer().set_data("text/plain", &bid.to_string()).ok();
+                                                    dragged_id.set(Some(bid));
+                                                }
                                             }
                                         }
                                     },
                                     ondragover: {
-                                        let bid = build.id;
+                                        let bid = build.job_id;
                                         move |evt| {
                                             if can_drag_reorder && dragged_id().is_some() {
                                                 evt.prevent_default();
-                                                drag_over_id.set(Some(bid));
+                                                drag_over_id.set(bid);
                                             }
                                         }
                                     },
@@ -198,14 +210,14 @@ pub fn BuildQueuePane(
                                             evt.prevent_default();
                                         }
                                         let from = dragged_id();
-                                        if let Some(f) = from {
+                                        if let (Some(f), Some(target_id)) = (from, build.job_id) {
                                             #[cfg(target_arch = "wasm32")]
-                                            web_sys::console::log_1(&format!("Drag drop: from build {} to build {}", f, build.id).into());
+                                            web_sys::console::log_1(&format!("Drag drop: from build {} to build {}", f, target_id).into());
 
                                             let actions = queue_drag_reorder_actions(
                                                 &queued_ids_for_drop,
                                                 f,
-                                                build.id,
+                                                target_id,
                                             );
 
                                             #[cfg(target_arch = "wasm32")]
@@ -229,12 +241,14 @@ pub fn BuildQueuePane(
                                         // Shift-click: toggle multi-select on operator-cancellable rows
                                         if evt.modifiers().shift() && can_cancel {
                                             let mut ids = selected_ids.read().clone();
-                                            if is_checked {
-                                                ids.retain(|&id| id != build.id);
-                                            } else {
-                                                ids.push(build.id);
+                                            if let Some(job_id) = build.job_id {
+                                                if is_checked {
+                                                    ids.retain(|&id| id != job_id);
+                                                } else {
+                                                    ids.push(job_id);
+                                                }
+                                                selected_ids.set(ids);
                                             }
-                                            selected_ids.set(ids);
                                             return;
                                         }
                                         // Clear multi-select on normal click if nothing selected
@@ -246,7 +260,9 @@ pub fn BuildQueuePane(
                                         if is_failed {
                                             dismiss_attention_item("builds", &build_key);
                                         }
-                                        selected_id.set(Some(build.id));
+                                        if let Some(job_id) = build.job_id {
+                                            selected_id.set(Some(job_id));
+                                        }
                                     },
 
                                     if reorderable {
@@ -404,7 +420,11 @@ pub fn BuildQueuePane(
                                                         class: "q-move-btn focus-ring",
                                                         title: "Move up",
                                                         disabled: queued_pos.is_none() || queued_pos == Some(0),
-                                                        onclick: move |_| on_build_action.call((build.id, BuildAction::MoveUp)),
+                                                        onclick: move |_| {
+                                                            if let Some(job_id) = build.job_id {
+                                                                on_build_action.call((job_id, BuildAction::MoveUp));
+                                                            }
+                                                        },
                                                         svg {
                                                             width: "15", height: "15",
                                                             view_box: "0 0 24 24",
@@ -417,7 +437,11 @@ pub fn BuildQueuePane(
                                                         class: "q-move-btn focus-ring",
                                                         title: "Move down",
                                                         disabled: queued_pos.is_none() || queued_pos == Some(queued_last_pos),
-                                                        onclick: move |_| on_build_action.call((build.id, BuildAction::MoveDown)),
+                                                        onclick: move |_| {
+                                                            if let Some(job_id) = build.job_id {
+                                                                on_build_action.call((job_id, BuildAction::MoveDown));
+                                                            }
+                                                        },
                                                         svg {
                                                             width: "15", height: "15",
                                                             view_box: "0 0 24 24",
@@ -434,8 +458,10 @@ pub fn BuildQueuePane(
                                                 class: "btn-icon focus-ring",
                                                 title: "Logs",
                                                 onclick: move |_| {
-                                                    selected_id.set(Some(build.id));
-                                                    on_log.call(build.id);
+                                                    if let Some(job_id) = build.job_id {
+                                                        selected_id.set(Some(job_id));
+                                                        on_log.call(job_id);
+                                                    }
                                                 },
                                                 // terminal icon
                                                 svg {
@@ -454,7 +480,11 @@ pub fn BuildQueuePane(
                                                 button {
                                                     class: "btn-icon focus-ring",
                                                     title: "Cancel build",
-                                                    onclick: move |_| on_build_action.call((build.id, BuildAction::Stop)),
+                                                    onclick: move |_| {
+                                                        if let Some(job_id) = build.job_id {
+                                                            on_build_action.call((job_id, BuildAction::Stop));
+                                                        }
+                                                    },
                                                     svg {
                                                         width: "14", height: "14",
                                                         view_box: "0 0 24 24",
@@ -471,7 +501,11 @@ pub fn BuildQueuePane(
                                                     class: "btn-icon focus-ring",
                                                     title: "Force kill",
                                                     style: "color: var(--cf-red, #f87171);",
-                                                    onclick: move |_| on_build_action.call((build.id, BuildAction::ForceCancel)),
+                                                    onclick: move |_| {
+                                                        if let Some(job_id) = build.job_id {
+                                                            on_build_action.call((job_id, BuildAction::ForceCancel));
+                                                        }
+                                                    },
                                                     svg {
                                                         width: "14", height: "14",
                                                         view_box: "0 0 24 24",
@@ -489,7 +523,11 @@ pub fn BuildQueuePane(
                                                 button {
                                                     class: "btn-icon focus-ring",
                                                     title: "Retry build",
-                                                    onclick: move |_| on_build_action.call((build.id, BuildAction::Restart)),
+                                                    onclick: move |_| {
+                                                        if let Some(job_id) = build.job_id {
+                                                            on_build_action.call((job_id, BuildAction::Restart));
+                                                        }
+                                                    },
                                                     // rollback icon
                                                     svg {
                                                         width: "14", height: "14",
@@ -693,23 +731,27 @@ fn status_chip_class(status: BuildStatus) -> &'static str {
 mod tests {
     use super::*;
 
+    fn id(n: u128) -> uuid::Uuid {
+        uuid::Uuid::from_u128(n)
+    }
+
     #[test]
     fn drag_reorder_uses_positions_not_id_values() {
-        let actions = queue_drag_reorder_actions(&[40, 10, 30], 40, 30);
+        let actions = queue_drag_reorder_actions(&[id(40), id(10), id(30)], id(40), id(30));
 
         assert_eq!(actions, vec![BuildAction::MoveDown, BuildAction::MoveDown]);
     }
 
     #[test]
     fn drag_reorder_moves_up_by_position() {
-        let actions = queue_drag_reorder_actions(&[40, 10, 30], 30, 40);
+        let actions = queue_drag_reorder_actions(&[id(40), id(10), id(30)], id(30), id(40));
 
         assert_eq!(actions, vec![BuildAction::MoveUp, BuildAction::MoveUp]);
     }
 
     #[test]
     fn drag_reorder_ignores_non_queued_rows() {
-        let actions = queue_drag_reorder_actions(&[40, 10, 30], -1, 10);
+        let actions = queue_drag_reorder_actions(&[id(40), id(10), id(30)], id(99), id(10));
 
         assert!(actions.is_empty());
     }

@@ -563,41 +563,39 @@ fn action_prompt(action: &PendingAction) -> (&'static str, String, &'static str)
             "Drain",
         ),
         PendingAction::Build {
-            build_id,
+            job_id,
             action: BuildAction::Stop,
         } => (
             "Stop build?",
-            format!(
-                "Build #{build_id} will send stop to the active systemd unit and mark canceled."
-            ),
+            format!("Build {job_id} will send stop to the active systemd unit and mark canceled."),
             "Stop",
         ),
         PendingAction::Build {
-            build_id,
+            job_id,
             action: BuildAction::ForceCancel,
         } => (
             "Force cancel build?",
             format!(
-                "Build #{build_id} will be immediately marked as cancelled without waiting for builder confirmation. Use this for stuck builds."
+                "Build {job_id} will be immediately marked as cancelled without waiting for builder confirmation. Use this for stuck builds."
             ),
             "Force Cancel",
         ),
         PendingAction::Build {
-            build_id,
+            job_id,
             action: BuildAction::Restart,
         } => (
             "Restart build?",
             format!(
-                "Build #{build_id} will cancel current systemd execution and rerun build commands."
+                "Build {job_id} will cancel current systemd execution and rerun build commands."
             ),
             "Restart",
         ),
         PendingAction::Build {
-            build_id,
+            job_id,
             action: BuildAction::RunNext,
         } => (
             "Run this build next?",
-            format!("Build #{build_id} will be promoted to the front of the queued set."),
+            format!("Build {job_id} will be promoted to the front of the queued set."),
             "Prioritize",
         ),
         PendingAction::Build {

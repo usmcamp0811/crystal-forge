@@ -617,10 +617,11 @@ pub async fn fetch_system_agent_events(
 }
 
 /// Fetch the evaluation queue (active + completed commits).
-pub async fn fetch_eval_queue() -> Result<EvalQueueSummary, ApiClientError> {
+pub async fn fetch_eval_queue(limit: i64) -> Result<EvalQueueSummary, ApiClientError> {
     let url = format!(
-        "{}/commits/eval-queue?_ts={}",
+        "{}/commits/eval-queue?limit={}&_ts={}",
         base_url(),
+        limit,
         js_sys::Date::now()
     );
     fetch_json(&url).await
@@ -859,8 +860,10 @@ pub async fn force_cancel_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClient
 }
 
 /// Fetch recent completed/failed build jobs.
-pub async fn fetch_recent_build_jobs() -> Result<Vec<BuildQueueItem>, ApiClientError> {
-    let url = format!("{}/build-jobs/recent", base_url());
+pub async fn fetch_recent_build_jobs(
+    limit: i64,
+) -> Result<crate::api::models::BuildQueuePageResponse, ApiClientError> {
+    let url = format!("{}/build-jobs/recent?limit={}", base_url(), limit);
     fetch_json(&url).await
 }
 
