@@ -360,10 +360,9 @@ web-ui-screenshots-mr-comment:
     - merge_requests
 
 # Runs the CVE scan loop processing test (scan_cycle_processes_target_with_fake_runner)
-# using the existing `devScripts.db-only` process-compose stack. The job starts
-# Postgres via process-compose, waits for readiness, applies migrations, runs
-# the targeted fake-runner processing test from the lightweight `.#sqlx` shell,
-# and then stops the stack.
+# via the repo-owned `devScripts.cve-test` process-compose project. That target
+# starts the DB service, waits for health, runs migrations + the targeted test,
+# and then shuts itself down so `up --tui=false` exits cleanly.
 cve-processing-test:
   stage: check
   tags:
@@ -374,40 +373,7 @@ cve-processing-test:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - |
-      nix develop .#sqlx -c bash -euo pipefail -c '
-        REPO_ROOT="$PWD"
-        DB_URL="postgresql://crystal_forge:password@127.0.0.1:3042/crystal_forge"
-        LOG_FILE="${TMPDIR:-/tmp}/cf-db-only.log"
-
-        cleanup() {
-          nix run "$REPO_ROOT#devScripts.db-only" -- down >/dev/null 2>&1 || true
-        }
-        trap cleanup EXIT
-
-        echo "📦 Starting db-only process-compose stack..."
-        setsid nix run "$REPO_ROOT#devScripts.db-only" -- up --tui=false \
-          >"$LOG_FILE" 2>&1 < /dev/null &
-
-        echo "⏳ Waiting for PostgreSQL on 127.0.0.1:3042..."
-        for i in {1..120}; do
-          if pg_isready -h 127.0.0.1 -p 3042 -U crystal_forge -d crystal_forge >/dev/null 2>&1; then
-            echo "✓ PostgreSQL ready"
-            break
-          fi
-          if [[ $i -eq 120 ]]; then
-            echo "❌ PostgreSQL did not become ready; last log output:"
-            tail -n 200 "$LOG_FILE" || true
-            exit 1
-          fi
-          sleep 1
-        done
-
-        DATABASE_URL="$DB_URL" cargo sqlx migrate run --source packages/default/migrations
-        CRYSTAL_FORGE_TEST_DATABASE_URL="$DB_URL" \
-          cargo test --manifest-path packages/default/Cargo.toml \
-          --lib builder::cve_worker::tests::scan_cycle_processes_target_with_fake_runner
-      '
+    - nix run .#devScripts.cve-test -- up --tui=false
   only:
     - merge_requests
     - main

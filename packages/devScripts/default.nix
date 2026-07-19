@@ -584,6 +584,35 @@ let
     '';
   };
 
+  runCveProcessingTest = pkgs.writeShellApplication {
+    name = "run-cve-processing-test";
+    runtimeInputs = with pkgs; [ nix coreutils ];
+    text = ''
+      set -euo pipefail
+
+      REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
+      DB_URL="postgresql://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge"
+
+      status=0
+      if nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
+        cd \"$REPO_ROOT/packages/default\"
+        DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source migrations
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib builder::cve_worker::tests::scan_cycle_processes_target_with_fake_runner
+      "; then
+        status=0
+      else
+        status=$?
+      fi
+
+      # Tear the project down so `process-compose up` exits once the one-shot
+      # test process completes.
+      nix run "$REPO_ROOT#devScripts.cve-test" -- down >/dev/null 2>&1 || true
+      exit "$status"
+    '';
+  };
+
   seedCveMock = pkgs.writeShellApplication {
     name = "seed-cve-mock";
     runtimeInputs = with pkgs; [ postgresql coreutils ];
@@ -1115,6 +1144,14 @@ let
     };
   };
 
+  cve-test-module = {
+    settings.processes.cve-processing-test = {
+      inherit namespace;
+      command = runCveProcessingTest;
+      depends_on."db".condition = "process_healthy";
+    };
+  };
+
   full-stack = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
@@ -1147,6 +1184,14 @@ let
     modules = [ inputs.services-flake.processComposeModules.default db-module ];
   };
 
+  cveTest = pkgs.process-compose-flake.evalModules {
+    modules = [
+      inputs.services-flake.processComposeModules.default
+      db-core-module
+      cve-test-module
+    ];
+  };
+
   oidc-stack = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
@@ -1159,6 +1204,7 @@ let
 in full-stack.config.outputs.package // {
   inherit runServer runAgent runBuilder simulatePush startBuilderApi
     runUiDev runUiFrontend bootstrapDevBuilder envExports;
+  cve-test = cveTest.config.outputs.package;
   db-only = dbOnly.config.outputs.package;
   server-only = server-only.config.outputs.package;
   server-stack-mock = server-stack-mock.config.outputs.package;
