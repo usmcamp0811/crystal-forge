@@ -649,14 +649,32 @@ pub fn BuildsView() -> Element {
             let requested_len = build_history_fetch_limit();
             let paging_count = paging.count();
 
+            // Calculate threshold using both status filter AND search query,
+            // matching the same predicates used to produce the rendered list
+            // (review finding #2). The observer recheck needs the actual
+            // displayed row count, not the backing list size.
             let q = search_query().trim().to_lowercase();
-            let threshold = if q.is_empty() {
-                loaded_len
-            } else {
-                build_history
-                    .read()
-                    .iter()
-                    .filter(|b| {
+            let status_filter = completed_status_filter();
+            let threshold = build_history
+                .read()
+                .iter()
+                .filter(|b| {
+                    // Apply status filter first.
+                    matches!(
+                        b.status,
+                        BuildStatus::Complete | BuildStatus::Failed | BuildStatus::Cancelled
+                    ) && match status_filter {
+                        CompletedStatusFilter::All => true,
+                        CompletedStatusFilter::Complete => b.status == BuildStatus::Complete,
+                        CompletedStatusFilter::Failed => b.status == BuildStatus::Failed,
+                        CompletedStatusFilter::Cancelled => b.status == BuildStatus::Cancelled,
+                    }
+                })
+                .filter(|b| {
+                    // Then apply search query.
+                    if q.is_empty() {
+                        true
+                    } else {
                         [
                             Some(extract_system_name(&b.hostname).to_lowercase()),
                             Some(b.flake.to_lowercase()),
@@ -672,9 +690,9 @@ pub fn BuildsView() -> Element {
                         .into_iter()
                         .flatten()
                         .any(|v| v.contains(&q))
-                    })
-                    .count()
-            };
+                    }
+                })
+                .count();
 
             let reachable_total = total.min(FETCH_LIMIT_MAX);
             let server_has_more = (loaded_len as i64) < reachable_total;

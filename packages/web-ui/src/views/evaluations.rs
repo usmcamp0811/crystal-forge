@@ -594,6 +594,7 @@ fn EvaluationsPage() -> Element {
                                         let selected_ids: Vec<i32> = history_selected_ids.read().iter().copied().collect();
                                         let mut refresh_sig = history_refresh.clone();
                                         let mut selected_sig = history_selected_ids.clone();
+                                        let mut select_all_sig = history_select_all_loaded.clone();
                                         let mut toast = toast_msg.clone();
                                         spawn(async move {
                                             let mut success = 0u32;
@@ -607,6 +608,9 @@ fn EvaluationsPage() -> Element {
                                             if success > 0 {
                                                 toast.set(Some(format!("Re-queued {} evaluation{}", success, if success == 1 { "" } else { "s" })));
                                                 selected_sig.set(failed.into_iter().collect());
+                                                // Disable auto-select so the next poll doesn't repopulate
+                                                // the selection with successful rows (review finding #3).
+                                                select_all_sig.set(false);
                                             } else {
                                                 toast.set(Some("Re-evaluate failed — see server logs".to_string()));
                                             }

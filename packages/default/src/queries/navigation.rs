@@ -527,12 +527,18 @@ pub async fn fetch_navigation_badges(
 
     // ── Evals: failed commit evaluations, new since evaluation_completed_at ──
     let evals_since = acks.get("evals").map(|b| b.last_seen_at);
+    // Retrieve only the latest 10,000 failed evaluations to match the
+    // frontend's reachable history window (review finding #1). Beyond that cap,
+    // the UI cannot load or acknowledge older failures, so the badge universe
+    // and acknowledgement universe must align or acknowledgement becomes
+    // permanently ineffective.
     let eval_alert_ids: Vec<String> = match sqlx::query_scalar(
         r#"
         SELECT c.id::text
         FROM commits c
         WHERE c.evaluation_status = 'failed'
         ORDER BY c.evaluation_completed_at DESC NULLS LAST, c.id DESC
+        LIMIT 10000
         "#,
     )
     .fetch_all(pool)
