@@ -168,8 +168,9 @@ fn materialization_nix_config_lines(
 /// called; the receiver lets the loop respond to run-now signals from HTTP
 /// handlers.
 ///
-/// The loop exits early (returning `()`) when vulnix is not on `$PATH`, logging
-/// an error.  All other errors are logged and the loop continues.
+/// The loop runs indefinitely.  When vulnix is unavailable it sleeps and
+/// retries so that installing or restoring vulnix does not require a server
+/// restart.  All cycle errors are logged and the loop continues.
 pub async fn run_cve_scan_loop(
     pool: PgPool,
     job: BackgroundJobHandle,
@@ -186,26 +187,14 @@ pub async fn run_cve_scan_loop(
         vulnix_config.poll_interval.as_secs()
     );
 
-    if !VulnixRunner::check_vulnix_available().await {
-        error!("❌ vulnix is not available — CVE scanning disabled");
-        return;
-    }
-
-    let vulnix_version = VulnixRunner::get_vulnix_version().await.ok();
-
-    debug!("🔧 vulnix version: {:?}", vulnix_version);
-    debug!(
-        "🔧 vulnix config: timeout={}s whitelist={} extra_args={:?}",
-        vulnix_config.timeout_seconds(),
-        vulnix_config.enable_whitelist,
-        vulnix_config.extra_args
-    );
-
     let vulnix_runner = VulnixRunner::with_config(&vulnix_config);
+
+    // Keep a reference to the enabled lock so scan_cycle can poll it mid-cycle.
+    let enabled_rx = &job.state.enabled;
 
     loop {
         // Honour the enabled flag — sleep the full interval and skip work when disabled.
-        let enabled = *job.state.enabled.read().await;
+        let enabled = *enabled_rx.read().await;
         if !enabled {
             debug!("CVE scan loop: disabled — skipping cycle");
             // Update next_run_at while disabled so the UI shows something reasonable.
@@ -221,6 +210,34 @@ pub async fn run_cve_scan_loop(
             continue;
         }
 
+        // Retry vulnix availability every cycle so the loop survives a temporary
+        // installation gap without requiring a server restart.
+        if !VulnixRunner::check_vulnix_available().await {
+            warn!("⚠️ vulnix is not available — will retry on next poll interval");
+            set_cve_status_idle().await;
+            *job.state.next_run_at.write().await = Some(
+                Utc::now()
+                    + chrono::Duration::from_std(vulnix_config.poll_interval)
+                        .unwrap_or(chrono::Duration::seconds(60)),
+            );
+            tokio::select! {
+                _ = sleep(vulnix_config.poll_interval) => {}
+                _ = run_now_rx.changed() => {}
+            }
+            let _ = run_now_rx.borrow_and_update();
+            continue;
+        }
+
+        let vulnix_version = VulnixRunner::get_vulnix_version().await.ok();
+
+        debug!("🔧 vulnix version: {:?}", vulnix_version);
+        debug!(
+            "🔧 vulnix config: timeout={}s whitelist={} extra_args={:?}",
+            vulnix_config.timeout_seconds(),
+            vulnix_config.enable_whitelist,
+            vulnix_config.extra_args
+        );
+
         // Mark the job as running and record timing.
         *job.state.is_running.write().await = true;
         *job.state.last_run_at.write().await = Some(Utc::now());
@@ -230,11 +247,15 @@ pub async fn run_cve_scan_loop(
             &vulnix_config,
             &vulnix_runner,
             vulnix_version.clone(),
+            &enabled_rx,
         )
         .await
         {
             error!("❌ Error in CVE scan cycle: {e}");
         }
+        // Always reset the worker status after every cycle so the UI does not
+        // remain permanently in "Working" state when no rescan targets were found.
+        set_cve_status_idle().await;
 
         // Update job metadata after the cycle completes.
         *job.state.is_running.write().await = false;
@@ -273,8 +294,16 @@ async fn scan_cycle(
     vulnix_config: &crate::config::VulnixConfig,
     vulnix_runner: &VulnixRunner,
     vulnix_version: Option<String>,
+    enabled_rx: &tokio::sync::RwLock<bool>,
 ) -> Result<()> {
-    scan_cycle_with_runner(pool, vulnix_config, vulnix_runner, vulnix_version).await
+    scan_cycle_with_runner(
+        pool,
+        vulnix_config,
+        vulnix_runner,
+        vulnix_version,
+        enabled_rx,
+    )
+    .await
 }
 
 async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
@@ -282,6 +311,7 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
     vulnix_config: &crate::config::VulnixConfig,
     vulnix_runner: &R,
     vulnix_version: Option<String>,
+    enabled_rx: &tokio::sync::RwLock<bool>,
 ) -> Result<()> {
     set_cve_status_working("finding scan targets").await;
 
@@ -317,6 +347,12 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
         let snapshot_cutoff = Utc::now();
         let mut attempted: HashSet<i32> = HashSet::new();
         loop {
+            // Respect mid-cycle disable: stop selecting new targets.
+            if !*enabled_rx.read().await {
+                info!("🛑 CVE scan loop disabled mid-cycle — stopping post-build phase");
+                return Ok(());
+            }
+
             let excluded_ids: Vec<i32> = attempted.iter().copied().collect();
             match get_targets_needing_cve_scan(
                 pool,
@@ -342,6 +378,12 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                     }
 
                     for chunk in batch.chunks(POST_BUILD_CONCURRENCY) {
+                        // Check again before each chunk so a disable mid-batch is
+                        // honoured without waiting for the entire concurrent batch.
+                        if !*enabled_rx.read().await {
+                            info!("🛑 CVE scan loop disabled — stopping mid-batch");
+                            return Ok(());
+                        }
                         let futures = chunk.iter().map(|derivation| async {
                             info!(
                                 "🔍 [post-build] Scanning newly built derivation: {}",
@@ -374,7 +416,13 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
             }
         }
     } else {
-        debug!("🔍 on_build = false — skipping post-build scan phase");
+        debug!("🔍 on_build = false — skipping post-build phase");
+    }
+
+    // Check enabled before entering Phase 2.
+    if !*enabled_rx.read().await {
+        info!("🛑 CVE scan loop disabled — skipping periodic rescan phase");
+        return Ok(());
     }
 
     // --- Phase 2: periodic rescan (stale completed scans) ---
@@ -385,6 +433,10 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                 targets.len()
             );
             for derivation in &targets {
+                if !*enabled_rx.read().await {
+                    info!("🛑 CVE scan loop disabled — stopping rescan phase");
+                    return Ok(());
+                }
                 info!(
                     "🔄 [rescan] Re-scanning stale derivation: {}",
                     derivation.derivation_name
@@ -401,7 +453,6 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
         }
         Ok(_) => {
             debug!("🔍 No derivations need CVE rescanning");
-            set_cve_status_idle().await;
         }
         Err(e) => error!("❌ Failed to get rescan targets: {e}"),
     }
@@ -954,6 +1005,13 @@ mod tests {
         }
     }
 
+    /// Verifies that `scan_cycle_with_runner` selects an eligible post-build target,
+    /// invokes the scanner exactly once, and persists a completed scan record.
+    ///
+    /// **Requires:** `CRYSTAL_FORGE_TEST_DATABASE_URL` pointing to a dedicated,
+    /// migration-applied PostgreSQL database (not the shared dev database).
+    /// The test is skipped when the variable is absent; CI should provision a
+    /// dedicated database and set this variable to ensure the check always runs.
     #[tokio::test]
     async fn scan_cycle_processes_target_with_fake_runner() {
         let Some(pool) = db_test_pool().await else {
@@ -1005,13 +1063,26 @@ mod tests {
             calls: Arc::new(AtomicUsize::new(0)),
         };
         let vulnix_config = crate::config::VulnixConfig::default();
+        let enabled_rx = tokio::sync::RwLock::new(true);
 
-        scan_cycle_with_runner(&pool, &vulnix_config, &runner, Some("test".to_string()))
-            .await
-            .expect("scan cycle should succeed");
-        scan_cycle_with_runner(&pool, &vulnix_config, &runner, Some("test".to_string()))
-            .await
-            .expect("second scan cycle should succeed");
+        scan_cycle_with_runner(
+            &pool,
+            &vulnix_config,
+            &runner,
+            Some("test".to_string()),
+            &enabled_rx,
+        )
+        .await
+        .expect("scan cycle should succeed");
+        scan_cycle_with_runner(
+            &pool,
+            &vulnix_config,
+            &runner,
+            Some("test".to_string()),
+            &enabled_rx,
+        )
+        .await
+        .expect("second scan cycle should succeed");
 
         assert_eq!(
             runner.calls.load(Ordering::SeqCst),
