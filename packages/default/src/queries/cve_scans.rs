@@ -56,11 +56,18 @@ pub async fn get_targets_needing_cve_scan(
                 WHERE cs.derivation_id = d.id
                 AND cs.status IN ('pending', 'in_progress')
             )
-            -- Exclude derivations that have failed 5+ times (total across every row)
+            -- Exclude derivations with 5+ consecutive failures since the last
+            -- successful scan (prevents hammering permanently-failing targets
+            -- while allowing recovery once the root cause is fixed).
             AND (
                 SELECT COUNT(*) FROM cve_scans cs
                 WHERE cs.derivation_id = d.id
-                AND cs.status = 'failed'
+                  AND cs.status = 'failed'
+                  AND (cs.created_at > COALESCE(
+                      (SELECT MAX(created_at) FROM cve_scans
+                       WHERE derivation_id = d.id AND status = 'completed'),
+                      '1970-01-01'::timestamp
+                  ))
             ) < 5
         ORDER BY d.completed_at ASC NULLS LAST
         LIMIT $1
@@ -718,6 +725,33 @@ pub async fn resolve_system_cve_scan_target(
     }))
 }
 
+/// Reset scans that have been stuck `in_progress` for more than the given
+/// threshold.  This prevents a server crash between `mark_scan_in_progress` and
+/// `save_scan_results` from permanently poisoning a derivation.
+///
+/// Returns the number of scans that were reset so callers can log the event.
+pub async fn recover_stale_scans(
+    pool: &PgPool,
+    stale_threshold: std::time::Duration,
+) -> Result<i64> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE cve_scans
+        SET status = 'pending',
+            attempts = attempts + 1,
+            scan_metadata = COALESCE(scan_metadata, '{}'::jsonb) || 
+                           jsonb_build_object('stale_recovered_at', NOW()::text)
+        WHERE status = 'in_progress'
+          AND created_at < NOW() - $1 * INTERVAL '1 second'
+        "#,
+        stale_threshold.as_secs() as i64
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() as i64)
+}
+
 /// Get derivations whose most recent completed CVE scan is stale according to
 /// the configured `scan_schedule_policy` intervals.
 ///
@@ -759,16 +793,28 @@ pub async fn get_targets_needing_cve_rescan(
         ),
         -- Lifecycle class derived from system deployment + build freshness,
         -- NOT from scan age.
+        --
+        -- "deployed" uses an EXISTS check against active systems, matching on:
+        --   - flake (via commits → systems.flake_id)
+        --   - effective configuration name (system_configuration_name or hostname)
+        -- This prevents derivations from other flakes or with different names
+        -- from being classified as deployed.
         lifecycle AS (
             SELECT
                 d.id AS derivation_id,
                 CASE
-                    WHEN s.id IS NOT NULL AND s.is_active = TRUE THEN 'deployed'
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM systems s
+                        JOIN commits c ON c.flake_id = s.flake_id
+                        WHERE c.id = d.commit_id
+                          AND s.is_active = TRUE
+                          AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = d.derivation_name
+                    ) THEN 'deployed'
                     WHEN d.completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
                     ELSE 'archived'
                 END AS lifecycle_class
             FROM derivations d
-            LEFT JOIN systems s ON s.hostname = d.derivation_name
             WHERE d.derivation_type = 'nixos'
               AND d.store_path IS NOT NULL
         ),
@@ -816,11 +862,18 @@ pub async fn get_targets_needing_cve_rescan(
                 WHERE cs.derivation_id = d.id
                   AND cs.status IN ('pending', 'in_progress')
             )
-            -- Exclude derivations that have failed 5+ times (total across every row)
+            -- Exclude derivations with 5+ consecutive failures since the last
+            -- successful scan (prevents hammering permanently-failing targets
+            -- while allowing recovery once the root cause is fixed).
             AND (
                 SELECT COUNT(*) FROM cve_scans cs
                 WHERE cs.derivation_id = d.id
                   AND cs.status = 'failed'
+                  AND (cs.created_at > COALESCE(
+                      (SELECT MAX(created_at) FROM cve_scans
+                       WHERE derivation_id = d.id AND status = 'completed'),
+                      '1970-01-01'::timestamp
+                  ))
             ) < 5
             -- Staleness check per lifecycle class, skipping 'never' intervals
             AND (
