@@ -496,9 +496,9 @@ pub(crate) async fn save_scan_results_with_store_path_override(
     .await?;
 
     // 3b. Bulk-upsert package derivations and return their IDs in insertion order.
-    // UNNEST keeps positional alignment; we return id + name so we can build the
-    // pkg_name → derivation_id map needed for package_vulnerabilities.
-    let pkg_rows = sqlx::query!(
+    // Uses sqlx::query (not sqlx::query!) because UNNEST with multi-column SELECT
+    // cannot be represented in the offline SQLx metadata cache.
+    let pkg_rows = sqlx::query(
         r#"
         INSERT INTO derivations (
             commit_id,
@@ -531,40 +531,41 @@ pub(crate) async fn save_scan_results_with_store_path_override(
             $5::text[]
         ) AS t(name, drv_path, pname, version, store_path)
         ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) DO UPDATE SET
-            pname    = EXCLUDED.pname,
-            version  = EXCLUDED.version,
+            pname     = EXCLUDED.pname,
+            version   = EXCLUDED.version,
             status_id = EXCLUDED.status_id
         RETURNING id, derivation_name
         "#,
-        &pkg_names as &[&str],
-        &pkg_drv_paths as &[&str],
-        &pkg_pnames as &[Option<&str>],
-        &pkg_versions as &[String],
-        &pkg_store_paths as &[&str],
     )
+    .bind(&pkg_names as &[&str])
+    .bind(&pkg_drv_paths as &[&str])
+    .bind(&pkg_pnames as &[Option<&str>])
+    .bind(&pkg_versions as &[String])
+    .bind(&pkg_store_paths as &[&str])
     .fetch_all(&mut *tx)
     .await?;
 
-    // Build name → derivation_id map (last write wins for duplicate names, which
-    // matches upsert semantics above).
+    // Build name → derivation_id map.
     let mut name_to_id: HashMap<String, i32> = HashMap::with_capacity(pkg_rows.len());
     let mut pkg_drv_ids: Vec<i32> = Vec::with_capacity(pkg_rows.len());
     for row in &pkg_rows {
-        name_to_id.insert(row.derivation_name.clone(), row.id);
-        pkg_drv_ids.push(row.id);
+        let id: i32 = row.get("id");
+        let name: String = row.get("derivation_name");
+        name_to_id.insert(name, id);
+        pkg_drv_ids.push(id);
     }
 
     // 3c. Bulk-insert scan_packages (ignore duplicates).
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO scan_packages (scan_id, derivation_id, is_runtime_dependency, dependency_depth)
         SELECT $1, id, true, 0
         FROM UNNEST($2::int[]) AS t(id)
         ON CONFLICT (scan_id, derivation_id) DO NOTHING
         "#,
-        scan_id,
-        &pkg_drv_ids as &[i32],
     )
+    .bind(scan_id)
+    .bind(&pkg_drv_ids as &[i32])
     .execute(&mut *tx)
     .await?;
 
@@ -573,7 +574,7 @@ pub(crate) async fn save_scan_results_with_store_path_override(
         let cve_ids: Vec<String> = cve_map.keys().cloned().collect();
         let cve_scores: Vec<Option<BigDecimal>> =
             cve_ids.iter().map(|k| cve_map[k].cvss.clone()).collect();
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO cves (id, cvss_v3_score)
             SELECT id, score
@@ -583,9 +584,9 @@ pub(crate) async fn save_scan_results_with_store_path_override(
                 updated_at    = NOW()
             WHERE cves.cvss_v3_score IS DISTINCT FROM COALESCE(EXCLUDED.cvss_v3_score, cves.cvss_v3_score)
             "#,
-            &cve_ids as &[String],
-            &cve_scores as &[Option<BigDecimal>],
         )
+        .bind(&cve_ids as &[String])
+        .bind(&cve_scores as &[Option<BigDecimal>])
         .execute(&mut *tx)
         .await?;
     }
@@ -598,8 +599,6 @@ pub(crate) async fn save_scan_results_with_store_path_override(
         let mut pv_reasons: Vec<Option<String>> = Vec::with_capacity(pkg_vulns.len());
 
         for pv in &pkg_vulns {
-            // Skip rows whose package name didn't resolve (shouldn't happen
-            // but guard defensively rather than panic).
             if let Some(&drv_id) = name_to_id.get(&pv.pkg_name) {
                 pv_drv_ids.push(drv_id);
                 pv_cve_ids.push(pv.cve_id.clone());
@@ -609,7 +608,7 @@ pub(crate) async fn save_scan_results_with_store_path_override(
         }
 
         if !pv_drv_ids.is_empty() {
-            sqlx::query!(
+            sqlx::query(
                 r#"
                 INSERT INTO package_vulnerabilities (
                     derivation_id, cve_id, detection_method,
@@ -630,11 +629,11 @@ pub(crate) async fn save_scan_results_with_store_path_override(
                 WHERE package_vulnerabilities.is_whitelisted IS DISTINCT FROM EXCLUDED.is_whitelisted
                    OR package_vulnerabilities.whitelist_reason IS DISTINCT FROM EXCLUDED.whitelist_reason
                 "#,
-                &pv_drv_ids as &[i32],
-                &pv_cve_ids as &[String],
-                &pv_whitelisted as &[bool],
-                &pv_reasons as &[Option<String>],
             )
+            .bind(&pv_drv_ids as &[i32])
+            .bind(&pv_cve_ids as &[String])
+            .bind(&pv_whitelisted as &[bool])
+            .bind(&pv_reasons as &[Option<String>])
             .execute(&mut *tx)
             .await?;
         }
