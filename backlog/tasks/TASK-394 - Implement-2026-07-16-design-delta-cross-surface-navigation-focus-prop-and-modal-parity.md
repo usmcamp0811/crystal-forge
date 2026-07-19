@@ -3,10 +3,11 @@ id: TASK-394
 title: >-
   Implement the 2026-07-16 design delta for cross-surface navigation, focus-prop
   system, edit-system tabbed modal, and cache-push detail parity
-status: Backlog
-assignee: []
+status: In Progress
+assignee:
+  - agent
 created_date: '2026-07-16 00:00'
-updated_date: '2026-07-16 00:00'
+updated_date: '2026-07-18 16:30'
 labels:
   - design-parity
   - web-ui
