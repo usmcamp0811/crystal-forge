@@ -1,7 +1,6 @@
 //! Modal for editing system configuration.
 //!
 //! Tabbed modal with General, Deployment, Security, and Danger tabs.
-//! Includes SSH key rotation flow in the Security tab.
 
 use crate::api::models::{CommitInfo, FieldUpdate, SystemDetail, UpdateSystemRequest};
 use crate::components::icon::{Icon, IconName};
@@ -14,19 +13,6 @@ enum Tab {
     Deployment,
     Security,
     Danger,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum KeyMode {
-    Generate,
-    Paste,
-}
-
-#[derive(Clone)]
-struct GeneratedKeys {
-    pub_key: String,
-    priv_key: String,
-    fingerprint: String,
 }
 
 /// Branch options for the flake branch field.
@@ -112,19 +98,6 @@ pub fn EditSystemModal(
     // Tab state
     let mut active_tab = use_signal(|| Tab::General);
 
-    // SSH key rotation state
-    let mut rotating_key = use_signal(|| false);
-    let mut key_mode = use_signal(|| KeyMode::Generate);
-    let mut new_pub_key = use_signal(String::new);
-    let mut generated_keys = use_signal(|| None::<GeneratedKeys>);
-    let mut priv_copied = use_signal(|| false);
-    let mut rotated = use_signal(|| false);
-
-    // Mock fingerprints (in real implementation, these would come from the server)
-    let current_fingerprint = "SHA256:jKLm8NoPqRsTuVwXyZ0123456789ABCDEfghijk";
-    let mut new_fingerprint =
-        use_signal(|| "SHA256:newFingerprintAfterRotation1234567890ABC".to_string());
-
     // Sync FQDN when hostname or environment changes
     {
         let hostname_clone = hostname.clone();
@@ -148,26 +121,6 @@ pub fn EditSystemModal(
             }
         });
     }
-
-    // SSH key validation
-    let new_key_valid = {
-        let key = new_pub_key.read();
-        key.trim().starts_with("ssh-ed25519")
-    };
-
-    // Generate keypair (mock implementation for design)
-    let gen_keypair = move |_| {
-        let mock_pub = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockGeneratedPublicKey1234567890ABCDEF crystal-forge@system".to_string();
-        let mock_priv = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACBNb2NrR2VuZXJhdGVkUHJpdmF0ZUtleTEyMzQ1Njc4OTBBQkNERUYAAAAA\nAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzND\nU2Nzg5Ojs8PT4/QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hp\namtsbW5vcHFyc3R1dnd4eXp7fH1+fw==\n-----END OPENSSH PRIVATE KEY-----".to_string();
-        let mock_fingerprint = "SHA256:MockGeneratedFingerprint7890ABCDEFGH".to_string();
-
-        generated_keys.set(Some(GeneratedKeys {
-            pub_key: mock_pub,
-            priv_key: mock_priv,
-            fingerprint: mock_fingerprint.clone(),
-        }));
-        new_fingerprint.set(mock_fingerprint);
-    };
 
     let handle_save = move |_| {
         is_saving.set(true);
@@ -582,237 +535,16 @@ pub fn EditSystemModal(
                                     Icon { name: IconName::Key, size: 13 }
                                     " Agent identity"
                                 }
-
-                                if !*rotating_key.read() {
-                                    // Display current fingerprint and rotate button
-                                    div {
-                                        class: "field",
-                                        label { "Current public key fingerprint" }
-                                        div {
-                                            class: "mono",
-                                            style: "font-size: 12px; word-break: break-all; padding: 8px 10px; background: var(--cf-subtle-bg); border-radius: 6px;",
-                                            if *rotated.read() {
-                                                "{new_fingerprint}"
-                                            } else {
-                                                "{current_fingerprint}"
-                                            }
-                                        }
+                                div {
+                                    class: "sd-callout sd-callout-warning",
+                                    div { style: "font-size: 12px;",
+                                        "SSH key rotation is unavailable in this modal until it is wired to the real key-generation and public-key update flow."
                                     }
-
-                                    if *rotated.read() {
-                                        div {
-                                            class: "sd-callout sd-callout-healthy",
-                                            style: "margin-top: 8px;",
-                                            span { style: "margin-right: 6px; display:inline-flex; vertical-align:text-bottom;",
-                                                Icon { name: IconName::Check, size: 13 }
-                                            }
-                                            div { style: "font-size: 12px;",
-                                                "Key rotated. The old key is revoked immediately — the agent will re-register with the new key on its next heartbeat."
-                                            }
-                                        }
-                                    } else {
-                                        button {
-                                            class: "btn btn-ghost focus-ring",
-                                            style: "margin-top: 4px;",
-                                            onclick: move |_| rotating_key.set(true),
-                                            span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
-                                                Icon { name: IconName::Sync, size: 12 }
-                                            }
-                                            "Rotate key"
-                                        }
-                                    }
-                                } else {
-                                    // Key rotation flow
-                                    div {
-                                        class: "seg",
-                                        style: "width: fit-content; margin-bottom: 12px;",
-                                        button {
-                                            class: if *key_mode.read() == KeyMode::Generate { "active" } else { "" },
-                                            onclick: move |_| key_mode.set(KeyMode::Generate),
-                                            "Generate new keypair"
-                                        }
-                                        button {
-                                            class: if *key_mode.read() == KeyMode::Paste { "active" } else { "" },
-                                            onclick: move |_| {
-                                                key_mode.set(KeyMode::Paste);
-                                                generated_keys.set(None);
-                                                new_pub_key.set(String::new());
-                                            },
-                                            "Paste existing public key"
-                                        }
-                                    }
-
-                                    if *key_mode.read() == KeyMode::Generate {
-                                        div {
-                                            class: "field",
-                                            if generated_keys.read().is_none() {
-                                                div {
-                                                    class: "help",
-                                                    style: "margin-top: 0;",
-                                                    "Generates a new Ed25519 keypair now. The private key is shown once for you to install on the host — Crystal Forge does not keep a copy."
-                                                }
-                                                button {
-                                                    class: "btn btn-ghost focus-ring",
-                                                    style: "margin-top: 8px;",
-                                                    onclick: gen_keypair,
-                                                    span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
-                                                        Icon { name: IconName::Key, size: 12 }
-                                                    }
-                                                    "Generate keypair"
-                                                }
-                                            } else {
-                                                // Show generated keys
-                                                if let Some(keys) = generated_keys.read().as_ref() {
-                                                    div {
-                                                        label {
-                                                            "Public key "
-                                                            span { style: "color: var(--cf-text-muted); font-weight: 400;", "· install on the host" }
-                                                        }
-                                                        div {
-                                                            class: "mono",
-                                                            style: "font-size: 11px; word-break: break-all; padding: 8px 10px; background: var(--cf-subtle-bg); border-radius: 6px; margin-bottom: 10px;",
-                                                            "{keys.pub_key}"
-                                                        }
-
-                                                        label {
-                                                            "Private key "
-                                                            span { style: "color: #f87171; font-weight: 600;", "· shown once, copy it now" }
-                                                        }
-                                                        div {
-                                                            style: "position: relative;",
-                                                            pre {
-                                                                class: "mono",
-                                                                style: "margin: 0; font-size: 10.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; padding: 8px 10px; background: var(--cf-subtle-bg); border-radius: 6px; border: 1px solid rgba(248,113,113,0.3);",
-                                                                "{keys.priv_key}"
-                                                            }
-                                                            button {
-                                                                class: "btn btn-ghost focus-ring xs",
-                                                                style: "position: absolute; top: 6px; right: 6px;",
-                                                                onclick: move |_| {
-                                                                    // Mock clipboard copy
-                                                                    priv_copied.set(true);
-                                                                    spawn(async move {
-                                                                        gloo_timers::future::TimeoutFuture::new(1600).await;
-                                                                        priv_copied.set(false);
-                                                                    });
-                                                                },
-                                                                span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
-                                                                    Icon {
-                                                                        name: if *priv_copied.read() { IconName::Check } else { IconName::File },
-                                                                        size: 11
-                                                                    }
-                                                                }
-                                                                if *priv_copied.read() { "Copied" } else { "Copy" }
-                                                            }
-                                                        }
-
-                                                        div {
-                                                            class: "help",
-                                                            style: "margin-top: 8px;",
-                                                            "Write the private key to "
-                                                            span { class: "mono", "/var/lib/crystal-forge/host.key" }
-                                                            " on the host before confirming — once rotated, the old key stops being accepted on the agent's next heartbeat."
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        // Paste mode
-                                        div {
-                                            class: "field",
-                                            label {
-                                                "New agent public key "
-                                                span { style: "color: #f87171;", "*" }
-                                            }
-                                            textarea {
-                                                class: "input focus-ring mono",
-                                                rows: "3",
-                                                value: "{new_pub_key}",
-                                                placeholder: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5… crystal-forge@hostname",
-                                                style: "font-size: 11px; resize: vertical;",
-                                                oninput: move |e| new_pub_key.set(e.value().clone()),
-                                            }
-                                            div {
-                                                class: "help",
-                                                "Generate a new keypair on the host and paste the public half here. The old key is revoked the moment you confirm — the agent must present the new key on its next heartbeat or it will be treated as unrecognized."
-                                            }
-
-                                            if !new_pub_key.read().trim().is_empty() {
-                                                div {
-                                                    style: format!(
-                                                        "margin-top: 10px; padding: 9px 12px; border-radius: 8px; border: 1px solid {}; background: {};",
-                                                        if new_key_valid { "rgba(52,211,153,0.3)" } else { "rgba(248,113,113,0.35)" },
-                                                        if new_key_valid { "rgba(52,211,153,0.06)" } else { "rgba(248,113,113,0.06)" }
-                                                    ),
-                                                    if new_key_valid {
-                                                        div {
-                                                            style: "min-width: 0;",
-                                                            div {
-                                                                style: "font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--cf-text-muted); font-weight: 600;",
-                                                                "New fingerprint"
-                                                            }
-                                                            div {
-                                                                class: "mono",
-                                                                style: "font-size: 11.5px; color: var(--cf-text-primary); word-break: break-all;",
-                                                                "SHA256:ComputedFingerprintFromPastedKey123"
-                                                            }
-                                                        }
-                                                    } else {
-                                                        span {
-                                                            style: "font-size: 11.5px; color: #fca5a5;",
-                                                            "Doesn't look like an SSH public key — expected it to start with "
-                                                            span { class: "mono", "ssh-ed25519" }
-                                                            "."
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Action buttons for rotation flow
-                                    div {
-                                        style: "display: flex; gap: 8px; margin-top: 8px;",
-                                        button {
-                                            class: "btn btn-ghost focus-ring",
-                                            onclick: move |_| {
-                                                rotating_key.set(false);
-                                                new_pub_key.set(String::new());
-                                                generated_keys.set(None);
-                                            },
-                                            "Cancel"
-                                        }
-                                        button {
-                                            class: "btn focus-ring",
-                                            disabled: if *key_mode.read() == KeyMode::Generate {
-                                                generated_keys.read().is_none()
-                                            } else {
-                                                !new_key_valid
-                                            },
-                                            style: format!(
-                                                "background: {}; color: {};",
-                                                if (if *key_mode.read() == KeyMode::Generate { generated_keys.read().is_some() } else { new_key_valid }) {
-                                                    "#dc2626"
-                                                } else {
-                                                    "var(--cf-subtle-bg)"
-                                                },
-                                                if (if *key_mode.read() == KeyMode::Generate { generated_keys.read().is_some() } else { new_key_valid }) {
-                                                    "white"
-                                                } else {
-                                                    "var(--cf-text-muted)"
-                                                }
-                                            ),
-                                            onclick: move |_| {
-                                                rotating_key.set(false);
-                                                rotated.set(true);
-                                            },
-                                            span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
-                                                Icon { name: IconName::Key, size: 12 }
-                                            }
-                                            "Revoke old key & rotate"
-                                        }
-                                    }
+                                }
+                                p {
+                                    class: "help",
+                                    style: "margin-top: 10px;",
+                                    "Use the existing system key update flow from the Systems view to generate or replace agent keys with the backend-backed workflow."
                                 }
                             }
                         }

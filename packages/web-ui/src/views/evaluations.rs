@@ -145,6 +145,9 @@ fn EvaluationsPage() -> Element {
             return;
         }
 
+        active_fetch_limit.set(FETCH_LIMIT_MAX);
+        history_fetch_limit.set(FETCH_LIMIT_MAX);
+
         let queue_snapshot = queue_items.read();
         let active_match = queue_snapshot.iter().find(|item| {
             focus
@@ -183,6 +186,23 @@ fn EvaluationsPage() -> Element {
         if let Some(item) = history_match.cloned() {
             active_tab.set(EvaluationsTab::History);
             drawer_target.set(Some(EvalDrawerTarget::History(item)));
+            navigation_focus.set(None);
+            return;
+        }
+
+        let history_loaded = history_resource
+            .read()
+            .as_ref()
+            .is_some_and(|result| result.is_ok());
+        let active_loaded = queue_resource
+            .read()
+            .as_ref()
+            .is_some_and(|result| result.is_ok());
+        let history_exhausted =
+            history_loaded && history_fetch_limit() >= history_total_acc().min(FETCH_LIMIT_MAX);
+        let active_exhausted = active_loaded && active_fetch_limit() >= FETCH_LIMIT_MAX;
+
+        if history_exhausted && active_exhausted {
             navigation_focus.set(None);
         }
     });
@@ -1875,62 +1895,6 @@ fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
     }
 }
 
-struct EvalCheckInfo {
-    label: &'static str,
-    attr: &'static str,
-    assertion: &'static str,
-    policy_name: Option<String>,
-}
-
-fn eval_check_info(policy_name: &str) -> Option<EvalCheckInfo> {
-    let lower = policy_name.to_ascii_lowercase();
-    if lower.contains("audit") {
-        Some(EvalCheckInfo {
-            label: "STIG · audit daemon",
-            attr: "config.security.audit",
-            assertion: "auditd rule set does not cover required syscalls per STIG baseline",
-            policy_name: Some(policy_name.to_string()),
-        })
-    } else if lower.contains("firewall") || lower.contains("fw") {
-        Some(EvalCheckInfo {
-            label: "STIG · firewall",
-            attr: "config.networking.firewall",
-            assertion: "host-based firewall is disabled for this system",
-            policy_name: Some(policy_name.to_string()),
-        })
-    } else if lower.contains("ssh") {
-        Some(EvalCheckInfo {
-            label: "STIG · sshd hardening",
-            attr: "config.services.openssh.settings",
-            assertion: "OpenSSH hardening settings do not satisfy the active policy",
-            policy_name: Some(policy_name.to_string()),
-        })
-    } else if lower.contains("heartbeat") || lower.contains("hb") {
-        Some(EvalCheckInfo {
-            label: "Heartbeat cadence",
-            attr: "config.services.crystal-forge-agent.heartbeatIntervalSec",
-            assertion: "heartbeat interval exceeds the fleet policy maximum",
-            policy_name: Some(policy_name.to_string()),
-        })
-    } else if lower.contains("cve") {
-        Some(EvalCheckInfo {
-            label: "CVE gate",
-            attr: "inputs.nixpkgs",
-            assertion: "locked nixpkgs input contains packages blocked by the CVE policy",
-            policy_name: Some(policy_name.to_string()),
-        })
-    } else if lower.contains("cache") {
-        Some(EvalCheckInfo {
-            label: "Cache push",
-            attr: "config.nix.settings.substituters",
-            assertion: "no cache destination is configured for this environment",
-            policy_name: Some(policy_name.to_string()),
-        })
-    } else {
-        None
-    }
-}
-
 #[component]
 fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> Element {
     let policy_resource =
@@ -2254,7 +2218,6 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                                                                               let policy_name = &policies[res_idx];
                                                                               let failcard_class = format!("pm-failcard pm-failcard-{}", result);
                                                                               let glyph = cell_glyph(result);
-                                                                              let info = eval_check_info(policy_name);
                                                                               let card_key = format!("{}::{}", row.system_name, res_idx);
                                                                               let is_open = open_cause.read().as_ref() == Some(&card_key);
                                                                               let fallback_desc = if *result == "fail" {
@@ -2283,10 +2246,10 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                                                                                           },
                                                                                           span { class: "pm-failcard-glyph pm-{result}", "{glyph}" }
                                                                                           div { style: "min-width: 0; text-align: left;",
-                                                                                              div { class: "mono", style: "font-weight: 600; font-size: 12px;", "{info.as_ref().map(|i| i.label).unwrap_or(policy_name)}" }
+                                                                                              div { class: "mono", style: "font-weight: 600; font-size: 12px;", "{policy_name}" }
                                                                                               div {
                                                                                                   style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 2px;",
-                                                                                                  "{info.as_ref().map(|i| i.assertion).unwrap_or(fallback_desc)}"
+                                                                                                  "{fallback_desc}"
                                                                                               }
                                                                                           }
                                                                                           Icon {
@@ -2297,36 +2260,22 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                                                                                       if is_open {
                                                                                           div {
                                                                                               style: "padding: 10px 12px; background: var(--cf-canvas); border-top: 1px solid var(--cf-divider);",
-                                                                                              if let Some(info) = info {
-                                                                                                  div {
-                                                                                                      class: "mono",
-                                                                                                      style: "font-size: 10.5px; color: var(--cf-text-muted); margin-bottom: 6px;",
-                                                                                                      "nixosConfigurations.{row.system_name}.{info.attr}"
-                                                                                                  }
-                                                                                                  div {
-                                                                                                      style: "font-size: 12px; color: #f87171; line-height: 1.5;",
-                                                                                                      span { class: "mono", style: "font-weight: 600;", "assertion failed:" }
-                                                                                                      " {info.assertion}"
-                                                                                                  }
-                                                                                                  div {
-                                                                                                      style: "font-size: 10.5px; color: var(--cf-text-muted); margin-top: 8px;",
-                                                                                                      "From nix-eval-jobs — attribute path + assertion message only; eval doesn't report a source line for module assertions."
-                                                                                                  }
-                                                                                                  if let Some(policy_name) = info.policy_name {
-                                                                                                      button {
-                                                                                                          class: "btn btn-ghost focus-ring xs",
-                                                                                                          style: "margin-top: 8px;",
-                                                                                                          onclick: {
-                                                                                                              let policy_name = policy_name.to_string();
-                                                                                                              move |e: MouseEvent| {
-                                                                                                                  e.stop_propagation();
-                                                                                                                  on_open_policy.call(policy_name.clone());
-                                                                                                              }
-                                                                                                          },
-                                                                                                          Icon { name: IconName::File, size: 11 }
-                                                                                                          " View policy definition"
+                                                                                              div {
+                                                                                                  style: "font-size: 12px; color: var(--cf-text-secondary); line-height: 1.5;",
+                                                                                                  "Detailed evaluation evidence is unavailable from the current API for this policy result."
+                                                                                              }
+                                                                                              button {
+                                                                                                  class: "btn btn-ghost focus-ring xs",
+                                                                                                  style: "margin-top: 8px;",
+                                                                                                  onclick: {
+                                                                                                      let policy_name = policy_name.to_string();
+                                                                                                      move |e: MouseEvent| {
+                                                                                                          e.stop_propagation();
+                                                                                                          on_open_policy.call(policy_name.clone());
                                                                                                       }
-                                                                                                  }
+                                                                                                  },
+                                                                                                  Icon { name: IconName::File, size: 11 }
+                                                                                                  " View policy definition"
                                                                                               }
                                                                                           }
                                                                                       }

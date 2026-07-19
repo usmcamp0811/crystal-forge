@@ -445,12 +445,17 @@ pub fn BuildsView() -> Element {
         }
 
         let status = focus.status.as_deref().unwrap_or_default();
-        if matches!(status, "failed" | "complete" | "cancelled") {
+        if matches!(
+            status,
+            "failed" | "complete" | "cancelled" | "cache-pushed" | "up-to-date"
+        ) {
             active_view.set(BuildsTab::Completed);
             completed_status_filter.set(CompletedStatusFilter::All);
+            build_history_fetch_limit.set(FETCH_LIMIT_MAX);
         } else {
             active_view.set(BuildsTab::ActiveQueue);
             filter_status.set("queued,building,cancelling".to_string());
+            fetch_limit.set(FETCH_LIMIT_MAX);
         }
 
         filter_commit.set(focus.commit_sha.unwrap_or_default());
@@ -569,6 +574,25 @@ pub fn BuildsView() -> Element {
         if let Some(job_id) = matching_job_id {
             selected_build.set(Some(job_id));
             active_tab.set(DetailTab::Details);
+            navigation_focus.set(None);
+            return;
+        }
+
+        let active_loaded = queue_resource
+            .read()
+            .as_ref()
+            .is_some_and(|result| result.is_ok());
+        let history_loaded = recent_builds
+            .read()
+            .as_ref()
+            .is_some_and(|result| result.is_ok());
+        let active_exhausted = active_loaded && fetch_limit() >= queue_total().min(FETCH_LIMIT_MAX);
+        let history_exhausted = history_loaded
+            && build_history_fetch_limit() >= build_history_total().min(FETCH_LIMIT_MAX);
+
+        if (active_view() == BuildsTab::ActiveQueue && active_exhausted)
+            || (active_view() == BuildsTab::Completed && history_exhausted)
+        {
             navigation_focus.set(None);
         }
     });
