@@ -3,10 +3,11 @@ let
   src = ./.;
   srcHash = builtins.hashString "sha256" (toString src);
 
-  # Read and parse Cargo.toml to extract version
-  cargoToml = builtins.fromTOML (builtins.readFile (src + "/Cargo.toml"));
-  version = cargoToml.package.version;
-  migrationsDir = ./migrations;
+  # Read and parse the server crate Cargo.toml to extract version
+  # (root Cargo.toml is now a virtual workspace manifest with no [package])
+  serverCargoToml = builtins.fromTOML (builtins.readFile (src + "/crates/cf-server/Cargo.toml"));
+  version = serverCargoToml.package.version;
+  migrationsDir = ./crates/cf-server/migrations;
   crystal-forge = pkgs.rustPlatform.buildRustPackage rec {
     inherit src version;
     pname = "crystal-forge";
