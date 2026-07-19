@@ -86,7 +86,8 @@ pub async fn trigger_immediate_cve_scan(
                         .await?;
                 }
                 Err(err) => {
-                    mark_cve_scan_failed(&spawn_pool, &derivation, &err.to_string()).await?;
+                    mark_cve_scan_failed(&spawn_pool, scan_id, &derivation, &err.to_string())
+                        .await?;
                 }
             }
 

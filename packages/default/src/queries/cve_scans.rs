@@ -45,8 +45,10 @@ pub async fn get_targets_needing_cve_scan(
     pool: &PgPool,
     limit: Option<i64>,
     excluded_derivation_ids: &[i32],
+    completed_before: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<Vec<Derivation>> {
     let limit = limit.unwrap_or(10);
+    let completed_before = completed_before.unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
     let targets = sqlx::query_as!(
         Derivation,
         r#"
@@ -64,6 +66,7 @@ pub async fn get_targets_needing_cve_scan(
             AND d.derivation_type = 'nixos'
             AND d.store_path IS NOT NULL
             AND NOT (d.id = ANY($2))
+            AND COALESCE(d.completed_at, d.scheduled_at, d.started_at) <= $3
             -- Exclude derivations that already have a completed scan
             AND NOT EXISTS (
                 SELECT 1 FROM cve_scans cs
@@ -111,7 +114,8 @@ pub async fn get_targets_needing_cve_scan(
         LIMIT $1
         "#,
         limit,
-        excluded_derivation_ids
+        excluded_derivation_ids,
+        completed_before
     )
     .fetch_all(pool)
     .await?;
@@ -255,33 +259,13 @@ pub async fn complete_cve_scan(
     Ok(())
 }
 
-/// Mark CVE scan as failed
+/// Mark a specific CVE scan as failed.
 pub async fn mark_cve_scan_failed(
     pool: &PgPool,
+    scan_id: Uuid,
     target: &Derivation,
     error_message: &str,
 ) -> Result<()> {
-    // First try to find an existing pending/in-progress scan
-    let existing_scan = sqlx::query!(
-        r#"
-        SELECT id FROM cve_scans 
-        WHERE derivation_id = $1 
-            AND status IN ('pending', 'in_progress')
-        ORDER BY scheduled_at DESC
-        LIMIT 1
-        "#,
-        target.id
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    let scan_id = if let Some(existing) = existing_scan {
-        existing.id
-    } else {
-        // Create a new scan record to mark as failed
-        create_cve_scan(pool, target.id, "vulnix", None).await?.id()
-    };
-
     // Create metadata with error details
     let metadata = serde_json::json!({
         "error": error_message,
@@ -1119,7 +1103,7 @@ mod tests {
     async fn get_targets_needing_cve_scan_selects_unscanned_derivation(pool: PgPool) {
         setup_test_derivation(&pool).await;
 
-        let targets = get_targets_needing_cve_scan(&pool, Some(10), &[])
+        let targets = get_targets_needing_cve_scan(&pool, Some(10), &[], None)
             .await
             .expect("should fetch targets");
 
@@ -1147,7 +1131,7 @@ mod tests {
             .await
             .expect("scan should be marked in_progress");
 
-        let targets = get_targets_needing_cve_scan(&pool, Some(10), &[])
+        let targets = get_targets_needing_cve_scan(&pool, Some(10), &[], None)
             .await
             .expect("should fetch targets");
 
@@ -1187,7 +1171,7 @@ mod tests {
         .expect("scan should be aged");
 
         // Derivation should be excluded while scan is in_progress.
-        let targets_before = get_targets_needing_cve_scan(&pool, Some(10), &[])
+        let targets_before = get_targets_needing_cve_scan(&pool, Some(10), &[], None)
             .await
             .expect("should fetch targets");
         assert!(
@@ -1213,7 +1197,7 @@ mod tests {
         );
 
         // Derivation should now be eligible again.
-        let targets_after = get_targets_needing_cve_scan(&pool, Some(10), &[])
+        let targets_after = get_targets_needing_cve_scan(&pool, Some(10), &[], None)
             .await
             .expect("should fetch targets");
         assert!(

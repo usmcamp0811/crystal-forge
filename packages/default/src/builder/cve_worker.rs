@@ -35,6 +35,7 @@ use crate::queries::scanning::get_scan_schedule_policy;
 use crate::server::jobs::BackgroundJobHandle;
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::{Context, Result};
+use axum::async_trait;
 use chrono::Utc;
 use sqlx::{PgPool, Row};
 use std::collections::HashSet;
@@ -49,6 +50,29 @@ struct MaterializationSource {
     from_url: String,
     cache_config: Option<CacheConfig>,
     trusted_public_key: Option<String>,
+    nix_config_lines: Vec<String>,
+}
+
+#[async_trait]
+trait CveScanRunner {
+    async fn scan_derivation(
+        &self,
+        pool: &PgPool,
+        derivation_id: i32,
+        vulnix_version: Option<String>,
+    ) -> Result<crate::vulnix::vulnix_parser::VulnixScanOutput>;
+}
+
+#[async_trait]
+impl CveScanRunner for VulnixRunner {
+    async fn scan_derivation(
+        &self,
+        pool: &PgPool,
+        derivation_id: i32,
+        vulnix_version: Option<String>,
+    ) -> Result<crate::vulnix::vulnix_parser::VulnixScanOutput> {
+        VulnixRunner::scan_derivation(self, pool, derivation_id, vulnix_version).await
+    }
 }
 
 fn cache_destination_to_config(dest: &CacheDestination) -> CacheConfig {
@@ -103,6 +127,32 @@ fn materialization_from_url(cache: &CacheConfig) -> Option<String> {
         }
         CacheType::S3 | CacheType::Http | CacheType::Nix => cache.push_to.clone(),
     }
+}
+
+fn materialization_nix_config_lines(
+    from_url: &str,
+    cache_config: &CacheConfig,
+    trusted_public_key: Option<&str>,
+) -> Vec<String> {
+    let mut lines = vec![format!("extra-substituters = {from_url}")];
+
+    if let Some(public_key) = trusted_public_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("extra-trusted-public-keys = {public_key}"));
+    }
+
+    if matches!(cache_config.cache_type, CacheType::Attic)
+        && let Some(token) = cache_config.attic_token.as_deref().map(str::trim)
+        && !token.is_empty()
+        && let Ok(parsed) = url::Url::parse(from_url)
+        && let Some(host) = parsed.host_str()
+    {
+        lines.push(format!("access-tokens = {host}={token}"));
+    }
+
+    lines
 }
 
 /// Run the CVE scan background loop.
@@ -205,6 +255,7 @@ pub async fn run_cve_scan_loop(
 }
 
 const BATCH_SIZE: i64 = 5;
+const POST_BUILD_CONCURRENCY: usize = 5;
 
 /// One full scan cycle: post-build scans followed by periodic rescans.
 ///
@@ -216,6 +267,15 @@ async fn scan_cycle(
     pool: &PgPool,
     vulnix_config: &crate::config::VulnixConfig,
     vulnix_runner: &VulnixRunner,
+    vulnix_version: Option<String>,
+) -> Result<()> {
+    scan_cycle_with_runner(pool, vulnix_config, vulnix_runner, vulnix_version).await
+}
+
+async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
+    pool: &PgPool,
+    vulnix_config: &crate::config::VulnixConfig,
+    vulnix_runner: &R,
     vulnix_version: Option<String>,
 ) -> Result<()> {
     set_cve_status_working("finding scan targets").await;
@@ -248,17 +308,20 @@ async fn scan_cycle(
 
     // --- Phase 1: post-build scans (drain queue until empty) ---
     if policy.on_build {
+        let snapshot_cutoff = Utc::now();
         let mut attempted: HashSet<i32> = HashSet::new();
         loop {
             let excluded_ids: Vec<i32> = attempted.iter().copied().collect();
-            match get_targets_needing_cve_scan(pool, Some(BATCH_SIZE), &excluded_ids).await {
+            match get_targets_needing_cve_scan(
+                pool,
+                Some(BATCH_SIZE),
+                &excluded_ids,
+                Some(snapshot_cutoff),
+            )
+            .await
+            {
                 Ok(targets) if !targets.is_empty() => {
-                    // Filter out derivations already attempted this cycle.
-                    let batch: Vec<_> = targets
-                        .into_iter()
-                        .filter(|d| !attempted.contains(&d.id))
-                        .take(BATCH_SIZE as usize)
-                        .collect();
+                    let batch: Vec<_> = targets.into_iter().take(BATCH_SIZE as usize).collect();
 
                     if batch.is_empty() {
                         debug!(
@@ -270,18 +333,25 @@ async fn scan_cycle(
 
                     for derivation in &batch {
                         attempted.insert(derivation.id);
-                        info!(
-                            "🔍 [post-build] Scanning newly built derivation: {}",
-                            derivation.derivation_name
-                        );
-                        if let Err(e) =
-                            scan_one(pool, vulnix_runner, vulnix_version.clone(), derivation).await
-                        {
-                            error!(
-                                "❌ [post-build] Scan failed for {}: {e}",
+                    }
+
+                    for chunk in batch.chunks(POST_BUILD_CONCURRENCY) {
+                        let futures = chunk.iter().map(|derivation| async {
+                            info!(
+                                "🔍 [post-build] Scanning newly built derivation: {}",
                                 derivation.derivation_name
                             );
-                        }
+                            if let Err(e) =
+                                scan_one(pool, vulnix_runner, vulnix_version.clone(), derivation)
+                                    .await
+                            {
+                                error!(
+                                    "❌ [post-build] Scan failed for {}: {e}",
+                                    derivation.derivation_name
+                                );
+                            }
+                        });
+                        futures::future::join_all(futures).await;
                     }
                 }
                 Ok(_) => {
@@ -340,19 +410,37 @@ async fn scan_cycle(
 /// completed cache push job's destination URL).  If materialization fails, the
 /// scan is marked as failed — the derivation's build status is **never**
 /// rewritten.
-async fn scan_one(
+async fn scan_one<R: CveScanRunner + Sync>(
     pool: &PgPool,
-    vulnix_runner: &VulnixRunner,
+    vulnix_runner: &R,
     vulnix_version: Option<String>,
     derivation: &crate::derivations::Derivation,
 ) -> Result<()> {
     set_cve_status_working(&format!("scanning {}", derivation.derivation_name)).await;
+
+    let scan_claim = create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone()).await?;
+    let scan_id = scan_claim.id();
+    if !scan_claim.was_created() {
+        info!(
+            "⏭️ Skipping duplicate CVE scan for {} — active scan {scan_id} already exists",
+            derivation.derivation_name
+        );
+        return Ok(());
+    }
+    mark_scan_in_progress(pool, scan_id).await?;
 
     let Some(ref path) = derivation.store_path else {
         warn!(
             "❌ No store_path set for derivation {}",
             derivation.derivation_name
         );
+        mark_cve_scan_failed(
+            pool,
+            scan_id,
+            derivation,
+            "No store_path set for derivation",
+        )
+        .await?;
         return Ok(());
     };
 
@@ -381,9 +469,9 @@ async fn scan_one(
                     "❌ Could not materialize {} from any cache — marking scan as failed",
                     path
                 );
-                // Record a failed scan (do NOT rewrite build status).
                 mark_cve_scan_failed(
                     pool,
+                    scan_id,
                     derivation,
                     &format!(
                         "Store path {} not present locally and no cache could provide it",
@@ -397,6 +485,7 @@ async fn scan_one(
                 error!("❌ Error materializing {} from cache: {}", path, e);
                 mark_cve_scan_failed(
                     pool,
+                    scan_id,
                     derivation,
                     &format!("Cache materialization error: {}", e),
                 )
@@ -405,18 +494,6 @@ async fn scan_one(
             }
         }
     }
-
-    // 3. Create scan record and run vulnix.
-    let scan_claim = create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone()).await?;
-    let scan_id = scan_claim.id();
-    if !scan_claim.was_created() {
-        info!(
-            "⏭️ Skipping duplicate CVE scan for {} — active scan {scan_id} already exists",
-            derivation.derivation_name
-        );
-        return Ok(());
-    }
-    mark_scan_in_progress(pool, scan_id).await?;
 
     let start = std::time::Instant::now();
     match vulnix_runner
@@ -437,7 +514,9 @@ async fn scan_one(
                 "❌ CVE scan failed for {}: {}",
                 derivation.derivation_name, e
             );
-            if let Err(save_err) = mark_cve_scan_failed(pool, derivation, &e.to_string()).await {
+            if let Err(save_err) =
+                mark_cve_scan_failed(pool, scan_id, derivation, &e.to_string()).await
+            {
                 error!("❌ Failed to mark CVE scan as failed: {save_err}");
             }
         }
@@ -507,19 +586,37 @@ async fn materialize_store_path_from_cache(
                 );
                 continue;
             };
+            let nix_config_lines = materialization_nix_config_lines(
+                &from_url,
+                &cache_config,
+                destination.attic_public_key.as_deref(),
+            );
 
             sources.push(MaterializationSource {
                 label: destination.name.clone(),
                 from_url,
                 cache_config: Some(cache_config),
                 trusted_public_key: destination.attic_public_key.clone(),
+                nix_config_lines,
             });
         } else if !raw_destination.trim().is_empty() {
+            let cfg = CrystalForgeConfig::load().unwrap_or_default();
+            let server_cache = cfg.get_cache_config().clone();
+            let cache_config = server_cache
+                .push_to
+                .as_deref()
+                .filter(|push_to| push_to.trim() == raw_destination.trim())
+                .map(|_| server_cache.clone());
+            let nix_config_lines = cache_config
+                .as_ref()
+                .map(|cache| materialization_nix_config_lines(&raw_destination, cache, None))
+                .unwrap_or_default();
             sources.push(MaterializationSource {
                 label: raw_destination.clone(),
                 from_url: raw_destination,
-                cache_config: None,
+                cache_config,
                 trusted_public_key: None,
+                nix_config_lines,
             });
         }
     }
@@ -557,6 +654,10 @@ async fn materialize_store_path_from_cache(
             }
 
             apply_cache_config_env_to_command(&mut command, cache_config);
+        }
+
+        if !source.nix_config_lines.is_empty() {
+            command.env("NIX_CONFIG", source.nix_config_lines.join("\n") + "\n");
         }
 
         let mut child = command
@@ -638,6 +739,40 @@ async fn set_cve_status_idle() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::queries::derivations::{EvaluationStatus, insert_derivation};
+    use sqlx::PgPool;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tempfile::tempdir;
+    use uuid::Uuid;
+
+    #[derive(Clone)]
+    struct FakeRunner {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl CveScanRunner for FakeRunner {
+        async fn scan_derivation(
+            &self,
+            _pool: &PgPool,
+            _derivation_id: i32,
+            _vulnix_version: Option<String>,
+        ) -> Result<crate::vulnix::vulnix_parser::VulnixScanOutput> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![])
+        }
+    }
+
+    async fn db_test_pool() -> PgPool {
+        let db_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set for cve_worker DB tests");
+        PgPool::connect(&db_url)
+            .await
+            .expect("failed to connect to DATABASE_URL")
+    }
 
     /// Confirms that [`run_cve_scan_loop`] exits cleanly when vulnix is not on
     /// `$PATH`, rather than panicking.  In CI vulnix is absent so the check at
@@ -686,7 +821,8 @@ mod tests {
             .expect("lazy pool should construct without connecting");
 
         let result =
-            crate::queries::cve_scans::get_targets_needing_cve_scan(&pool, Some(5), &[]).await;
+            crate::queries::cve_scans::get_targets_needing_cve_scan(&pool, Some(5), &[], None)
+                .await;
         if let Err(e) = result {
             let msg = format!("{e:#}");
             assert!(
@@ -801,6 +937,81 @@ mod tests {
                 "unexpected error type: {msg}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn scan_cycle_processes_target_with_fake_runner() {
+        let pool = db_test_pool().await;
+        let tempdir = tempdir().expect("tempdir should be created");
+        let store_path = tempdir.path().join("task-396-scan-cycle-store-path");
+        std::fs::create_dir_all(&store_path).expect("store path dir should be created");
+
+        sqlx::query!(
+            r#"
+            INSERT INTO scan_schedule_policy (id, on_build, deployed_interval, recent_interval, archived_interval, archived_enabled)
+            VALUES (1, true, '24h', '24h', '168h', true)
+            ON CONFLICT (id) DO NOTHING
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("scan schedule policy should be inserted");
+
+        let derivation_name = format!("task-396-cycle-{}", Uuid::new_v4());
+        let derivation = insert_derivation(&pool, None, &derivation_name, "nixos")
+            .await
+            .expect("derivation should be inserted");
+
+        sqlx::query!(
+            r#"
+            UPDATE derivations
+            SET status_id = $2,
+                completed_at = NOW(),
+                store_path = $3
+            WHERE id = $1
+            "#,
+            derivation.id,
+            EvaluationStatus::BuildComplete.as_id(),
+            store_path.to_string_lossy().to_string(),
+        )
+        .execute(&pool)
+        .await
+        .expect("derivation should be marked build-complete");
+
+        let runner = FakeRunner {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let vulnix_config = crate::config::VulnixConfig::default();
+
+        scan_cycle_with_runner(&pool, &vulnix_config, &runner, Some("test".to_string()))
+            .await
+            .expect("scan cycle should succeed");
+        scan_cycle_with_runner(&pool, &vulnix_config, &runner, Some("test".to_string()))
+            .await
+            .expect("second scan cycle should succeed");
+
+        assert_eq!(
+            runner.calls.load(Ordering::SeqCst),
+            1,
+            "target should be processed exactly once"
+        );
+
+        let scan = sqlx::query!(
+            r#"
+            SELECT status, completed_at
+            FROM cve_scans
+            WHERE derivation_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+            derivation.id,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("scan row should exist");
+
+        assert_eq!(scan.status, Some("completed".to_string()));
+        assert!(scan.completed_at.is_some(), "scan should be terminal");
     }
 
     /// Confirms that [`BackgroundJobHandle`] state machine correctly reports
