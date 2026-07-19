@@ -6,9 +6,10 @@ use uuid::Uuid;
 use crate::api::client::delete_deployment_policy;
 use crate::components::layout::Card;
 use crate::components::policy::{
-    POLICY_CATEGORIES, PolicyCard, PolicyCategory, PolicyDefinition, PolicyEditorModal,
-    PolicyFormat, is_core_policy, policy_category,
+    is_core_policy, policy_category, PolicyCard, PolicyCategory, PolicyDefinition,
+    PolicyEditorModal, PolicyFormat, POLICY_CATEGORIES,
 };
+use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::theme;
 use crate::views::policies_api;
 
@@ -24,6 +25,7 @@ const POLICY_JSON_TEMPLATE: &str = r#"{
 /// The policies page for global policy management.
 #[component]
 pub fn PoliciesView() -> Element {
+    let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let mut policy_library: Signal<Vec<PolicyDefinition>> = use_signal(Vec::new);
     let mut show_editor = use_signal(|| false);
 
@@ -43,6 +45,56 @@ pub fn PoliciesView() -> Element {
     let mut category_filter = use_signal(|| "all".to_string());
     let mut type_filter = use_signal(|| "all".to_string());
     let mut delete_confirm: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut focused_policy_name = use_signal(|| None::<String>);
+
+    use_effect(move || {
+        let Some(focus) = navigation_focus() else {
+            return;
+        };
+        if focus.target != FocusTarget::Policies {
+            return;
+        }
+
+        let Some(policy_name) = focus.policy_name.clone() else {
+            navigation_focus.set(None);
+            return;
+        };
+
+        let policy_snapshot = policy_library.read();
+        let matched = policy_snapshot.iter().find(|policy| {
+            policy.name.eq_ignore_ascii_case(&policy_name)
+                || policy
+                    .name
+                    .to_ascii_lowercase()
+                    .contains(&policy_name.to_ascii_lowercase())
+        });
+
+        if let Some(policy) = matched {
+            category_filter.set("all".to_string());
+            type_filter.set("all".to_string());
+            search_query.set(String::new());
+            focused_policy_name.set(Some(policy.name.clone()));
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                let target_name = policy.name.clone();
+                spawn(async move {
+                    gloo_timers::future::TimeoutFuture::new(10).await;
+                    if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+                        let selector = format!(
+                            r#"[data-policy-name=\"{}\"]"#,
+                            target_name.replace('"', "\\\"")
+                        );
+                        if let Ok(Some(element)) = document.query_selector(&selector) {
+                            element.scroll_into_view();
+                        }
+                    }
+                });
+            }
+        }
+
+        navigation_focus.set(None);
+    });
 
     let query = search_query.read().to_lowercase();
     let selected_category = category_filter.read().clone();
@@ -223,6 +275,7 @@ pub fn PoliciesView() -> Element {
                                 PolicyCard {
                                     key: "{policy.id}",
                                     policy: policy.clone(),
+                                    highlighted: focused_policy_name.read().as_ref() == Some(&policy.name),
                                     on_edit: move |p: PolicyDefinition| {
                                         editing_policy_id.set(Some(p.id));
                                         edit_name.set(p.name.clone());

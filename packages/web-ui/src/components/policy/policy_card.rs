@@ -4,8 +4,8 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use super::types::{
-    PolicyDefinition, is_core_policy, is_policy_enabled, normalized_policy_type, policy_category,
-    policy_rule_summaries,
+    is_core_policy, is_policy_enabled, normalized_policy_type, policy_category,
+    policy_rule_summaries, PolicyDefinition,
 };
 
 /// Card component for displaying a policy definition with design-parity rule summaries.
@@ -14,6 +14,7 @@ pub fn PolicyCard(
     policy: PolicyDefinition,
     on_edit: EventHandler<PolicyDefinition>,
     on_delete: EventHandler<Uuid>,
+    #[props(default = false)] highlighted: bool,
 ) -> Element {
     let category = policy_category(&policy);
     let rules = policy_rule_summaries(&policy);
@@ -34,8 +35,15 @@ pub fn PolicyCard(
     rsx! {
         div {
             class: "sys-card",
-            style: "--status-color: {category_color}; opacity: {opacity};",
+            style: if highlighted {
+                format!(
+                    "--status-color: {category_color}; opacity: {opacity}; box-shadow: inset 0 0 0 1px color-mix(in oklab, {category_color} 55%, transparent), 0 0 0 2px color-mix(in oklab, {category_color} 22%, transparent); background: color-mix(in oklab, {category_color} 7%, var(--cf-card-bg));"
+                )
+            } else {
+                format!("--status-color: {category_color}; opacity: {opacity};")
+            },
             "data-policy-card": "true",
+            "data-policy-name": "{policy.name}",
             div { class: "status-rail" }
 
             div { class: "sys-card-head",
