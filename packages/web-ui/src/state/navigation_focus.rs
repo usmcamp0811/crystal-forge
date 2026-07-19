@@ -3,11 +3,20 @@
 use dioxus::prelude::*;
 
 /// Target view for a cross-surface focus request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusTarget {
     /// Builds view focus.
-    #[default]
     Builds,
+    /// Evaluations view focus.
+    Evaluations,
+    /// Policies view focus.
+    Policies,
+}
+
+impl Default for FocusTarget {
+    fn default() -> Self {
+        Self::Builds
+    }
 }
 
 /// Shared navigation focus payload.
@@ -17,6 +26,7 @@ pub struct NavigationFocus {
     pub commit_sha: Option<String>,
     pub flake_name: Option<String>,
     pub status: Option<String>,
+    pub policy_name: Option<String>,
 }
 
 /// Provide the global navigation focus signal.

@@ -5,20 +5,22 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::alerts::{
-    NAV_BADGES, acknowledge_with_cursor_and_ids_async, attention_row_class, dismiss_attention_item,
-    should_flash,
+    acknowledge_with_cursor_and_ids_async, attention_row_class, dismiss_attention_item,
+    should_flash, NAV_BADGES,
 };
 
 use crate::api::{
     client::{
-        ApiClientError, cancel_commit_evaluation, fetch_eval_dependency_graph, fetch_eval_history,
+        cancel_commit_evaluation, fetch_eval_dependency_graph, fetch_eval_history,
         fetch_eval_policy_matrix, fetch_eval_queue, force_cancel_commit_evaluation,
-        re_evaluate_commit, reorder_eval_queue,
+        re_evaluate_commit, reorder_eval_queue, ApiClientError,
     },
     models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem},
 };
 use crate::components::{Icon, IconName};
-use crate::hooks::{InfiniteScroll, use_infinite_scroll};
+use crate::hooks::{use_infinite_scroll, InfiniteScroll};
+use crate::routes::Route;
+use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 
 const FETCH_LIMIT_MAX: i64 = 10_000; // must match backend LIMIT_MAX
 
@@ -47,6 +49,8 @@ pub fn EvaluationsCommitView(commit_id: i32) -> Element {
 
 #[component]
 fn EvaluationsPage() -> Element {
+    let nav = navigator();
+    let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let mut queue_items = use_signal(Vec::<EvalQueueItem>::new);
     let mut active_fetch_limit = use_signal(|| 200_i64);
     let mut active_refresh = use_signal(|| 0_u64);
@@ -133,6 +137,56 @@ fn EvaluationsPage() -> Element {
         }
     });
 
+    use_effect(move || {
+        let Some(focus) = navigation_focus() else {
+            return;
+        };
+        if focus.target != FocusTarget::Evaluations {
+            return;
+        }
+
+        let queue_snapshot = queue_items.read();
+        let active_match = queue_snapshot.iter().find(|item| {
+            focus
+                .commit_sha
+                .as_deref()
+                .map(|sha| item.commit_hash == sha)
+                .unwrap_or(false)
+                && focus
+                    .flake_name
+                    .as_deref()
+                    .map(|flake| item.flake_name == flake)
+                    .unwrap_or(true)
+        });
+
+        if let Some(item) = active_match.cloned() {
+            active_tab.set(EvaluationsTab::ActiveQueue);
+            drawer_target.set(Some(EvalDrawerTarget::Queue(item)));
+            navigation_focus.set(None);
+            return;
+        }
+
+        let history_snapshot = history_items_acc.read();
+        let history_match = history_snapshot.iter().find(|item| {
+            focus
+                .commit_sha
+                .as_deref()
+                .map(|sha| item.commit_hash == sha)
+                .unwrap_or(false)
+                && focus
+                    .flake_name
+                    .as_deref()
+                    .map(|flake| item.flake_name == flake)
+                    .unwrap_or(true)
+        });
+
+        if let Some(item) = history_match.cloned() {
+            active_tab.set(EvaluationsTab::History);
+            drawer_target.set(Some(EvalDrawerTarget::History(item)));
+            navigation_focus.set(None);
+        }
+    });
+
     // Replace the loaded history window atomically on each refresh. Fetching
     // from page 1 with a growing limit avoids inconsistencies from mutable
     // offset pagination (review finding #1).
@@ -209,8 +263,7 @@ fn EvaluationsPage() -> Element {
         .and_then(|result| result.as_ref().ok())
         .map(|summary| summary.active_count)
         .unwrap_or(0);
-    let active_has_more =
-        active_paging.count() < active_items.len()
+    let active_has_more = active_paging.count() < active_items.len()
         || (active_items.len() as i64) < active_total.min(FETCH_LIMIT_MAX);
 
     use_effect(move || {
@@ -672,6 +725,16 @@ fn EvaluationsPage() -> Element {
                         refresh: active_refresh,
                         on_close: move |_| drawer_target.set(None),
                         toast_msg: toast_msg,
+                        on_open_policy: move |policy_name: String| {
+                            navigation_focus.set(Some(NavigationFocus {
+                                target: FocusTarget::Policies,
+                                commit_sha: None,
+                                flake_name: None,
+                                status: None,
+                                policy_name: Some(policy_name),
+                            }));
+                            nav.push(Route::PoliciesView {});
+                        },
                     }
                 }
 
@@ -1301,6 +1364,7 @@ fn EvalDrawer(
     mut refresh: Signal<u64>,
     on_close: EventHandler<MouseEvent>,
     mut toast_msg: Signal<Option<String>>,
+    on_open_policy: EventHandler<String>,
 ) -> Element {
     let mut drawer_tab = use_signal(|| String::from("log"));
 
@@ -1441,6 +1505,7 @@ fn EvalDrawer(
                         } else if drawer_tab() == "policy" {
                             EvalDrawerPolicyTab {
                                 commit_id: ev.commit_id,
+                                on_open_policy: on_open_policy,
                             }
                         } else {
                             EvalDrawerGraphTab {
@@ -1548,6 +1613,7 @@ fn EvalDrawer(
                         } else if drawer_tab() == "policy" {
                             EvalDrawerPolicyTab {
                                 commit_id: ev.commit_id,
+                                on_open_policy: on_open_policy,
                             }
                         } else {
                             EvalDrawerGraphTab {
@@ -1809,8 +1875,64 @@ fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
     }
 }
 
+struct EvalCheckInfo {
+    label: &'static str,
+    attr: &'static str,
+    assertion: &'static str,
+    policy_name: Option<String>,
+}
+
+fn eval_check_info(policy_name: &str) -> Option<EvalCheckInfo> {
+    let lower = policy_name.to_ascii_lowercase();
+    if lower.contains("audit") {
+        Some(EvalCheckInfo {
+            label: "STIG · audit daemon",
+            attr: "config.security.audit",
+            assertion: "auditd rule set does not cover required syscalls per STIG baseline",
+            policy_name: Some(policy_name.to_string()),
+        })
+    } else if lower.contains("firewall") || lower.contains("fw") {
+        Some(EvalCheckInfo {
+            label: "STIG · firewall",
+            attr: "config.networking.firewall",
+            assertion: "host-based firewall is disabled for this system",
+            policy_name: Some(policy_name.to_string()),
+        })
+    } else if lower.contains("ssh") {
+        Some(EvalCheckInfo {
+            label: "STIG · sshd hardening",
+            attr: "config.services.openssh.settings",
+            assertion: "OpenSSH hardening settings do not satisfy the active policy",
+            policy_name: Some(policy_name.to_string()),
+        })
+    } else if lower.contains("heartbeat") || lower.contains("hb") {
+        Some(EvalCheckInfo {
+            label: "Heartbeat cadence",
+            attr: "config.services.crystal-forge-agent.heartbeatIntervalSec",
+            assertion: "heartbeat interval exceeds the fleet policy maximum",
+            policy_name: Some(policy_name.to_string()),
+        })
+    } else if lower.contains("cve") {
+        Some(EvalCheckInfo {
+            label: "CVE gate",
+            attr: "inputs.nixpkgs",
+            assertion: "locked nixpkgs input contains packages blocked by the CVE policy",
+            policy_name: Some(policy_name.to_string()),
+        })
+    } else if lower.contains("cache") {
+        Some(EvalCheckInfo {
+            label: "Cache push",
+            attr: "config.nix.settings.substituters",
+            assertion: "no cache destination is configured for this environment",
+            policy_name: Some(policy_name.to_string()),
+        })
+    } else {
+        None
+    }
+}
+
 #[component]
-fn EvalDrawerPolicyTab(commit_id: i32) -> Element {
+fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> Element {
     let policy_resource =
         use_resource(move || async move { fetch_eval_policy_matrix(commit_id).await });
     let policy_snapshot = policy_resource.read();
@@ -1819,6 +1941,7 @@ fn EvalDrawerPolicyTab(commit_id: i32) -> Element {
     let mut filter_state = use_signal(|| "all".to_string());
     let mut sort_state = use_signal(|| "health".to_string());
     let mut expanded = use_signal(|| None::<String>);
+    let mut open_cause = use_signal(|| None::<String>);
     let mut policy_filter = use_signal(|| None::<String>);
 
     rsx! {
@@ -2124,32 +2247,92 @@ fn EvalDrawerPolicyTab(commit_id: i32) -> Element {
                                                         td {
                                                             colspan: policies.len() + 2,
                                                             div { class: "pm-expand",
-                                                                 div { style: "display: flex; gap: 14px; flex-wrap: wrap;",
-                                                                     {row.results.iter().enumerate()
-                                                                         .filter(|(_, result)| *result != "pass")
-                                                                         .map(|(res_idx, result)| {
-                                                                             let policy_name = &policies[res_idx];
-                                                                             let failcard_class = format!("pm-failcard pm-failcard-{}", result);
-                                                                             let glyph = cell_glyph(result);
-                                                                             let desc = if *result == "fail" {
-                                                                                 "Blocks deployment until resolved"
-                                                                             } else {
-                                                                                 "Soft warning — deploy will proceed"
-                                                                             };
-                                                                             rsx! {
-                                                                                 button {
-                                                                                     key: "{res_idx}",
-                                                                                     class: "{failcard_class} focus-ring",
-                                                                                     title: "Open policy: {policy_name}",
-                                                                                     span { class: "pm-failcard-glyph pm-{result}", "{glyph}" }
-                                                                                     div { style: "min-width: 0; text-align: left;",
-                                                                                         div { class: "mono", style: "font-weight: 600; font-size: 12px;", "{policy_name}" }
-                                                                                         div { style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 2px;", "{desc}" }
-                                                                                     }
-                                                                                     Icon { name: IconName::ArrowRight, size: 12 }
-                                                                                 }
-                                                                             }
-                                                                         })}
+                                                                 div { style: "display: flex; flex-direction: column; gap: 14px;",
+                                                                      {row.results.iter().enumerate()
+                                                                          .filter(|(_, result)| *result != "pass")
+                                                                          .map(|(res_idx, result)| {
+                                                                              let policy_name = &policies[res_idx];
+                                                                              let failcard_class = format!("pm-failcard pm-failcard-{}", result);
+                                                                              let glyph = cell_glyph(result);
+                                                                              let info = eval_check_info(policy_name);
+                                                                              let card_key = format!("{}::{}", row.system_name, res_idx);
+                                                                              let is_open = open_cause.read().as_ref() == Some(&card_key);
+                                                                              let fallback_desc = if *result == "fail" {
+                                                                                  "Blocks deployment until resolved"
+                                                                              } else {
+                                                                                  "Soft warning — deploy will proceed"
+                                                                              };
+                                                                              rsx! {
+                                                                                  div {
+                                                                                      key: "{res_idx}",
+                                                                                      style: "border: 1px solid var(--cf-divider); border-radius: 8px; overflow: hidden;",
+                                                                                      div {
+                                                                                          class: "{failcard_class} focus-ring",
+                                                                                          style: "cursor: pointer; border: none; border-radius: 0;",
+                                                                                          onclick: {
+                                                                                              let mut open_cause = open_cause.clone();
+                                                                                              let key = card_key.clone();
+                                                                                              move |e: MouseEvent| {
+                                                                                                  e.stop_propagation();
+                                                                                                  if open_cause.read().as_ref() == Some(&key) {
+                                                                                                      open_cause.set(None);
+                                                                                                  } else {
+                                                                                                      open_cause.set(Some(key.clone()));
+                                                                                                  }
+                                                                                              }
+                                                                                          },
+                                                                                          span { class: "pm-failcard-glyph pm-{result}", "{glyph}" }
+                                                                                          div { style: "min-width: 0; text-align: left;",
+                                                                                              div { class: "mono", style: "font-weight: 600; font-size: 12px;", "{info.as_ref().map(|i| i.label).unwrap_or(policy_name)}" }
+                                                                                              div {
+                                                                                                  style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 2px;",
+                                                                                                  "{info.as_ref().map(|i| i.assertion).unwrap_or(fallback_desc)}"
+                                                                                              }
+                                                                                          }
+                                                                                          Icon {
+                                                                                              name: if is_open { IconName::ChevronDown } else { IconName::ChevronRight },
+                                                                                              size: 12,
+                                                                                          }
+                                                                                      }
+                                                                                      if is_open {
+                                                                                          div {
+                                                                                              style: "padding: 10px 12px; background: var(--cf-canvas); border-top: 1px solid var(--cf-divider);",
+                                                                                              if let Some(info) = info {
+                                                                                                  div {
+                                                                                                      class: "mono",
+                                                                                                      style: "font-size: 10.5px; color: var(--cf-text-muted); margin-bottom: 6px;",
+                                                                                                      "nixosConfigurations.{row.system_name}.{info.attr}"
+                                                                                                  }
+                                                                                                  div {
+                                                                                                      style: "font-size: 12px; color: #f87171; line-height: 1.5;",
+                                                                                                      span { class: "mono", style: "font-weight: 600;", "assertion failed:" }
+                                                                                                      " {info.assertion}"
+                                                                                                  }
+                                                                                                  div {
+                                                                                                      style: "font-size: 10.5px; color: var(--cf-text-muted); margin-top: 8px;",
+                                                                                                      "From nix-eval-jobs — attribute path + assertion message only; eval doesn't report a source line for module assertions."
+                                                                                                  }
+                                                                                                  if let Some(policy_name) = info.policy_name {
+                                                                                                      button {
+                                                                                                          class: "btn btn-ghost focus-ring xs",
+                                                                                                          style: "margin-top: 8px;",
+                                                                                                          onclick: {
+                                                                                                              let policy_name = policy_name.to_string();
+                                                                                                              move |e: MouseEvent| {
+                                                                                                                  e.stop_propagation();
+                                                                                                                  on_open_policy.call(policy_name.clone());
+                                                                                                              }
+                                                                                                          },
+                                                                                                          Icon { name: IconName::File, size: 11 }
+                                                                                                          " View policy definition"
+                                                                                                      }
+                                                                                                  }
+                                                                                              }
+                                                                                          }
+                                                                                      }
+                                                                                  }
+                                                                              }
+                                                                          })}
                                                                         if row.fail == 0 && row.warn == 0 {
                                                                             div { style: "font-size: 12px; color: #34d399; display: flex; align-items: center; gap: 8px;",
                                                                                 Icon { name: IconName::Check, size: 14 }

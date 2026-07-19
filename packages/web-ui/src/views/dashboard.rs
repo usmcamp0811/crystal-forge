@@ -658,6 +658,9 @@ pub fn DashboardView() -> Element {
                     on_open_build: move |focus: NavigationFocus| {
                         navigation_focus.set(Some(focus));
                     },
+                    on_open_evaluation: move |focus: NavigationFocus| {
+                        navigation_focus.set(Some(focus));
+                    },
                 }
             },
             "quick-actions" => rsx! {
