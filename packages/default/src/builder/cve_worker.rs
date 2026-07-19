@@ -31,7 +31,8 @@ use crate::server::jobs::BackgroundJobHandle;
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::{Context, Result};
 use chrono::Utc;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
+use std::collections::HashSet;
 use tokio::fs;
 use tokio::process::Command as TokioCommand;
 use tokio::time::{sleep, timeout};
@@ -102,7 +103,14 @@ pub async fn run_cve_scan_loop(
         *job.state.is_running.write().await = true;
         *job.state.last_run_at.write().await = Some(Utc::now());
 
-        if let Err(e) = scan_cycle(&pool, &vulnix_runner, vulnix_version.clone()).await {
+        if let Err(e) = scan_cycle(
+            &pool,
+            &vulnix_config,
+            &vulnix_runner,
+            vulnix_version.clone(),
+        )
+        .await
+        {
             error!("❌ Error in CVE scan cycle: {e}");
         }
 
@@ -129,31 +137,29 @@ pub async fn run_cve_scan_loop(
     }
 }
 
-/// Maximum derivations to drain from the post-build queue per cycle.  The
-/// post-build loop claims bounded batches repeatedly until the queue is empty
-/// or this limit is reached, guaranteeing all recently-built derivations are
-/// scanned within one poll interval (up to the cap).  The rescan phase has its
-/// own per-cycle limit so that periodic rescans cannot starve post-build work
-/// across cycles.
-const DRAIN_MAX_PER_CYCLE: i64 = 50;
 const BATCH_SIZE: i64 = 5;
 
 /// One full scan cycle: post-build scans followed by periodic rescans.
 ///
-/// Phase 1 (post-build) drains the queue in batches until empty or
-/// `DRAIN_MAX_PER_CYCLE` is reached, ensuring newly completed derivations are
-/// scanned within one poll interval.  Phase 2 (rescan) processes a single batch
-/// of stale derivations.
+/// Phase 1 (post-build) drains the queue in batches until empty, tracking
+/// attempted derivation IDs in a [`HashSet`] so that a failing derivation is
+/// not retried within the same cycle.  This guarantees every eligible,
+/// non-failing derivation is scanned within one poll interval.
 async fn scan_cycle(
     pool: &PgPool,
+    vulnix_config: &crate::config::VulnixConfig,
     vulnix_runner: &VulnixRunner,
     vulnix_version: Option<String>,
 ) -> Result<()> {
     set_cve_status_working("finding scan targets").await;
 
-    // Recover scans that were stuck in_progress from a prior server crash.
-    const STALE_THRESHOLD_SECS: u64 = 1800; // 30 minutes
-    match recover_stale_scans(pool, std::time::Duration::from_secs(STALE_THRESHOLD_SECS)).await {
+    // Derive stale-recovery threshold from the vulnix timeout rather than a
+    // hardcoded constant.  A legitimate in-progress scan may take up to the
+    // configured timeout to complete; we add a 120 s safety margin on top.
+    let stale_threshold = vulnix_config
+        .timeout
+        .saturating_add(std::time::Duration::from_secs(120));
+    match recover_stale_scans(pool, stale_threshold).await {
         Ok(n) if n > 0 => warn!("Recovered {n} stale in_progress CVE scan(s)"),
         Ok(_) => {}
         Err(e) => error!("Failed to recover stale CVE scans: {e}"),
@@ -175,26 +181,27 @@ async fn scan_cycle(
 
     // --- Phase 1: post-build scans (drain queue until empty) ---
     if policy.on_build {
-        let mut total_scanned: i64 = 0;
+        let mut attempted: HashSet<i32> = HashSet::new();
         loop {
             match get_targets_needing_cve_scan(pool, Some(BATCH_SIZE)).await {
                 Ok(targets) if !targets.is_empty() => {
-                    let remaining = DRAIN_MAX_PER_CYCLE - total_scanned;
-                    let batch = if targets.len() as i64 > remaining {
-                        &targets[..remaining as usize]
-                    } else {
-                        &targets[..]
-                    };
+                    // Filter out derivations already attempted this cycle.
+                    let batch: Vec<_> = targets
+                        .into_iter()
+                        .filter(|d| !attempted.contains(&d.id))
+                        .take(BATCH_SIZE as usize)
+                        .collect();
+
                     if batch.is_empty() {
+                        debug!(
+                            "🔍 Post-build queue drained ({} attempted)",
+                            attempted.len()
+                        );
                         break;
                     }
-                    total_scanned += batch.len() as i64;
-                    info!(
-                        "🔍 [post-build] Scanning {} newly built derivation(s) (total this cycle: {})",
-                        batch.len(),
-                        total_scanned
-                    );
-                    for derivation in batch {
+
+                    for derivation in &batch {
+                        attempted.insert(derivation.id);
                         info!(
                             "🔍 [post-build] Scanning newly built derivation: {}",
                             derivation.derivation_name
@@ -208,16 +215,12 @@ async fn scan_cycle(
                             );
                         }
                     }
-                    if total_scanned >= DRAIN_MAX_PER_CYCLE {
-                        warn!(
-                            "Post-build drain reached cap of {}; {} may remain for next cycle",
-                            DRAIN_MAX_PER_CYCLE, DRAIN_MAX_PER_CYCLE
-                        );
-                        break;
-                    }
                 }
                 Ok(_) => {
-                    debug!("🔍 Post-build queue drained ({} scanned)", total_scanned);
+                    debug!(
+                        "🔍 Post-build queue drained ({} attempted)",
+                        attempted.len()
+                    );
                     break;
                 }
                 Err(e) => {
@@ -336,7 +339,15 @@ async fn scan_one(
     }
 
     // 3. Create scan record and run vulnix.
-    let scan_id = create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone()).await?;
+    let scan_claim = create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone()).await?;
+    let scan_id = scan_claim.id();
+    if !scan_claim.was_created() {
+        info!(
+            "⏭️ Skipping duplicate CVE scan for {} — active scan {scan_id} already exists",
+            derivation.derivation_name
+        );
+        return Ok(());
+    }
     mark_scan_in_progress(pool, scan_id).await?;
 
     let start = std::time::Instant::now();
@@ -381,16 +392,27 @@ async fn materialize_store_path_from_cache(
 ) -> Result<bool> {
     // Find cache URLs that previously received a completed push for this derivation.
     //
-    // The LEFT JOIN handles two cases:
-    //   1. DB-configured cache destination — use `cd.push_to` (which may carry
-    //      credentials, type-specific config, etc.).
-    //   2. `server.toml`-configured cache (no matching `cache_destinations` row)
-    //      — fall back to the raw URL stored in `cpj.cache_destination`.
-    let cache_urls: Vec<String> = sqlx::query_scalar(
+    // The LEFT JOIN matches on both `cd.push_to` and `cd.name` because
+    // `cpj.cache_destination` may contain either a URL (legacy/server.toml)
+    // or a destination name (DB-configured cache).
+    //
+    // For DB-configured caches we also load `cache_type`, `attic_cache_name`,
+    // `attic_token`, `attic_public_key`, S3 credentials, etc. — but currently
+    // only the URL is used for materialization (`nix copy --from <url>`).
+    // Type-specific materialization (e.g. Attic token auth) is a future
+    // enhancement tracked separately.
+    //
+    // When no `cache_destinations` row matches, we fall back to the raw URL
+    // stored in `cpj.cache_destination` (server.toml case).
+    let cache_rows = sqlx::query(
         r#"
-        SELECT DISTINCT COALESCE(cd.push_to, cpj.cache_destination)
+        SELECT DISTINCT
+            COALESCE(cd.push_to, cpj.cache_destination) AS cache_url,
+            cd.cache_type,
+            cd.attic_cache_name
         FROM cache_push_jobs cpj
-        LEFT JOIN cache_destinations cd ON cd.push_to = cpj.cache_destination
+        LEFT JOIN cache_destinations cd
+            ON (cd.push_to = cpj.cache_destination OR cd.name = cpj.cache_destination)
         WHERE cpj.derivation_id = $1
           AND cpj.status = 'completed'
           AND COALESCE(cd.push_to, cpj.cache_destination) IS NOT NULL
@@ -400,6 +422,15 @@ async fn materialize_store_path_from_cache(
     .fetch_all(pool)
     .await
     .context("Failed to query cache destinations for materialization")?;
+
+    // Extract URLs; we ignore cache_type for now (nix copy --from works for
+    // HTTP, Nix, S3-with-env-creds, and Attic server URLs).  For authenticated
+    // S3 or Attic with token-based auth, the caller should ensure the
+    // environment has the necessary credentials configured.
+    let cache_urls: Vec<String> = cache_rows
+        .iter()
+        .filter_map(|row| row.try_get::<String, _>("cache_url").ok())
+        .collect();
 
     if cache_urls.is_empty() {
         debug!(

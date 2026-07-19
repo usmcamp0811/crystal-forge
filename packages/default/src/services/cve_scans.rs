@@ -57,9 +57,13 @@ pub async fn trigger_immediate_cve_scan(
     }
 
     let vulnix_version = VulnixRunner::get_vulnix_version().await.ok();
-    let scan_id = create_cve_scan(&pool, derivation_id, "vulnix", vulnix_version.clone())
+    let scan_claim = create_cve_scan(&pool, derivation_id, "vulnix", vulnix_version.clone())
         .await
         .map_err(CveScanError::Internal)?;
+    let scan_id = scan_claim.id();
+    if !scan_claim.was_created() {
+        return Ok(scan_id);
+    }
 
     let spawn_pool = pool.clone();
     tokio::spawn(async move {

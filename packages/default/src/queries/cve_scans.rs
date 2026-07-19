@@ -18,6 +18,24 @@ pub struct CveScanEligibleTarget {
     pub blocked_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateCveScanOutcome {
+    Created(Uuid),
+    Existing(Uuid),
+}
+
+impl CreateCveScanOutcome {
+    pub fn id(self) -> Uuid {
+        match self {
+            Self::Created(id) | Self::Existing(id) => id,
+        }
+    }
+
+    pub fn was_created(self) -> bool {
+        matches!(self, Self::Created(_))
+    }
+}
+
 fn truncate_for_varchar(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
@@ -97,16 +115,22 @@ pub async fn get_targets_needing_cve_scan(
     Ok(targets)
 }
 
-/// Create a new CVE scan record
+/// Create a new CVE scan record.
+///
+/// Uses `ON CONFLICT DO NOTHING` with the partial unique index
+/// `idx_cve_scans_unique_active` to make the claim atomic across concurrent
+/// callers (background loop vs. on-demand request).  If a pending or in-progress
+/// scan already exists for the same derivation, this returns the existing scan's
+/// ID instead of creating a duplicate.
 pub async fn create_cve_scan(
     pool: &PgPool,
     derivation_id: i32,
     scanner_name: &str,
     scanner_version: Option<String>,
-) -> Result<Uuid> {
+) -> Result<CreateCveScanOutcome> {
     let scan_id = Uuid::new_v4();
 
-    sqlx::query!(
+    let result = sqlx::query!(
         r#"
         INSERT INTO cve_scans (
             id, derivation_id, scanner_name, scanner_version,
@@ -114,6 +138,8 @@ pub async fn create_cve_scan(
             critical_count, high_count, medium_count, low_count,
             attempts
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT (derivation_id) WHERE status IN ('pending', 'in_progress')
+        DO NOTHING
         "#,
         scan_id,
         derivation_id,
@@ -131,7 +157,31 @@ pub async fn create_cve_scan(
     .execute(pool)
     .await?;
 
-    Ok(scan_id)
+    if result.rows_affected() == 0 {
+        // Another caller already created an active scan for this derivation.
+        // Return its ID instead.
+        let existing = sqlx::query_scalar!(
+            r#"
+            SELECT id FROM cve_scans
+            WHERE derivation_id = $1
+              AND status IN ('pending', 'in_progress')
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+            derivation_id
+        )
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "ON CONFLICT returned 0 rows but no active scan found for derivation {}",
+                derivation_id
+            )
+        })?;
+        return Ok(CreateCveScanOutcome::Existing(existing));
+    }
+
+    Ok(CreateCveScanOutcome::Created(scan_id))
 }
 
 /// Update CVE scan to in-progress status
@@ -221,7 +271,7 @@ pub async fn mark_cve_scan_failed(
         existing.id
     } else {
         // Create a new scan record to mark as failed
-        create_cve_scan(pool, target.id, "vulnix", None).await?
+        create_cve_scan(pool, target.id, "vulnix", None).await?.id()
     };
 
     // Create metadata with error details
@@ -818,9 +868,9 @@ pub async fn get_targets_needing_cve_rescan(
         -- "deployed" uses an EXISTS check against active systems, matching on:
         --   - flake (via commits → systems.flake_id)
         --   - effective configuration name (system_configuration_name or hostname)
-        --   - the derivation's .drv path matches the latest system_states row
-        --     for that hostname (ensures only the currently deployed generation
-        --     is classified as deployed, not every historical build).
+        --   - the derivation's store path matches the latest system_states
+        --     store_path for that hostname (ensures only the currently deployed
+        --     generation is classified as deployed, not every historical build).
         lifecycle AS (
             SELECT
                 d.id AS derivation_id,
@@ -832,11 +882,13 @@ pub async fn get_targets_needing_cve_rescan(
                         WHERE c.id = d.commit_id
                           AND s.is_active = TRUE
                           AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = d.derivation_name
-                          AND d.derivation_path IS NOT NULL
-                          AND d.derivation_path = (
-                              SELECT ss.derivation_path
+                          AND d.store_path IS NOT NULL
+                          AND d.store_path = (
+                              SELECT ss.store_path
                               FROM system_states ss
                               WHERE ss.hostname = s.hostname
+                                AND ss.store_path IS NOT NULL
+                                AND BTRIM(ss.store_path) <> ''
                               ORDER BY ss.timestamp DESC
                               LIMIT 1
                           )
@@ -1055,7 +1107,7 @@ mod tests {
     /// An unscanned derivation with build-complete status should be selected
     /// for post-build scanning.
     #[sqlx::test]
-    #[ignore = "requires live database connection"]
+    #[ignore = "requires test database creation privileges"]
     async fn get_targets_needing_cve_scan_selects_unscanned_derivation(pool: PgPool) {
         setup_test_derivation(&pool).await;
 
@@ -1075,13 +1127,14 @@ mod tests {
 
     /// A derivation with an in_progress scan should NOT be selected.
     #[sqlx::test]
-    #[ignore = "requires live database connection"]
+    #[ignore = "requires test database creation privileges"]
     async fn get_targets_needing_cve_scan_excludes_in_progress(pool: PgPool) {
         let (derivation_id, _) = setup_test_derivation(&pool).await;
 
         let scan_id = create_cve_scan(&pool, derivation_id, "vulnix", None)
             .await
-            .expect("scan should be created");
+            .expect("scan should be created")
+            .id();
         mark_scan_in_progress(&pool, scan_id)
             .await
             .expect("scan should be marked in_progress");
@@ -1099,14 +1152,15 @@ mod tests {
     /// recover_stale_scans should mark old in_progress scans as failed,
     /// making the derivation eligible again.
     #[sqlx::test]
-    #[ignore = "requires live database connection"]
+    #[ignore = "requires test database creation privileges"]
     async fn recover_stale_scans_unblocks_derivation(pool: PgPool) {
         let (derivation_id, _) = setup_test_derivation(&pool).await;
 
         // Create a scan and mark it in_progress with an old timestamp.
         let scan_id = create_cve_scan(&pool, derivation_id, "vulnix", None)
             .await
-            .expect("scan should be created");
+            .expect("scan should be created")
+            .id();
         mark_scan_in_progress(&pool, scan_id)
             .await
             .expect("scan should be marked in_progress");
@@ -1163,14 +1217,15 @@ mod tests {
     /// A stale completed scan should be selected for rescan when the policy
     /// interval has elapsed.
     #[sqlx::test]
-    #[ignore = "requires live database connection"]
+    #[ignore = "requires test database creation privileges"]
     async fn get_targets_needing_cve_rescan_selects_stale_scan(pool: PgPool) {
         let (derivation_id, _) = setup_test_derivation(&pool).await;
 
         // Create a completed scan that is old enough to be stale.
         let scan_id = create_cve_scan(&pool, derivation_id, "vulnix", None)
             .await
-            .expect("scan should be created");
+            .expect("scan should be created")
+            .id();
         sqlx::query!(
             r#"
             UPDATE cve_scans
