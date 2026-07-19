@@ -290,7 +290,7 @@ pub async fn run_cve_scan_loop(
 }
 
 const BATCH_SIZE: i64 = 5;
-const POST_BUILD_CONCURRENCY: usize = 5;
+const POST_BUILD_CONCURRENCY: usize = 1;
 
 /// One full scan cycle: post-build scans followed by periodic rescans.
 ///

@@ -354,6 +354,18 @@ pub(crate) async fn save_scan_results_with_store_path_override(
     // Calculate statistics from vulnix results
     let stats = VulnixParser::calculate_stats(vulnix_results);
 
+    // Resolve store paths before opening the transaction. This invokes
+    // `nix-store` for each result and can take long enough that holding a pool
+    // connection here starves latency-sensitive API requests.
+    let mut resolved_results = Vec::with_capacity(vulnix_results.len());
+    for entry in vulnix_results {
+        let store_path = match store_path_override {
+            Some(path) => path.to_string(),
+            None => get_store_path_from_drv(&entry.derivation).await?,
+        };
+        resolved_results.push((entry, store_path));
+    }
+
     // Start a transaction
     let mut tx = pool.begin().await?;
 
@@ -387,16 +399,12 @@ pub(crate) async fn save_scan_results_with_store_path_override(
     .await?;
 
     // Insert packages and vulnerabilities found during scan
-    for entry in vulnix_results {
+    for (entry, store_path) in resolved_results {
         debug!(
             "CVE Scan Entry - name: '{}', pname: {:?}, version: {:?}, derivation: '{}', affected_by: {:?}",
             entry.name, entry.pname, entry.version, entry.derivation, entry.affected_by
         );
 
-        let store_path = match store_path_override {
-            Some(path) => path.to_string(),
-            None => get_store_path_from_drv(&entry.derivation).await?,
-        };
         let package_version = truncate_for_varchar(&entry.version, 100);
         if package_version != entry.version {
             debug!(
