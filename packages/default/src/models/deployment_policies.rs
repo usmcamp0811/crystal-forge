@@ -477,11 +477,15 @@ impl PolicyCheckResult {
         let mut custom_checks = HashMap::new();
         let mut failed_policies = Vec::new();
 
-        for (policy_idx, policy) in policies.iter().enumerate() {
+        let mut nix_policy_idx = 0usize;
+        for policy in policies {
             // CVE policies are not Nix-evaluated; skip here.
             if !policy.is_nix_evaluated() {
                 continue;
             }
+
+            let policy_idx = nix_policy_idx;
+            nix_policy_idx += 1;
 
             let is_strict = policy.is_strict();
 
@@ -814,6 +818,38 @@ mod tests {
         let expr = build_nix_eval_expression("github:user/repo", &policies);
         assert!(expr.contains("hasRequiredPackages_0"));
         assert!(expr.contains("hasRequiredPackages_1"));
+    }
+
+    #[test]
+    fn require_packages_indices_ignore_non_nix_policies_consistently() {
+        let policies = vec![
+            DeploymentPolicy::RequirePackages {
+                packages: vec!["grafana".to_string()],
+                strict: true,
+            },
+            DeploymentPolicy::RequireCveCheck {
+                config: CveCheckConfig::default(),
+            },
+            DeploymentPolicy::RequirePackages {
+                packages: vec!["neovim".to_string()],
+                strict: true,
+            },
+        ];
+
+        let expr = build_nix_eval_expression("github:user/repo", &policies);
+        assert!(expr.contains("hasRequiredPackages_0"));
+        assert!(expr.contains("hasRequiredPackages_1"));
+        assert!(!expr.contains("hasRequiredPackages_2"));
+
+        let policies_json = serde_json::json!({
+            "hasRequiredPackages_0": true,
+            "hasRequiredPackages_1": true,
+        });
+
+        let result =
+            PolicyCheckResult::from_json("campground-host".to_string(), &policies_json, &policies);
+        assert!(result.meets_requirements);
+        assert!(result.failed_policies.is_empty());
     }
 
     #[test]
