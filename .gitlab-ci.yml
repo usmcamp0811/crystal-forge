@@ -360,31 +360,14 @@ web-ui-screenshots-mr-comment:
     - merge_requests
 
 # Runs the CVE scan loop processing test (scan_cycle_processes_target_with_fake_runner)
-# against a dedicated ephemeral PostgreSQL service provided by the Docker CI
-# runner.  The job uses the lightweight `.#sqlx` dev shell (not the default
-# dev shell) so it gets cargo/sqlx/postgresql tooling without the interactive
-# key-generation shellHook used for local development.
-#
-# The test inserts a single build-complete derivation, runs one scan cycle with
-# a fake vulnix runner, and asserts the derivation is processed exactly once and
-# a completed scan record is persisted.
+# using the existing `devScripts.db-only` process-compose stack. The job starts
+# Postgres via process-compose, waits for readiness, applies migrations, runs
+# the targeted fake-runner processing test from the lightweight `.#sqlx` shell,
+# and then stops the stack.
 cve-processing-test:
   stage: check
   tags:
     - nix
-  services:
-    - name: postgres:16-alpine
-      alias: postgres
-      entrypoint:
-        - /usr/local/bin/docker-entrypoint.sh
-      command:
-        - postgres
-  variables:
-    POSTGRES_DB: cf_cve_test
-    POSTGRES_USER: cf_cve_test
-    POSTGRES_PASSWORD: cf_cve_test
-    POSTGRES_HOST_AUTH_METHOD: trust
-    CRYSTAL_FORGE_TEST_DATABASE_URL: "postgres://cf_cve_test:cf_cve_test@postgres/cf_cve_test"
   before_script:
     - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
     - echo "login gitlab-ci-token" >> ~/.netrc
@@ -392,18 +375,37 @@ cve-processing-test:
     - chmod 600 ~/.netrc
   script:
     - |
-      set -euo pipefail
-
       nix develop .#sqlx -c bash -euo pipefail -c '
-        until pg_isready -h postgres -U cf_cve_test -d cf_cve_test; do sleep 0.2; done
+        REPO_ROOT="$PWD"
+        DB_URL="postgresql://crystal_forge:password@127.0.0.1:3042/crystal_forge"
+        LOG_FILE="${TMPDIR:-/tmp}/cf-db-only.log"
 
-        DATABASE_URL="$CRYSTAL_FORGE_TEST_DATABASE_URL" \
-          cargo sqlx migrate run \
-          --source packages/default/migrations
+        cleanup() {
+          nix run "$REPO_ROOT#devScripts.db-only" -- down >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
 
-        CRYSTAL_FORGE_TEST_DATABASE_URL="$CRYSTAL_FORGE_TEST_DATABASE_URL" \
-          cargo test \
-          --manifest-path packages/default/Cargo.toml \
+        echo "📦 Starting db-only process-compose stack..."
+        setsid nix run "$REPO_ROOT#devScripts.db-only" -- up --tui=false \
+          >"$LOG_FILE" 2>&1 < /dev/null &
+
+        echo "⏳ Waiting for PostgreSQL on 127.0.0.1:3042..."
+        for i in {1..120}; do
+          if pg_isready -h 127.0.0.1 -p 3042 -U crystal_forge -d crystal_forge >/dev/null 2>&1; then
+            echo "✓ PostgreSQL ready"
+            break
+          fi
+          if [[ $i -eq 120 ]]; then
+            echo "❌ PostgreSQL did not become ready; last log output:"
+            tail -n 200 "$LOG_FILE" || true
+            exit 1
+          fi
+          sleep 1
+        done
+
+        DATABASE_URL="$DB_URL" cargo sqlx migrate run --source packages/default/migrations
+        CRYSTAL_FORGE_TEST_DATABASE_URL="$DB_URL" \
+          cargo test --manifest-path packages/default/Cargo.toml \
           --lib builder::cve_worker::tests::scan_cycle_processes_target_with_fake_runner
       '
   only:
