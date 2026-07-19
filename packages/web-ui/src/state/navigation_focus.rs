@@ -11,6 +11,8 @@ pub enum FocusTarget {
     Evaluations,
     /// Policies view focus.
     Policies,
+    /// Systems view focus.
+    Systems,
 }
 
 impl Default for FocusTarget {
