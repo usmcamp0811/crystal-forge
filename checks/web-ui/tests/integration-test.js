@@ -99,7 +99,10 @@ const VIEWPORTS = {
 };
 
 async function assertVisible(locator, message, timeoutMs = 5000) {
-  const visible = await locator.isVisible({ timeout: timeoutMs }).catch(() => false);
+  const visible = await locator
+    .waitFor({ state: "visible", timeout: timeoutMs })
+    .then(() => true)
+    .catch(() => false);
   if (!visible) {
     throw new Error(message);
   }
