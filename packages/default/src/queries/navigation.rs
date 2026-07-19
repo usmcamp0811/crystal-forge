@@ -533,7 +533,16 @@ pub async fn fetch_navigation_badges(
     // use the same universe or acknowledgement becomes ineffective (review finding #1).
     let eval_alert_ids: Vec<String> = match sqlx::query_scalar(
         r#"
-        SELECT recent.id::text
+        SELECT
+            concat_ws(
+                ':',
+                'eval',
+                recent.id::text,
+                COALESCE(
+                    (EXTRACT(EPOCH FROM recent.evaluation_completed_at) * 1000000)::bigint::text,
+                    'unknown'
+                )
+            )
         FROM (
             SELECT
                 c.id,

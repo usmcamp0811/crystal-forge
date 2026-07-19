@@ -698,6 +698,7 @@ pub async fn list_eval_history(
         passed_count: i64,
         policy_failed_count: i64,
         eval_failed_count: i64,
+        alert_occurrence_id: String,
         total_count: i64,
     }
 
@@ -734,6 +735,15 @@ pub async fn list_eval_history(
                 SELECT COUNT(*)::BIGINT FROM derivations d
                 WHERE d.commit_id = c.id AND d.status_id = 6
             ), 0)                           AS eval_failed_count,
+            concat_ws(
+                ':',
+                'eval',
+                c.id::text,
+                COALESCE(
+                    (EXTRACT(EPOCH FROM c.evaluation_completed_at) * 1000000)::bigint::text,
+                    'unknown'
+                )
+            )                               AS alert_occurrence_id,
             COUNT(*) OVER ()                AS total_count
         FROM commits c
         JOIN flakes f ON f.id = c.flake_id
@@ -773,6 +783,7 @@ pub async fn list_eval_history(
             passed_count: r.passed_count,
             policy_failed_count: r.policy_failed_count,
             eval_failed_count: r.eval_failed_count,
+            alert_occurrence_id: r.alert_occurrence_id,
         })
         .collect();
 

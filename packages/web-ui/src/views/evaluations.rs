@@ -289,7 +289,7 @@ fn EvaluationsPage() -> Element {
                         .items
                         .iter()
                         .filter(|item| item.evaluation_status == "failed")
-                        .map(|item| item.commit_id.to_string())
+                        .map(|item| item.alert_occurrence_id.clone())
                         .collect::<Vec<_>>();
                     spawn(async move {
                         if acknowledge_with_cursor_and_ids_async(

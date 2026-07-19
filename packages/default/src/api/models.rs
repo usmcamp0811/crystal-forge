@@ -739,6 +739,10 @@ pub struct EvalHistoryItem {
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
+    /// Unique identifier for this evaluation occurrence, including both commit
+    /// and completion timestamp. Used for alert acknowledgement to distinguish
+    /// between separate evaluation attempts of the same commit (review finding).
+    pub alert_occurrence_id: String,
 }
 
 /// Paginated response for GET /api/v1/commits/eval-history.
