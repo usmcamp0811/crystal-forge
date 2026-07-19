@@ -593,23 +593,13 @@ let
       REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
       DB_URL="postgresql://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge"
 
-      status=0
-      if nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
+      nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
         cd \"$REPO_ROOT/packages/default\"
         DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source migrations
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib builder::cve_worker::tests::scan_cycle_processes_target_with_fake_runner
-      "; then
-        status=0
-      else
-        status=$?
-      fi
-
-      # Tear the project down so `process-compose up` exits once the one-shot
-      # test process completes.
-      nix run "$REPO_ROOT#devScripts.cve-test" -- down >/dev/null 2>&1 || true
-      exit "$status"
+      "
     '';
   };
 
@@ -1148,6 +1138,7 @@ let
     settings.processes.cve-processing-test = {
       inherit namespace;
       command = runCveProcessingTest;
+      availability.exit_on_end = true;
       depends_on."db".condition = "process_healthy";
     };
   };
