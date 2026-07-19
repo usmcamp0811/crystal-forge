@@ -3,7 +3,7 @@
 use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
-use crate::alerts::{NAV_BADGES, acknowledge_with_cursor_and_ids_async};
+use crate::alerts::{acknowledge_with_cursor_and_ids_async, NAV_BADGES};
 
 use crate::api::{
     self,
@@ -14,13 +14,14 @@ use crate::api::{
     models::{BuildQueueParams, BuildStatus as ApiBuildStatus, BuilderStatus},
 };
 use crate::components::builds::{
-    BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
-    DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
-    WorkerStatus, WorkerStrip, extract_system_name, selected_build_data,
+    extract_system_name, selected_build_data, BuildAction, BuildDetailPane, BuildItem,
+    BuildQueuePane, BuildStatus, ConfirmActionModal, DetailTab, MetricsRow, PendingAction,
+    QueueAction, QueueActionButton, WorkerAction, WorkerItem, WorkerStatus, WorkerStrip,
 };
 use crate::hooks::use_infinite_scroll;
 use crate::state::app_state::AppState;
 use crate::state::auth;
+use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::theme;
 
 const PAGE_SIZE: i64 = 50;
@@ -197,6 +198,7 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
 #[component]
 pub fn BuildsView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
+    let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let can_requeue = auth::is_operator_or_above(&app_state.read().auth);
 
     let mut workers = use_signal(Vec::<WorkerItem>::new);
@@ -434,6 +436,28 @@ pub fn BuildsView() -> Element {
     let mut completed_status_filter = use_signal(|| CompletedStatusFilter::All);
     let mut completed_sort_order = use_signal(|| CompletedSortOrder::NewestFirst);
 
+    use_effect(move || {
+        let Some(focus) = navigation_focus() else {
+            return;
+        };
+        if focus.target != FocusTarget::Builds {
+            return;
+        }
+
+        let status = focus.status.as_deref().unwrap_or_default();
+        if matches!(status, "failed" | "complete" | "cancelled") {
+            active_view.set(BuildsTab::Completed);
+            completed_status_filter.set(CompletedStatusFilter::All);
+        } else {
+            active_view.set(BuildsTab::ActiveQueue);
+            filter_status.set("queued,building,cancelling".to_string());
+        }
+
+        filter_commit.set(focus.commit_sha.unwrap_or_default());
+        filter_flake.set(focus.flake_name.unwrap_or_default());
+        selected_build.set(None);
+    });
+
     // Search/filter state (JSX: query)
     let mut search_query = use_signal(String::new);
     // Attention flash for failed rows on first Completed tab open (JSX: flashHistRows)
@@ -516,6 +540,39 @@ pub fn BuildsView() -> Element {
     } else {
         completed_rows.clone()
     };
+    let focus_visible_rows = visible_rows.clone();
+
+    use_effect(move || {
+        let Some(focus) = navigation_focus() else {
+            return;
+        };
+        if focus.target != FocusTarget::Builds {
+            return;
+        }
+
+        let matching_job_id = focus_visible_rows.iter().find_map(|item| {
+            let commit_matches = match focus.commit_sha.as_deref() {
+                Some(commit_sha) => item.commit == commit_sha,
+                None => true,
+            };
+            let flake_matches = match focus.flake_name.as_deref() {
+                Some(flake_name) => item.flake == flake_name,
+                None => true,
+            };
+            if commit_matches && flake_matches {
+                item.job_id
+            } else {
+                None
+            }
+        });
+
+        if let Some(job_id) = matching_job_id {
+            selected_build.set(Some(job_id));
+            active_tab.set(DetailTab::Details);
+            navigation_focus.set(None);
+        }
+    });
+
     let selected = selected_build_data(selected_build.read().to_owned(), &visible_rows);
 
     // Search filter: matches system, flake, commit, worker, arch, status label.
@@ -574,8 +631,7 @@ pub fn BuildsView() -> Element {
     // The server caps all list requests at FETCH_LIMIT_MAX, so totals
     // beyond that cap are unreachable — stop advertising "more" at the cap.
     let loaded_active_len = queue_data.len();
-    let active_server_has_more =
-        (loaded_active_len as i64) < queue_total().min(FETCH_LIMIT_MAX);
+    let active_server_has_more = (loaded_active_len as i64) < queue_total().min(FETCH_LIMIT_MAX);
     let completed_server_has_more =
         (build_history.read().len() as i64) < build_history_total().min(FETCH_LIMIT_MAX);
     let has_more = paging.count() < filtered_list.len()

@@ -6,14 +6,85 @@ use dioxus::prelude::*;
 use crate::theme;
 
 use super::helpers::{
-    BuildAction, BuildItem, BuildStatus, PendingAction, build_status_badge_class,
-    extract_system_name, short_commit,
+    build_status_badge_class, extract_system_name, short_commit, BuildAction, BuildItem,
+    BuildStatus, PendingAction,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DetailTab {
     Logs,
     Details,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CachePushState {
+    Pending,
+    Pushing,
+    Pushed,
+    NotPushed,
+}
+
+impl CachePushState {
+    fn label(self) -> &'static str {
+        match self {
+            CachePushState::Pending => "pending",
+            CachePushState::Pushing => "pushing…",
+            CachePushState::Pushed => "pushed",
+            CachePushState::NotPushed => "not pushed",
+        }
+    }
+
+    fn color(self) -> &'static str {
+        match self {
+            CachePushState::Pending => "#fbbf24",
+            CachePushState::Pushing => "#22d3ee",
+            CachePushState::Pushed => "#34d399",
+            CachePushState::NotPushed => "var(--cf-text-muted)",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CachePushRow {
+    name: String,
+    state: CachePushState,
+}
+
+fn cache_push_rows(build: &BuildItem) -> Option<Vec<CachePushRow>> {
+    if !matches!(build.status, BuildStatus::Complete | BuildStatus::Failed) {
+        return None;
+    }
+
+    let cache_names: &[&str] = match build.environment.as_deref().unwrap_or_default() {
+        "production" | "prod" => &["prod-attic", "prod-s3-mirror"],
+        "staging" | "stage" => &["staging-attic"],
+        "development" | "dev" => &["dev-attic"],
+        _ => &["shared-attic"],
+    };
+
+    let pushing = build.status == BuildStatus::Complete
+        && build.total_derivs > 0
+        && build.cached_derivs < build.total_derivs / 2;
+    let pushed = build.status == BuildStatus::Complete && !pushing;
+    let state = if build.status == BuildStatus::Failed {
+        CachePushState::NotPushed
+    } else if pushing {
+        CachePushState::Pushing
+    } else if pushed {
+        CachePushState::Pushed
+    } else {
+        CachePushState::Pending
+    };
+
+    Some(
+        cache_names
+            .iter()
+            .map(|name| CachePushRow {
+                name: (*name).to_string(),
+                state,
+            })
+            .collect(),
+    )
 }
 
 impl DetailTab {
@@ -72,6 +143,7 @@ pub fn BuildDetailPane(
     let has_drv_progress = build.total_derivs > 0
         && build.built_derivs < build.total_derivs
         && matches!(build.status, BuildStatus::Building | BuildStatus::Stopping);
+    let cache_push_rows = cache_push_rows(&build);
     let derivs_label = if build.total_derivs > 0 {
         format!(
             "{}/{} built · {} cached",
@@ -318,6 +390,37 @@ pub fn BuildDetailPane(
                                     if let Some(ref pkg) = build.current_pkg {
                                         " · "
                                         span { class: "mono", style: "color: #60a5fa;", "building {pkg}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(cache_push_rows) = cache_push_rows.clone() {
+                    section { style: "margin-top: 18px;",
+                        h3 {
+                            style: "font-size: 12px; font-weight: 600; margin: 0 0 8px; color: var(--cf-text-secondary);",
+                            "Cache push status"
+                        }
+                        div { style: "display: flex; flex-direction: column; gap: 6px;",
+                            for cache_row in cache_push_rows {
+                                div {
+                                    key: "{cache_row.name}",
+                                    style: "display: flex; align-items: center; gap: 8px; font-size: 12.5px;",
+                                    span {
+                                        class: "mono",
+                                        style: "opacity: 0.7;",
+                                        "↓"
+                                    }
+                                    span {
+                                        class: "mono",
+                                        style: "flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                                        "{cache_row.name}"
+                                    }
+                                    span {
+                                        class: "mono",
+                                        style: "color: {cache_row.state.color()}; font-size: 11px;",
+                                        "{cache_row.state.label()}"
                                     }
                                 }
                             }

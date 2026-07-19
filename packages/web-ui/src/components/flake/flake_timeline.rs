@@ -8,6 +8,7 @@ use std::collections::HashSet;
 
 use crate::api::models::{BuildStatus, FlakeCommit, FlakeTimeline};
 use crate::routes::Route;
+use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::theme;
 use chrono::TimeZone;
 
@@ -61,6 +62,7 @@ pub fn FlakeTimelineWidget(
     timelines: Vec<FlakeTimeline>,
     #[props(default)] selected_flake_indices: HashSet<usize>,
     #[props(default)] on_filter_change: Option<EventHandler<HashSet<usize>>>,
+    #[props(default)] on_open_build: Option<EventHandler<NavigationFocus>>,
 ) -> Element {
     // Local state for dropdown visibility
     let mut dropdown_open = use_signal(|| false);
@@ -287,10 +289,16 @@ pub fn FlakeTimelineWidget(
                 class: "relative z-10",
                 match *view_mode.read() {
                     TimelineViewMode::Combined | TimelineViewMode::SingleFlake => rsx! {
-                        CombinedTimeline { timelines: filtered_timelines.clone() }
+                        CombinedTimeline {
+                            timelines: filtered_timelines.clone(),
+                            on_open_build: on_open_build.clone(),
+                        }
                     },
                     TimelineViewMode::Stacked => rsx! {
-                        StackedTimelines { timelines: filtered_timelines.clone() }
+                        StackedTimelines {
+                            timelines: filtered_timelines.clone(),
+                            on_open_build: on_open_build.clone(),
+                        }
                     },
                 }
             }
@@ -526,7 +534,10 @@ fn format_tick_label(timestamp: chrono::DateTime<chrono::Utc>, tick_seconds: i64
 
 /// Combined timeline showing all flakes' commits merged chronologically.
 #[component]
-fn CombinedTimeline(timelines: Vec<FlakeTimeline>) -> Element {
+fn CombinedTimeline(
+    timelines: Vec<FlakeTimeline>,
+    on_open_build: Option<EventHandler<NavigationFocus>>,
+) -> Element {
     let all_commits: Vec<(Option<String>, FlakeCommit)> = timelines
         .iter()
         .flat_map(|t| {
@@ -549,6 +560,7 @@ fn CombinedTimeline(timelines: Vec<FlakeTimeline>) -> Element {
             total_width: total_width,
             scale: scale,
             show_flake_labels: true,
+            on_open_build: on_open_build,
             testid: "combined-timeline"
         }
     }
@@ -556,13 +568,19 @@ fn CombinedTimeline(timelines: Vec<FlakeTimeline>) -> Element {
 
 /// Stacked timelines showing each flake separately.
 #[component]
-fn StackedTimelines(timelines: Vec<FlakeTimeline>) -> Element {
+fn StackedTimelines(
+    timelines: Vec<FlakeTimeline>,
+    on_open_build: Option<EventHandler<NavigationFocus>>,
+) -> Element {
     rsx! {
         div {
             class: "space-y-4",
             "data-testid": "stacked-timelines",
             for timeline in timelines {
-                SingleFlakeTimeline { timeline }
+                SingleFlakeTimeline {
+                    timeline,
+                    on_open_build: on_open_build.clone(),
+                }
             }
         }
     }
@@ -570,7 +588,10 @@ fn StackedTimelines(timelines: Vec<FlakeTimeline>) -> Element {
 
 /// Timeline for a single flake.
 #[component]
-fn SingleFlakeTimeline(timeline: FlakeTimeline) -> Element {
+fn SingleFlakeTimeline(
+    timeline: FlakeTimeline,
+    on_open_build: Option<EventHandler<NavigationFocus>>,
+) -> Element {
     let commits: Vec<(Option<String>, FlakeCommit)> =
         timeline.commits.iter().map(|c| (None, c.clone())).collect();
 
@@ -595,6 +616,7 @@ fn SingleFlakeTimeline(timeline: FlakeTimeline) -> Element {
                 total_width: total_width,
                 scale: scale,
                 show_flake_labels: false,
+                on_open_build: on_open_build,
                 testid: "single-timeline"
             }
         }
@@ -608,6 +630,7 @@ fn TimelineGraph(
     total_width: f64,
     scale: Option<TimelineScale>,
     show_flake_labels: bool,
+    on_open_build: Option<EventHandler<NavigationFocus>>,
     testid: &'static str,
 ) -> Element {
     if positioned_commits.is_empty() {
@@ -634,7 +657,7 @@ fn TimelineGraph(
     let node_center = node_top + (node_size / 2); // Center at y=14
     let line_thickness = 5;
     let line_top = node_center - 2; // Line at y=12, 5px thick, centers at y=14
-    // Height for node + text labels only
+                                    // Height for node + text labels only
     let container_height = 65;
 
     rsx! {
@@ -697,7 +720,8 @@ fn TimelineGraph(
                                 show_flake_label: show_flake_labels,
                                 x_position: pc.x_position,
                                 node_top: node_top,
-                                node_size: node_size
+                                node_size: node_size,
+                                on_open_build: on_open_build.clone(),
                             }
                         }
                     }
@@ -734,6 +758,7 @@ fn CommitNode(
     x_position: f64,
     node_top: i32,
     node_size: i32,
+    on_open_build: Option<EventHandler<NavigationFocus>>,
 ) -> Element {
     let navigator = navigator();
     let short_hash = commit.hash.chars().take(7).collect::<String>();
@@ -798,7 +823,21 @@ fn CommitNode(
                 title: "{build_status.label()}",
                 onclick: {
                     let target_route = target_route.clone();
+                    let on_open_build = on_open_build.clone();
+                    let commit_hash = commit.hash.clone();
+                    let flake_name = flake_name.clone();
+                    let build_status_label = build_status.label().to_ascii_lowercase();
                     move |_| {
+                        if let Some(handler) = &on_open_build {
+                            if matches!(target_route.as_ref(), Some(Route::BuildsView { .. })) {
+                                handler.call(NavigationFocus {
+                                    target: FocusTarget::Builds,
+                                    commit_sha: Some(commit_hash.clone()),
+                                    flake_name: flake_name.clone(),
+                                    status: Some(build_status_label.clone()),
+                                });
+                            }
+                        }
                         if let Some(route) = target_route.clone() {
                             navigator.push(route);
                         }
@@ -890,7 +929,21 @@ fn CommitNode(
                 style: "top: {text_top}px; min-width: 50px;",
                 onclick: {
                     let target_route = target_route.clone();
+                    let on_open_build = on_open_build.clone();
+                    let commit_hash = commit.hash.clone();
+                    let flake_name = flake_name.clone();
+                    let build_status_label = build_status.label().to_ascii_lowercase();
                     move |_| {
+                        if let Some(handler) = &on_open_build {
+                            if matches!(target_route.as_ref(), Some(Route::BuildsView { .. })) {
+                                handler.call(NavigationFocus {
+                                    target: FocusTarget::Builds,
+                                    commit_sha: Some(commit_hash.clone()),
+                                    flake_name: flake_name.clone(),
+                                    status: Some(build_status_label.clone()),
+                                });
+                            }
+                        }
                         if let Some(route) = target_route.clone() {
                             navigator.push(route);
                         }
