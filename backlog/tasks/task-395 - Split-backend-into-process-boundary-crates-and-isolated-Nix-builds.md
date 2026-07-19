@@ -1,10 +1,11 @@
 ---
 id: TASK-395
 title: Split backend into process-boundary crates and isolated Nix builds
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-19 00:00'
 updated_date: '2026-07-19 00:00'
+lock: TASK-395-split-backend
 labels:
   - backend
   - architecture
