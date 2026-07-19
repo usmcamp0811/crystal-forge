@@ -26,21 +26,26 @@ use tokio::time::Duration;
 use tracing::info;
 
 /// Live runtime state for a single background job.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BackgroundJobState {
     pub enabled: RwLock<bool>,
     pub last_run_at: RwLock<Option<DateTime<Utc>>>,
     pub next_run_at: RwLock<Option<DateTime<Utc>>>,
     pub is_running: RwLock<bool>,
+    /// Fires whenever `enabled` changes so the background task can wake
+    /// immediately instead of waiting out the full poll interval.
+    pub enabled_changed_tx: watch::Sender<()>,
 }
 
 impl BackgroundJobState {
     pub fn new(enabled: bool) -> Self {
+        let (enabled_changed_tx, _) = watch::channel(());
         Self {
             enabled: RwLock::new(enabled),
             last_run_at: RwLock::new(None),
             next_run_at: RwLock::new(None),
             is_running: RwLock::new(false),
+            enabled_changed_tx,
         }
     }
 }
@@ -99,8 +104,14 @@ impl BackgroundJobHandle {
     }
 
     /// Enable or disable the job.
+    ///
+    /// After updating the flag, fires `enabled_changed_tx` so the background
+    /// task's disabled-sleep wakes up immediately rather than waiting out the
+    /// full poll interval.
     pub async fn set_enabled(&self, enabled: bool) {
         *self.state.enabled.write().await = enabled;
+        // Best-effort wake — ignore if no receivers are listening.
+        let _ = self.state.enabled_changed_tx.send(());
         info!(
             "⚙️  Background job '{}' {}",
             self.id,

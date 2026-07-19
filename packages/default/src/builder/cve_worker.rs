@@ -191,6 +191,9 @@ pub async fn run_cve_scan_loop(
 
     // Keep a reference to the enabled lock so scan_cycle can poll it mid-cycle.
     let enabled_rx = &job.state.enabled;
+    // Subscribe to enable/disable wake signals so the disabled sleep is
+    // interruptible without waiting the full poll interval.
+    let mut enabled_changed_rx = job.state.enabled_changed_tx.subscribe();
 
     loop {
         // Honour the enabled flag — sleep the full interval and skip work when disabled.
@@ -203,9 +206,15 @@ pub async fn run_cve_scan_loop(
                     + chrono::Duration::from_std(vulnix_config.poll_interval)
                         .unwrap_or(chrono::Duration::seconds(60)),
             );
-            sleep(vulnix_config.poll_interval).await;
-            // Mark the current counter value as seen so a stale signal does
-            // not trigger an immediate cycle on re-enable.
+            // Sleep until the poll interval, a run-now signal, or an
+            // enable/disable state change — whichever comes first.
+            tokio::select! {
+                _ = sleep(vulnix_config.poll_interval) => {}
+                _ = run_now_rx.changed() => {}
+                _ = enabled_changed_rx.changed() => {}
+            }
+            // Consume any run-now counter so a pending signal does not
+            // immediately re-fire on the next enabled cycle.
             let _ = run_now_rx.borrow_and_update();
             continue;
         }
@@ -389,9 +398,14 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                                 "🔍 [post-build] Scanning newly built derivation: {}",
                                 derivation.derivation_name
                             );
-                            if let Err(e) =
-                                scan_one(pool, vulnix_runner, vulnix_version.clone(), derivation)
-                                    .await
+                            if let Err(e) = scan_one(
+                                pool,
+                                vulnix_runner,
+                                vulnix_version.clone(),
+                                derivation,
+                                enabled_rx,
+                            )
+                            .await
                             {
                                 error!(
                                     "❌ [post-build] Scan failed for {}: {e}",
@@ -441,8 +455,14 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                     "🔄 [rescan] Re-scanning stale derivation: {}",
                     derivation.derivation_name
                 );
-                if let Err(e) =
-                    scan_one(pool, vulnix_runner, vulnix_version.clone(), derivation).await
+                if let Err(e) = scan_one(
+                    pool,
+                    vulnix_runner,
+                    vulnix_version.clone(),
+                    derivation,
+                    enabled_rx,
+                )
+                .await
                 {
                     error!(
                         "❌ [rescan] Scan failed for {}: {e}",
@@ -472,18 +492,45 @@ async fn scan_one<R: CveScanRunner + Sync>(
     vulnix_runner: &R,
     vulnix_version: Option<String>,
     derivation: &crate::derivations::Derivation,
+    enabled_rx: &tokio::sync::RwLock<bool>,
 ) -> Result<()> {
     set_cve_status_working(&format!("scanning {}", derivation.derivation_name)).await;
 
-    let scan_claim = create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone()).await?;
-    let scan_id = scan_claim.id();
-    if !scan_claim.was_created() {
-        info!(
-            "⏭️ Skipping duplicate CVE scan for {} — active scan {scan_id} already exists",
-            derivation.derivation_name
-        );
-        return Ok(());
-    }
+    // Hold the enabled read guard across the claim INSERT so that
+    // `set_enabled(false)` — which needs the write lock — cannot return until
+    // any claim we are in the process of creating has either been written or
+    // we have confirmed we should not proceed.
+    //
+    // Tokio's RwLock is write-preferring: once set_enabled(false) begins
+    // waiting for the write lock, no new read guard can be acquired.  This
+    // ensures that any scan_one() call begun after set_enabled(false) returns
+    // will see enabled=false and exit without creating a claim.
+    let scan_id = {
+        let enabled_guard = enabled_rx.read().await;
+        if !*enabled_guard {
+            debug!(
+                "Skipping claim for {} — job disabled",
+                derivation.derivation_name
+            );
+            return Ok(());
+        }
+
+        let scan_claim =
+            create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone()).await?;
+        let scan_id = scan_claim.id();
+        // Release the guard as soon as the claim is committed.  From here the
+        // scan is authorized and runs to completion even if disable fires later.
+        drop(enabled_guard);
+
+        if !scan_claim.was_created() {
+            info!(
+                "⏭️ Skipping duplicate CVE scan for {} — active scan {scan_id} already exists",
+                derivation.derivation_name
+            );
+            return Ok(());
+        }
+        scan_id
+    };
 
     let Some(ref path) = derivation.store_path else {
         warn!(
