@@ -6133,6 +6133,7 @@ const steps = [
             passed_count: 9,
             policy_failed_count: 0,
             eval_failed_count: 0,
+            alert_occurrence_id: "eval:999:1737235200000000",
           },
           {
             commit_id: 998,
@@ -6151,6 +6152,7 @@ const steps = [
             passed_count: 0,
             policy_failed_count: 0,
             eval_failed_count: 3,
+            alert_occurrence_id: "eval:998:1737231600000000",
           },
           {
             commit_id: 997,
@@ -6169,6 +6171,7 @@ const steps = [
             passed_count: 0,
             policy_failed_count: 0,
             eval_failed_count: 0,
+            alert_occurrence_id: "eval:997:1737228000000000",
           },
         ],
       };
