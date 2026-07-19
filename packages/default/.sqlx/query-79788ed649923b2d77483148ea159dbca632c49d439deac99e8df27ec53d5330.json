@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE cve_scans\n            SET created_at = NOW() - '2 hours'::INTERVAL\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "79788ed649923b2d77483148ea159dbca632c49d439deac99e8df27ec53d5330"
+}
