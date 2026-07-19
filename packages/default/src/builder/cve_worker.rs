@@ -20,8 +20,13 @@
 //! their first scan quickly.  The `on_build` flag in `scan_schedule_policy`
 //! controls whether the post-build phase runs at all.
 
-use crate::config::CrystalForgeConfig;
+use crate::config::{CacheConfig, CacheType, CrystalForgeConfig};
+use crate::derivations::utils::{
+    apply_cache_config_env_to_command, attic_server_url_from_cache_config,
+};
 use crate::log::{WorkerState, WorkerStatus, get_cve_status};
+use crate::models::cache_destination::CacheDestination;
+use crate::queries::cache_destinations::get_cache_destination;
 use crate::queries::cve_scans::{
     create_cve_scan, get_targets_needing_cve_rescan, get_targets_needing_cve_scan,
     mark_cve_scan_failed, mark_scan_in_progress, recover_stale_scans, save_scan_results,
@@ -37,6 +42,68 @@ use tokio::fs;
 use tokio::process::Command as TokioCommand;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
+
+#[derive(Debug, Clone)]
+struct MaterializationSource {
+    label: String,
+    from_url: String,
+    cache_config: Option<CacheConfig>,
+    trusted_public_key: Option<String>,
+}
+
+fn cache_destination_to_config(dest: &CacheDestination) -> CacheConfig {
+    let cache_type = match dest.cache_type.as_str() {
+        "S3" => CacheType::S3,
+        "Attic" => CacheType::Attic,
+        "Http" => CacheType::Http,
+        "Nix" => CacheType::Nix,
+        _ => CacheType::Nix,
+    };
+
+    CacheConfig {
+        cache_type,
+        push_to: dest.push_to.clone(),
+        push_after_build: true,
+        signing_key: dest.signing_key_path.clone(),
+        compression: dest.compression.clone(),
+        push_filter: None,
+        parallel_uploads: dest.parallel_uploads.unwrap_or(1) as u32,
+        s3_region: dest.s3_region.clone(),
+        s3_profile: dest.s3_profile.clone(),
+        s3_access_key_id: dest.s3_access_key_id.clone(),
+        s3_secret_access_key: dest.s3_secret_access_key.clone(),
+        s3_session_token: dest.s3_session_token.clone(),
+        s3_endpoint_url: dest.s3_endpoint_url.clone(),
+        attic_token: dest.attic_token.clone(),
+        attic_cache_name: dest.attic_cache_name.clone(),
+        attic_ignore_upstream_cache_filter: dest.attic_ignore_upstream_cache_filter.unwrap_or(true),
+        attic_jobs: dest.attic_jobs.unwrap_or(5) as u32,
+        max_retries: dest.max_retries.unwrap_or(3) as u32,
+        retry_delay_seconds: dest.retry_delay_seconds.unwrap_or(5) as u64,
+        poll_interval: std::time::Duration::from_secs(30),
+        push_timeout_seconds: dest.push_timeout_seconds.unwrap_or(3600) as u64,
+        force_repush: dest.force_repush.unwrap_or(false),
+        require_sigs: dest.require_sigs.unwrap_or(true),
+    }
+}
+
+fn materialization_from_url(cache: &CacheConfig) -> Option<String> {
+    match cache.cache_type {
+        CacheType::Attic => {
+            let server_url = attic_server_url_from_cache_config(cache)?;
+            let cache_name = cache.attic_cache_name.as_deref()?.trim();
+            if cache_name.is_empty() {
+                return None;
+            }
+            Some(format!(
+                "{}/{}",
+                server_url.trim_end_matches('/'),
+                cache_name
+            ))
+        }
+        CacheType::S3 | CacheType::Http | CacheType::Nix => cache.push_to.clone(),
+    }
+}
 
 /// Run the CVE scan background loop.
 ///
@@ -183,7 +250,8 @@ async fn scan_cycle(
     if policy.on_build {
         let mut attempted: HashSet<i32> = HashSet::new();
         loop {
-            match get_targets_needing_cve_scan(pool, Some(BATCH_SIZE)).await {
+            let excluded_ids: Vec<i32> = attempted.iter().copied().collect();
+            match get_targets_needing_cve_scan(pool, Some(BATCH_SIZE), &excluded_ids).await {
                 Ok(targets) if !targets.is_empty() => {
                     // Filter out derivations already attempted this cycle.
                     let batch: Vec<_> = targets
@@ -390,26 +458,15 @@ async fn materialize_store_path_from_cache(
     derivation: &crate::derivations::Derivation,
     store_path: &str,
 ) -> Result<bool> {
-    // Find cache URLs that previously received a completed push for this derivation.
-    //
-    // The LEFT JOIN matches on both `cd.push_to` and `cd.name` because
-    // `cpj.cache_destination` may contain either a URL (legacy/server.toml)
-    // or a destination name (DB-configured cache).
-    //
-    // For DB-configured caches we also load `cache_type`, `attic_cache_name`,
-    // `attic_token`, `attic_public_key`, S3 credentials, etc. — but currently
-    // only the URL is used for materialization (`nix copy --from <url>`).
-    // Type-specific materialization (e.g. Attic token auth) is a future
-    // enhancement tracked separately.
-    //
-    // When no `cache_destinations` row matches, we fall back to the raw URL
-    // stored in `cpj.cache_destination` (server.toml case).
+    // Resolve completed cache pushes for this derivation. `cache_destination`
+    // may hold either a DB destination name or a legacy/server.toml URL, so we
+    // match on both `cd.name` and `cd.push_to`.
     let cache_rows = sqlx::query(
         r#"
         SELECT DISTINCT
-            COALESCE(cd.push_to, cpj.cache_destination) AS cache_url,
-            cd.cache_type,
-            cd.attic_cache_name
+            cpj.cache_destination,
+            cd.id AS cache_destination_id,
+            cd.name AS cache_destination_name
         FROM cache_push_jobs cpj
         LEFT JOIN cache_destinations cd
             ON (cd.push_to = cpj.cache_destination OR cd.name = cpj.cache_destination)
@@ -423,16 +480,51 @@ async fn materialize_store_path_from_cache(
     .await
     .context("Failed to query cache destinations for materialization")?;
 
-    // Extract URLs; we ignore cache_type for now (nix copy --from works for
-    // HTTP, Nix, S3-with-env-creds, and Attic server URLs).  For authenticated
-    // S3 or Attic with token-based auth, the caller should ensure the
-    // environment has the necessary credentials configured.
-    let cache_urls: Vec<String> = cache_rows
-        .iter()
-        .filter_map(|row| row.try_get::<String, _>("cache_url").ok())
-        .collect();
+    let mut sources = Vec::new();
+    for row in &cache_rows {
+        let raw_destination = row
+            .try_get::<String, _>("cache_destination")
+            .context("cache_destination row missing cache_destination")?;
 
-    if cache_urls.is_empty() {
+        if let Ok(cache_destination_id) = row.try_get::<i32, _>("cache_destination_id") {
+            let Some(destination) = get_cache_destination(pool, cache_destination_id)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to load cache destination {} for materialization",
+                        cache_destination_id
+                    )
+                })?
+            else {
+                continue;
+            };
+
+            let cache_config = cache_destination_to_config(&destination);
+            let Some(from_url) = materialization_from_url(&cache_config) else {
+                warn!(
+                    "Skipping cache destination {} for {}: missing usable materialization URL",
+                    destination.name, store_path
+                );
+                continue;
+            };
+
+            sources.push(MaterializationSource {
+                label: destination.name.clone(),
+                from_url,
+                cache_config: Some(cache_config),
+                trusted_public_key: destination.attic_public_key.clone(),
+            });
+        } else if !raw_destination.trim().is_empty() {
+            sources.push(MaterializationSource {
+                label: raw_destination.clone(),
+                from_url: raw_destination,
+                cache_config: None,
+                trusted_public_key: None,
+            });
+        }
+    }
+
+    if sources.is_empty() {
         debug!(
             "No completed cache push found for derivation {} — cannot materialize",
             derivation.id
@@ -444,16 +536,34 @@ async fn materialize_store_path_from_cache(
     // scan loop when the cache is unreachable or very slow.
     const NIX_COPY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-    for url in &cache_urls {
-        debug!("Trying nix copy --from {} {}", url, store_path);
+    for source in &sources {
+        debug!(
+            "Trying nix copy --from {} {} (source: {})",
+            source.from_url, store_path, source.label
+        );
 
         // Spawn with kill_on_drop(true) so the child is guaranteed to be
         // terminated if the child handle is dropped.
-        let mut child = TokioCommand::new("nix")
-            .args(["copy", "--from", url, store_path])
+        let mut command = TokioCommand::new("nix");
+        command.arg("copy").arg("--from").arg(&source.from_url);
+
+        if let Some(cache_config) = &source.cache_config {
+            if matches!(cache_config.cache_type, CacheType::Attic) {
+                command.args(["--option", "http2", "false"]);
+            }
+
+            if let Some(public_key) = source.trusted_public_key.as_deref() {
+                command.args(["--option", "trusted-public-keys", public_key]);
+            }
+
+            apply_cache_config_env_to_command(&mut command, cache_config);
+        }
+
+        let mut child = command
+            .arg(store_path)
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("Failed to spawn nix copy from {}", url))?;
+            .with_context(|| format!("Failed to spawn nix copy from {}", source.from_url))?;
 
         // Use `child.wait()` (borrows `&mut self`) instead of
         // `wait_with_output()` (consumes `self`) so we can still kill the
@@ -463,7 +573,7 @@ async fn materialize_store_path_from_cache(
             Err(_elapsed) => {
                 warn!(
                     "nix copy from {} timed out after {}s for {} — killing process",
-                    url,
+                    source.from_url,
                     NIX_COPY_TIMEOUT.as_secs(),
                     store_path
                 );
@@ -481,21 +591,21 @@ async fn materialize_store_path_from_cache(
                 Ok(false) => {
                     warn!(
                         "nix copy from {} reported success but {} is still absent",
-                        url, store_path
+                        source.from_url, store_path
                     );
                     // Continue trying other caches.
                 }
                 Err(e) => {
                     warn!(
                         "nix copy from {} succeeded but path check failed: {}",
-                        url, e
+                        source.from_url, e
                     );
                 }
             }
         } else {
             warn!(
                 "nix copy from {} failed for {} (exit code: {:?})",
-                url,
+                source.from_url,
                 store_path,
                 wait_result.code()
             );
@@ -575,7 +685,8 @@ mod tests {
             .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
             .expect("lazy pool should construct without connecting");
 
-        let result = crate::queries::cve_scans::get_targets_needing_cve_scan(&pool, Some(5)).await;
+        let result =
+            crate::queries::cve_scans::get_targets_needing_cve_scan(&pool, Some(5), &[]).await;
         if let Err(e) = result {
             let msg = format!("{e:#}");
             assert!(

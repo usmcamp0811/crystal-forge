@@ -44,6 +44,7 @@ fn truncate_for_varchar(value: &str, max_chars: usize) -> String {
 pub async fn get_targets_needing_cve_scan(
     pool: &PgPool,
     limit: Option<i64>,
+    excluded_derivation_ids: &[i32],
 ) -> Result<Vec<Derivation>> {
     let limit = limit.unwrap_or(10);
     let targets = sqlx::query_as!(
@@ -62,6 +63,7 @@ pub async fn get_targets_needing_cve_scan(
         WHERE ds.name IN ('build-complete', 'complete')
             AND d.derivation_type = 'nixos'
             AND d.store_path IS NOT NULL
+            AND NOT (d.id = ANY($2))
             -- Exclude derivations that already have a completed scan
             AND NOT EXISTS (
                 SELECT 1 FROM cve_scans cs
@@ -108,7 +110,8 @@ pub async fn get_targets_needing_cve_scan(
         ORDER BY d.completed_at ASC NULLS LAST
         LIMIT $1
         "#,
-        limit
+        limit,
+        excluded_derivation_ids
     )
     .fetch_all(pool)
     .await?;
@@ -158,14 +161,19 @@ pub async fn create_cve_scan(
     .await?;
 
     if result.rows_affected() == 0 {
-        // Another caller already created an active scan for this derivation.
-        // Return its ID instead.
+        // Another caller already claimed this derivation. Prefer an active scan
+        // if it still exists; if the winner completed between the conflicting
+        // INSERT and this follow-up read, fall back to the newest scan row for
+        // the derivation so the loser does not surface a spurious internal
+        // error.
         let existing = sqlx::query_scalar!(
             r#"
             SELECT id FROM cve_scans
             WHERE derivation_id = $1
-              AND status IN ('pending', 'in_progress')
-            ORDER BY created_at DESC
+            ORDER BY
+              CASE WHEN status IN ('pending', 'in_progress') THEN 0 ELSE 1 END,
+              created_at DESC,
+              id DESC
             LIMIT 1
             "#,
             derivation_id
@@ -1111,7 +1119,7 @@ mod tests {
     async fn get_targets_needing_cve_scan_selects_unscanned_derivation(pool: PgPool) {
         setup_test_derivation(&pool).await;
 
-        let targets = get_targets_needing_cve_scan(&pool, Some(10))
+        let targets = get_targets_needing_cve_scan(&pool, Some(10), &[])
             .await
             .expect("should fetch targets");
 
@@ -1139,7 +1147,7 @@ mod tests {
             .await
             .expect("scan should be marked in_progress");
 
-        let targets = get_targets_needing_cve_scan(&pool, Some(10))
+        let targets = get_targets_needing_cve_scan(&pool, Some(10), &[])
             .await
             .expect("should fetch targets");
 
@@ -1179,7 +1187,7 @@ mod tests {
         .expect("scan should be aged");
 
         // Derivation should be excluded while scan is in_progress.
-        let targets_before = get_targets_needing_cve_scan(&pool, Some(10))
+        let targets_before = get_targets_needing_cve_scan(&pool, Some(10), &[])
             .await
             .expect("should fetch targets");
         assert!(
@@ -1205,7 +1213,7 @@ mod tests {
         );
 
         // Derivation should now be eligible again.
-        let targets_after = get_targets_needing_cve_scan(&pool, Some(10))
+        let targets_after = get_targets_needing_cve_scan(&pool, Some(10), &[])
             .await
             .expect("should fetch targets");
         assert!(
