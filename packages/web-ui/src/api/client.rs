@@ -1186,7 +1186,10 @@ pub async fn fetch_flake_timelines_for_ids(
 pub async fn fetch_flake_timeline_for_tray(
     flake_id: i32,
 ) -> Result<Vec<FlakeTimeline>, ApiClientError> {
-    let url = format!("{}/flakes/timelines?ids={}&limit=200", base_url(), flake_id);
+    // Keep the initial tray payload bounded. Fifty commits is enough for the
+    // immediately visible history while avoiding path/config enrichment for
+    // 200 commits on every tray open.
+    let url = format!("{}/flakes/timelines?ids={}&limit=50", base_url(), flake_id);
     fetch_json(&url).await
 }
 

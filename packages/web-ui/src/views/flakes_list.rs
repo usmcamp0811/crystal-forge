@@ -3704,19 +3704,6 @@ pub fn FlakesListViewNew() -> Element {
                                             action_notice.set(Some("Sync requested".to_string()));
                                             let next = *reload_nonce.read() + 1;
                                             reload_nonce.set(next);
-
-                                            // Sync is asynchronous server-side; poll timeline refresh shortly after request.
-                                            #[cfg(target_arch = "wasm32")]
-                                            {
-                                                use gloo_timers::future::TimeoutFuture;
-                                                TimeoutFuture::new(1200).await;
-                                                let next = *reload_nonce.read() + 1;
-                                                reload_nonce.set(next);
-
-                                                TimeoutFuture::new(2200).await;
-                                                let next = *reload_nonce.read() + 1;
-                                                reload_nonce.set(next);
-                                            }
                                         }
                                         Err(err) => {
                                             if let Some((id, detail)) =

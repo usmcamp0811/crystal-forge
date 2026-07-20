@@ -192,30 +192,24 @@ pub async fn get_flake_timelines(
                 return (StatusCode::OK, Json(timelines)).into_response();
             }
 
+            // Fetch configuration/path details for every returned commit in one
+            // bounded set-based query. The previous implementation issued one
+            // serialized query per flake after the timeline query completed.
+            let commit_ids: Vec<i32> = timelines
+                .iter()
+                .flat_map(|timeline| timeline.commits.iter().map(|commit| commit.id))
+                .collect();
+            let commit_path_lookup = fetch_commit_config_paths(&pool, &commit_ids)
+                .await
+                .unwrap_or_else(|err| {
+                    error!("Failed to fetch commit config paths: {err:#}");
+                    HashMap::new()
+                });
+
             // Database-only enrichment: config paths, empty metadata defaults.
             // No Git operations — message/author are cached in the commits table
             // by the sync path. Very old pre-cache commits use fallback text.
             for timeline in &mut timelines {
-                let commit_hashes: Vec<String> = timeline
-                    .commits
-                    .iter()
-                    .map(|commit| commit.hash.clone())
-                    .collect();
-
-                let commit_path_lookup = if commit_hashes.is_empty() {
-                    HashMap::new()
-                } else {
-                    fetch_commit_config_paths(&pool, timeline.flake_id, &commit_hashes)
-                        .await
-                        .unwrap_or_else(|err| {
-                            error!(
-                                "Failed to fetch commit config paths for {}: {:#}",
-                                timeline.flake_name, err
-                            );
-                            HashMap::new()
-                        })
-                };
-
                 for commit in &mut timeline.commits {
                     // Use cached message/author; fall back to defaults when empty.
                     // The sync path populates these fields (migration 0085).
@@ -235,7 +229,7 @@ pub async fn get_flake_timelines(
                     } else {
                         let marked = mark_cf_system_matches(
                             &commit.systems,
-                            commit_path_lookup.get(&commit.hash),
+                            commit_path_lookup.get(&commit.id),
                         );
                         commit.system_count = marked.len() as i64;
                         commit.systems = marked;
@@ -243,7 +237,7 @@ pub async fn get_flake_timelines(
 
                     commit.system_paths = build_commit_system_paths(
                         &commit.systems,
-                        commit_path_lookup.get(&commit.hash),
+                        commit_path_lookup.get(&commit.id),
                     );
                 }
             }
@@ -317,76 +311,106 @@ struct CommitConfigPathRow {
 
 async fn fetch_commit_config_paths(
     pool: &PgPool,
-    flake_id: i32,
-    commit_hashes: &[String],
-) -> anyhow::Result<HashMap<String, HashMap<String, CommitConfigPathRow>>> {
-    if commit_hashes.is_empty() {
+    commit_ids: &[i32],
+) -> anyhow::Result<HashMap<i32, HashMap<String, CommitConfigPathRow>>> {
+    if commit_ids.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let rows = sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>, Option<String>, Option<String>)>(
+    let rows = sqlx::query_as::<_, (i32, String, i64, Option<String>, Option<String>, Option<String>, Option<String>)>(
         r#"
+        WITH selected_derivations AS (
+            SELECT
+                c.id AS commit_id,
+                c.flake_id,
+                d.id AS derivation_id,
+                d.derivation_name,
+                d.expected_store_path,
+                d.store_path
+            FROM commits c
+            JOIN derivations d
+              ON d.commit_id = c.id
+             AND d.derivation_type = 'nixos'
+            WHERE c.id = ANY($1)
+        ),
+        relevant_systems AS (
+            SELECT
+                s.flake_id,
+                COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) AS config_name,
+                s.hostname
+            FROM systems s
+            WHERE s.is_active = TRUE
+              AND s.flake_id IN (SELECT DISTINCT flake_id FROM selected_derivations)
+        ),
+        mapped_hosts AS (
+            SELECT flake_id, config_name, COUNT(*)::bigint AS mapped_host_count
+            FROM relevant_systems
+            GROUP BY flake_id, config_name
+        ),
+        latest_states AS (
+            SELECT DISTINCT ON (ss.hostname)
+                ss.hostname,
+                ss.store_path,
+                ss.timestamp,
+                ss.id
+            FROM system_states ss
+            WHERE ss.hostname IN (SELECT hostname FROM relevant_systems)
+            ORDER BY ss.hostname, ss.timestamp DESC, ss.id DESC
+        ),
+        selected_states AS (
+            SELECT DISTINCT ON (rs.flake_id, rs.config_name)
+                rs.flake_id,
+                rs.config_name,
+                rs.hostname,
+                ls.store_path
+            FROM relevant_systems rs
+            LEFT JOIN latest_states ls ON ls.hostname = rs.hostname
+            ORDER BY
+                rs.flake_id,
+                rs.config_name,
+                ls.timestamp DESC NULLS LAST,
+                ls.id DESC NULLS LAST,
+                rs.hostname ASC
+        ),
+        completed_cache_pushes AS (
+            SELECT DISTINCT cpj.derivation_id
+            FROM cache_push_jobs cpj
+            WHERE cpj.status = 'completed'
+              AND cpj.derivation_id IN (
+                  SELECT derivation_id FROM selected_derivations
+              )
+        )
         SELECT
-            c.git_commit_hash,
-            d.derivation_name,
-            COALESCE(mapped_hosts.mapped_host_count, 0)::bigint,
-            selected_state.hostname,
-            d.expected_store_path,
-            selected_state.store_path,
+            sd.commit_id,
+            sd.derivation_name,
+            COALESCE(mh.mapped_host_count, 0)::bigint,
+            ss.hostname,
+            sd.expected_store_path,
+            ss.store_path,
             CASE
-                WHEN d.store_path IS NULL THEN 'Build output is unavailable for this configuration.'
-                WHEN NOT EXISTS (
-                    SELECT 1
-                    FROM cache_push_jobs cpj
-                    WHERE cpj.derivation_id = d.id
-                      AND cpj.status = 'completed'
-                ) THEN 'CVE scan requires a completed cache push for this configuration.'
+                WHEN sd.store_path IS NULL THEN 'Build output is unavailable for this configuration.'
+                WHEN ccp.derivation_id IS NULL THEN 'CVE scan requires a completed cache push for this configuration.'
                 ELSE NULL
             END AS cve_scan_blocked_reason
-        FROM commits c
-        JOIN derivations d
-            ON d.commit_id = c.id
-           AND d.derivation_type = 'nixos'
-        LEFT JOIN LATERAL (
-            SELECT COUNT(*)::bigint AS mapped_host_count
-            FROM systems s
-            WHERE s.flake_id = c.flake_id
-              AND s.is_active = TRUE
-              AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = d.derivation_name
-        ) mapped_hosts ON TRUE
-        LEFT JOIN LATERAL (
-            SELECT
-                s.hostname,
-                latest_ss.store_path,
-                latest_ss.timestamp,
-                latest_ss.id
-            FROM systems s
-            LEFT JOIN LATERAL (
-                SELECT ss.store_path, ss.timestamp, ss.id
-                FROM system_states ss
-                WHERE ss.hostname = s.hostname
-                ORDER BY ss.timestamp DESC, ss.id DESC
-                LIMIT 1
-            ) latest_ss ON TRUE
-            WHERE s.flake_id = c.flake_id
-              AND s.is_active = TRUE
-              AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = d.derivation_name
-            ORDER BY latest_ss.timestamp DESC NULLS LAST, latest_ss.id DESC NULLS LAST, s.hostname ASC
-            LIMIT 1
-        ) selected_state ON TRUE
-        WHERE c.flake_id = $1
-          AND c.git_commit_hash = ANY($2)
-        ORDER BY c.git_commit_hash, d.derivation_name, d.id DESC
+        FROM selected_derivations sd
+        LEFT JOIN mapped_hosts mh
+          ON mh.flake_id = sd.flake_id
+         AND mh.config_name = sd.derivation_name
+        LEFT JOIN selected_states ss
+          ON ss.flake_id = sd.flake_id
+         AND ss.config_name = sd.derivation_name
+        LEFT JOIN completed_cache_pushes ccp
+          ON ccp.derivation_id = sd.derivation_id
+        ORDER BY sd.commit_id, sd.derivation_name, sd.derivation_id DESC
         "#,
     )
-    .bind(flake_id)
-    .bind(commit_hashes)
+    .bind(commit_ids)
     .fetch_all(pool)
     .await?;
 
-    let mut out: HashMap<String, HashMap<String, CommitConfigPathRow>> = HashMap::new();
+    let mut out: HashMap<i32, HashMap<String, CommitConfigPathRow>> = HashMap::new();
     for (
-        hash,
+        commit_id,
         config_name,
         mapped_host_count,
         cf_hostname,
@@ -395,7 +419,7 @@ async fn fetch_commit_config_paths(
         cve_scan_blocked_reason,
     ) in rows
     {
-        out.entry(hash)
+        out.entry(commit_id)
             .or_default()
             .entry(config_name.clone())
             .or_insert(CommitConfigPathRow {

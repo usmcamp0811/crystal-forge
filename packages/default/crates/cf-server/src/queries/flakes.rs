@@ -187,13 +187,84 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
 
     let rows = sqlx::query_as::<_, FlakeRegistryRow>(
         r#"
+        WITH active_flakes AS (
+            SELECT *
+            FROM flakes
+            WHERE deleted_at IS NULL
+        ),
+        system_agg AS (
+            SELECT
+                s.flake_id,
+                COUNT(DISTINCT s.id)::bigint AS system_count,
+                COALESCE(
+                    array_agg(DISTINCT e.name ORDER BY e.name)
+                        FILTER (WHERE s.is_active = TRUE AND e.name IS NOT NULL),
+                    ARRAY[]::text[]
+                ) AS environments
+            FROM systems s
+            LEFT JOIN environments e ON e.id = s.environment_id
+            WHERE s.flake_id IN (SELECT id FROM active_flakes)
+            GROUP BY s.flake_id
+        ),
+        snapshot_stats AS (
+            SELECT
+                fbcs.flake_id,
+                MAX(fbcs.commit_id) FILTER (WHERE fbcs.position = 0) AS head_commit_id,
+                COUNT(*)::bigint AS total_count
+            FROM flake_branch_commit_snapshot fbcs
+            JOIN active_flakes f ON f.id = fbcs.flake_id
+            WHERE f.snapshot_ready_at IS NOT NULL
+            GROUP BY fbcs.flake_id
+        ),
+        fallback_latest AS (
+            SELECT DISTINCT ON (c.flake_id)
+                c.flake_id,
+                c.id AS commit_id,
+                COUNT(*) OVER (PARTITION BY c.flake_id)::bigint AS total_count
+            FROM commits c
+            JOIN active_flakes f ON f.id = c.flake_id
+            WHERE f.snapshot_ready_at IS NULL
+            ORDER BY c.flake_id, c.commit_timestamp DESC, c.id DESC
+        ),
+        effective_commits AS (
+            SELECT
+                f.id AS flake_id,
+                CASE
+                    WHEN f.snapshot_ready_at IS NOT NULL THEN ss.head_commit_id
+                    ELSE fl.commit_id
+                END AS commit_id,
+                CASE
+                    WHEN f.snapshot_ready_at IS NOT NULL THEN COALESCE(ss.total_count, 0::bigint)
+                    ELSE COALESCE(fl.total_count, 0::bigint)
+                END AS total_count
+            FROM active_flakes f
+            LEFT JOIN snapshot_stats ss ON ss.flake_id = f.id
+            LEFT JOIN fallback_latest fl ON fl.flake_id = f.id
+        ),
+        latest_build AS (
+            SELECT
+                d.commit_id,
+                CASE
+                    WHEN COUNT(*) FILTER (WHERE bj.status = 'building') > 0 THEN 'building'
+                    WHEN COUNT(*) FILTER (WHERE bj.status = 'queued') > 0 THEN 'queued'
+                    WHEN COUNT(*) FILTER (WHERE bj.status = 'failed') > 0 THEN 'failed'
+                    WHEN COUNT(*) FILTER (WHERE bj.status = 'success') > 0 THEN 'complete'
+                    ELSE NULL
+                END AS build_status
+            FROM build_jobs bj
+            JOIN derivations d ON d.id = bj.derivation_id
+            WHERE d.commit_id IN (
+                SELECT commit_id FROM effective_commits WHERE commit_id IS NOT NULL
+            )
+            GROUP BY d.commit_id
+        )
         SELECT
             f.id,
             f.name,
             f.repo_url,
             f.branch,
             f.build_scope,
-            COUNT(DISTINCT s.id)::bigint AS system_count,
+            COALESCE(sa.system_count, 0::bigint) AS system_count,
             CASE
                 WHEN f.sync_status = 'syncing'
                  AND f.last_sync_at IS NOT NULL
@@ -209,109 +280,19 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
                 THEN COALESCE(f.last_sync_error, 'Sync appears stale — previous sync attempt did not finish')
                 ELSE f.last_sync_error
             END AS last_sync_error,
-            -- Latest visible commit hash from snapshot (when ready) or fallback
-            COALESCE(
-                snap_latest.git_commit_hash,
-                fallback_latest.git_commit_hash
-            ) AS latest_commit_hash,
-            COALESCE(
-                snap_latest.message,
-                fallback_latest.message
-            ) AS latest_commit_message,
-            COALESCE(
-                snap_latest.author,
-                fallback_latest.author
-            ) AS latest_commit_author,
-            COALESCE(
-                snap_latest.commit_timestamp,
-                fallback_latest.commit_timestamp
-            ) AS latest_commit_timestamp,
-            -- Build status for whichever latest commit is active
-            latest_build.build_status,
-            COALESCE(
-                snap_latest.evaluation_status,
-                fallback_latest.evaluation_status
-            ) AS evaluation_status,
-            -- Sorted, deduplicated environment names from active systems
-            COALESCE(env_agg.environments, ARRAY[]::text[]) AS environments,
-            -- Total visible commits (snapshot count when ready, else commit count)
-            COALESCE(snap_count.total_count, all_count.total_count, 0::bigint) AS total_commit_count
-        FROM flakes f
-        LEFT JOIN systems s ON s.flake_id = f.id
-
-        -- Latest commit via branch snapshot (when ready)
-        LEFT JOIN LATERAL (
-            SELECT c.id, c.git_commit_hash, c.message, c.author,
-                   c.commit_timestamp, c.evaluation_status
-            FROM flake_branch_commit_snapshot fbcs
-            JOIN commits c ON c.id = fbcs.commit_id
-            WHERE fbcs.flake_id = f.id
-              AND f.snapshot_ready_at IS NOT NULL
-            ORDER BY fbcs.position ASC
-            LIMIT 1
-        ) snap_latest ON TRUE
-
-        -- Latest commit via timestamp fallback (when snapshot not ready)
-        LEFT JOIN LATERAL (
-            SELECT c.id, c.git_commit_hash, c.message, c.author,
-                   c.commit_timestamp, c.evaluation_status
-            FROM commits c
-            WHERE c.flake_id = f.id
-            ORDER BY c.commit_timestamp DESC, c.id DESC
-            LIMIT 1
-        ) fallback_latest ON TRUE
-
-        -- Build status for the effective latest commit
-        LEFT JOIN LATERAL (
-            SELECT
-                CASE
-                    WHEN COUNT(*) FILTER (WHERE bj.status = 'building') > 0 THEN 'building'
-                    WHEN COUNT(*) FILTER (WHERE bj.status = 'queued') > 0 THEN 'queued'
-                    WHEN COUNT(*) FILTER (WHERE bj.status = 'failed') > 0 THEN 'failed'
-                    WHEN COUNT(*) FILTER (WHERE bj.status = 'success') > 0 THEN 'complete'
-                    ELSE NULL
-                END AS build_status
-            FROM build_jobs bj
-            JOIN derivations d ON d.id = bj.derivation_id
-            WHERE d.commit_id = COALESCE(snap_latest.id, fallback_latest.id)
-        ) latest_build ON TRUE
-
-        -- Environment names from active systems (no 500-row cap)
-        LEFT JOIN LATERAL (
-            SELECT array_agg(DISTINCT e.name ORDER BY e.name) AS environments
-            FROM systems s2
-            JOIN environments e ON e.id = s2.environment_id
-            WHERE s2.flake_id = f.id
-              AND s2.is_active = TRUE
-              AND e.name IS NOT NULL
-        ) env_agg ON TRUE
-
-        -- Snapshot commit count (when ready)
-        LEFT JOIN LATERAL (
-            SELECT COUNT(*)::bigint AS total_count
-            FROM flake_branch_commit_snapshot fbcs2
-            WHERE fbcs2.flake_id = f.id
-        ) snap_count ON TRUE
-
-        -- All commits count (fallback)
-        LEFT JOIN LATERAL (
-            SELECT COUNT(*)::bigint AS total_count
-            FROM commits c2
-            WHERE c2.flake_id = f.id
-        ) all_count ON TRUE
-
-        WHERE f.deleted_at IS NULL
-        GROUP BY f.id, f.name, f.repo_url, f.branch, f.build_scope,
-                 f.sync_status, f.last_sync_at, f.last_sync_error,
-                 snap_latest.git_commit_hash, snap_latest.message,
-                 snap_latest.author, snap_latest.commit_timestamp,
-                 snap_latest.evaluation_status,
-                 fallback_latest.git_commit_hash, fallback_latest.message,
-                 fallback_latest.author, fallback_latest.commit_timestamp,
-                 fallback_latest.evaluation_status,
-                 latest_build.build_status,
-                 env_agg.environments,
-                 snap_count.total_count, all_count.total_count
+            c.git_commit_hash AS latest_commit_hash,
+            c.message AS latest_commit_message,
+            c.author AS latest_commit_author,
+            c.commit_timestamp AS latest_commit_timestamp,
+            lb.build_status,
+            c.evaluation_status,
+            COALESCE(sa.environments, ARRAY[]::text[]) AS environments,
+            ec.total_count AS total_commit_count
+        FROM active_flakes f
+        JOIN effective_commits ec ON ec.flake_id = f.id
+        LEFT JOIN commits c ON c.id = ec.commit_id
+        LEFT JOIN latest_build lb ON lb.commit_id = ec.commit_id
+        LEFT JOIN system_agg sa ON sa.flake_id = f.id
         ORDER BY lower(f.name) ASC
         "#,
     )
@@ -635,217 +616,224 @@ pub async fn fetch_dashboard_flake_timelines(
 ///
 /// Returns up to `max_commits_per_flake` most recent commits for each flake.
 ///
-/// **Database-only read path** (TASK-397): Uses the branch-commit snapshot for
-/// commit ordering when available (snapshot_ready_at IS NOT NULL), falling back to
-/// deterministic timestamp ordering for flakes that have never been synchronized
-/// since migration 0178. No Git/network operations are performed.
+/// **Set-based, database-only, single round trip** (TASK-397): uses a CTE with
+/// `ROW_NUMBER() OVER (PARTITION BY flake_id ...)` to apply the per-flake limit
+/// across all requested flakes in one query, eliminating the previous 1+N loop.
 ///
-/// Commit visibility and order are derived from:
-///   - `flake_branch_commit_snapshot` when the flake has been synchronized since
-///     migration 0178 (snapshot mode), removing force-pushed commits from view
-///     while keeping them in the commits audit table.
-///   - `commits.commit_timestamp DESC, id DESC` when no snapshot exists (fallback
-///     mode), preserving the pre-migration ordering behavior.
+/// Ordering uses the branch-commit snapshot (position) when `snapshot_ready_at`
+/// IS NOT NULL, falling back to `(commit_timestamp DESC, id DESC)` otherwise.
 pub async fn fetch_flake_timelines(
     pool: &PgPool,
     max_commits_per_flake: i64,
     flake_ids: Option<&[i32]>,
 ) -> Result<Vec<FlakeTimeline>> {
-    // Fetch flakes with their snapshot readiness
     let flake_filter: Option<Vec<i32>> = flake_ids.map(|ids| ids.to_vec());
-    let flakes = sqlx::query_as::<_, (i32, String, String, Option<chrono::DateTime<chrono::Utc>>)>(
-        "SELECT id, name, repo_url, snapshot_ready_at \
-         FROM flakes WHERE deleted_at IS NULL \
-         AND ($1::int[] IS NULL OR id = ANY($1)) \
-         ORDER BY name ASC",
+
+    #[derive(sqlx::FromRow)]
+    struct FlakeCommitRow {
+        flake_id: i32,
+        flake_name: String,
+        repo_url: String,
+        id: i32,
+        git_commit_hash: String,
+        commit_timestamp: chrono::DateTime<chrono::Utc>,
+        message: Option<String>,
+        author: Option<String>,
+        system_count: i64,
+        systems: Vec<String>,
+        commits_behind: i64,
+        build_status: Option<String>,
+        evaluation_status: Option<String>,
+        evaluation_error_message: Option<String>,
+        total_systems: Option<i32>,
+        systems_passed_policy: Option<i32>,
+        systems_failed_policy_strict: Option<i32>,
+        systems_failed_policy_non_strict: Option<i32>,
+        has_nix_eval_error: Option<bool>,
+        has_policy_failures: Option<bool>,
+        all_systems_passed: Option<bool>,
+    }
+
+    // Single set-based query for all flakes.
+    //
+    // Structure:
+    //  1. ranked CTE: assigns per-flake sort position using a window function,
+    //     respecting snapshot ordering when available and timestamp ordering as
+    //     fallback. Snapshot flakes exclude commits not in the snapshot via the
+    //     LEFT JOIN filter.
+    //  2. build_agg CTE: pre-aggregates build-job status by commit_id across
+    //     all selected commits in one pass — eliminates the correlated
+    //     build_jobs subquery that previously fired per-commit-row.
+    //  3. Outer SELECT: joins ranked + build_agg + cache tables, applies the
+    //     per-flake LIMIT via WHERE rn <= $2.
+    let rows = sqlx::query_as::<_, FlakeCommitRow>(
+        r#"
+        WITH ranked AS (
+            SELECT
+                f.id          AS flake_id,
+                f.name        AS flake_name,
+                f.repo_url    AS repo_url,
+                c.id          AS commit_id,
+                CASE
+                    WHEN f.snapshot_ready_at IS NOT NULL THEN fbcs.position::bigint
+                    ELSE ROW_NUMBER() OVER (
+                        PARTITION BY c.flake_id
+                        ORDER BY c.commit_timestamp DESC, c.id DESC
+                    ) - 1
+                END AS commits_behind,
+                ROW_NUMBER() OVER (
+                    PARTITION BY c.flake_id
+                    ORDER BY
+                        CASE WHEN f.snapshot_ready_at IS NOT NULL THEN 0 ELSE 1 END,
+                        CASE WHEN f.snapshot_ready_at IS NOT NULL
+                             THEN fbcs.position ELSE 0 END ASC,
+                        c.commit_timestamp DESC,
+                        c.id DESC
+                ) AS rn
+            FROM flakes f
+            JOIN commits c ON c.flake_id = f.id
+            LEFT JOIN flake_branch_commit_snapshot fbcs
+                ON fbcs.commit_id = c.id AND fbcs.flake_id = f.id
+            WHERE f.deleted_at IS NULL
+              AND ($1::int[] IS NULL OR f.id = ANY($1))
+              AND (f.snapshot_ready_at IS NULL OR fbcs.commit_id IS NOT NULL)
+        ),
+        build_agg AS (
+            SELECT
+                d.commit_id,
+                CASE
+                    WHEN COUNT(*) FILTER (WHERE bj.status = 'building') > 0 THEN 'building'
+                    WHEN COUNT(*) FILTER (WHERE bj.status = 'queued')   > 0 THEN 'queued'
+                    WHEN COUNT(*) FILTER (WHERE bj.status = 'failed')   > 0 THEN 'failed'
+                    WHEN COUNT(*) FILTER (WHERE bj.status = 'success')  > 0 THEN 'complete'
+                    ELSE NULL
+                END AS build_status
+            FROM build_jobs bj
+            JOIN derivations d ON d.id = bj.derivation_id
+            WHERE d.commit_id IN (SELECT commit_id FROM ranked WHERE rn <= $2)
+            GROUP BY d.commit_id
+        )
+        SELECT
+            r.flake_id,
+            r.flake_name,
+            r.repo_url,
+            c.id,
+            c.git_commit_hash,
+            c.commit_timestamp,
+            c.message,
+            c.author,
+            COALESCE(CARDINALITY(cac.nixos_configurations), 0)::bigint AS system_count,
+            COALESCE(
+                cac.nixos_configurations,
+                (
+                    SELECT COALESCE(array_agg(dn.derivation_name), ARRAY[]::text[])
+                    FROM (
+                        SELECT DISTINCT d2.derivation_name
+                        FROM derivations d2
+                        WHERE d2.commit_id = c.id
+                          AND d2.derivation_type = 'nixos'
+                        ORDER BY d2.derivation_name
+                    ) dn
+                ),
+                ARRAY[]::text[]
+            ) AS systems,
+            r.commits_behind,
+            ba.build_status,
+            c.evaluation_status,
+            c.evaluation_error_message,
+            cmc.total_systems,
+            cmc.systems_passed_policy,
+            cmc.systems_failed_policy_strict,
+            cmc.systems_failed_policy_non_strict,
+            cmc.has_nix_eval_error,
+            cmc.has_policy_failures,
+            cmc.all_systems_passed
+        FROM ranked r
+        JOIN commits c ON c.id = r.commit_id
+        LEFT JOIN build_agg ba ON ba.commit_id = r.commit_id
+        LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = r.commit_id
+        LEFT JOIN commit_metadata_cache cmc ON cmc.commit_id = r.commit_id
+        WHERE r.rn <= $2
+        ORDER BY r.flake_name ASC, r.rn ASC
+        "#,
     )
     .bind(&flake_filter)
+    .bind(max_commits_per_flake)
     .fetch_all(pool)
     .await?;
 
-    let mut timelines = Vec::new();
+    // Group rows into FlakeTimeline per flake, preserving query order.
+    let mut timelines: Vec<FlakeTimeline> = Vec::new();
+    let mut flake_index: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
 
-    for (flake_id, flake_name, repo_url, snapshot_ready_at) in flakes {
-        let use_snapshot = snapshot_ready_at.is_some();
-
-        // Single query that transparently handles both snapshot and fallback modes.
-        // When snapshot mode is active (snapshot_ready_at IS NOT NULL):
-        //   - Only commits present in flake_branch_commit_snapshot are returned
-        //   - Ordering and commits_behind use the snapshot position
-        // When fallback mode (snapshot_ready_at IS NULL):
-        //   - All commits are returned ordered by timestamp DESC
-        //   - commits_behind uses a correlated count
-        //
-        // The LEFT JOIN + WHERE filter ensures mutually exclusive mode selection:
-        //   - Snapshot mode: snapshot_ready_at IS NOT NULL AND fbcs.commit_id IS NOT NULL
-        //   - Fallback mode: snapshot_ready_at IS NULL
-
-        #[derive(sqlx::FromRow)]
-        struct FlakeCommitRow {
-            id: i32,
-            git_commit_hash: String,
-            commit_timestamp: chrono::DateTime<chrono::Utc>,
-            message: Option<String>,
-            author: Option<String>,
-            system_count: i64,
-            systems: Vec<String>,
-            commits_behind: i64,
-            build_status: Option<String>,
-            evaluation_status: Option<String>,
-            evaluation_error_message: Option<String>,
-            total_systems: Option<i32>,
-            systems_passed_policy: Option<i32>,
-            systems_failed_policy_strict: Option<i32>,
-            systems_failed_policy_non_strict: Option<i32>,
-            has_nix_eval_error: Option<bool>,
-            has_policy_failures: Option<bool>,
-            all_systems_passed: Option<bool>,
-        }
-
-        // Use a single query that adapts to the flake's snapshot readiness.
-        // The key differences between modes are handled by the LEFT JOIN on
-        // flake_branch_commit_snapshot, the WHERE filter, and the ORDER BY.
-        let commits_rows = sqlx::query_as::<_, FlakeCommitRow>(
-            r#"
-            SELECT
-                c.id,
-                c.git_commit_hash,
-                c.commit_timestamp,
-                c.message,
-                c.author,
-                COALESCE(CARDINALITY(cac.nixos_configurations), 0)::bigint AS system_count,
-                COALESCE(
-                    cac.nixos_configurations,
-                    (
-                        SELECT COALESCE(array_agg(dn.derivation_name), ARRAY[]::text[])
-                        FROM (
-                            SELECT DISTINCT d.derivation_name
-                            FROM derivations d
-                            WHERE d.commit_id = c.id
-                                AND d.derivation_type = 'nixos'
-                            ORDER BY d.derivation_name
-                        ) dn
-                    ),
-                    ARRAY[]::text[]
-                ) AS systems,
-                CASE
-                    WHEN f3.snapshot_ready_at IS NOT NULL
-                    THEN fbcs.position::bigint
-                    ELSE (
-                        SELECT COUNT(*)::bigint
-                        FROM commits c2
-                        WHERE c2.flake_id = c.flake_id
-                        AND c2.commit_timestamp > c.commit_timestamp
-                    )
-                END AS commits_behind,
-                (
-                    SELECT
-                        CASE
-                            WHEN COUNT(*) FILTER (WHERE bj.status = 'building') > 0 THEN 'building'
-                            WHEN COUNT(*) FILTER (WHERE bj.status = 'queued') > 0 THEN 'queued'
-                            WHEN COUNT(*) FILTER (WHERE bj.status = 'failed') > 0 THEN 'failed'
-                            WHEN COUNT(*) FILTER (WHERE bj.status = 'success') > 0 THEN 'complete'
-                            ELSE NULL
-                        END
-                    FROM build_jobs bj
-                    JOIN derivations d ON d.id = bj.derivation_id
-                    WHERE d.commit_id = c.id
-                ) AS build_status,
-                c.evaluation_status,
-                c.evaluation_error_message,
-                cmc.total_systems,
-                cmc.systems_passed_policy,
-                cmc.systems_failed_policy_strict,
-                cmc.systems_failed_policy_non_strict,
-                cmc.has_nix_eval_error,
-                cmc.has_policy_failures,
-                cmc.all_systems_passed
-            FROM commits c
-            JOIN flakes f3 ON f3.id = c.flake_id AND f3.id = $1 AND f3.deleted_at IS NULL
-            LEFT JOIN flake_branch_commit_snapshot fbcs
-                ON fbcs.commit_id = c.id AND fbcs.flake_id = c.flake_id
-            LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
-            LEFT JOIN commit_metadata_cache cmc ON cmc.commit_id = c.id
-            WHERE c.flake_id = $1
-              AND (f3.snapshot_ready_at IS NULL OR fbcs.commit_id IS NOT NULL)
-            ORDER BY
-                CASE WHEN f3.snapshot_ready_at IS NOT NULL THEN 0 ELSE 1 END,
-                CASE WHEN f3.snapshot_ready_at IS NOT NULL THEN fbcs.position ELSE 0 END ASC,
-                c.commit_timestamp DESC,
-                c.id DESC
-            LIMIT $2
-            "#,
-        )
-        .bind(flake_id)
-        .bind(max_commits_per_flake)
-        .fetch_all(pool)
-        .await?;
-
-        let commits: Vec<FlakeCommit> = commits_rows
-            .into_iter()
-            .map(|row| {
-                let build_status = row.build_status.as_deref().map(|status| match status {
-                    "queued" => BuildStatus::Queued,
-                    "building" => BuildStatus::Building,
-                    "failed" => BuildStatus::Failed,
-                    "complete" => BuildStatus::Complete,
-                    _ => BuildStatus::Idle,
-                });
-
-                let metadata = if let (
-                    Some(total_systems),
-                    Some(systems_passed_policy),
-                    Some(systems_failed_policy_strict),
-                    Some(systems_failed_policy_non_strict),
-                    Some(has_nix_eval_error),
-                    Some(has_policy_failures),
-                    Some(all_systems_passed),
-                ) = (
-                    row.total_systems,
-                    row.systems_passed_policy,
-                    row.systems_failed_policy_strict,
-                    row.systems_failed_policy_non_strict,
-                    row.has_nix_eval_error,
-                    row.has_policy_failures,
-                    row.all_systems_passed,
-                ) {
-                    Some(CommitMetadata {
-                        total_systems,
-                        systems_passed_policy,
-                        systems_failed_policy_strict,
-                        systems_failed_policy_non_strict,
-                        has_nix_eval_error,
-                        has_policy_failures,
-                        all_systems_passed,
-                    })
-                } else {
-                    None
-                };
-
-                FlakeCommit {
-                    id: row.id,
-                    hash: row.git_commit_hash,
-                    message: row.message.unwrap_or_default(),
-                    author: row.author.unwrap_or_default(),
-                    committed_at: row.commit_timestamp,
-                    system_count: row.system_count,
-                    commits_behind: row.commits_behind,
-                    systems: row.systems,
-                    system_paths: Vec::new(),
-                    build_status,
-                    evaluation_status: row.evaluation_status,
-                    evaluation_error_message: row.evaluation_error_message,
-                    metadata,
-                }
-            })
-            .collect();
-
-        timelines.push(FlakeTimeline {
-            flake_id,
-            flake_name,
-            repo_url,
-            commits,
+    for row in rows {
+        let build_status = row.build_status.as_deref().map(|s| match s {
+            "queued" => BuildStatus::Queued,
+            "building" => BuildStatus::Building,
+            "failed" => BuildStatus::Failed,
+            "complete" => BuildStatus::Complete,
+            _ => BuildStatus::Idle,
         });
+
+        let metadata = match (
+            row.total_systems,
+            row.systems_passed_policy,
+            row.systems_failed_policy_strict,
+            row.systems_failed_policy_non_strict,
+            row.has_nix_eval_error,
+            row.has_policy_failures,
+            row.all_systems_passed,
+        ) {
+            (
+                Some(total_systems),
+                Some(systems_passed_policy),
+                Some(systems_failed_policy_strict),
+                Some(systems_failed_policy_non_strict),
+                Some(has_nix_eval_error),
+                Some(has_policy_failures),
+                Some(all_systems_passed),
+            ) => Some(CommitMetadata {
+                total_systems,
+                systems_passed_policy,
+                systems_failed_policy_strict,
+                systems_failed_policy_non_strict,
+                has_nix_eval_error,
+                has_policy_failures,
+                all_systems_passed,
+            }),
+            _ => None,
+        };
+
+        let commit = FlakeCommit {
+            id: row.id,
+            hash: row.git_commit_hash,
+            message: row.message.unwrap_or_default(),
+            author: row.author.unwrap_or_default(),
+            committed_at: row.commit_timestamp,
+            system_count: row.system_count,
+            commits_behind: row.commits_behind,
+            systems: row.systems,
+            system_paths: Vec::new(),
+            build_status,
+            evaluation_status: row.evaluation_status,
+            evaluation_error_message: row.evaluation_error_message,
+            metadata,
+        };
+
+        let idx = if let Some(&i) = flake_index.get(&row.flake_id) {
+            i
+        } else {
+            let i = timelines.len();
+            flake_index.insert(row.flake_id, i);
+            timelines.push(FlakeTimeline {
+                flake_id: row.flake_id,
+                flake_name: row.flake_name,
+                repo_url: row.repo_url,
+                commits: Vec::new(),
+            });
+            i
+        };
+        timelines[idx].commits.push(commit);
     }
 
     Ok(timelines)
@@ -972,4 +960,83 @@ pub async fn is_flake_snapshot_ready(pool: &PgPool, flake_id: i32) -> Result<boo
     .is_some();
 
     Ok(ready)
+}
+
+#[cfg(test)]
+mod task_397_tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    #[sqlx::test]
+    #[ignore = "requires a test database role with CREATE DATABASE privileges"]
+    async fn set_based_registry_and_timeline_queries_use_snapshot_order(pool: PgPool) {
+        let flake = insert_flake(
+            &pool,
+            "task-397-test",
+            "https://example.invalid/task-397-test.git",
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("insert test flake");
+
+        let now = Utc::now();
+        let mut commit_ids = Vec::new();
+        for (offset, hash) in [(2, "oldest"), (1, "middle"), (0, "newest")] {
+            let id = sqlx::query_scalar::<_, i32>(
+                r#"
+                INSERT INTO commits (
+                    flake_id, git_commit_hash, commit_timestamp, message, author
+                )
+                VALUES ($1, $2, $3, $4, 'Test Author')
+                RETURNING id
+                "#,
+            )
+            .bind(flake.id)
+            .bind(hash)
+            .bind(now - Duration::minutes(offset))
+            .bind(format!("Commit {hash}"))
+            .fetch_one(&pool)
+            .await
+            .expect("insert test commit");
+            commit_ids.push(id);
+        }
+
+        let fallback = fetch_flake_timelines(&pool, 2, Some(&[flake.id]))
+            .await
+            .expect("fetch fallback timeline");
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].commits.len(), 2);
+        assert_eq!(fallback[0].commits[0].hash, "newest");
+        assert_eq!(fallback[0].commits[1].hash, "middle");
+
+        // Deliberately make snapshot order differ from timestamp order.
+        replace_flake_branch_snapshot_standalone(
+            &pool,
+            flake.id,
+            &[(commit_ids[0], now), (commit_ids[2], now)],
+        )
+        .await
+        .expect("replace snapshot");
+
+        let snapshot = fetch_flake_timelines(&pool, 10, Some(&[flake.id]))
+            .await
+            .expect("fetch snapshot timeline");
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].commits.len(), 2);
+        assert_eq!(snapshot[0].commits[0].hash, "oldest");
+        assert_eq!(snapshot[0].commits[0].commits_behind, 0);
+        assert_eq!(snapshot[0].commits[1].hash, "newest");
+        assert_eq!(snapshot[0].commits[1].commits_behind, 1);
+
+        let registry = list_flake_registry(&pool)
+            .await
+            .expect("fetch enriched registry");
+        let item = registry
+            .iter()
+            .find(|item| item.id == flake.id)
+            .expect("registry item");
+        assert_eq!(item.latest_commit_hash.as_deref(), Some("oldest"));
+        assert_eq!(item.total_commit_count, 2);
+    }
 }
