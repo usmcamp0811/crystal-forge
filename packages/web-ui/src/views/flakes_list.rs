@@ -25,15 +25,14 @@ use crate::alerts::{
 use crate::api::client::{
     accept_flake_history_rewrite, create_flake, delete_flake, delete_flake_credentials,
     fetch_commit_diff, fetch_cve_scan_status, fetch_environments, fetch_flake_credentials,
-    fetch_flake_timeline_for_tray, fetch_flake_timelines, fetch_flake_timelines_for_ids,
-    fetch_flakes, fetch_systems, put_flake_credentials, request_sync_all_flakes,
+    fetch_flake_timeline_for_tray, fetch_flakes, put_flake_credentials, request_sync_all_flakes,
     request_sync_flake, test_flake_credentials, trigger_flake_config_cve_scan, update_flake,
     ApiClientError,
 };
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
     EnvironmentSummary, FlakeCommitSystemPath, FlakeRegistryItem, FlakeSummary, FlakeTimeline,
-    SystemsListParams, TestFlakeCredentialRequest, UpdateFlakeRequest,
+    TestFlakeCredentialRequest, UpdateFlakeRequest,
 };
 use crate::components::flake::FlakeSyncErrorBanner;
 use crate::components::layout::Card;
@@ -3034,55 +3033,18 @@ pub fn FlakesListViewNew() -> Element {
         None
     };
 
+    // TASK-397: Enriched registry fetch — single request for all initial data.
+    // The registry now returns latest commit summary, environments, and total
+    // commit count so separate timeline and systems requests are not needed.
     let flakes_resource = use_resource(move || {
         let _nonce = *reload_nonce.read();
         async move { fetch_flakes().await }
     });
-    let timelines_resource = use_resource(move || {
-        let _nonce = *reload_nonce.read();
-        async move { fetch_flake_timelines().await }
-    });
-    // Fetch environments for the edit dialog dropdown
+    // Fetch environments for the edit dialog dropdown (separate, lazy)
     let environments_resource = use_resource(|| async { fetch_environments().await });
     let db_environments: Vec<EnvironmentSummary> = match environments_resource.read().as_ref() {
         Some(Ok(envs)) => envs.clone(),
         _ => Vec::new(),
-    };
-
-    // Fetch systems (large page) to derive environments-per-flake since the registry API
-    // does not expose which environments a flake spans. Tracked by TASK-357.1.
-    let systems_resource = use_resource(|| async {
-        fetch_systems(&SystemsListParams {
-            page: Some(1),
-            per_page: Some(500),
-            search: None,
-            health_status: None,
-            deployment_status: None,
-            environment: None,
-            sort_by: None,
-            sort_order: None,
-        })
-        .await
-    });
-    // Build flake_id → sorted/deduped environment names
-    let flake_env_map: HashMap<i32, Vec<String>> = {
-        let systems = match systems_resource.read().as_ref() {
-            Some(Ok(resp)) => resp.items.clone(),
-            _ => Vec::new(),
-        };
-        let mut map: HashMap<i32, Vec<String>> = HashMap::new();
-        for system in &systems {
-            if let (Some(flake_id), Some(env)) = (system.flake_id, system.environment.clone()) {
-                let entry = map.entry(flake_id).or_default();
-                if !entry.iter().any(|e: &String| e.eq_ignore_ascii_case(&env)) {
-                    entry.push(env);
-                }
-            }
-        }
-        for envs in map.values_mut() {
-            envs.sort();
-        }
-        map
     };
 
     let (raw_flakes, load_error, loading) = match flakes_resource.read().as_ref() {
@@ -3090,58 +3052,11 @@ pub fn FlakesListViewNew() -> Element {
         Some(Err(err)) => (Vec::new(), Some(err.to_string()), false),
         None => (Vec::new(), None, true),
     };
-    let timeline_items = match timelines_resource.read().as_ref() {
-        Some(Ok(items)) => items.clone(),
-        _ => Vec::new(),
-    };
-    let mut commit_map: HashMap<i32, Vec<MockCommitItem>> = HashMap::new();
-    for timeline in &timeline_items {
-        commit_map.insert(
-            timeline.flake_id,
-            map_timeline_commits_to_view(&timeline.commits),
-        );
-    }
+
+    // Map directly from the enriched registry — no secondary requests needed.
     let all_flakes: Vec<MockFlakeItem> = raw_flakes
         .iter()
-        .map(|item| {
-            let mut mapped = map_registry_flake_to_view(item);
-            // Populate environment from systems data
-            if let Some(envs) = flake_env_map.get(&item.id) {
-                mapped.environment = envs.join(",");
-            }
-            if let Some(commits) = commit_map.get(&item.id) {
-                if let Some(latest) = commits.first() {
-                    mapped.latest_commit = latest.sha.clone();
-                    mapped.latest_message = latest.msg.clone();
-                    mapped.latest_author = latest.author.clone();
-                    mapped.total_commits = commits.len() as i32;
-                    // Enrich last_sync_at from latest commit only if the DB has no timestamp.
-                    if mapped.last_sync_at == "Not synced yet" {
-                        mapped.last_sync_at = latest.at.clone();
-                    }
-                    // Only derive pipeline-based status when the DB reports "unknown" or
-                    // "synced". If the DB reports "error" or "syncing", preserve it — that
-                    // is the actual sync state (TASK-385).
-                    if matches!(mapped.status.as_str(), "unknown" | "synced") {
-                        mapped.status = if latest.eval_status.as_deref() == Some("failed")
-                            || latest.build_status.as_deref() == Some("failed")
-                        {
-                            // Pipeline failure — not a sync failure; leave chip as synced
-                            // but note the pipeline issue. Keep "synced" so the chip is green.
-                            "synced".to_string()
-                        } else if matches!(
-                            latest.build_status.as_deref(),
-                            Some("building") | Some("pending")
-                        ) {
-                            "syncing".to_string()
-                        } else {
-                            "synced".to_string()
-                        };
-                    }
-                }
-            }
-            mapped
-        })
+        .map(map_registry_flake_to_view)
         .collect();
 
     // Convert raw_flakes to FlakeListItem for duplicate validation
@@ -3226,27 +3141,16 @@ pub fn FlakesListViewNew() -> Element {
 
     let selected_flake_value = selected_flake.read().clone();
     let selected_flake_for_timeline = selected_flake.clone();
-    // Use extended commit limit (200) for the tray view
+    // TASK-397: Lazy per-flake timeline fetch — only triggered when a tray is
+    // opened. Never falls back to the all-flakes timeline endpoint; a failed
+    // request surfaces a tray-local error instead.
     let selected_timeline_resource = use_resource(move || {
         let flake_id = selected_flake_for_timeline.read().as_ref().map(|f| f.id);
         let _nonce = *reload_nonce.read();
         async move {
-            if let Some(id) = flake_id {
-                // Use the tray-specific fetch with higher commit limit
-                match fetch_flake_timeline_for_tray(id).await {
-                    Ok(items) => {
-                        let has_selected = items.iter().any(|timeline| timeline.flake_id == id);
-                        if has_selected {
-                            Ok(items)
-                        } else {
-                            // Fallback: use standard timelines fetch
-                            fetch_flake_timelines().await
-                        }
-                    }
-                    Err(_) => fetch_flake_timelines().await,
-                }
-            } else {
-                Ok(Vec::new())
+            match flake_id {
+                Some(id) => fetch_flake_timeline_for_tray(id).await,
+                None => Ok(Vec::new()),
             }
         }
     });
@@ -4043,6 +3947,29 @@ fn map_registry_flake_to_view(item: &FlakeRegistryItem) -> MockFlakeItem {
         .map(|dt| relative_time_label(*dt))
         .unwrap_or_else(|| "Not synced yet".to_string());
 
+    // TASK-397: Use enriched fields from the registry response.
+    // These fields are now returned by GET /api/v1/flakes directly,
+    // so no separate timeline or systems request is needed for initial render.
+    let latest_commit = item
+        .latest_commit_hash
+        .as_deref()
+        .unwrap_or("—")
+        .to_string();
+    let latest_message = item
+        .latest_commit_message
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("No commits yet")
+        .to_string();
+    let latest_author = item
+        .latest_commit_author
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("—")
+        .to_string();
+    let environment = item.environments.join(",");
+    let total_commits = item.total_commit_count as i32;
+
     MockFlakeItem {
         id: item.id,
         name: item.name.clone(),
@@ -4052,16 +3979,14 @@ fn map_registry_flake_to_view(item: &FlakeRegistryItem) -> MockFlakeItem {
         branch: item.branch.clone(),
         build_scope: item.build_scope.clone(),
         system_count: item.system_count as i32,
-        latest_commit: "—".to_string(),
-        latest_message: "No commits yet".to_string(),
-        latest_author: "—".to_string(),
+        latest_commit,
+        latest_message,
+        latest_author,
         last_sync_at: last_sync_display,
         last_sync_at_raw: item.last_sync_at,
-        // The current registry API does not expose the environments spanned by a flake.
-        // Render this as an explicit unsupported/pending value instead of fabricating one.
-        environment: String::new(),
+        environment,
         error_msg: item.last_sync_error.clone(),
-        total_commits: 0,
+        total_commits,
     }
 }
 
