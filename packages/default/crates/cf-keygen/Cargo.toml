@@ -1,0 +1,15 @@
+[package]
+name = "cf-keygen"
+version = "0.3.0"
+edition = "2024"
+description = "Crystal Forge Ed25519 key generation utility"
+
+[dependencies]
+base64 = "0.21"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hostname = "0.3"
+rand = "0.8"
+
+[[bin]]
+name = "cf-keygen"
+path = "src/bin/cf-keygen.rs"
