@@ -805,6 +805,7 @@ pub async fn list_eval_history(
 pub struct EvalPolicySystemRow {
     pub system_name: String,
     pub policy_status: String,
+    pub detail: Option<String>,
 }
 
 pub async fn fetch_eval_policy_matrix(
@@ -820,7 +821,14 @@ pub async fn fetch_eval_policy_matrix(
                 WHEN d.cf_agent_enabled IS FALSE THEN 'fail'
                 WHEN d.status_id = 6 OR d.error_message IS NOT NULL THEN 'warn'
                 ELSE 'warn'
-            END AS policy_status
+            END AS policy_status,
+            CASE
+                WHEN d.cf_agent_enabled IS FALSE
+                    THEN 'Crystal Forge agent is disabled. Enable with crystal-forge.agent.enable = true in your NixOS configuration.'
+                WHEN d.error_message IS NOT NULL
+                    THEN d.error_message
+                ELSE NULL
+            END AS detail
         FROM derivations d
         WHERE d.commit_id = $1
           AND d.derivation_type = 'nixos'

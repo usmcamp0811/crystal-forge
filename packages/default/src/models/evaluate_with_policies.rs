@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -23,7 +23,7 @@ use crate::derivations::utils::{build_flake_reference, count_closure_packages};
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
-    DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
+    build_nix_eval_expression, DeploymentPolicy, PolicyCheckResult,
 };
 use crate::models::flakes::Flake;
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
@@ -1592,10 +1592,9 @@ mod tests {
         let systems = vec!["alpha".to_string(), "beta".to_string()];
         let err = resolve_mock_systems("demo", "gamma", &systems)
             .expect_err("missing target should return error");
-        assert!(
-            err.to_string()
-                .contains("mock evaluation has no matching systems to evaluate")
-        );
+        assert!(err
+            .to_string()
+            .contains("mock evaluation has no matching systems to evaluate"));
     }
 
     #[test]
@@ -1629,7 +1628,7 @@ mod tests {
         // System failing strict policy only
         let policies_json = json!({
             "cfAgentEnabled": false,
-            "hasRequiredPackages": true
+            "hasRequiredPackages_1": true
         });
 
         let result =
@@ -1646,7 +1645,7 @@ mod tests {
         // System failing non-strict policy only
         let policies_json_2 = json!({
             "cfAgentEnabled": true,
-            "hasRequiredPackages": false
+            "hasRequiredPackages_1": false
         });
 
         let result_2 =
@@ -1661,7 +1660,7 @@ mod tests {
         // System failing both
         let policies_json_3 = json!({
             "cfAgentEnabled": false,
-            "hasRequiredPackages": false
+            "hasRequiredPackages_1": false
         });
 
         let result_3 =

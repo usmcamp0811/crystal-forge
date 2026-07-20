@@ -3,5 +3,5 @@
 pub mod infinite_scroll;
 pub mod websocket;
 
-pub use infinite_scroll::{InfiniteScroll, use_infinite_scroll};
-pub use websocket::{SystemMetrics, use_websocket_logs};
+pub use infinite_scroll::{use_infinite_scroll, InfiniteScroll};
+pub use websocket::{use_websocket_logs, SystemMetrics};

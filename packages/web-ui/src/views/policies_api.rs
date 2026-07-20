@@ -3,9 +3,11 @@
 //! This module provides the adapter layer between the policies UI and the backend API,
 //! with graceful fallback to mock data when the API is unavailable.
 
+use std::collections::HashMap;
+
 use uuid::Uuid;
 
-use crate::api::client::{ApiClientError, fetch_deployment_policies};
+use crate::api::client::{fetch_deployment_policies, ApiClientError};
 use crate::api::models::DeploymentPolicyRecord;
 use crate::components::policy::PolicyDefinition;
 
@@ -20,10 +22,14 @@ pub async fn load_policies_with_fallback() -> Vec<PolicyDefinition> {
             web_sys::console::log_1(
                 &format!("Loaded {} policies from API", response.policies.len()).into(),
             );
+            let sys_counts = response.system_counts;
             response
                 .policies
                 .into_iter()
-                .map(policy_record_to_definition)
+                .map(|p| {
+                    let count = sys_counts.get(&p.id).copied().unwrap_or(0);
+                    policy_record_to_definition_with_count(p, count)
+                })
                 .collect()
         }
         Err(ApiClientError::Status { code, body }) => {
@@ -65,7 +71,10 @@ pub async fn load_policies_with_fallback() -> Vec<PolicyDefinition> {
 }
 
 /// Convert a backend DeploymentPolicyRecord to a frontend PolicyDefinition.
-fn policy_record_to_definition(record: DeploymentPolicyRecord) -> PolicyDefinition {
+fn policy_record_to_definition_with_count(
+    record: DeploymentPolicyRecord,
+    system_count: i64,
+) -> PolicyDefinition {
     use crate::components::policy::PolicyFormat;
 
     let body = serde_json::to_string_pretty(&serde_json::json!({
@@ -84,6 +93,7 @@ fn policy_record_to_definition(record: DeploymentPolicyRecord) -> PolicyDefiniti
         format: PolicyFormat::Json,
         body,
         policy_type: Some(record.policy_type),
+        system_count,
     }
 }
 
@@ -91,6 +101,7 @@ fn policy_record_to_definition(record: DeploymentPolicyRecord) -> PolicyDefiniti
 fn mock_policies() -> Vec<PolicyDefinition> {
     use crate::components::policy::PolicyFormat;
 
+    let mock_count = 12i64;
     vec![
         PolicyDefinition {
             id: Uuid::from_u128(1),
@@ -102,6 +113,7 @@ type = "require_crystal_forge_agent"
 strict = true
 "#.to_string(),
             policy_type: Some("require_crystal_forge_agent".to_string()),
+            system_count: mock_count,
         },
         PolicyDefinition {
             id: Uuid::from_u128(2),
@@ -115,6 +127,7 @@ description = "Firewall must be enabled"
 strict = true
 "#.to_string(),
             policy_type: Some("custom_check".to_string()),
+            system_count: mock_count,
         },
         PolicyDefinition {
             id: Uuid::from_u128(3),
@@ -128,6 +141,7 @@ description = "Password authentication must be disabled"
 strict = false
 "#.to_string(),
             policy_type: Some("custom_check".to_string()),
+            system_count: mock_count,
         },
         PolicyDefinition {
             id: Uuid::from_u128(4),
@@ -141,6 +155,7 @@ description = "Audit daemon should be enabled"
 strict = false
 "#.to_string(),
             policy_type: Some("custom_check".to_string()),
+            system_count: mock_count,
         },
     ]
 }

@@ -10,25 +10,25 @@ use js_sys::Object;
 #[cfg(target_arch = "wasm32")]
 use js_sys::{Function, Reflect};
 use uuid::Uuid;
+use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
-use wasm_bindgen::prelude::Closure;
 #[cfg(target_arch = "wasm32")]
 use web_sys::console;
-use web_sys::{Node, window};
+use web_sys::{window, Node};
 
 use crate::alerts::{
-    NAV_BADGES, acknowledge_locally, acknowledge_with_cursor_and_ids_async, attention_row_class,
-    dismiss_attention_item, should_flash,
+    acknowledge_locally, acknowledge_with_cursor_and_ids_async, attention_row_class,
+    dismiss_attention_item, should_flash, NAV_BADGES,
 };
 use crate::api::client::{
-    ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
-    delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_environments,
-    fetch_flake_credentials, fetch_flake_timeline_for_tray, fetch_flake_timelines,
-    fetch_flake_timelines_for_ids, fetch_flakes, fetch_systems, put_flake_credentials,
-    request_sync_all_flakes, request_sync_flake, test_flake_credentials,
-    trigger_flake_config_cve_scan, update_flake,
+    accept_flake_history_rewrite, create_flake, delete_flake, delete_flake_credentials,
+    fetch_commit_diff, fetch_cve_scan_status, fetch_environments, fetch_flake_credentials,
+    fetch_flake_timeline_for_tray, fetch_flake_timelines, fetch_flake_timelines_for_ids,
+    fetch_flakes, fetch_systems, put_flake_credentials, request_sync_all_flakes,
+    request_sync_flake, test_flake_credentials, trigger_flake_config_cve_scan, update_flake,
+    ApiClientError,
 };
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
@@ -41,6 +41,7 @@ use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
+use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::theme;
 use crate::views::systems_mock::mock_system_details;
 
@@ -2988,6 +2989,8 @@ mod tests {
 /// Uses live API data for flakes, timelines, and commit diffs.
 #[component]
 pub fn FlakesListViewNew() -> Element {
+    let nav = navigator();
+    let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let app_state = use_context::<Signal<AppState>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
     let mut view_mode = use_signal(|| "table");
@@ -3831,7 +3834,19 @@ pub fn FlakesListViewNew() -> Element {
                                 );
                                 action_notice.set(Some("Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string()));
                             },
-                            on_close: move |_| selected_flake.set(None)
+                            on_close: move |_| selected_flake.set(None),
+                            on_open_evaluation: move |focus: NavigationFocus| {
+                                navigation_focus.set(Some(focus));
+                                nav.push(Route::EvaluationsView {});
+                            },
+                            on_open_build: move |focus: NavigationFocus| {
+                                navigation_focus.set(Some(focus));
+                                nav.push(Route::BuildsView {});
+                            },
+                            on_open_systems: move |focus: NavigationFocus| {
+                                navigation_focus.set(Some(focus));
+                                nav.push(Route::SystemsView {});
+                            },
                         }
                     }
                 }
@@ -5141,6 +5156,9 @@ pub(crate) fn FlakeTrayNew(
     on_sync: EventHandler<i32>,
     on_history_rewrite_conflict: EventHandler<(i32, String)>,
     on_close: EventHandler<()>,
+    #[props(default)] on_open_evaluation: Option<EventHandler<NavigationFocus>>,
+    #[props(default)] on_open_build: Option<EventHandler<NavigationFocus>>,
+    #[props(default)] on_open_systems: Option<EventHandler<NavigationFocus>>,
 ) -> Element {
     const INITIAL_VISIBLE_COMMITS: usize = 100;
     const LOAD_MORE_STEP: usize = 100;
@@ -5535,6 +5553,9 @@ pub(crate) fn FlakeTrayNew(
                                         selected_commit.set(replacement);
                                     },
                                     on_history_rewrite_conflict: on_history_rewrite_conflict,
+                                    on_open_evaluation: on_open_evaluation.clone(),
+                                    on_open_build: on_open_build.clone(),
+                                    on_open_systems: on_open_systems.clone(),
                                 }
                             }
                         }
@@ -5809,6 +5830,9 @@ fn CommitDetailNew(
     on_request_timeline_refresh: EventHandler<i32>,
     on_commit_unavailable: EventHandler<String>,
     on_history_rewrite_conflict: EventHandler<(i32, String)>,
+    on_open_evaluation: Option<EventHandler<NavigationFocus>>,
+    on_open_build: Option<EventHandler<NavigationFocus>>,
+    on_open_systems: Option<EventHandler<NavigationFocus>>,
 ) -> Element {
     let mut selected_file_label = use_signal(String::new);
     let mut active_modal_file = use_signal(|| None::<MockFileItem>);
@@ -5871,6 +5895,11 @@ fn CommitDetailNew(
         eval: commit.eval_status.clone(),
         build: commit.build_status.clone(),
     };
+    let commit_hash_for_eval = commit.full_hash.clone();
+    let commit_hash_for_build = commit.full_hash.clone();
+    let flake_name_for_eval = flake.name.clone();
+    let flake_name_for_build = flake.name.clone();
+    let flake_name_for_systems = flake.name.clone();
 
     rsx! {
         // Commit header - JSX lines 196-217
@@ -5915,11 +5944,54 @@ fn CommitDetailNew(
 
             // Pipeline strip - JSX lines 209-216
             div { class: "fl-pipeline",
-                PipelinePillNew { stage: "eval", val: pipeline.eval.clone() }
+                PipelinePillNew {
+                    stage: "eval",
+                    val: pipeline.eval.clone(),
+                    onclick: move |_| {
+                        if let Some(handler) = &on_open_evaluation {
+                            handler.call(NavigationFocus {
+                                target: FocusTarget::Evaluations,
+                                commit_sha: Some(commit_hash_for_eval.clone()),
+                                flake_name: Some(flake_name_for_eval.clone()),
+                                status: pipeline.eval.clone(),
+                                policy_name: None,
+                            });
+                        }
+                    }
+                }
                 PipelineArrowNew {}
-                PipelinePillNew { stage: "build", val: pipeline.build.clone() }
+                PipelinePillNew {
+                    stage: "build",
+                    val: pipeline.build.clone(),
+                    onclick: move |_| {
+                        if let Some(handler) = &on_open_build {
+                            handler.call(NavigationFocus {
+                                target: FocusTarget::Builds,
+                                commit_sha: Some(commit_hash_for_build.clone()),
+                                flake_name: Some(flake_name_for_build.clone()),
+                                status: pipeline.build.clone(),
+                                policy_name: None,
+                            });
+                        }
+                    }
+                }
                 PipelineArrowNew {}
-                RolloutPillNew { on: commit.rollout_on, total: commit.rollout_total.max(commit.rollout_on), failed: 0 }
+                RolloutPillNew {
+                    on: commit.rollout_on,
+                    total: commit.rollout_total.max(commit.rollout_on),
+                    failed: 0,
+                    onclick: move |_| {
+                        if let Some(handler) = &on_open_systems {
+                            handler.call(NavigationFocus {
+                                target: FocusTarget::Systems,
+                                commit_sha: None,
+                                flake_name: Some(flake_name_for_systems.clone()),
+                                status: None,
+                                policy_name: None,
+                            });
+                        }
+                    }
+                }
             }
         }
 
@@ -5996,7 +6068,11 @@ fn CommitDetailNew(
 
 #[allow(dead_code)]
 #[component]
-fn PipelinePillNew(stage: &'static str, val: Option<String>) -> Element {
+fn PipelinePillNew(
+    stage: &'static str,
+    val: Option<String>,
+    #[props(default)] onclick: Option<EventHandler<MouseEvent>>,
+) -> Element {
     let Some(val_str) = val else {
         return rsx! { span { class: "chip chip-unknown", style: "font-weight: 600;", "N/A" } };
     };
@@ -6014,7 +6090,16 @@ fn PipelinePillNew(stage: &'static str, val: Option<String>) -> Element {
     };
 
     rsx! {
-        span { class: "chip {chip_class}", style: "font-weight: 600;", "{label}" }
+        button {
+            class: "chip {chip_class} focus-ring",
+            style: "font-weight: 600; cursor: pointer;",
+            onclick: move |evt| {
+                if let Some(handler) = &onclick {
+                    handler.call(evt);
+                }
+            },
+            "{label}"
+        }
     }
 }
 
@@ -6038,7 +6123,12 @@ fn PipelineArrowNew() -> Element {
 
 #[allow(dead_code)]
 #[component]
-fn RolloutPillNew(on: i32, total: i32, failed: i32) -> Element {
+fn RolloutPillNew(
+    on: i32,
+    total: i32,
+    failed: i32,
+    #[props(default)] onclick: Option<EventHandler<MouseEvent>>,
+) -> Element {
     let pct = if total > 0 {
         (on as f32) / (total as f32)
     } else {
@@ -6055,9 +6145,14 @@ fn RolloutPillNew(on: i32, total: i32, failed: i32) -> Element {
     };
 
     rsx! {
-        span {
+        button {
             class: "chip {chip_class}",
-            style: "display: inline-flex; align-items: center; gap: 6px; font-weight: 600;",
+            style: "display: inline-flex; align-items: center; gap: 6px; font-weight: 600; cursor: pointer;",
+            onclick: move |evt| {
+                if let Some(handler) = &onclick {
+                    handler.call(evt);
+                }
+            },
             // Server icon
             svg {
                 width: "10",

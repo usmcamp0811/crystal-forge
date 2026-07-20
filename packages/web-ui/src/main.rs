@@ -23,7 +23,8 @@ use dioxus::prelude::*;
 
 use routes::Route;
 use state::app_state::provide_app_state;
-use state::theme::{UiTheme, apply as apply_theme, persist as persist_theme};
+use state::navigation_focus::provide_navigation_focus;
+use state::theme::{apply as apply_theme, persist as persist_theme, UiTheme};
 
 fn main() {
     // Install a panic hook that logs Rust panic messages to the browser
@@ -38,6 +39,7 @@ fn main() {
 #[component]
 fn app() -> Element {
     provide_app_state();
+    provide_navigation_focus();
     let theme = use_context_provider(|| Signal::new(UiTheme::load()));
 
     use_effect(move || {

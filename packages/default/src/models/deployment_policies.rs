@@ -346,7 +346,7 @@ impl DeploymentPolicy {
     /// Generate the Nix expression fragment for this policy.
     /// Returns (field_name, nix_expression).
     /// Panics if called on RequireCveCheck (use is_nix_evaluated() to guard).
-    pub fn to_nix_expression(&self) -> (String, String) {
+    pub fn to_nix_expression_with_index(&self, index: usize) -> (String, String) {
         match self {
             DeploymentPolicy::RequireCrystalForgeAgent { .. } => (
                 "cfAgentEnabled".to_string(),
@@ -362,7 +362,7 @@ impl DeploymentPolicy {
                     .collect::<Vec<_>>()
                     .join(" ");
                 (
-                    "hasRequiredPackages".to_string(),
+                    format!("hasRequiredPackages_{index}"),
                     format!(
                         "let pkgNames = builtins.map (p: p.pname or p.name or \"\") \
                          cfg.config.environment.systemPackages; \
@@ -404,11 +404,15 @@ impl DeploymentPolicy {
         }
     }
 
+    pub fn to_nix_expression(&self) -> (String, String) {
+        self.to_nix_expression_with_index(0)
+    }
+
     /// Get the field name this policy uses in JSON output
-    pub fn field_name(&self) -> String {
+    pub fn field_name_with_index(&self, index: usize) -> String {
         match self {
             DeploymentPolicy::RequireCrystalForgeAgent { .. } => "cfAgentEnabled".to_string(),
-            DeploymentPolicy::RequirePackages { .. } => "hasRequiredPackages".to_string(),
+            DeploymentPolicy::RequirePackages { .. } => format!("hasRequiredPackages_{index}"),
             DeploymentPolicy::CustomCheck {
                 field_name, rules, ..
             } => {
@@ -425,6 +429,10 @@ impl DeploymentPolicy {
             DeploymentPolicy::CanaryRollout { .. } => "canaryRollout".to_string(),
             DeploymentPolicy::CveThreshold { .. } => "cveThreshold".to_string(),
         }
+    }
+
+    pub fn field_name(&self) -> String {
+        self.field_name_with_index(0)
     }
 }
 
@@ -469,17 +477,21 @@ impl PolicyCheckResult {
         let mut custom_checks = HashMap::new();
         let mut failed_policies = Vec::new();
 
+        let mut nix_policy_idx = 0usize;
         for policy in policies {
             // CVE policies are not Nix-evaluated; skip here.
             if !policy.is_nix_evaluated() {
                 continue;
             }
 
+            let policy_idx = nix_policy_idx;
+            nix_policy_idx += 1;
+
             let is_strict = policy.is_strict();
 
             match policy {
                 DeploymentPolicy::RequireCrystalForgeAgent { .. } => {
-                    let field_name = policy.field_name();
+                    let field_name = policy.field_name_with_index(policy_idx);
                     let value = policies_json.get(&field_name).and_then(|v| v.as_bool());
                     cf_agent_enabled = value;
                     if value != Some(true) {
@@ -492,7 +504,7 @@ impl PolicyCheckResult {
                     }
                 }
                 DeploymentPolicy::RequirePackages { packages, .. } => {
-                    let field_name = policy.field_name();
+                    let field_name = policy.field_name_with_index(policy_idx);
                     let value = policies_json.get(&field_name).and_then(|v| v.as_bool());
                     has_required_packages = value;
                     if value != Some(true) {
@@ -631,7 +643,8 @@ pub fn build_nix_eval_expression(flake_ref: &str, policies: &[DeploymentPolicy])
     } else {
         nix_policies
             .iter()
-            .flat_map(|policy| {
+            .enumerate()
+            .flat_map(|(policy_idx, policy)| {
                 match policy {
                     DeploymentPolicy::CustomCheck { rules, .. } if !rules.is_empty() => {
                         // Multi-rule: emit one field per rule
@@ -643,7 +656,7 @@ pub fn build_nix_eval_expression(flake_ref: &str, policies: &[DeploymentPolicy])
                             .collect::<Vec<_>>()
                     }
                     _ => {
-                        let (field_name, expr) = policy.to_nix_expression();
+                        let (field_name, expr) = policy.to_nix_expression_with_index(policy_idx);
                         vec![format!("        {} = {};", field_name, expr)]
                     }
                 }
@@ -760,8 +773,8 @@ mod tests {
             packages: vec!["vim".to_string(), "git".to_string()],
             strict: false,
         };
-        let (field_name, expr) = policy.to_nix_expression();
-        assert_eq!(field_name, "hasRequiredPackages");
+        let (field_name, expr) = policy.to_nix_expression_with_index(2);
+        assert_eq!(field_name, "hasRequiredPackages_2");
         assert!(expr.contains("\"vim\""));
         assert!(expr.contains("\"git\""));
     }
@@ -784,9 +797,59 @@ mod tests {
         ];
         let expr = build_nix_eval_expression("github:user/repo", &policies);
         assert!(expr.contains("cfAgentEnabled"));
-        assert!(expr.contains("hasRequiredPackages"));
+        assert!(expr.contains("hasRequiredPackages_1"));
         assert!(expr.contains("systemd.services.crystal-forge-agent.enable"));
         assert!(expr.contains("services.crystal-forge"));
+    }
+
+    #[test]
+    fn require_packages_policies_get_distinct_field_names() {
+        let policies = vec![
+            DeploymentPolicy::RequirePackages {
+                packages: vec!["grafana".to_string()],
+                strict: true,
+            },
+            DeploymentPolicy::RequirePackages {
+                packages: vec!["neovim".to_string()],
+                strict: true,
+            },
+        ];
+
+        let expr = build_nix_eval_expression("github:user/repo", &policies);
+        assert!(expr.contains("hasRequiredPackages_0"));
+        assert!(expr.contains("hasRequiredPackages_1"));
+    }
+
+    #[test]
+    fn require_packages_indices_ignore_non_nix_policies_consistently() {
+        let policies = vec![
+            DeploymentPolicy::RequirePackages {
+                packages: vec!["grafana".to_string()],
+                strict: true,
+            },
+            DeploymentPolicy::RequireCveCheck {
+                config: CveCheckConfig::default(),
+            },
+            DeploymentPolicy::RequirePackages {
+                packages: vec!["neovim".to_string()],
+                strict: true,
+            },
+        ];
+
+        let expr = build_nix_eval_expression("github:user/repo", &policies);
+        assert!(expr.contains("hasRequiredPackages_0"));
+        assert!(expr.contains("hasRequiredPackages_1"));
+        assert!(!expr.contains("hasRequiredPackages_2"));
+
+        let policies_json = serde_json::json!({
+            "hasRequiredPackages_0": true,
+            "hasRequiredPackages_1": true,
+        });
+
+        let result =
+            PolicyCheckResult::from_json("campground-host".to_string(), &policies_json, &policies);
+        assert!(result.meets_requirements);
+        assert!(result.failed_policies.is_empty());
     }
 
     #[test]

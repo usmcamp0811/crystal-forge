@@ -6,14 +6,46 @@ use dioxus::prelude::*;
 use crate::theme;
 
 use super::helpers::{
-    BuildAction, BuildItem, BuildStatus, PendingAction, build_status_badge_class,
-    extract_system_name, short_commit,
+    build_status_badge_class, extract_system_name, short_commit, BuildAction, BuildItem,
+    BuildStatus, PendingAction,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DetailTab {
     Logs,
     Details,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CachePushState {
+    Unknown,
+}
+
+impl CachePushState {
+    fn label(self) -> &'static str {
+        match self {
+            CachePushState::Unknown => "unknown",
+        }
+    }
+
+    fn color(self) -> &'static str {
+        match self {
+            CachePushState::Unknown => "var(--cf-text-muted)",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CachePushRow {
+    name: String,
+    state: CachePushState,
+}
+
+fn cache_push_rows(_build: &BuildItem) -> Option<Vec<CachePushRow>> {
+    // Real cache-push data is not yet available from the backend.
+    // Returning None hides the cache-push status section entirely
+    // until per-cache-destination push state is wired (TASK-394 follow-up).
+    None
 }
 
 impl DetailTab {
@@ -72,6 +104,7 @@ pub fn BuildDetailPane(
     let has_drv_progress = build.total_derivs > 0
         && build.built_derivs < build.total_derivs
         && matches!(build.status, BuildStatus::Building | BuildStatus::Stopping);
+    let cache_push_rows = cache_push_rows(&build);
     let derivs_label = if build.total_derivs > 0 {
         format!(
             "{}/{} built · {} cached",
@@ -318,6 +351,37 @@ pub fn BuildDetailPane(
                                     if let Some(ref pkg) = build.current_pkg {
                                         " · "
                                         span { class: "mono", style: "color: #60a5fa;", "building {pkg}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(cache_push_rows) = cache_push_rows.clone() {
+                    section { style: "margin-top: 18px;",
+                        h3 {
+                            style: "font-size: 12px; font-weight: 600; margin: 0 0 8px; color: var(--cf-text-secondary);",
+                            "Cache push status"
+                        }
+                        div { style: "display: flex; flex-direction: column; gap: 6px;",
+                            for cache_row in cache_push_rows {
+                                div {
+                                    key: "{cache_row.name}",
+                                    style: "display: flex; align-items: center; gap: 8px; font-size: 12.5px;",
+                                    span {
+                                        class: "mono",
+                                        style: "opacity: 0.7;",
+                                        "↓"
+                                    }
+                                    span {
+                                        class: "mono",
+                                        style: "flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                                        "{cache_row.name}"
+                                    }
+                                    span {
+                                        class: "mono",
+                                        style: "color: {cache_row.state.color()}; font-size: 11px;",
+                                        "{cache_row.state.label()}"
                                     }
                                 }
                             }

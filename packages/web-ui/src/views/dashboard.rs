@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
-use crate::api::client::{ApiClientError, fetch_hardening_top_services, fetch_systems};
+use crate::api::client::{fetch_hardening_top_services, fetch_systems, ApiClientError};
 use crate::api::models::HardeningTopServiceResponse;
 use crate::api::models::{
     BuildQueueSummary, DeploymentStatus, FlakeTimeline, SystemSummary, SystemsListParams,
@@ -23,6 +23,7 @@ use crate::dashboard::adapter::{
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
+use crate::state::navigation_focus::NavigationFocus;
 use crate::theme;
 use crate::views::hardening::render_top_services_compact;
 
@@ -332,6 +333,7 @@ fn should_persist_widget_positions(positions: &[WidgetPosition]) -> bool {
 #[component]
 pub fn DashboardView() -> Element {
     let nav = navigator();
+    let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
 
     let dashboard = use_signal(empty_dashboard_summary);
     let dashboard_notice = use_signal(|| None::<String>);
@@ -652,7 +654,13 @@ pub fn DashboardView() -> Element {
                                 selected_flake_names: names,
                             });
                         }
-                    }
+                    },
+                    on_open_build: move |focus: NavigationFocus| {
+                        navigation_focus.set(Some(focus));
+                    },
+                    on_open_evaluation: move |focus: NavigationFocus| {
+                        navigation_focus.set(Some(focus));
+                    },
                 }
             },
             "quick-actions" => rsx! {

@@ -6,9 +6,10 @@ use uuid::Uuid;
 use crate::api::client::delete_deployment_policy;
 use crate::components::layout::Card;
 use crate::components::policy::{
-    POLICY_CATEGORIES, PolicyCard, PolicyCategory, PolicyDefinition, PolicyEditorModal,
-    PolicyFormat, is_core_policy, policy_category,
+    is_core_policy, normalized_policy_type, policy_category, PolicyCard, PolicyCategory,
+    PolicyDefinition, PolicyEditorModal, PolicyFormat, POLICY_CATEGORIES,
 };
+use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::theme;
 use crate::views::policies_api;
 
@@ -24,8 +25,10 @@ const POLICY_JSON_TEMPLATE: &str = r#"{
 /// The policies page for global policy management.
 #[component]
 pub fn PoliciesView() -> Element {
+    let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let mut policy_library: Signal<Vec<PolicyDefinition>> = use_signal(Vec::new);
     let mut show_editor = use_signal(|| false);
+    let mut drawer_policy = use_signal(|| None::<PolicyDefinition>);
 
     use_effect(move || {
         spawn(async move {
@@ -43,6 +46,111 @@ pub fn PoliciesView() -> Element {
     let mut category_filter = use_signal(|| "all".to_string());
     let mut type_filter = use_signal(|| "all".to_string());
     let mut delete_confirm: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut focused_policy_name = use_signal(|| None::<String>);
+    let mut policies_loaded = use_signal(|| false);
+    let mut pending_policy_focus = use_signal(|| None::<NavigationFocus>);
+
+    // Track when policies finish loading, so we can retry the focus match.
+    use_effect(move || {
+        let snapshot_empty = policy_library.read().is_empty();
+        if !snapshot_empty && !policies_loaded() {
+            policies_loaded.set(true);
+        }
+        // If there's a pending focus and policies are now loaded, re-fire the focus effect.
+        if policies_loaded() {
+            let pending = pending_policy_focus.read().clone();
+            if let Some(pf) = pending {
+                navigation_focus.set(Some(pf));
+                pending_policy_focus.set(None);
+            }
+        }
+    });
+
+    // Normalize matrix-API identifiers to canonical policy types.  The eval
+    // policy matrix returns internal keys such as "cf.agent_enabled" which do
+    // not match any policy_type, display name, or normalized form.
+    fn canonical_policy_type(name: &str) -> &str {
+        match name {
+            "cf.agent_enabled" => "require_cf_agent",
+            other => other,
+        }
+    }
+
+    use_effect(move || {
+        let Some(focus) = navigation_focus() else {
+            return;
+        };
+        if focus.target != FocusTarget::Policies {
+            return;
+        }
+
+        let Some(raw_name) = focus.policy_name.clone() else {
+            navigation_focus.set(None);
+            return;
+        };
+
+        let policy_name = canonical_policy_type(&raw_name).to_string();
+        let policy_snapshot = policy_library.read();
+        let loaded = policies_loaded();
+        let search_name = policy_name.to_ascii_lowercase();
+        let matched = policy_snapshot.iter().find(|policy| {
+            // Match against display name.
+            if policy.name.eq_ignore_ascii_case(&policy_name)
+                || policy.name.to_ascii_lowercase().contains(&search_name)
+            {
+                return true;
+            }
+            // Match against the policy_type field (e.g. "require_crystal_forge_agent").
+            if let Some(ref pt) = policy.policy_type {
+                if pt.eq_ignore_ascii_case(&policy_name)
+                    || pt.to_ascii_lowercase().contains(&search_name)
+                {
+                    return true;
+                }
+            }
+            // Match against the normalized policy type.
+            if normalized_policy_type(policy)
+                .to_ascii_lowercase()
+                .contains(&search_name)
+            {
+                return true;
+            }
+            false
+        });
+
+        if let Some(policy) = matched {
+            category_filter.set("all".to_string());
+            type_filter.set("all".to_string());
+            search_query.set(String::new());
+            focused_policy_name.set(Some(policy.name.clone()));
+            drawer_policy.set(Some(policy.clone()));
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                let target_name = policy.name.clone();
+                spawn(async move {
+                    gloo_timers::future::TimeoutFuture::new(10).await;
+                    if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+                        let selector = format!(
+                            r#"[data-policy-name=\"{}\"]"#,
+                            target_name.replace('"', "\\\"")
+                        );
+                        if let Ok(Some(element)) = document.query_selector(&selector) {
+                            element.scroll_into_view();
+                        }
+                    }
+                });
+            }
+            navigation_focus.set(None);
+        } else if loaded {
+            // Policies are loaded but no match found — genuinely missing.
+            navigation_focus.set(None);
+        } else {
+            // Policies not yet loaded — save focus and retry after load.
+            pending_policy_focus.set(Some(focus));
+            navigation_focus.set(None);
+        }
+    });
 
     let query = search_query.read().to_lowercase();
     let selected_category = category_filter.read().clone();
@@ -223,6 +331,10 @@ pub fn PoliciesView() -> Element {
                                 PolicyCard {
                                     key: "{policy.id}",
                                     policy: policy.clone(),
+                                    on_open: move |p: PolicyDefinition| {
+                                        drawer_policy.set(Some(p));
+                                    },
+                                    highlighted: focused_policy_name.read().as_ref() == Some(&policy.name),
                                     on_edit: move |p: PolicyDefinition| {
                                         editing_policy_id.set(Some(p.id));
                                         edit_name.set(p.name.clone());
@@ -253,6 +365,22 @@ pub fn PoliciesView() -> Element {
                 }
             }
 
+            if let Some(policy) = drawer_policy.read().clone() {
+                PolicyDrawer {
+                    policy,
+                    on_close: move |_| drawer_policy.set(None),
+                    on_edit: move |policy: PolicyDefinition| {
+                        drawer_policy.set(None);
+                        editing_policy_id.set(Some(policy.id));
+                        edit_name.set(policy.name.clone());
+                        edit_description.set(policy.description.clone());
+                        edit_body.set(policy.body.clone());
+                        edit_format.set(policy.format);
+                        show_editor.set(true);
+                    },
+                }
+            }
+
             if let Some(id) = *delete_confirm.read() {
                 DeleteConfirmModal {
                     policy_id: id,
@@ -274,6 +402,99 @@ pub fn PoliciesView() -> Element {
                         });
                     },
                     on_cancel: move |_| delete_confirm.set(None),
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn PolicyDrawer(
+    policy: PolicyDefinition,
+    on_close: EventHandler<MouseEvent>,
+    on_edit: EventHandler<PolicyDefinition>,
+) -> Element {
+    let category = policy_category(&policy);
+    let rules = crate::components::policy::policy_rule_summaries(&policy);
+    let is_core = is_core_policy(&policy);
+    let policy_for_edit = policy.clone();
+
+    rsx! {
+        div {
+            class: "fl-tray-backdrop",
+            onclick: move |evt| on_close.call(evt),
+        }
+        aside {
+            class: "fl-tray",
+            role: "dialog",
+            "aria-label": "Policy detail",
+            header {
+                class: "fl-tray-head",
+                div {
+                    style: "display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;",
+                    div { style: "min-width: 0;",
+                        div {
+                            style: "display: flex; align-items: center; gap: 8px; flex-wrap: wrap;",
+                            span { class: "mono", style: "font-weight: 700; font-size: 15px;", "{policy.name}" }
+                            span {
+                                class: "chip",
+                                style: "color: {category.color()}; background: color-mix(in oklab, {category.color()} 14%, transparent);",
+                                "{category.label()}"
+                            }
+                            if is_core {
+                                span { class: "chip chip-info", "built-in" }
+                            } else {
+                                span { class: "chip chip-healthy", "custom" }
+                            }
+                        }
+                        div {
+                            style: "font-size: 12px; color: var(--cf-text-muted); margin-top: 4px;",
+                            "{policy.description}"
+                        }
+                    }
+                }
+                div { style: "display: flex; gap: 6px; align-items: center;",
+                    if !is_core {
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| on_edit.call(policy_for_edit.clone()),
+                            "Edit"
+                        }
+                    }
+                    button {
+                        class: "btn-icon focus-ring",
+                        onclick: move |evt| on_close.call(evt),
+                        title: "Close",
+                        crate::components::icon::Icon { name: crate::components::icon::IconName::X, size: 16 }
+                    }
+                }
+            }
+            div {
+                class: "ed-body",
+                div { style: "display: flex; flex-direction: column; gap: 16px;",
+                    div {
+                        h3 { style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 8px;", "Rules" }
+                        if rules.is_empty() {
+                            div { style: "font-size: 12px; color: var(--cf-text-muted);", "No automated rules — operator approves directly." }
+                        } else {
+                            div { style: "display: flex; flex-direction: column; gap: 8px;",
+                                for rule in rules {
+                                    div {
+                                        style: "font-size: 12px; color: var(--cf-text-primary);",
+                                        "{rule.label}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div {
+                        h3 { style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 8px;", "Definition" }
+                        pre {
+                            class: "mono",
+                            style: "margin: 0; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; padding: 12px; border-radius: 8px; background: var(--cf-subtle-bg);",
+                            "{policy.body}"
+                        }
+                    }
                 }
             }
         }
