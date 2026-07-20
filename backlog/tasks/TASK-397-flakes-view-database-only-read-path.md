@@ -1,10 +1,10 @@
 ---
 id: TASK-397
 title: Make the Flakes view fast with a database-only read path and lazy commit history
-status: Backlog
+status: Review
 assignee: []
 created_date: '2026-07-20 00:00'
-updated_date: '2026-07-20 00:00'
+updated_date: '2026-07-20 12:00'
 labels:
   - backend
   - frontend
@@ -487,5 +487,52 @@ Keep this task in `Backlog` until a human selects it for a sprint. Once selected
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-<!-- Add implementation decisions, measurements, verification results, commit IDs, and MR link here during execution. -->
+LOCK: opencode-agent on reckless in /home/mcamp/code/crystal-forge/TASK-397-flakes-view-database-only-read-path
+
+Branch: TASK-397-flakes-view-database-only-read-path (from dev @ 40680403)
+
+### Implementation decisions
+
+**Snapshot build strategy**: After successful sync, rebuild snapshot from
+`SELECT id, commit_timestamp FROM commits WHERE flake_id=$1 ORDER BY commit_timestamp DESC, id DESC LIMIT 500`
+rather than threading Git log results through the call stack. This is correct
+for all supported sync flows:
+- Normal progression: timestamp order matches git log order
+- Force-push acceptance: `purge_flake_commit_history` deletes all old commits
+  before re-sync, so DB ordering is always correct after acceptance
+
+**last_accessed_at removal**: Removed synchronous UPDATE of
+`commit_metadata_cache.last_accessed_at` from both timeline query functions.
+The column is not used for correctness, GC policy, or any downstream decision.
+
+**Registry enrichment**: Uses LATERAL joins (one per concern: snapshot latest,
+fallback latest, build status, environments, snapshot count, all-count).
+Choosing LATERAL over correlated subqueries because it allows sharing
+snap_latest.id between the build status join and the COALESCE expressions.
+
+**UI fallback removal**: The tray timeline resource previously fell back to
+`fetch_flake_timelines()` (all timelines) when the single-flake fetch failed
+or returned no results. This fallback is now removed — a failed tray fetch
+surfaces a tray-local error state instead.
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/306
+
+### Commits
+- a98dbf87  Step 2: migration, models, snapshot queries
+- 91aa7b64  Step 3: atomic snapshot rebuild on sync
+- c063cd7f  Step 4+6: database-only timeline reads with snapshot ordering
+- 3cb318fe  Step 5: enriched registry response
+- c185d909  Step 8: remove synchronous cache writes
+- 7a931dc4  Step 9: UI lazy tray fetching
+- 1886cd75  Step 10: observability tracing + cargo fmt
+
+### Verification (local)
+- SQLX_OFFLINE=true cargo check (server): PASS
+- SQLX_OFFLINE=true cargo check (web-ui): PASS
+- cargo fmt --check (server): PASS
+- cargo fmt --check (web-ui): PASS
+
+Before/after measurements and SQL EXPLAIN plans require a running dev DB
+with representative data — to be captured after deployment to dev server.
+
 <!-- SECTION:NOTES:END -->
