@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use cf_agent::deployment::agent::{AgentDeploymentManager, DeploymentResult, readlink_path};
+use cf_agent::system_state::gather_system_state;
 use cf_config::config::CrystalForgeConfig;
 use cf_protocol::agent::{LogResponse, SystemState};
 use ed25519_dalek::{Signer, SigningKey};
@@ -162,7 +163,7 @@ fn create_signed_payload(
     let hostname = hostname::get()?.to_string_lossy().into_owned();
 
     let current_system_str = current_system.to_string_lossy();
-    let payload = SystemState::gather(&hostname, context, current_system_str.as_ref())?;
+    let payload = gather_system_state(&hostname, context, current_system_str.as_ref())?;
     let payload_json = serde_json::to_string(&payload)?;
 
     let key_bytes = STANDARD

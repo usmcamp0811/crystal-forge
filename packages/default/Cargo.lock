@@ -413,6 +413,7 @@ dependencies = [
  "base64 0.21.7",
  "cf-config",
  "cf-protocol",
+ "chrono",
  "ed25519-dalek",
  "hostname",
  "nix",
@@ -490,16 +491,9 @@ dependencies = [
 name = "cf-protocol"
 version = "0.3.0"
 dependencies = [
- "anyhow",
- "base64 0.21.7",
  "chrono",
- "ed25519-dalek",
- "hex",
  "serde",
  "serde_json",
- "sha2",
- "sysinfo",
- "tracing",
  "uuid",
 ]
 

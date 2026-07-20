@@ -1,7 +1,4 @@
-//! Network interface inspection utilities for agent system state gathering.
-//!
-//! These functions are used by `SystemState::gather()` to collect host network
-//! identity information. They have no server-side dependencies.
+//! Linux network inspection used by agent heartbeat collection.
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -26,7 +23,7 @@ struct NetworkInterface {
     ip_addresses: Vec<String>,
 }
 
-pub fn get_network_interfaces() -> Result<String> {
+pub(crate) fn get_network_interfaces() -> Result<String> {
     let output = Command::new("ip")
         .arg("-j")
         .arg("address")
@@ -46,91 +43,70 @@ pub fn get_network_interfaces() -> Result<String> {
     Ok(serde_json::to_string(&interfaces)?)
 }
 
-pub fn get_primary_mac() -> Result<String> {
+fn default_interface() -> Result<String> {
     let output = Command::new("ip")
         .arg("route")
         .output()
         .map_err(|e| anyhow!("Failed to run ip route: {:?}", e))?;
-
     let route = str::from_utf8(&output.stdout)?;
-    let iface = route
-        .lines()
-        .find(|l| l.contains("default"))
-        .and_then(|l| {
-            l.split_whitespace().find(|w| *w == "dev").and_then(|_| {
-                let parts: Vec<&str> = l.split_whitespace().collect();
-                parts
-                    .get(parts.iter().position(|&w| w == "dev")? + 1)
-                    .copied()
-            })
-        })
-        .ok_or_else(|| anyhow!("Could not determine default interface"))?;
 
+    route
+        .lines()
+        .find(|line| line.contains("default"))
+        .and_then(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            parts
+                .iter()
+                .position(|part| *part == "dev")
+                .and_then(|index| parts.get(index + 1))
+                .map(|interface| (*interface).to_string())
+        })
+        .ok_or_else(|| anyhow!("Could not determine default interface"))
+}
+
+pub(crate) fn get_primary_mac() -> Result<String> {
+    let interface = default_interface()?;
     let output = Command::new("cat")
-        .arg(format!("/sys/class/net/{iface}/address"))
+        .arg(format!("/sys/class/net/{interface}/address"))
         .output()
         .map_err(|e| anyhow!("Failed to read MAC: {:?}", e))?;
 
     Ok(str::from_utf8(&output.stdout)?.trim().to_string())
 }
 
-pub fn get_primary_ip() -> Result<String> {
+pub(crate) fn get_primary_ip() -> Result<String> {
+    let interface = default_interface()?;
     let output = Command::new("ip")
-        .arg("route")
-        .output()
-        .map_err(|e| anyhow!("Failed to run ip route: {:?}", e))?;
-
-    let route = str::from_utf8(&output.stdout)?;
-    let iface = route
-        .lines()
-        .find(|l| l.contains("default"))
-        .and_then(|l| {
-            l.split_whitespace().find(|w| *w == "dev").and_then(|_| {
-                let parts: Vec<&str> = l.split_whitespace().collect();
-                parts
-                    .get(parts.iter().position(|&w| w == "dev")? + 1)
-                    .copied()
-            })
-        })
-        .ok_or_else(|| anyhow!("Could not determine default interface"))?;
-
-    let output = Command::new("ip")
-        .arg("-f")
-        .arg("inet")
-        .arg("addr")
-        .arg("show")
-        .arg(iface)
+        .args(["-f", "inet", "addr", "show", &interface])
         .output()
         .map_err(|e| anyhow!("Failed to get IP address: {:?}", e))?;
 
     let stdout = str::from_utf8(&output.stdout)?;
-    let ip = stdout
+    stdout
         .lines()
         .find(|line| line.trim_start().starts_with("inet "))
         .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|s| s.split('/').next())
-        .ok_or_else(|| anyhow!("Could not extract IP address"))?;
-
-    Ok(ip.to_string())
+        .and_then(|address| address.split('/').next())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow!("Could not extract IP address"))
 }
 
-pub fn get_gateway_ip() -> Result<String> {
+pub(crate) fn get_gateway_ip() -> Result<String> {
     let output = Command::new("ip")
         .arg("route")
         .output()
         .map_err(|e| anyhow!("Failed to run ip route: {:?}", e))?;
-
     let stdout = str::from_utf8(&output.stdout)?;
-    let ip = stdout
-        .lines()
-        .find(|l| l.contains("default"))
-        .and_then(|l| l.split_whitespace().nth(2))
-        .ok_or_else(|| anyhow!("Could not find gateway IP"))?;
 
-    Ok(ip.to_string())
+    stdout
+        .lines()
+        .find(|line| line.contains("default"))
+        .and_then(|line| line.split_whitespace().nth(2))
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow!("Could not find gateway IP"))
 }
 
-pub fn get_selinux_status() -> Result<String> {
+pub(crate) fn get_selinux_status() -> Result<String> {
     let output = Command::new("getenforce")
         .output()
         .map_err(|e| anyhow!("Failed to run getenforce: {:?}", e))?;

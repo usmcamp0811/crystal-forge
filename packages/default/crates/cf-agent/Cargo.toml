@@ -9,6 +9,7 @@ cf-config = { path = "../cf-config" }
 cf-protocol = { path = "../cf-protocol" }
 anyhow = "1.0.98"
 base64 = "0.21"
+chrono = { version = "0.4.41", features = ["serde"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 nix = { version = "0.30.1", default-features = false, features = ["inotify", "fs", "user"] }
 rand = "0.8"

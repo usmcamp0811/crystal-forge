@@ -15,4 +15,3 @@
 pub mod agent;
 pub mod builder;
 pub mod cache;
-pub(crate) mod network;
