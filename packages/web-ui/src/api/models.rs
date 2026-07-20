@@ -1487,6 +1487,8 @@ pub struct EvalPolicyMatrixResponse {
 pub struct EvalPolicySystemRow {
     pub system_name: String,
     pub results: Vec<String>,
+    #[serde(default)]
+    pub details: Vec<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

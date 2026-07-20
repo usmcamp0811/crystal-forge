@@ -1926,6 +1926,7 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                     struct AnnotatedRow {
                         system_name: String,
                         results: Vec<String>,
+                        details: Vec<Option<String>>,
                         fail: usize,
                         warn: usize,
                         pass: usize,
@@ -1938,6 +1939,7 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                         AnnotatedRow {
                             system_name: r.system_name.clone(),
                             results: r.results.clone(),
+                            details: r.details.clone(),
                             fail,
                             warn,
                             pass,
@@ -2220,68 +2222,75 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                                                                               let glyph = cell_glyph(result);
                                                                               let card_key = format!("{}::{}", row.system_name, res_idx);
                                                                               let is_open = open_cause.read().as_ref() == Some(&card_key);
-                                                                              let fallback_desc = if *result == "fail" {
-                                                                                  "Blocks deployment until resolved"
-                                                                              } else {
-                                                                                  "Soft warning — deploy will proceed"
-                                                                              };
-                                                                              rsx! {
-                                                                                  div {
-                                                                                      key: "{res_idx}",
-                                                                                      style: "border: 1px solid var(--cf-divider); border-radius: 8px; overflow: hidden;",
-                                                                                      div {
-                                                                                          class: "{failcard_class} focus-ring",
-                                                                                          style: "cursor: pointer; border: none; border-radius: 0;",
-                                                                                          onclick: {
-                                                                                              let mut open_cause = open_cause.clone();
-                                                                                              let key = card_key.clone();
-                                                                                              move |e: MouseEvent| {
-                                                                                                  e.stop_propagation();
-                                                                                                  if open_cause.read().as_ref() == Some(&key) {
-                                                                                                      open_cause.set(None);
-                                                                                                  } else {
-                                                                                                      open_cause.set(Some(key.clone()));
-                                                                                                  }
-                                                                                              }
-                                                                                          },
-                                                                                          span { class: "pm-failcard-glyph pm-{result}", "{glyph}" }
-                                                                                          div { style: "min-width: 0; text-align: left;",
-                                                                                              div { class: "mono", style: "font-weight: 600; font-size: 12px;", "{policy_name}" }
-                                                                                              div {
-                                                                                                  style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 2px;",
-                                                                                                  "{fallback_desc}"
-                                                                                              }
-                                                                                          }
-                                                                                          Icon {
-                                                                                              name: if is_open { IconName::ChevronDown } else { IconName::ChevronRight },
-                                                                                              size: 12,
-                                                                                          }
-                                                                                      }
-                                                                                      if is_open {
-                                                                                          div {
-                                                                                              style: "padding: 10px 12px; background: var(--cf-canvas); border-top: 1px solid var(--cf-divider);",
-                                                                                              div {
-                                                                                                  style: "font-size: 12px; color: var(--cf-text-secondary); line-height: 1.5;",
-                                                                                                  "Detailed evaluation evidence is unavailable from the current API for this policy result."
-                                                                                              }
-                                                                                              button {
-                                                                                                  class: "btn btn-ghost focus-ring xs",
-                                                                                                  style: "margin-top: 8px;",
-                                                                                                  onclick: {
-                                                                                                      let policy_name = policy_name.to_string();
-                                                                                                      move |e: MouseEvent| {
-                                                                                                          e.stop_propagation();
-                                                                                                          on_open_policy.call(policy_name.clone());
-                                                                                                      }
-                                                                                                  },
-                                                                                                  Icon { name: IconName::File, size: 11 }
-                                                                                                  " View policy definition"
-                                                                                              }
-                                                                                          }
-                                                                                      }
-                                                                                  }
-                                                                              }
-                                                                          })}
+                                                                               let fallback_desc = if *result == "fail" {
+                                                                                   "Blocks deployment until resolved"
+                                                                               } else {
+                                                                                   "Soft warning — deploy will proceed"
+                                                                               };
+                                                                               let evidence_text = row
+                                                                                   .details
+                                                                                   .get(res_idx)
+                                                                                   .and_then(|d| d.as_deref());
+                                                                               rsx! {
+                                                                                   div {
+                                                                                       key: "{res_idx}",
+                                                                                       style: "border: 1px solid var(--cf-divider); border-radius: 8px; overflow: hidden;",
+                                                                                       div {
+                                                                                           class: "{failcard_class} focus-ring",
+                                                                                           style: "cursor: pointer; border: none; border-radius: 0;",
+                                                                                           onclick: {
+                                                                                               let mut open_cause = open_cause.clone();
+                                                                                               let key = card_key.clone();
+                                                                                               move |e: MouseEvent| {
+                                                                                                   e.stop_propagation();
+                                                                                                   if open_cause.read().as_ref() == Some(&key) {
+                                                                                                       open_cause.set(None);
+                                                                                                   } else {
+                                                                                                       open_cause.set(Some(key.clone()));
+                                                                                                   }
+                                                                                               }
+                                                                                           },
+                                                                                           span { class: "pm-failcard-glyph pm-{result}", "{glyph}" }
+                                                                                           div { style: "min-width: 0; text-align: left;",
+                                                                                               div { class: "mono", style: "font-weight: 600; font-size: 12px;", "{policy_name}" }
+                                                                                               div {
+                                                                                                   style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 2px;",
+                                                                                                   "{fallback_desc}"
+                                                                                               }
+                                                                                           }
+                                                                                           Icon {
+                                                                                               name: if is_open { IconName::ChevronDown } else { IconName::ChevronRight },
+                                                                                               size: 12,
+                                                                                           }
+                                                                                       }
+                                                                                       if is_open {
+                                                                                           div {
+                                                                                               style: "padding: 10px 12px; background: var(--cf-canvas); border-top: 1px solid var(--cf-divider);",
+                                                                                               if let Some(evidence) = evidence_text {
+                                                                                                   div {
+                                                                                                       style: "font-size: 12px; color: var(--cf-text-secondary); line-height: 1.5;",
+                                                                                                       "{evidence}"
+                                                                                                   }
+                                                                                               }
+                                                                                               button {
+                                                                                                   class: "btn btn-ghost focus-ring xs",
+                                                                                                   style: "margin-top: 8px;",
+                                                                                                   onclick: {
+                                                                                                       let policy_name = policy_name.to_string();
+                                                                                                       move |e: MouseEvent| {
+                                                                                                           e.stop_propagation();
+                                                                                                           on_open_policy.call(policy_name.clone());
+                                                                                                       }
+                                                                                                   },
+                                                                                                   Icon { name: IconName::File, size: 11 }
+                                                                                                   " View policy definition"
+                                                                                               }
+                                                                                           }
+                                                                                       }
+                                                                                   }
+                                                                               }
+                                                                           })}
+
                                                                         if row.fail == 0 && row.warn == 0 {
                                                                             div { style: "font-size: 12px; color: #34d399; display: flex; align-items: center; gap: 8px;",
                                                                                 Icon { name: IconName::Check, size: 14 }
