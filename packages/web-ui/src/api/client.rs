@@ -1237,30 +1237,21 @@ pub async fn get_navigation_badges() -> Result<NavigationBadges, ApiClientError>
 pub async fn acknowledge_navigation_category(
     category: &str,
     observed_at: &str,
-    current_count: i64,
-    fingerprint: Option<&str>,
-    alert_ids: Option<&[String]>,
-) -> Result<(), ApiClientError> {
+    occurrence_ids: &[String],
+) -> Result<NavigationBadges, ApiClientError> {
     #[derive(serde::Serialize)]
     struct AcknowledgeRequest<'a> {
         category: &'a str,
         observed_at: &'a str,
-        current_count: i64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        fingerprint: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        alert_ids: Option<&'a [String]>,
+        occurrence_ids: &'a [String],
     }
     let url = format!("{}/navigation/acknowledge", base_url());
     let body = AcknowledgeRequest {
         category,
         observed_at,
-        current_count,
-        fingerprint,
-        alert_ids,
+        occurrence_ids,
     };
-    let _: serde_json::Value = send_json_with_csrf("POST", &url, Some(&body)).await?;
-    Ok(())
+    send_json_with_csrf("POST", &url, Some(&body)).await
 }
 
 /// Fetch the git diff for a specific commit in a flake.

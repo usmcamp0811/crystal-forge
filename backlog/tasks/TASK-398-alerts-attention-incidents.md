@@ -550,5 +550,10 @@ Keep this task in `Backlog` until a human selects it for a sprint. Once selected
   - `complete_job_atomic` resolves the `builds`/`build_job` occurrence.
 - Verified: `SQLX_OFFLINE=true nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server --all-targets` passes.
 - Verified: `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server attention` passes.
-- Next: rewrite `fetch_navigation_badges` and the dismissal endpoint to use the canonical occurrence model.
+- Verified: `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server navigation` passes (DB tests ignored, no compile errors).
+- Rewrote `fetch_navigation_badges` to use canonical occurrences via `attention::count_attention_for_user` and `attention::list_eligible_occurrence_keys`.
+- Rewrote `POST /api/v1/navigation/acknowledge` to dismiss exact server occurrence IDs and return refreshed `NavigationBadges`.
+- Added per-category `*_occurrence_ids` vectors to `NavigationBadges`.
+- Pushed commit `9f9f8250` to branch `TASK-398-alerts-attention-incidents`.
+- Next: update web UI to use server occurrence IDs and the new acknowledge response, then wire remaining category producers (flakes, systems, environments, CVEs).
 <!-- SECTION:NOTES:END -->
