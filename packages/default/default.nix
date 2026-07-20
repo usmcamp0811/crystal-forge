@@ -8,32 +8,134 @@ let
   serverCargoToml = builtins.fromTOML (builtins.readFile (src + "/crates/cf-server/Cargo.toml"));
   version = serverCargoToml.package.version;
   migrationsDir = ./crates/cf-server/migrations;
+
+  # Common Rust build infrastructure
+  commonBuildInputs = with pkgs; [
+    pkg-config
+    openssl
+    libressl
+  ];
+  commonNativeBuildInputs = with pkgs; [ pkg-config ];
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Server derivation — builds cf-server with embedded-ui
+  # ─────────────────────────────────────────────────────────────────────────
+  cf-server-drv = pkgs.rustPlatform.buildRustPackage rec {
+    inherit src version;
+    pname = "cf-server";
+    cargoLock = { lockFile = ./Cargo.lock; };
+    cargoBuildFlags = [ "--package" "cf-server" "--features" "cf-server/embedded-ui" ];
+    CRYSTAL_FORGE_UI_DIST = "${pkgs.crystal-forge.web-ui}/public";
+
+    nativeBuildInputs = commonNativeBuildInputs ++ (with pkgs; [ sqlx-cli ]);
+    buildInputs = commonBuildInputs;
+
+    # Runtime dependencies
+    runtimeDeps = with pkgs; [
+      util-linux # findmnt, blkid
+      zfs        # optional
+      vulnix
+    ];
+
+    preBuild = ''
+      export SRC_HASH="${lib.strings.removeSuffix "\n" srcHash}"
+    '';
+
+    meta = with lib; {
+      description = "Crystal Forge server";
+      license = licenses.agpl3Only;
+      platforms = platforms.all;
+    };
+  };
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Agent derivation — builds cf-agent only
+  # Does NOT compile cf-server, cf-builder, or server-only dependencies.
+  # ─────────────────────────────────────────────────────────────────────────
+  cf-agent-drv = pkgs.rustPlatform.buildRustPackage rec {
+    inherit src version;
+    pname = "cf-agent";
+    cargoLock = { lockFile = ./Cargo.lock; };
+    cargoBuildFlags = [ "--package" "cf-agent" ];
+
+    nativeBuildInputs = commonNativeBuildInputs;
+    buildInputs = commonBuildInputs;
+
+    preBuild = ''
+      export SRC_HASH="${lib.strings.removeSuffix "\n" srcHash}"
+    '';
+
+    meta = with lib; {
+      description = "Crystal Forge deployment agent";
+      license = licenses.agpl3Only;
+      platforms = platforms.all;
+    };
+  };
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Builder derivation — builds cf-builder only
+  # Does NOT compile cf-server or cf-agent packages.
+  # ─────────────────────────────────────────────────────────────────────────
+  cf-builder-drv = pkgs.rustPlatform.buildRustPackage rec {
+    inherit src version;
+    pname = "cf-builder";
+    cargoLock = { lockFile = ./Cargo.lock; };
+    cargoBuildFlags = [ "--package" "cf-builder" ];
+
+    nativeBuildInputs = commonNativeBuildInputs;
+    buildInputs = commonBuildInputs;
+
+    preBuild = ''
+      export SRC_HASH="${lib.strings.removeSuffix "\n" srcHash}"
+    '';
+
+    meta = with lib; {
+      description = "Crystal Forge remote build worker";
+      license = licenses.agpl3Only;
+      platforms = platforms.all;
+    };
+  };
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Key generation utility — builds cf-keygen only
+  # ─────────────────────────────────────────────────────────────────────────
+  cf-keygen-drv = pkgs.rustPlatform.buildRustPackage rec {
+    inherit src version;
+    pname = "cf-keygen";
+    cargoLock = { lockFile = ./Cargo.lock; };
+    cargoBuildFlags = [ "--package" "cf-keygen" ];
+
+    nativeBuildInputs = commonNativeBuildInputs;
+    buildInputs = commonBuildInputs;
+
+    meta = with lib; {
+      description = "Crystal Forge key generation utility";
+      license = licenses.agpl3Only;
+      platforms = platforms.all;
+    };
+  };
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Legacy monolithic build for backward compatibility.
+  # Used by existing NixOS modules, test infrastructure, and CI that
+  # reference pkgs.crystal-forge.default.
+  # ─────────────────────────────────────────────────────────────────────────
   crystal-forge = pkgs.rustPlatform.buildRustPackage rec {
     inherit src version;
     pname = "crystal-forge";
     cargoLock = { lockFile = ./Cargo.lock; };
-    cargoBuildFlags = [ "--features" "embedded-ui" ];
+    cargoBuildFlags = [ "--features" "cf-server/embedded-ui" ];
     CRYSTAL_FORGE_UI_DIST = "${pkgs.crystal-forge.web-ui}/public";
 
-    # Ensure all dependencies are included
-    nativeBuildInputs = with pkgs; [ pkg-config ];
-    buildInputs = [
-      pkgs.rustc
-      pkgs.cargo
-      pkgs.pkg-config
-      pkgs.openssl
-      pkgs.sqlx-cli
-      pkgs.libressl
-    ];
+    nativeBuildInputs = commonNativeBuildInputs ++ (with pkgs; [ sqlx-cli ]);
+    buildInputs = commonBuildInputs;
 
-    # Runtime dependencies that need to be in PATH
     runtimeDeps = with pkgs; [
-      util-linux # findmnt, blkid
-      zfs # zfs command (optional)
+      util-linux
+      zfs
       vulnix
     ];
 
-    # Set the GIT_HASH environment variable during build
     preBuild = ''
       export SRC_HASH="${lib.strings.removeSuffix "\n" srcHash}"
     '';
@@ -44,15 +146,15 @@ let
       platforms = platforms.all;
     };
   };
-  # data-only output with your .sql files staged in a stable path
+
+  # data-only output with migration SQL files
   crystal-forge-migrations = pkgs.runCommand "crystal-forge-migrations" { } ''
     set -euo pipefail
     mkdir -p $out/share/crystal-forge/migrations
     cp -v ${migrationsDir}/*.sql $out/share/crystal-forge/migrations/
   '';
 
-  # standalone CLI app to apply migrations (no inline in installPhase)
-
+  # standalone CLI app to apply migrations
   migrate = pkgs.writeShellApplication {
     name = "crystal-forge-migrate";
     runtimeInputs = [ pkgs.postgresql pkgs.coreutils pkgs.findutils pkgs.gawk ];
@@ -86,17 +188,20 @@ let
     '';
   };
 
+  # Component output derivations
+  # These extract specific binaries from the dedicated component builds.
+
   agent = pkgs.stdenv.mkDerivation {
     pname = "agent";
-    version = pkgs.crystal-forge.default.version;
-    src = pkgs.crystal-forge.default;
+    inherit version;
+    src = cf-agent-drv;
     installPhase = ''
       mkdir -p $out/bin
-      cp ${crystal-forge}/bin/agent $out/bin/agent
-      cp ${crystal-forge}/bin/cf-keygen $out/bin/cf-keygen
+      cp ${cf-agent-drv}/bin/agent $out/bin/agent
+      cp ${cf-keygen-drv}/bin/cf-keygen $out/bin/cf-keygen
     '';
     meta = with lib; {
-      description = "Crystal Forge";
+      description = "Crystal Forge deployment agent";
       license = licenses.agpl3Only;
       platforms = platforms.all;
     };
@@ -104,32 +209,38 @@ let
 
   server = pkgs.stdenv.mkDerivation {
     pname = "server";
-    version = pkgs.crystal-forge.default.version;
-    src = pkgs.crystal-forge.default;
+    inherit version;
+    src = cf-server-drv;
     installPhase = ''
       mkdir -p $out/bin
-      cp ${pkgs.crystal-forge.default}/bin/server $out/bin/server
-      cp ${pkgs.crystal-forge.default}/bin/cf-keygen $out/bin/cf-keygen
-      cp ${pkgs.crystal-forge.default}/bin/builder $out/bin/builder
+      cp ${cf-server-drv}/bin/server $out/bin/server
+      cp ${cf-server-drv}/bin/test-agent $out/bin/test-agent
+      cp ${cf-keygen-drv}/bin/cf-keygen $out/bin/cf-keygen
+      cp ${cf-builder-drv}/bin/builder $out/bin/builder
     '';
     meta = with lib; {
-      description = "Crystal Forge";
+      description = "Crystal Forge server";
       license = licenses.agpl3Only;
       platforms = platforms.all;
     };
   };
+
   cf-keygen = pkgs.writeShellApplication {
     name = "cf-keygen";
-    text = ''${crystal-forge}/bin/cf-keygen "$@"'';
+    text = ''${cf-keygen-drv}/bin/cf-keygen "$@"'';
   };
+
   test-agent = pkgs.writeShellApplication {
     name = "test-agent";
-    text = ''${crystal-forge}/bin/test-agent "$@"'';
+    text = ''${cf-server-drv}/bin/test-agent "$@"'';
   };
+
   builder = pkgs.writeShellApplication {
     name = "builder";
-    text = ''${crystal-forge}/bin/builder "$@"'';
+    text = ''${cf-builder-drv}/bin/builder "$@"'';
   };
+
 in crystal-forge // {
   inherit agent server builder cf-keygen test-agent srcHash migrate;
+  inherit cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv;
 }
