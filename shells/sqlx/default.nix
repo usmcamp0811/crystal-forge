@@ -15,6 +15,7 @@ with lib.crystal-forge;
       pkg-config
       openssl
       fzf
+      postgresql
       sqlx-cli
     ];
 

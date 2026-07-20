@@ -358,3 +358,22 @@ web-ui-screenshots-mr-comment:
     - flake-check
   only:
     - merge_requests
+
+# Runs the CVE scan loop processing test (scan_cycle_processes_target_with_fake_runner)
+# via the repo-owned `devScripts.cve-test` process-compose project. That target
+# starts the DB service, waits for health, runs migrations + the targeted test,
+# and then shuts itself down so `up --tui=false` exits cleanly.
+cve-processing-test:
+  stage: check
+  tags:
+    - nix
+  before_script:
+    - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
+    - echo "login gitlab-ci-token" >> ~/.netrc
+    - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
+    - chmod 600 ~/.netrc
+  script:
+    - nix run .#devScripts.cve-test -- up --tui=false
+  only:
+    - merge_requests
+    - main

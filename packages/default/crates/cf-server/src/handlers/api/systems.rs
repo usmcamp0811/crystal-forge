@@ -2534,6 +2534,7 @@ mod tests {
             pool,
             ServerConfig::default(),
             Arc::new(QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
         )
     }
 

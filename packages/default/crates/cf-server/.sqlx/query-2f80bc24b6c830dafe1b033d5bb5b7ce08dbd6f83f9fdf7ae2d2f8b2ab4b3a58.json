@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE cve_scans\n            SET status = 'completed',\n                completed_at = NOW() - '48 hours'::INTERVAL,\n                created_at = NOW() - '48 hours'::INTERVAL\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2f80bc24b6c830dafe1b033d5bb5b7ce08dbd6f83f9fdf7ae2d2f8b2ab4b3a58"
+}

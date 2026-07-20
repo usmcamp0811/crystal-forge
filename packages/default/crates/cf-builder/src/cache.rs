@@ -37,6 +37,7 @@ pub fn builder_cache_to_config(
         s3_endpoint_url: push.s3_endpoint_url.clone(),
         attic_token: push.attic_token.clone(),
         attic_cache_name: push.attic_cache_name.clone(),
+        attic_public_key: push.attic_public_key.clone(),
         attic_ignore_upstream_cache_filter: push.attic_ignore_upstream_cache_filter,
         attic_jobs: if push.attic_jobs == 0 {
             fallback.attic_jobs

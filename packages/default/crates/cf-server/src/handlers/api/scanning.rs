@@ -225,6 +225,47 @@ pub async fn get_scanning_schedule(
     }
 }
 
+/// Validate that a scan interval string is a known, safe value.
+/// Accepts `never` or a positive integer followed by `h` (hours) or `d` (days).
+fn validate_scan_interval(
+    val: &str,
+    label: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if val == "never" {
+        return Ok(());
+    }
+    let trimmed = val.trim();
+    if trimmed.len() < 2 || (!trimmed.ends_with('h') && !trimmed.ends_with('d')) {
+        return Err(validation_error(format!(
+            "Invalid {label} interval {val:?}: must be 'never' or a number followed by 'h' or 'd' (e.g. '24h', '7d')"
+        )));
+    }
+    let (num_str, unit) = trimmed.split_at(trimmed.len() - 1);
+    let num: u32 = num_str.parse().map_err(|_| {
+        validation_error(format!(
+            "Invalid {label} interval {val:?}: could not parse number from '{num_str}'"
+        ))
+    })?;
+    if num == 0 {
+        return Err(validation_error(format!(
+            "Invalid {label} interval {val:?}: interval must be > 0"
+        )));
+    }
+    match unit {
+        "h" | "d" => Ok(()),
+        _ => Err(validation_error(format!(
+            "Invalid {label} interval {val:?}: unit must be 'h' or 'd'"
+        ))),
+    }
+}
+
+fn validation_error(msg: String) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": msg })),
+    )
+}
+
 pub async fn put_scanning_schedule(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -232,6 +273,17 @@ pub async fn put_scanning_schedule(
 ) -> impl IntoResponse {
     if require_admin(&pool, &headers).await.is_none() {
         return forbidden_admin();
+    }
+
+    // Validate interval values before writing to the database.
+    if let Err(e) = validate_scan_interval(&payload.deployed_interval, "deployed_interval") {
+        return e.into_response();
+    }
+    if let Err(e) = validate_scan_interval(&payload.recent_interval, "recent_interval") {
+        return e.into_response();
+    }
+    if let Err(e) = validate_scan_interval(&payload.archived_interval, "archived_interval") {
+        return e.into_response();
     }
 
     let row = ScanSchedulePolicyRow {

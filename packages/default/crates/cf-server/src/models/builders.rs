@@ -90,6 +90,7 @@ impl BuilderCachePushConfigExt for BuilderCachePushConfig {
             s3_endpoint_url: self.s3_endpoint_url.clone(),
             attic_token: self.attic_token.clone(),
             attic_cache_name: self.attic_cache_name.clone(),
+            attic_public_key: self.attic_public_key.clone(),
             attic_ignore_upstream_cache_filter: self.attic_ignore_upstream_cache_filter,
             attic_jobs: if self.attic_jobs == 0 {
                 local_fallback.attic_jobs

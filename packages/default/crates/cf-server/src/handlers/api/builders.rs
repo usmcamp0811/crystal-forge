@@ -356,6 +356,7 @@ fn builder_cache_push_config_from_destination(
         s3_endpoint_url: destination.s3_endpoint_url.clone(),
         attic_token: destination.attic_token.clone(),
         attic_cache_name: destination.attic_cache_name.clone(),
+        attic_public_key: destination.attic_public_key.clone(),
         attic_ignore_upstream_cache_filter: destination
             .attic_ignore_upstream_cache_filter
             .unwrap_or(true),

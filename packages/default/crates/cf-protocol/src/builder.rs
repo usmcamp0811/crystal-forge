@@ -109,6 +109,7 @@ pub struct BuilderCachePushConfig {
     pub s3_endpoint_url: Option<String>,
     pub attic_token: Option<String>,
     pub attic_cache_name: Option<String>,
+    pub attic_public_key: Option<String>,
     #[serde(default)]
     pub attic_ignore_upstream_cache_filter: bool,
     #[serde(default)]
@@ -145,6 +146,7 @@ impl BuilderCachePushConfig {
             s3_endpoint_url: None,
             attic_token: None,
             attic_cache_name: None,
+            attic_public_key: None,
             attic_ignore_upstream_cache_filter: true,
             attic_jobs: 5,
             max_retries: 3,

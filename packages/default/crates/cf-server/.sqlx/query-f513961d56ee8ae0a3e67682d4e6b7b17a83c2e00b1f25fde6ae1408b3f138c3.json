@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO scan_schedule_policy (id, on_build, deployed_interval, recent_interval, archived_interval, archived_enabled)\n            VALUES (1, true, '24h', '24h', '168h', true)\n            ON CONFLICT (id) DO NOTHING\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "f513961d56ee8ae0a3e67682d4e6b7b17a83c2e00b1f25fde6ae1408b3f138c3"
+}
