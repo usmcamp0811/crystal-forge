@@ -1,7 +1,6 @@
 { lib, pkgs, inputs, ... }:
 let
   src = ./.;
-  srcHash = builtins.hashString "sha256" (toString src);
 
   # Read and parse the server crate Cargo.toml to extract version
   # (root Cargo.toml is now a virtual workspace manifest with no [package])
@@ -27,10 +26,9 @@ let
   mkWorkspaceSrc = crates:
     lib.cleanSourceWith {
       src = src;
-      filter = path: type:
+      filter = path: _type:
         let
           relPath = lib.removePrefix (toString src + "/") (toString path);
-          # Always include workspace root metadata
           isWorkspaceMeta =
             relPath == "Cargo.toml" ||
             relPath == "Cargo.lock";
@@ -51,11 +49,23 @@ let
   # cf-protocol and cf-config are shared foundational crates needed by all.
   foundationalCrates = [ "cf-protocol" "cf-config" ];
 
-  # Each component's filtered source: workspace metadata + transitive local deps source.
   agentSrc   = mkWorkspaceSrc (foundationalCrates ++ [ "cf-agent" ]);
   builderSrc = mkWorkspaceSrc (foundationalCrates ++ [ "cf-builder" ]);
   keygenSrc  = mkWorkspaceSrc [ "cf-keygen" ];
   serverSrc  = src; # server builds the full workspace
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Per-component SRC_HASH
+  #
+  # Each SRC_HASH is derived from that component's filtered source tree,
+  # NOT from the full unfiltered backend. A server-only source change must
+  # not change agentSrcHash or builderSrcHash.
+  #
+  # The builder and keygen do not use SRC_HASH at runtime, so they receive
+  # no SRC_HASH preBuild export at all.
+  # ─────────────────────────────────────────────────────────────────────────
+  agentSrcHash   = builtins.hashString "sha256" (toString agentSrc);
+  serverSrcHash  = builtins.hashString "sha256" (toString serverSrc);
 
   # Common Rust build infrastructure
   commonBuildInputs = with pkgs; [
@@ -67,19 +77,24 @@ let
 
   # ─────────────────────────────────────────────────────────────────────────
   # Server derivation — builds cf-server with embedded-ui
+  # Only server and test-agent binaries; agent/builder/keygen are separate.
   # ─────────────────────────────────────────────────────────────────────────
   cf-server-drv = pkgs.rustPlatform.buildRustPackage rec {
     src = serverSrc;
     inherit version;
     pname = "cf-server";
     cargoLock = { lockFile = ./Cargo.lock; };
-    cargoBuildFlags = [ "--package" "cf-server" "--features" "cf-server/embedded-ui" ];
+    cargoBuildFlags = [
+      "--package" "cf-server"
+      "--bin" "server"
+      "--bin" "test-agent"
+      "--features" "cf-server/embedded-ui"
+    ];
     CRYSTAL_FORGE_UI_DIST = "${pkgs.crystal-forge.web-ui}/public";
 
     nativeBuildInputs = commonNativeBuildInputs ++ (with pkgs; [ sqlx-cli ]);
     buildInputs = commonBuildInputs;
 
-    # Runtime dependencies
     runtimeDeps = with pkgs; [
       util-linux # findmnt, blkid
       zfs        # optional
@@ -87,7 +102,7 @@ let
     ];
 
     preBuild = ''
-      export SRC_HASH="${lib.strings.removeSuffix "\n" srcHash}"
+      export SRC_HASH="${lib.strings.removeSuffix "\n" serverSrcHash}"
     '';
 
     meta = with lib; {
@@ -100,6 +115,7 @@ let
   # ─────────────────────────────────────────────────────────────────────────
   # Agent derivation — builds cf-agent only
   # Does NOT compile cf-server, cf-builder, or server-only dependencies.
+  # SRC_HASH is derived from agentSrc only; server changes do not affect it.
   # ─────────────────────────────────────────────────────────────────────────
   cf-agent-drv = pkgs.rustPlatform.buildRustPackage rec {
     src = agentSrc;
@@ -111,8 +127,11 @@ let
     nativeBuildInputs = commonNativeBuildInputs;
     buildInputs = commonBuildInputs;
 
+    # SRC_HASH is embedded in the agent binary via option_env!("SRC_HASH").
+    # Use the agent-specific source hash so server-only changes do not
+    # invalidate this derivation.
     preBuild = ''
-      export SRC_HASH="${lib.strings.removeSuffix "\n" srcHash}"
+      export SRC_HASH="${lib.strings.removeSuffix "\n" agentSrcHash}"
     '';
 
     meta = with lib; {
@@ -125,6 +144,7 @@ let
   # ─────────────────────────────────────────────────────────────────────────
   # Builder derivation — builds cf-builder only
   # Does NOT compile cf-server or cf-agent packages.
+  # Does NOT set SRC_HASH; the builder binary does not embed a source hash.
   # ─────────────────────────────────────────────────────────────────────────
   cf-builder-drv = pkgs.rustPlatform.buildRustPackage rec {
     src = builderSrc;
@@ -136,9 +156,7 @@ let
     nativeBuildInputs = commonNativeBuildInputs;
     buildInputs = commonBuildInputs;
 
-    preBuild = ''
-      export SRC_HASH="${lib.strings.removeSuffix "\n" srcHash}"
-    '';
+    # SRC_HASH intentionally not set: cf-builder does not use option_env!("SRC_HASH").
 
     meta = with lib; {
       description = "Crystal Forge remote build worker";
@@ -149,6 +167,7 @@ let
 
   # ─────────────────────────────────────────────────────────────────────────
   # Key generation utility — builds cf-keygen only
+  # Standalone; no SRC_HASH needed.
   # ─────────────────────────────────────────────────────────────────────────
   cf-keygen-drv = pkgs.rustPlatform.buildRustPackage rec {
     src = keygenSrc;
@@ -168,35 +187,22 @@ let
   };
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Legacy monolithic build for backward compatibility.
-  # Used by existing NixOS modules, test infrastructure, and CI that
-  # reference pkgs.crystal-forge.default.
+  # Legacy "crystal-forge" combined output for backward compatibility.
+  #
+  # Previously a single buildRustPackage; now a symlinkJoin of the four
+  # dedicated component derivations. This preserves the existing flake
+  # package name and binary layout that NixOS modules and test infra rely on,
+  # while ensuring each binary is built from its authoritative crate.
   # ─────────────────────────────────────────────────────────────────────────
-  crystal-forge = pkgs.rustPlatform.buildRustPackage rec {
-    inherit src version;
-    pname = "crystal-forge";
-    cargoLock = { lockFile = ./Cargo.lock; };
-    cargoBuildFlags = [ "--features" "cf-server/embedded-ui" ];
-    CRYSTAL_FORGE_UI_DIST = "${pkgs.crystal-forge.web-ui}/public";
-
-    nativeBuildInputs = commonNativeBuildInputs ++ (with pkgs; [ sqlx-cli ]);
-    buildInputs = commonBuildInputs;
-
-    runtimeDeps = with pkgs; [
-      util-linux
-      zfs
-      vulnix
+  crystal-forge = pkgs.symlinkJoin {
+    name = "crystal-forge-${version}";
+    inherit version;
+    paths = [
+      cf-server-drv
+      cf-agent-drv
+      cf-builder-drv
+      cf-keygen-drv
     ];
-
-    preBuild = ''
-      export SRC_HASH="${lib.strings.removeSuffix "\n" srcHash}"
-    '';
-
-    meta = with lib; {
-      description = "Crystal Forge";
-      license = licenses.agpl3Only;
-      platforms = platforms.all;
-    };
   };
 
   # data-only output with migration SQL files
@@ -240,41 +246,18 @@ let
     '';
   };
 
-  # Component output derivations
-  # These extract specific binaries from the dedicated component builds.
+  # Component output packages (expose dedicated builds at flake-level names)
 
-  agent = pkgs.stdenv.mkDerivation {
-    pname = "agent";
+  agent = pkgs.symlinkJoin {
+    name = "crystal-forge-agent-${version}";
     inherit version;
-    src = cf-agent-drv;
-    installPhase = ''
-      mkdir -p $out/bin
-      cp ${cf-agent-drv}/bin/agent $out/bin/agent
-      cp ${cf-keygen-drv}/bin/cf-keygen $out/bin/cf-keygen
-    '';
-    meta = with lib; {
-      description = "Crystal Forge deployment agent";
-      license = licenses.agpl3Only;
-      platforms = platforms.all;
-    };
+    paths = [ cf-agent-drv cf-keygen-drv ];
   };
 
-  server = pkgs.stdenv.mkDerivation {
-    pname = "server";
+  server = pkgs.symlinkJoin {
+    name = "crystal-forge-server-${version}";
     inherit version;
-    src = cf-server-drv;
-    installPhase = ''
-      mkdir -p $out/bin
-      cp ${cf-server-drv}/bin/server $out/bin/server
-      cp ${cf-server-drv}/bin/test-agent $out/bin/test-agent
-      cp ${cf-keygen-drv}/bin/cf-keygen $out/bin/cf-keygen
-      cp ${cf-builder-drv}/bin/builder $out/bin/builder
-    '';
-    meta = with lib; {
-      description = "Crystal Forge server";
-      license = licenses.agpl3Only;
-      platforms = platforms.all;
-    };
+    paths = [ cf-server-drv cf-builder-drv cf-keygen-drv ];
   };
 
   cf-keygen = pkgs.writeShellApplication {
@@ -293,6 +276,9 @@ let
   };
 
 in crystal-forge // {
-  inherit agent server builder cf-keygen test-agent srcHash migrate;
+  inherit agent server builder cf-keygen test-agent migrate;
   inherit cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv;
+  # Expose component-specific source hashes for verification
+  agentSrcHash = agentSrcHash;
+  serverSrcHash = serverSrcHash;
 }
