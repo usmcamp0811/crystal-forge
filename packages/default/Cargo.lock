@@ -427,6 +427,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-builder"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.21.7",
+ "bytes",
+ "cf-config",
+ "cf-protocol",
+ "chrono",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "nix",
+ "rand 0.8.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "winnow",
+]
+
+[[package]]
 name = "cf-config"
 version = "0.3.0"
 dependencies = [

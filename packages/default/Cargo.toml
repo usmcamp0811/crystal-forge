@@ -3,6 +3,7 @@ members = [
     "crates/cf-protocol",
     "crates/cf-config",
     "crates/cf-agent",
+    "crates/cf-builder",
     "crates/cf-server",
 ]
 resolver = "2"
