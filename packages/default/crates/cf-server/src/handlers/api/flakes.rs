@@ -36,8 +36,9 @@ use crate::queries::flake_credentials::{
     delete_flake_credential, get_flake_credential, update_flake_credential, upsert_flake_credential,
 };
 use crate::queries::flakes::{
-    cascade_delete_flake, check_flake_dependencies, count_systems_for_flake, delete_flake_by_id,
-    fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
+    cascade_delete_flake, check_flake_dependencies, clear_flake_branch_snapshot,
+    count_systems_for_flake, delete_flake_by_id, fetch_dashboard_flake_timelines,
+    fetch_flake_timelines, get_flake_by_id, get_flake_by_name, get_flake_id_by_repo_url,
     insert_flake, list_flake_registry, purge_flake_commit_history, soft_delete_flake, update_flake,
 };
 use crate::queries::users::get_by_email;
@@ -813,6 +814,24 @@ pub async fn create_flake(
         Err(response) => return response,
     };
 
+    // Insert uses ON CONFLICT (repo_url) which silently updates an existing
+    // flake's branch. If the branch changed, the old snapshot is stale.
+    // Clear it before the upsert so readers don't see old history.
+    if let Ok(Some(existing_id)) = get_flake_id_by_repo_url(&pool, repo_url).await {
+        if let Ok(existing) = get_flake_by_id(&pool, existing_id).await {
+            if existing.branch != branch {
+                if let Ok(mut tx) = pool.begin().await {
+                    if clear_flake_branch_snapshot(&mut tx, existing.id)
+                        .await
+                        .is_ok()
+                    {
+                        let _ = tx.commit().await;
+                    }
+                }
+            }
+        }
+    }
+
     match insert_flake(&pool, name, repo_url, &branch, build_scope).await {
         Ok(flake) => (
             StatusCode::CREATED,
@@ -895,6 +914,20 @@ pub async fn update_flake_handler(
         Ok(value) => value,
         Err(response) => return response,
     };
+
+    // If repo_url or branch changed, the existing branch snapshot is no longer
+    // authoritative. Clear it before updating so readers see fallback ordering
+    // until the next successful sync populates a fresh snapshot.
+    if let Ok(current) = get_flake_by_id(&pool, flake_id).await {
+        let identity_changed = current.repo_url != repo_url || current.branch != branch;
+        if identity_changed {
+            if let Ok(mut tx) = pool.begin().await {
+                if clear_flake_branch_snapshot(&mut tx, flake_id).await.is_ok() {
+                    let _ = tx.commit().await;
+                }
+            }
+        }
+    }
 
     match update_flake(&pool, flake_id, name, repo_url, &branch, build_scope).await {
         Ok(flake) => (

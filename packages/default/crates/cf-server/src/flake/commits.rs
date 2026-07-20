@@ -5,7 +5,6 @@ use crate::models::commits::Commit;
 use crate::queries::commits::{
     flake_has_commits, flake_last_commit, insert_commit, insert_commit_with_metadata,
 };
-use crate::queries::flakes::replace_flake_branch_snapshot_standalone;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -353,7 +352,16 @@ pub async fn sync_flake_recorded(
 
     match &result {
         Ok(_) => {
-            let was_applied = match sqlx::query(
+            // Obtain the authoritative Git log order before opening the
+            // snapshot transaction.  This ensures the Git/network work
+            // (clone + log) is never inside a long-held transaction.
+            let ordered_ids: Option<Vec<i32>> =
+                resolve_snapshot_order(pool, flake_id, repo_url, branch).await;
+
+            // Publish sync_status and snapshot atomically so readers never
+            // see synced with a stale snapshot, and a concurrent sync never
+            // snapshots commits it did not insert.
+            match sqlx::query(
                 "UPDATE flakes \
                  SET sync_status = 'synced', last_sync_at = now(), last_sync_error = NULL \
                  WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $2",
@@ -363,21 +371,44 @@ pub async fn sync_flake_recorded(
             .execute(pool)
             .await
             {
-                Ok(update) => update.rows_affected() == 1,
-                Err(e) => {
-                    warn!("Failed to set sync_status=synced for flake {flake_id}: {e:#}");
-                    false
+                Ok(update) if update.rows_affected() == 1 => {
+                    // This attempt still owns the sync — publish snapshot in
+                    // the same transaction (only if we resolved Git order).
+                    if let Some(ordered_ids) = ordered_ids {
+                        if ordered_ids.is_empty() {
+                            // Empty branch: clear snapshot, keep ready_at set.
+                            if let Ok(mut tx) = pool.begin().await {
+                                if sqlx::query(
+                                    "DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1",
+                                )
+                                .bind(flake_id)
+                                .execute(&mut *tx)
+                                .await
+                                .is_ok()
+                                {
+                                    let _ = tx.commit().await;
+                                }
+                            }
+                        } else if let Ok(mut tx) = pool.begin().await {
+                            if crate::queries::flakes::replace_flake_branch_snapshot(
+                                &mut tx,
+                                flake_id,
+                                &ordered_ids,
+                            )
+                            .await
+                            .is_ok()
+                            {
+                                let _ = tx.commit().await;
+                            }
+                        }
+                    }
                 }
-            };
-
-            // Atomically update the branch-commit snapshot so GET handlers can
-            // serve database-only reads without git operations (TASK-397).
-            //
-            // If this attempt was superseded (was_applied == false), skip the
-            // snapshot update — a newer sync is already in progress and its
-            // snapshot will reflect the latest state.
-            if was_applied {
-                rebuild_branch_snapshot(pool, flake_id).await;
+                Ok(_) => {
+                    info!(
+                        "Skipping sync_status=synced for flake {flake_id}: attempt {attempt_id} was superseded"
+                    );
+                }
+                Err(e) => warn!("Failed to set sync_status=synced for flake {flake_id}: {e:#}"),
             }
         }
         Err(sync_err) => {
@@ -407,46 +438,74 @@ pub async fn sync_flake_recorded(
     result
 }
 
+/// Run `git log --max-count=MAX_SNAPSHOT_COMMITS` on the tracked branch and
+/// resolve the resulting hashes (in Git traversal order, HEAD first) to
+/// database commit IDs. Returns `None` on error so the caller can still
+/// mark the flake synced even if the snapshot rebuild fails.
+async fn resolve_snapshot_order(
+    pool: &PgPool,
+    flake_id: i32,
+    repo_url: &str,
+    branch: &str,
+) -> Option<Vec<i32>> {
+    let creds = FlakeCredentialEnv::load(pool, flake_id)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Failed to load credentials for flake {flake_id}: {e:#}");
+            None
+        });
+
+    let max = MAX_SNAPSHOT_COMMITS as usize;
+    let commits =
+        match get_commits_with_full_metadata(repo_url, branch, Some(max), None, creds.as_ref())
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to fetch git log for snapshot (flake {flake_id}): {e:#}");
+                return None;
+            }
+        };
+
+    if commits.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let hash_slice: Vec<&str> = commits.iter().map(|c| c.hash.as_str()).collect();
+    match sqlx::query_as::<_, (String, i32)>(
+        r#"
+        SELECT git_commit_hash, id
+        FROM commits
+        WHERE flake_id = $1
+          AND git_commit_hash = ANY($2)
+        "#,
+    )
+    .bind(flake_id)
+    .bind(&hash_slice)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => {
+            let map: std::collections::HashMap<&str, i32> =
+                rows.iter().map(|(h, id)| (h.as_str(), *id)).collect();
+            let ids: Vec<i32> = commits
+                .iter()
+                .filter_map(|c| map.get(c.hash.as_str()).copied())
+                .collect();
+            Some(ids)
+        }
+        Err(e) => {
+            error!("Failed to resolve commit hashes for snapshot (flake {flake_id}): {e:#}");
+            None
+        }
+    }
+}
+
 /// Maximum number of commits to retain in the branch-commit snapshot.
 ///
 /// Must be at least the maximum timeline limit (500) so the snapshot can
 /// satisfy every supported Flakes timeline request without git operations.
 const MAX_SNAPSHOT_COMMITS: i64 = 500;
-
-/// Rebuild the branch-commit snapshot for a flake from the commits table.
-///
-/// Queries the most recent `MAX_SNAPSHOT_COMMITS` commits ordered by
-/// `(commit_timestamp DESC, id DESC)` — which matches git log order for
-/// normal branch progression — and atomically replaces the snapshot.
-///
-/// Errors are logged but not propagated so a failed snapshot rebuild never
-/// causes the sync itself to be reported as failed.
-async fn rebuild_branch_snapshot(pool: &PgPool, flake_id: i32) {
-    let commits = match sqlx::query_as::<_, (i32, DateTime<Utc>)>(
-        r#"
-        SELECT id, commit_timestamp
-        FROM commits
-        WHERE flake_id = $1
-        ORDER BY commit_timestamp DESC, id DESC
-        LIMIT $2
-        "#,
-    )
-    .bind(flake_id)
-    .bind(MAX_SNAPSHOT_COMMITS)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            error!("Failed to query commits for snapshot rebuild (flake {flake_id}): {e:#}");
-            return;
-        }
-    };
-
-    if let Err(e) = replace_flake_branch_snapshot_standalone(pool, flake_id, &commits).await {
-        error!("Failed to replace branch snapshot after sync (flake {flake_id}): {e:#}");
-    }
-}
 
 fn sanitize_and_truncate_sync_error(repo_url: &str, raw: &str, max_chars: usize) -> String {
     let sanitized_repo = redact_url_credentials(repo_url);

@@ -846,16 +846,18 @@ pub async fn fetch_flake_timelines(
 /// Atomically replace the branch-commit snapshot for a flake.
 ///
 /// Deletes all existing snapshot rows for `flake_id`, inserts new rows from
-/// `commits` (in order, where index 0 = HEAD), and sets `snapshot_ready_at`.
+/// `commit_ids` (in order, where index 0 = HEAD), and sets `snapshot_ready_at`.
+/// `observed_at` is set to `now()` for every row — this is the observation
+/// timestamp, not the commit authorship timestamp.
 ///
 /// Must be called inside an open transaction so readers never see a partial
-/// or empty snapshot. If `commits` is empty the snapshot is cleared but
+/// or empty snapshot. If `commit_ids` is empty the snapshot is cleared but
 /// `snapshot_ready_at` is still set (indicating an empty tracked branch
 /// has been validated).
 pub async fn replace_flake_branch_snapshot(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     flake_id: i32,
-    commits: &[(i32, chrono::DateTime<chrono::Utc>)],
+    commit_ids: &[i32],
 ) -> Result<()> {
     // Delete existing snapshot rows for this flake
     sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
@@ -864,22 +866,22 @@ pub async fn replace_flake_branch_snapshot(
         .await
         .context("Failed to delete old branch snapshot")?;
 
-    // Insert new snapshot rows
-    for (position, (commit_id, observed_at)) in commits.iter().enumerate() {
+    // Insert new snapshot rows. observed_at is always now() — this is the
+    // server observation timestamp, not the commit authorship timestamp.
+    for (position, commit_id) in commit_ids.iter().enumerate() {
         let pos = position as i32;
         sqlx::query(
             r#"
             INSERT INTO flake_branch_commit_snapshot (flake_id, commit_id, position, observed_at)
-            VALUES ($1, $2, $3, $4)
+            VALUES ($1, $2, $3, now())
             ON CONFLICT (flake_id, commit_id) DO UPDATE
                 SET position = EXCLUDED.position,
-                    observed_at = EXCLUDED.observed_at
+                    observed_at = now()
             "#,
         )
         .bind(flake_id)
         .bind(commit_id)
         .bind(pos)
-        .bind(observed_at)
         .execute(&mut **tx)
         .await
         .context("Failed to insert branch snapshot row")?;
@@ -908,10 +910,10 @@ pub async fn replace_flake_branch_snapshot(
 pub async fn replace_flake_branch_snapshot_standalone(
     pool: &PgPool,
     flake_id: i32,
-    commits: &[(i32, chrono::DateTime<chrono::Utc>)],
+    commit_ids: &[i32],
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    replace_flake_branch_snapshot(&mut tx, flake_id, commits).await?;
+    replace_flake_branch_snapshot(&mut tx, flake_id, commit_ids).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -960,6 +962,30 @@ pub async fn is_flake_snapshot_ready(pool: &PgPool, flake_id: i32) -> Result<boo
     .is_some();
 
     Ok(ready)
+}
+
+/// Clear the branch snapshot for a flake and reset `snapshot_ready_at`.
+///
+/// Used when the tracked source identity changes (repo_url or branch) so
+/// the old snapshot is no longer authoritative. The next successful sync
+/// will populate a fresh snapshot.
+pub async fn clear_flake_branch_snapshot(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    flake_id: i32,
+) -> Result<()> {
+    sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
+        .bind(flake_id)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to clear branch snapshot")?;
+
+    sqlx::query("UPDATE flakes SET snapshot_ready_at = NULL WHERE id = $1")
+        .bind(flake_id)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to reset snapshot_ready_at")?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1011,13 +1037,11 @@ mod task_397_tests {
         assert_eq!(fallback[0].commits[1].hash, "middle");
 
         // Deliberately make snapshot order differ from timestamp order.
-        replace_flake_branch_snapshot_standalone(
-            &pool,
-            flake.id,
-            &[(commit_ids[0], now), (commit_ids[2], now)],
-        )
-        .await
-        .expect("replace snapshot");
+        // Snapshot says: oldest (pos 0) → newest (pos 1).
+        // Timestamp order would be: newest → middle → oldest.
+        replace_flake_branch_snapshot_standalone(&pool, flake.id, &[commit_ids[0], commit_ids[2]])
+            .await
+            .expect("replace snapshot");
 
         let snapshot = fetch_flake_timelines(&pool, 10, Some(&[flake.id]))
             .await
