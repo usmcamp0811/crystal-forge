@@ -2,7 +2,7 @@ use crate::api::models::{
     BuildStatus, CommitMetadata, FlakeCommit, FlakeRegistryItem, FlakeTimeline,
 };
 use crate::config::{FlakeConfig, WatchedFlake};
-use crate::models::flakes::Flake;
+use crate::models::flakes::{BranchCommitSnapshot, Flake};
 use anyhow::Context;
 use anyhow::Result;
 use sqlx::PgPool;
@@ -721,4 +721,129 @@ pub async fn fetch_flake_timelines(
     }
 
     Ok(timelines)
+}
+
+// ---------------------------------------------------------------------------
+// Branch-commit snapshot queries (TASK-397)
+// ---------------------------------------------------------------------------
+
+/// Atomically replace the branch-commit snapshot for a flake.
+///
+/// Deletes all existing snapshot rows for `flake_id`, inserts new rows from
+/// `commits` (in order, where index 0 = HEAD), and sets `snapshot_ready_at`.
+///
+/// Must be called inside an open transaction so readers never see a partial
+/// or empty snapshot. If `commits` is empty the snapshot is cleared but
+/// `snapshot_ready_at` is still set (indicating an empty tracked branch
+/// has been validated).
+pub async fn replace_flake_branch_snapshot(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    flake_id: i32,
+    commits: &[(i32, chrono::DateTime<chrono::Utc>)],
+) -> Result<()> {
+    // Delete existing snapshot rows for this flake
+    sqlx::query(
+        "DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1",
+    )
+    .bind(flake_id)
+    .execute(&mut **tx)
+    .await
+    .context("Failed to delete old branch snapshot")?;
+
+    // Insert new snapshot rows
+    for (position, (commit_id, observed_at)) in commits.iter().enumerate() {
+        let pos = position as i32;
+        sqlx::query(
+            r#"
+            INSERT INTO flake_branch_commit_snapshot (flake_id, commit_id, position, observed_at)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (flake_id, commit_id) DO UPDATE
+                SET position = EXCLUDED.position,
+                    observed_at = EXCLUDED.observed_at
+            "#,
+        )
+        .bind(flake_id)
+        .bind(commit_id)
+        .bind(pos)
+        .bind(observed_at)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to insert branch snapshot row")?;
+    }
+
+    // Mark snapshot as ready
+    sqlx::query(
+        r#"
+        UPDATE flakes
+        SET snapshot_ready_at = COALESCE(snapshot_ready_at, now())
+        WHERE id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .execute(&mut **tx)
+    .await
+    .context("Failed to set snapshot_ready_at")?;
+
+    Ok(())
+}
+
+/// Replace the branch snapshot for a flake using a connection (auto-transaction).
+///
+/// Opens its own short transaction. Prefer `replace_flake_branch_snapshot` when
+/// the caller already has a transaction.
+pub async fn replace_flake_branch_snapshot_standalone(
+    pool: &PgPool,
+    flake_id: i32,
+    commits: &[(i32, chrono::DateTime<chrono::Utc>)],
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    replace_flake_branch_snapshot(&mut tx, flake_id, commits).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Read the ordered branch snapshot for a flake.
+///
+/// Returns rows ordered by position ascending (position 0 = HEAD).
+pub async fn read_flake_branch_snapshot(
+    pool: &PgPool,
+    flake_id: i32,
+    limit: i64,
+) -> Result<Vec<BranchCommitSnapshot>> {
+    let rows = sqlx::query_as::<_, BranchCommitSnapshot>(
+        r#"
+        SELECT flake_id, commit_id, position, observed_at
+        FROM flake_branch_commit_snapshot
+        WHERE flake_id = $1
+        ORDER BY position ASC
+        LIMIT $2
+        "#,
+    )
+    .bind(flake_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+/// Check whether a flake has a ready branch snapshot.
+///
+/// Returns `true` if `snapshot_ready_at` is set (migration 0178 has populated
+/// at least one snapshot for this flake).
+pub async fn is_flake_snapshot_ready(pool: &PgPool, flake_id: i32) -> Result<bool> {
+    let ready = sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+        r#"
+        SELECT snapshot_ready_at
+        FROM flakes
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten()
+    .is_some();
+
+    Ok(ready)
 }
