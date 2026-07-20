@@ -16,15 +16,15 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::api::client::{
-    ApiClientError, create_environment, delete_environment, fetch_environment_policies,
+    create_environment, delete_environment, fetch_environment_policies,
     fetch_environment_policies_map, fetch_environments, fetch_policies, update_environment,
-    update_environment_policies,
+    update_environment_policies, ApiClientError,
 };
 use crate::api::models::{CreateEnvironmentRequest, EnvironmentSummary, UpdateEnvironmentRequest};
 use crate::components::environments::{
-    EnvironmentCacheSummary, EnvironmentComplianceSummary, EnvironmentDeploymentPolicy,
-    EnvironmentHealthBreakdown, EnvironmentItem, PolicyOption,
-    policy_library as fallback_policy_library,
+    policy_library as fallback_policy_library, EnvironmentCacheSummary,
+    EnvironmentComplianceSummary, EnvironmentDeploymentPolicy, EnvironmentHealthBreakdown,
+    EnvironmentItem, PolicyOption,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

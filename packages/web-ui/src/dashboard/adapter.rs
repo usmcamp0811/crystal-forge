@@ -1,6 +1,6 @@
 use chrono::Utc;
 
-use crate::api::client::{ApiClientError, fetch_dashboard, fetch_dashboard_flake_timelines};
+use crate::api::client::{fetch_dashboard, fetch_dashboard_flake_timelines, ApiClientError};
 use crate::api::models::{
     BuildQueueSummary, CveSummary, DashboardSummary, DeploymentStatusSummary, FlakeTimeline,
     FleetHealthSummary,

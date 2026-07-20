@@ -361,6 +361,7 @@ pub async fn get_eval_policy_matrix(
             .map(|row| EvalPolicySystemRow {
                 system_name: row.system_name,
                 results: vec![row.policy_status],
+                details: vec![row.detail],
             })
             .collect(),
     };

@@ -4,16 +4,18 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use super::types::{
-    PolicyDefinition, is_core_policy, is_policy_enabled, normalized_policy_type, policy_category,
-    policy_rule_summaries,
+    is_core_policy, is_policy_enabled, normalized_policy_type, policy_category,
+    policy_rule_summaries, PolicyDefinition,
 };
 
 /// Card component for displaying a policy definition with design-parity rule summaries.
 #[component]
 pub fn PolicyCard(
     policy: PolicyDefinition,
+    on_open: EventHandler<PolicyDefinition>,
     on_edit: EventHandler<PolicyDefinition>,
     on_delete: EventHandler<Uuid>,
+    #[props(default = false)] highlighted: bool,
 ) -> Element {
     let category = policy_category(&policy);
     let rules = policy_rule_summaries(&policy);
@@ -28,14 +30,23 @@ pub fn PolicyCard(
     };
     let category_color = category.color();
     let opacity = if enabled { "1" } else { "0.72" };
+    let policy_for_open = policy.clone();
     let policy_for_edit = policy.clone();
     let policy_id = policy.id;
 
     rsx! {
         div {
             class: "sys-card",
-            style: "--status-color: {category_color}; opacity: {opacity};",
+            onclick: move |_| on_open.call(policy_for_open.clone()),
+            style: if highlighted {
+                format!(
+                    "--status-color: {category_color}; opacity: {opacity}; box-shadow: inset 0 0 0 1px color-mix(in oklab, {category_color} 55%, transparent), 0 0 0 2px color-mix(in oklab, {category_color} 22%, transparent); background: color-mix(in oklab, {category_color} 7%, var(--cf-card-bg));"
+                )
+            } else {
+                format!("--status-color: {category_color}; opacity: {opacity}; cursor: pointer;")
+            },
             "data-policy-card": "true",
+            "data-policy-name": "{policy.name}",
             div { class: "status-rail" }
 
             div { class: "sys-card-head",
@@ -93,8 +104,8 @@ pub fn PolicyCard(
                         rect { x: "3", y: "4", width: "18", height: "8", rx: "2" }
                         rect { x: "3", y: "14", width: "18", height: "6", rx: "2" }
                     }
-                    span { class: "mono font-semibold text-gray-300", "0" }
-                    span { "systems use this" }
+                    span { class: "mono font-semibold text-gray-300", "{policy.system_count}" }
+                    span { "systems assigned" }
                 }
                 if is_core {
                     span { class: "text-xs text-emerald-300", "Always on" }

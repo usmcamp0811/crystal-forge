@@ -16,13 +16,13 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api::client::{
-    ApiClientError, fetch_compliance_system_evidence, fetch_flake_timeline_for_tray,
+    fetch_compliance_system_evidence, fetch_flake_timeline_for_tray,
     fetch_system_compliance_bundles, fetch_system_cve_scan_eligibility, fetch_system_cves,
     fetch_system_hardening, fetch_system_hardening_justifications,
     fetch_system_hardening_scan_eligibility, get_system_deployment_progress,
     request_system_generation_rollback, request_system_rollback, request_system_sync,
     save_system_hardening_justification,
-    verify_generation_closure as verify_generation_closure_request,
+    verify_generation_closure as verify_generation_closure_request, ApiClientError,
 };
 use crate::api::models::{
     BuildStatus, CommitInfo, ComplianceEvidenceResponse, CveScanEligibilityResponse,
@@ -41,10 +41,14 @@ use crate::components::layout::Card;
 use crate::components::modals::{RollbackConfirmDialog, SyncConfirmDialog};
 use crate::components::notifications::Toast;
 use crate::components::system::{
-    EditSystemModal, PendingDeployBanner, deployment_state_label, environment_style, format_uptime,
+    deployment_state_label, environment_style, format_uptime, EditSystemModal, PendingDeployBanner,
 };
 use crate::routes::Route;
-use crate::state::{app_state::AppState, auth};
+use crate::state::{
+    app_state::AppState,
+    auth,
+    navigation_focus::{FocusTarget, NavigationFocus},
+};
 use crate::systems::adapter::{
     deploy_system_via_api, fetch_system_commits_via_api, load_system_agent_events_with_fallback,
     load_system_generations_with_fallback, load_system_history_with_fallback,
@@ -53,8 +57,8 @@ use crate::systems::adapter::{
 use crate::systems::adapter::{fallback_system_detail, load_system_detail_with_fallback};
 use crate::theme;
 use crate::views::flakes_list::{
-    CommitFocusMeta, FlakeTrayNew, MockCommitItem, MockFlakeItem, map_flake_summary_to_tray_item,
-    map_timeline_commits_to_view,
+    map_flake_summary_to_tray_item, map_timeline_commits_to_view, CommitFocusMeta, FlakeTrayNew,
+    MockCommitItem, MockFlakeItem,
 };
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
@@ -295,6 +299,7 @@ struct FlakeCommitPeekState {
 #[component]
 pub fn SystemDetailView(id: String) -> Element {
     let nav = navigator();
+    let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let mut breadcrumb_override = use_context::<Signal<Option<(String, String)>>>();
     let app_state = use_context::<Signal<AppState>>();
 
@@ -1308,6 +1313,24 @@ pub fn SystemDetailView(id: String) -> Element {
                     )));
                 },
                 on_close: move |_| flake_commit_peek.set(None),
+                on_open_evaluation: move |focus: NavigationFocus| {
+                    navigation_focus.set(Some(focus));
+                    nav.push(Route::EvaluationsView {});
+                },
+                on_open_build: move |focus: NavigationFocus| {
+                    navigation_focus.set(Some(focus));
+                    nav.push(Route::BuildsView {});
+                },
+                on_open_systems: move |focus: NavigationFocus| {
+                    navigation_focus.set(Some(NavigationFocus {
+                        target: FocusTarget::Systems,
+                        commit_sha: focus.commit_sha,
+                        flake_name: focus.flake_name,
+                        status: focus.status,
+                        policy_name: None,
+                    }));
+                    nav.push(Route::SystemsView {});
+                },
             }
         }
 
@@ -4542,7 +4565,7 @@ fn fold_restart_clusters(events: &[HistoryEvent]) -> Vec<TimelineItem> {
 
 #[cfg(test)]
 mod fold_tests {
-    use super::{HistoryEvent, HistoryEventKind, TimelineItem, fold_restart_clusters};
+    use super::{fold_restart_clusters, HistoryEvent, HistoryEventKind, TimelineItem};
     use chrono::Utc;
 
     fn ev(kind: HistoryEventKind, generation: Option<i32>) -> HistoryEvent {
@@ -7775,8 +7798,8 @@ fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogE
 #[cfg(test)]
 mod tests {
     use super::{
-        HistoryEventKind, build_history_events, classify_history_entry, map_agent_events_to_logs,
-        map_history_entries_to_commit_history,
+        build_history_events, classify_history_entry, map_agent_events_to_logs,
+        map_history_entries_to_commit_history, HistoryEventKind,
     };
     use crate::api::models::{SystemAgentEvent, SystemHistoryEntry};
     use chrono::{Duration, Utc};
@@ -7890,13 +7913,11 @@ mod tests {
 
         assert_eq!(timeline.len(), 3);
         assert!(timeline[0].is_current);
-        assert!(
-            timeline[2]
-                .diff_summary
-                .as_deref()
-                .unwrap_or_default()
-                .contains("Revert detected")
-        );
+        assert!(timeline[2]
+            .diff_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Revert detected"));
     }
 
     #[test]

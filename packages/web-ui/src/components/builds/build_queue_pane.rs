@@ -7,7 +7,7 @@ use dioxus::prelude::*;
 
 use crate::alerts::{attention_row_class, dismiss_attention_item};
 
-use super::helpers::{BuildAction, BuildItem, BuildStatus, extract_system_name, short_commit};
+use super::helpers::{extract_system_name, short_commit, BuildAction, BuildItem, BuildStatus};
 
 fn queue_drag_reorder_actions(
     queued_ids: &[uuid::Uuid],

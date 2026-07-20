@@ -767,6 +767,10 @@ pub struct EvalPolicySystemRow {
     pub system_name: String,
     /// One entry per policy in `EvalPolicyMatrixResponse.policies`.
     pub results: Vec<String>,
+    /// Parallel to `results` — per-policy detail/evidence. Empty vec or `None`
+    /// entries mean no detail is available for that result.
+    #[serde(default)]
+    pub details: Vec<Option<String>>,
 }
 
 /// Dependency/derivation breakdown for a single commit evaluation.

@@ -7,8 +7,8 @@ use gloo_storage::{LocalStorage, Storage};
 use uuid::Uuid;
 
 use crate::alerts::{
-    NAV_BADGES, acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item,
-    should_flash,
+    acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item, should_flash,
+    NAV_BADGES,
 };
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
@@ -18,15 +18,15 @@ use crate::api::models::{
 };
 use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::filters::ViewMode;
-use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
+use crate::components::forms::{validate_new_system, AddSystemForm, NewSystemDraft};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::icon::{Icon, IconName};
 use crate::components::modals::{
-    GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
+    generate_key_pair, GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::system::{
-    EditSystemModal, PendingDeployBanner, SystemCardV2, deployment_state_label,
+    deployment_state_label, EditSystemModal, PendingDeployBanner, SystemCardV2,
 };
 use crate::components::systems_stat_strip::SystemsStatStrip;
 use crate::components::tables::SystemsTable;
@@ -37,6 +37,7 @@ use crate::environments::adapter::{
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
+use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::systems::adapter::{
     create_system_via_api, deactivate_system_via_api, fallback_flake_names,
     load_flake_context_with_fallback, load_flake_names_with_fallback,
@@ -162,6 +163,7 @@ fn system_alert_occurrence_id(system: &SystemSummary) -> String {
 pub fn SystemsListView() -> Element {
     let nav = navigator();
     let app_state = use_context::<Signal<AppState>>();
+    let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
 
     let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
@@ -196,6 +198,21 @@ pub fn SystemsListView() -> Element {
     let mut environment_filter = use_signal(|| "all".to_string());
     let mut status_filter = use_signal(|| "all".to_string());
     let mut flake_filter = use_signal(|| "all".to_string());
+
+    use_effect(move || {
+        let Some(focus) = navigation_focus() else {
+            return;
+        };
+        if focus.target != FocusTarget::Systems {
+            return;
+        }
+
+        if let Some(flake_name) = focus.flake_name.clone() {
+            flake_filter.set(flake_name);
+            search.set(String::new());
+        }
+        navigation_focus.set(None);
+    });
 
     // Load real data from the backend using use_resource to prevent repeated fetches.
     // Note: Currently loads all systems; filters applied client-side.

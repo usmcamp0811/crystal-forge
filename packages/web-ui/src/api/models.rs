@@ -7,6 +7,8 @@
 //! - The server crate has native dependencies (OpenSSL, SQLx) incompatible with wasm32
 //! - Client-side DTOs may diverge (e.g. adding UI-only computed fields)
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use uuid::Uuid;
@@ -1159,6 +1161,9 @@ pub struct DeploymentPoliciesListResponse {
     pub total: usize,
     pub limit: i64,
     pub offset: i64,
+    /// Per-policy count of distinct active systems inheriting the policy.
+    #[serde(default)]
+    pub system_counts: HashMap<Uuid, i64>,
 }
 
 /// Request to create a new deployment policy.
@@ -1487,6 +1492,8 @@ pub struct EvalPolicyMatrixResponse {
 pub struct EvalPolicySystemRow {
     pub system_name: String,
     pub results: Vec<String>,
+    #[serde(default)]
+    pub details: Vec<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
