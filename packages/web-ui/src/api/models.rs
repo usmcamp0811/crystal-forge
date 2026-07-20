@@ -772,6 +772,23 @@ pub struct FlakeRegistryItem {
     /// The error text from the most recent failed sync, if any.
     #[serde(default)]
     pub last_sync_error: Option<String>,
+
+    // ----- Enriched fields (TASK-397) -----
+    #[serde(default)]
+    pub latest_commit_hash: Option<String>,
+    #[serde(default)]
+    pub latest_commit_message: Option<String>,
+    #[serde(default)]
+    pub latest_commit_author: Option<String>,
+    #[serde(default)]
+    pub latest_commit_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub build_status: Option<String>,
+    #[serde(default)]
+    pub evaluation_status: Option<String>,
+    #[serde(default)]
+    pub environments: Vec<String>,
+    pub total_commit_count: i64,
 }
 
 fn default_sync_status() -> String {

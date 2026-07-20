@@ -946,6 +946,10 @@ pub struct FlakeSummary {
 }
 
 /// Flake registry item for flakes management view.
+///
+/// Enriched with latest commit summary and environment names so the initial
+/// Flakes view can render from a single registry response without fetching
+/// timelines or the full systems list (TASK-397).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlakeRegistryItem {
     pub id: i32,
@@ -962,6 +966,37 @@ pub struct FlakeRegistryItem {
     /// The error text from the most recent failed sync, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_sync_error: Option<String>,
+
+    // ----- Enriched fields (TASK-397) -----
+
+    /// Hash of the latest commit visible on the tracked branch (from snapshot
+    /// or commit table). `None` if the flake has no commits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_commit_hash: Option<String>,
+    /// Commit message of the latest visible commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_commit_message: Option<String>,
+    /// Author of the latest visible commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_commit_author: Option<String>,
+    /// Timestamp of the latest visible commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_commit_timestamp: Option<DateTime<Utc>>,
+    /// Aggregate build status of the latest visible commit.
+    /// One of: "building", "queued", "failed", "complete", or `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_status: Option<String>,
+    /// Evaluation status of the latest visible commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluation_status: Option<String>,
+    /// Sorted, deduplicated environment names associated with this flake's
+    /// active systems. Empty array if no systems exist.
+    #[serde(default)]
+    pub environments: Vec<String>,
+    /// Total number of commits currently visible on the tracked branch.
+    /// When a branch snapshot exists, this is the snapshot row count.
+    /// Otherwise it is the count of commits in the commits table.
+    pub total_commit_count: i64,
 }
 
 /// Navigation badge aggregate — counts of items needing attention per view,

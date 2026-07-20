@@ -161,10 +161,31 @@ pub async fn find_flake_by_repo_urls(
 }
 
 pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>> {
-    use chrono::{DateTime, Utc};
+    // Intermediate row struct matching the query column names.
+    // Required because the tuple approach becomes unwieldy with 20+ columns.
+    #[derive(sqlx::FromRow)]
+    struct FlakeRegistryRow {
+        id: i32,
+        name: String,
+        repo_url: String,
+        branch: String,
+        build_scope: String,
+        system_count: i64,
+        sync_status: String,
+        last_sync_at: Option<chrono::DateTime<chrono::Utc>>,
+        last_sync_error: Option<String>,
+        // Enriched fields (TASK-397)
+        latest_commit_hash: Option<String>,
+        latest_commit_message: Option<String>,
+        latest_commit_author: Option<String>,
+        latest_commit_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+        build_status: Option<String>,
+        evaluation_status: Option<String>,
+        environments: Vec<String>,
+        total_commit_count: i64,
+    }
 
-    #[allow(clippy::type_complexity)]
-    let rows = sqlx::query_as::<_, (i32, String, String, String, String, i64, String, Option<DateTime<Utc>>, Option<String>)>(
+    let rows = sqlx::query_as::<_, FlakeRegistryRow>(
         r#"
         SELECT
             f.id,
@@ -172,7 +193,7 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
             f.repo_url,
             f.branch,
             f.build_scope,
-            COUNT(s.id)::bigint AS system_count,
+            COUNT(DISTINCT s.id)::bigint AS system_count,
             CASE
                 WHEN f.sync_status = 'syncing'
                  AND f.last_sync_at IS NOT NULL
@@ -187,11 +208,110 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
                  AND f.last_sync_at < now() - interval '30 minutes'
                 THEN COALESCE(f.last_sync_error, 'Sync appears stale — previous sync attempt did not finish')
                 ELSE f.last_sync_error
-            END AS last_sync_error
+            END AS last_sync_error,
+            -- Latest visible commit hash from snapshot (when ready) or fallback
+            COALESCE(
+                snap_latest.git_commit_hash,
+                fallback_latest.git_commit_hash
+            ) AS latest_commit_hash,
+            COALESCE(
+                snap_latest.message,
+                fallback_latest.message
+            ) AS latest_commit_message,
+            COALESCE(
+                snap_latest.author,
+                fallback_latest.author
+            ) AS latest_commit_author,
+            COALESCE(
+                snap_latest.commit_timestamp,
+                fallback_latest.commit_timestamp
+            ) AS latest_commit_timestamp,
+            -- Build status for whichever latest commit is active
+            latest_build.build_status,
+            COALESCE(
+                snap_latest.evaluation_status,
+                fallback_latest.evaluation_status
+            ) AS evaluation_status,
+            -- Sorted, deduplicated environment names from active systems
+            COALESCE(env_agg.environments, ARRAY[]::text[]) AS environments,
+            -- Total visible commits (snapshot count when ready, else commit count)
+            COALESCE(snap_count.total_count, all_count.total_count, 0::bigint) AS total_commit_count
         FROM flakes f
         LEFT JOIN systems s ON s.flake_id = f.id
+
+        -- Latest commit via branch snapshot (when ready)
+        LEFT JOIN LATERAL (
+            SELECT c.id, c.git_commit_hash, c.message, c.author,
+                   c.commit_timestamp, c.evaluation_status
+            FROM flake_branch_commit_snapshot fbcs
+            JOIN commits c ON c.id = fbcs.commit_id
+            WHERE fbcs.flake_id = f.id
+              AND f.snapshot_ready_at IS NOT NULL
+            ORDER BY fbcs.position ASC
+            LIMIT 1
+        ) snap_latest ON TRUE
+
+        -- Latest commit via timestamp fallback (when snapshot not ready)
+        LEFT JOIN LATERAL (
+            SELECT c.id, c.git_commit_hash, c.message, c.author,
+                   c.commit_timestamp, c.evaluation_status
+            FROM commits c
+            WHERE c.flake_id = f.id
+            ORDER BY c.commit_timestamp DESC, c.id DESC
+            LIMIT 1
+        ) fallback_latest ON TRUE
+
+        -- Build status for the effective latest commit
+        LEFT JOIN LATERAL (
+            SELECT
+                CASE
+                    WHEN COUNT(*) FILTER (WHERE bj.status = 'building') > 0 THEN 'building'
+                    WHEN COUNT(*) FILTER (WHERE bj.status = 'queued') > 0 THEN 'queued'
+                    WHEN COUNT(*) FILTER (WHERE bj.status = 'failed') > 0 THEN 'failed'
+                    WHEN COUNT(*) FILTER (WHERE bj.status = 'success') > 0 THEN 'complete'
+                    ELSE NULL
+                END AS build_status
+            FROM build_jobs bj
+            JOIN derivations d ON d.id = bj.derivation_id
+            WHERE d.commit_id = COALESCE(snap_latest.id, fallback_latest.id)
+        ) latest_build ON TRUE
+
+        -- Environment names from active systems (no 500-row cap)
+        LEFT JOIN LATERAL (
+            SELECT array_agg(DISTINCT e.name ORDER BY e.name) AS environments
+            FROM systems s2
+            JOIN environments e ON e.id = s2.environment_id
+            WHERE s2.flake_id = f.id
+              AND s2.is_active = TRUE
+              AND e.name IS NOT NULL
+        ) env_agg ON TRUE
+
+        -- Snapshot commit count (when ready)
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*)::bigint AS total_count
+            FROM flake_branch_commit_snapshot fbcs2
+            WHERE fbcs2.flake_id = f.id
+        ) snap_count ON TRUE
+
+        -- All commits count (fallback)
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*)::bigint AS total_count
+            FROM commits c2
+            WHERE c2.flake_id = f.id
+        ) all_count ON TRUE
+
         WHERE f.deleted_at IS NULL
-        GROUP BY f.id, f.name, f.repo_url, f.branch, f.build_scope, f.sync_status, f.last_sync_at, f.last_sync_error
+        GROUP BY f.id, f.name, f.repo_url, f.branch, f.build_scope,
+                 f.sync_status, f.last_sync_at, f.last_sync_error,
+                 snap_latest.git_commit_hash, snap_latest.message,
+                 snap_latest.author, snap_latest.commit_timestamp,
+                 snap_latest.evaluation_status,
+                 fallback_latest.git_commit_hash, fallback_latest.message,
+                 fallback_latest.author, fallback_latest.commit_timestamp,
+                 fallback_latest.evaluation_status,
+                 latest_build.build_status,
+                 env_agg.environments,
+                 snap_count.total_count, all_count.total_count
         ORDER BY lower(f.name) ASC
         "#,
     )
@@ -200,29 +320,25 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
 
     Ok(rows
         .into_iter()
-        .map(
-            |(
-                id,
-                name,
-                repo_url,
-                branch,
-                build_scope,
-                system_count,
-                sync_status,
-                last_sync_at,
-                last_sync_error,
-            )| FlakeRegistryItem {
-                id,
-                name,
-                repo_url,
-                branch,
-                build_scope,
-                system_count,
-                sync_status,
-                last_sync_at,
-                last_sync_error,
-            },
-        )
+        .map(|row| FlakeRegistryItem {
+            id: row.id,
+            name: row.name,
+            repo_url: row.repo_url,
+            branch: row.branch,
+            build_scope: row.build_scope,
+            system_count: row.system_count,
+            sync_status: row.sync_status,
+            last_sync_at: row.last_sync_at,
+            last_sync_error: row.last_sync_error,
+            latest_commit_hash: row.latest_commit_hash,
+            latest_commit_message: row.latest_commit_message,
+            latest_commit_author: row.latest_commit_author,
+            latest_commit_timestamp: row.latest_commit_timestamp,
+            build_status: row.build_status,
+            evaluation_status: row.evaluation_status,
+            environments: row.environments,
+            total_commit_count: row.total_commit_count,
+        })
         .collect())
 }
 
