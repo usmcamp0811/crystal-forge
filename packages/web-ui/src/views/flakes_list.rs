@@ -2929,10 +2929,20 @@ mod tests {
             sync_status: "synced".to_string(),
             last_sync_at: None,
             last_sync_error: None,
+            // TASK-397 enriched fields — empty for a flake with no commits/environments
+            latest_commit_hash: None,
+            latest_commit_message: None,
+            latest_commit_author: None,
+            latest_commit_timestamp: None,
+            build_status: None,
+            evaluation_status: None,
+            environments: Vec::new(),
+            total_commit_count: 0,
         };
 
         let mapped = map_registry_flake_to_view(&item);
 
+        // With no environments in the registry response, environment is empty.
         assert_eq!(mapped.environment, "");
         assert_eq!(mapped.description, "Build scope: cf_systems_only");
     }
