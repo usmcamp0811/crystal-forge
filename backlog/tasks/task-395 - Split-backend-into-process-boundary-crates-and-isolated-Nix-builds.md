@@ -1,11 +1,11 @@
 ---
 id: TASK-395
 title: Split backend into process-boundary crates and isolated Nix builds
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-07-19 00:00'
-updated_date: '2026-07-19 00:00'
-lock: TASK-395-split-backend
+updated_date: '2026-07-20 00:00'
+mr: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/new?merge_request%5Bsource_branch%5D=TASK-395-split-backend
 labels:
   - backend
   - architecture
