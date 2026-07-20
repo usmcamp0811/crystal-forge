@@ -1300,14 +1300,16 @@ mod tests {
 
         assert!(has_cve_combination(&rules));
         assert!(build_persisted_payload(&rules).is_none());
-        assert!(save_blocker(
-            false,
-            PolicyFormat::Json,
-            "custom_check",
-            &serde_json::Value::Null,
-            &rules
-        )
-        .is_some());
+        assert!(
+            save_blocker(
+                false,
+                PolicyFormat::Json,
+                "custom_check",
+                &serde_json::Value::Null,
+                &rules
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -1337,14 +1339,16 @@ mod tests {
         });
         let rules = rules_from_policy("require_cve_check", &config);
 
-        assert!(save_blocker(
-            true,
-            PolicyFormat::Json,
-            "require_cve_check",
-            &config,
-            &rules
-        )
-        .is_some());
+        assert!(
+            save_blocker(
+                true,
+                PolicyFormat::Json,
+                "require_cve_check",
+                &config,
+                &rules
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -1355,28 +1359,32 @@ mod tests {
         ];
 
         assert!(build_persisted_payload(&rules).is_none());
-        assert!(save_blocker(
-            false,
-            PolicyFormat::Json,
-            "custom_check",
-            &serde_json::Value::Null,
-            &rules
-        )
-        .is_some());
+        assert!(
+            save_blocker(
+                false,
+                PolicyFormat::Json,
+                "custom_check",
+                &serde_json::Value::Null,
+                &rules
+            )
+            .is_some()
+        );
     }
 
     #[test]
     fn toml_edit_is_read_only_in_design_form() {
         let rules = vec![PolicyRule::new("custom_eval")];
 
-        assert!(save_blocker(
-            true,
-            PolicyFormat::Toml,
-            "custom_check",
-            &serde_json::Value::Null,
-            &rules
-        )
-        .is_some());
+        assert!(
+            save_blocker(
+                true,
+                PolicyFormat::Toml,
+                "custom_check",
+                &serde_json::Value::Null,
+                &rules
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -1435,13 +1443,15 @@ mod tests {
         });
         let rules = rules_from_policy("require_packages", &config);
 
-        assert!(save_blocker(
-            true,
-            PolicyFormat::Json,
-            "require_packages",
-            &config,
-            &rules
-        )
-        .is_some());
+        assert!(
+            save_blocker(
+                true,
+                PolicyFormat::Json,
+                "require_packages",
+                &config,
+                &rules
+            )
+            .is_some()
+        );
     }
 }

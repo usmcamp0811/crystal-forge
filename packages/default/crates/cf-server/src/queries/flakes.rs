@@ -870,13 +870,11 @@ pub async fn replace_flake_branch_snapshot(
     commits: &[(i32, chrono::DateTime<chrono::Utc>)],
 ) -> Result<()> {
     // Delete existing snapshot rows for this flake
-    sqlx::query(
-        "DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1",
-    )
-    .bind(flake_id)
-    .execute(&mut **tx)
-    .await
-    .context("Failed to delete old branch snapshot")?;
+    sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
+        .bind(flake_id)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to delete old branch snapshot")?;
 
     // Insert new snapshot rows
     for (position, (commit_id, observed_at)) in commits.iter().enumerate() {

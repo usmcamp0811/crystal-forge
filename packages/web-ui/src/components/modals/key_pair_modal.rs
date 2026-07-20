@@ -15,8 +15,8 @@ pub struct GeneratedKeyPair {
 
 /// Generate a new Ed25519 key pair for system authentication.
 pub fn generate_key_pair() -> GeneratedKeyPair {
-    use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
     use ed25519_dalek::SigningKey;
     use wasm_bindgen::JsCast;
 

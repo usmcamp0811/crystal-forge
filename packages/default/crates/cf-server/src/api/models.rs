@@ -968,7 +968,6 @@ pub struct FlakeRegistryItem {
     pub last_sync_error: Option<String>,
 
     // ----- Enriched fields (TASK-397) -----
-
     /// Hash of the latest commit visible on the tracked branch (from snapshot
     /// or commit table). `None` if the flake has no commits.
     #[serde(default, skip_serializing_if = "Option::is_none")]

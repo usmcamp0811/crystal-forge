@@ -10,24 +10,24 @@ use js_sys::Object;
 #[cfg(target_arch = "wasm32")]
 use js_sys::{Function, Reflect};
 use uuid::Uuid;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
+use wasm_bindgen::prelude::Closure;
 #[cfg(target_arch = "wasm32")]
 use web_sys::console;
-use web_sys::{window, Node};
+use web_sys::{Node, window};
 
 use crate::alerts::{
-    acknowledge_locally, acknowledge_with_cursor_and_ids_async, attention_row_class,
-    dismiss_attention_item, should_flash, NAV_BADGES,
+    NAV_BADGES, acknowledge_locally, acknowledge_with_cursor_and_ids_async, attention_row_class,
+    dismiss_attention_item, should_flash,
 };
 use crate::api::client::{
-    accept_flake_history_rewrite, create_flake, delete_flake, delete_flake_credentials,
-    fetch_commit_diff, fetch_cve_scan_status, fetch_environments, fetch_flake_credentials,
-    fetch_flake_timeline_for_tray, fetch_flakes, put_flake_credentials, request_sync_all_flakes,
-    request_sync_flake, test_flake_credentials, trigger_flake_config_cve_scan, update_flake,
-    ApiClientError,
+    ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
+    delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_environments,
+    fetch_flake_credentials, fetch_flake_timeline_for_tray, fetch_flakes, put_flake_credentials,
+    request_sync_all_flakes, request_sync_flake, test_flake_credentials,
+    trigger_flake_config_cve_scan, update_flake,
 };
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
@@ -3054,10 +3054,8 @@ pub fn FlakesListViewNew() -> Element {
     };
 
     // Map directly from the enriched registry — no secondary requests needed.
-    let all_flakes: Vec<MockFlakeItem> = raw_flakes
-        .iter()
-        .map(map_registry_flake_to_view)
-        .collect();
+    let all_flakes: Vec<MockFlakeItem> =
+        raw_flakes.iter().map(map_registry_flake_to_view).collect();
 
     // Convert raw_flakes to FlakeListItem for duplicate validation
     let existing_flakes_for_validation: Vec<FlakeListItem> = raw_flakes

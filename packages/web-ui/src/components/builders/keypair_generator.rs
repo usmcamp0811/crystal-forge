@@ -2,7 +2,7 @@
 //!
 //! Uses web-sys crypto.getRandomValues for secure random bytes.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::SigningKey;
 
 /// Generate an Ed25519 keypair using browser crypto API.

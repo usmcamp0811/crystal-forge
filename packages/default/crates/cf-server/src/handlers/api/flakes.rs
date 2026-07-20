@@ -86,8 +86,16 @@ pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl
         return forbidden_viewer();
     }
 
+    let t = std::time::Instant::now();
     match list_flake_registry(&pool).await {
-        Ok(flakes) => (StatusCode::OK, Json(flakes)).into_response(),
+        Ok(flakes) => {
+            info!(
+                flake_count = flakes.len(),
+                elapsed_ms = t.elapsed().as_millis(),
+                "flake_registry_served"
+            );
+            (StatusCode::OK, Json(flakes)).into_response()
+        }
         Err(e) => {
             error!("Failed to list flakes: {e:#}");
             (
@@ -153,6 +161,12 @@ pub async fn get_flake_timelines(
     // Parse optional limit parameter (default 10, max 500 for tray view)
     let max_commits = parse_timeline_limit(&params);
 
+    let t = std::time::Instant::now();
+    let view_mode = if use_dashboard_view {
+        "dashboard"
+    } else {
+        "flakes"
+    };
     let fetch_result = if use_dashboard_view {
         fetch_dashboard_flake_timelines(&pool, max_commits, flake_ids.as_deref()).await
     } else {
@@ -166,6 +180,15 @@ pub async fn get_flake_timelines(
         Ok(mut timelines) => {
             // Dashboard view doesn't need config path details, return immediately.
             if use_dashboard_view {
+                let total_commits: usize = timelines.iter().map(|t| t.commits.len()).sum();
+                info!(
+                    view = view_mode,
+                    flake_count = timelines.len(),
+                    commit_count = total_commits,
+                    limit = max_commits,
+                    elapsed_ms = t.elapsed().as_millis(),
+                    "flake_timelines_served"
+                );
                 return (StatusCode::OK, Json(timelines)).into_response();
             }
 
@@ -225,6 +248,16 @@ pub async fn get_flake_timelines(
                 }
             }
 
+            let total_commits: usize = timelines.iter().map(|t| t.commits.len()).sum();
+            info!(
+                view = view_mode,
+                flake_count = timelines.len(),
+                commit_count = total_commits,
+                limit = max_commits,
+                requested_ids = ?flake_ids.as_deref().map(|ids| ids.len()),
+                elapsed_ms = t.elapsed().as_millis(),
+                "flake_timelines_served"
+            );
             (StatusCode::OK, Json(timelines)).into_response()
         }
         Err(e) => {

@@ -4,10 +4,10 @@ use dioxus::prelude::*;
 
 use crate::api::client::{fetch_classification_config, fetch_config_health};
 use crate::api::models::{AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role};
-use crate::components::layout::sidebar::{MobileDrawer, SidebarContext, SidebarNav};
 use crate::components::layout::TopBar;
+use crate::components::layout::sidebar::{MobileDrawer, SidebarContext, SidebarNav};
 use crate::components::layout::{
-    use_dev_mode_enabled, BannerPlacement, DevModeBanner, DEV_MODE_BANNER_HEIGHT_PX,
+    BannerPlacement, DEV_MODE_BANNER_HEIGHT_PX, DevModeBanner, use_dev_mode_enabled,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::onboarding::OnboardingCoachPanel;

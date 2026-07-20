@@ -438,19 +438,13 @@ async fn rebuild_branch_snapshot(pool: &PgPool, flake_id: i32) {
     {
         Ok(rows) => rows,
         Err(e) => {
-            error!(
-                "Failed to query commits for snapshot rebuild (flake {flake_id}): {e:#}"
-            );
+            error!("Failed to query commits for snapshot rebuild (flake {flake_id}): {e:#}");
             return;
         }
     };
 
-    if let Err(e) =
-        replace_flake_branch_snapshot_standalone(pool, flake_id, &commits).await
-    {
-        error!(
-            "Failed to replace branch snapshot after sync (flake {flake_id}): {e:#}"
-        );
+    if let Err(e) = replace_flake_branch_snapshot_standalone(pool, flake_id, &commits).await {
+        error!("Failed to replace branch snapshot after sync (flake {flake_id}): {e:#}");
     }
 }
 
