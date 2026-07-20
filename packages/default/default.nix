@@ -16,13 +16,9 @@ let
   # from invalidating agent/builder derivations.
   # ─────────────────────────────────────────────────────────────────────────
 
-  # All workspace member crate names (for workspace manifest inclusion)
-  allCrateNames = [ "cf-protocol" "cf-config" "cf-agent" "cf-builder" "cf-keygen" "cf-server" ];
-
   # Helper: build a source filter that includes:
   # 1. Workspace root metadata (Cargo.toml, Cargo.lock)
-  # 2. Cargo.toml of ALL workspace members (so Cargo can parse the workspace)
-  # 3. Full source of the specified crate directories
+  # 2. Full source of the specified crate directories
   mkWorkspaceSrc = crates:
     lib.cleanSourceWith {
       src = src;
@@ -32,18 +28,32 @@ let
           isWorkspaceMeta =
             relPath == "Cargo.toml" ||
             relPath == "Cargo.lock";
-          # Include the Cargo.toml manifest for every workspace member
-          # (needed for Cargo to parse the workspace, even for packages not being built)
-          isAnyMemberManifest = builtins.any
-            (crate: relPath == "crates/${crate}/Cargo.toml" || relPath == "crates/${crate}")
-            allCrateNames;
+          # cleanSourceWith must retain ancestor directories before it can
+          # descend into member manifests and selected crate sources.
+          isWorkspaceDirectory = relPath == "crates";
           # Include full source only for the crates in the component's closure
           isIncludedCrateSource = builtins.any
-            (crate: lib.hasPrefix "crates/${crate}/" relPath)
+            (crate:
+              relPath == "crates/${crate}" ||
+              lib.hasPrefix "crates/${crate}/" relPath)
             crates;
         in
-        isWorkspaceMeta || isAnyMemberManifest || isIncludedCrateSource;
+        isWorkspaceMeta || isWorkspaceDirectory || isIncludedCrateSource;
     };
+
+  # Cargo parses every member named by a workspace manifest, even when
+  # --package selects a single component. Filtered builds therefore replace
+  # the root manifest in the build tree with one containing only that
+  # component's transitive local-crate closure. Excluded process manifests and
+  # sources are neither parsed nor included in the derivation input.
+  mkComponentWorkspaceManifest = name: crates:
+    pkgs.writeText "${name}-workspace-Cargo.toml" ''
+      [workspace]
+      members = [
+      ${lib.concatMapStringsSep "\n" (crate: "  \"crates/${crate}\",") crates}
+      ]
+      resolver = "2"
+    '';
 
   # Source closures for each component.
   # cf-protocol and cf-config are shared foundational crates needed by all.
@@ -53,6 +63,13 @@ let
   builderSrc = mkWorkspaceSrc (foundationalCrates ++ [ "cf-builder" ]);
   keygenSrc  = mkWorkspaceSrc [ "cf-keygen" ];
   serverSrc  = src; # server builds the full workspace
+
+  agentWorkspaceManifest =
+    mkComponentWorkspaceManifest "agent" (foundationalCrates ++ [ "cf-agent" ]);
+  builderWorkspaceManifest =
+    mkComponentWorkspaceManifest "builder" (foundationalCrates ++ [ "cf-builder" ]);
+  keygenWorkspaceManifest =
+    mkComponentWorkspaceManifest "keygen" [ "cf-keygen" ];
 
   # ─────────────────────────────────────────────────────────────────────────
   # Per-component SRC_HASH
@@ -90,6 +107,11 @@ let
       "--bin" "test-agent"
       "--features" "cf-server/embedded-ui"
     ];
+    cargoCheckFlags = cargoBuildFlags;
+    cargoTestFlags = [
+      "--package" "cf-server"
+      "--features" "cf-server/embedded-ui"
+    ];
     CRYSTAL_FORGE_UI_DIST = "${pkgs.crystal-forge.web-ui}/public";
 
     nativeBuildInputs = commonNativeBuildInputs ++ (with pkgs; [ sqlx-cli ]);
@@ -123,6 +145,12 @@ let
     pname = "cf-agent";
     cargoLock = { lockFile = ./Cargo.lock; };
     cargoBuildFlags = [ "--package" "cf-agent" ];
+    cargoCheckFlags = cargoBuildFlags;
+    cargoTestFlags = cargoBuildFlags;
+
+    postPatch = ''
+      cp ${agentWorkspaceManifest} Cargo.toml
+    '';
 
     nativeBuildInputs = commonNativeBuildInputs;
     buildInputs = commonBuildInputs;
@@ -152,6 +180,12 @@ let
     pname = "cf-builder";
     cargoLock = { lockFile = ./Cargo.lock; };
     cargoBuildFlags = [ "--package" "cf-builder" ];
+    cargoCheckFlags = cargoBuildFlags;
+    cargoTestFlags = cargoBuildFlags;
+
+    postPatch = ''
+      cp ${builderWorkspaceManifest} Cargo.toml
+    '';
 
     nativeBuildInputs = commonNativeBuildInputs;
     buildInputs = commonBuildInputs;
@@ -175,6 +209,12 @@ let
     pname = "cf-keygen";
     cargoLock = { lockFile = ./Cargo.lock; };
     cargoBuildFlags = [ "--package" "cf-keygen" ];
+    cargoCheckFlags = cargoBuildFlags;
+    cargoTestFlags = cargoBuildFlags;
+
+    postPatch = ''
+      cp ${keygenWorkspaceManifest} Cargo.toml
+    '';
 
     nativeBuildInputs = commonNativeBuildInputs;
     buildInputs = commonBuildInputs;
