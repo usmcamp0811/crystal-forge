@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/cf-protocol",
+    "crates/cf-config",
     "crates/cf-server",
 ]
 resolver = "2"

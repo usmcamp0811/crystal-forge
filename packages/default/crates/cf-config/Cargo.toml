@@ -1,0 +1,19 @@
+[package]
+name = "cf-config"
+version = "0.3.0"
+edition = "2024"
+description = "Crystal Forge configuration types and loading (no DB, no server)"
+
+[dependencies]
+cf-protocol = { path = "../cf-protocol" }
+anyhow = "1.0.98"
+chrono = { version = "0.4.41", features = ["serde"] }
+config = { version = "0.15", features = ["toml", "json"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+humantime-serde = "1.1.1"
+num_cpus = "1.16"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.37", features = ["process"] }
+tracing = "0.1.41"
+uuid = { version = "1.17.0", features = ["v4", "serde"] }

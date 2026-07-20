@@ -1,30 +1,21 @@
-mod agent;
-mod auth;
-mod build;
-mod builder;
-mod cache;
-mod database;
-pub mod deployment;
-mod environment;
-mod flakes;
-mod oidc;
-mod server;
-mod system;
-mod vulnix;
+//! Crystal Forge server configuration.
+//!
+//! This module re-exports all configuration types from `cf-config` and adds
+//! server-specific functionality: database pool creation, connection validation,
+//! and configuration synchronization to the database.
+//!
+//! # Summary of what lives where
+//!
+//! - Pure config loading, structs, defaults → `cf-config`
+//! - Database pool creation, validation, and DB sync → this module (server-only)
 
-pub use agent::*;
-pub use auth::*;
-pub use build::*;
-pub use builder::*;
-pub use cache::*;
-pub use database::*;
-pub use deployment::*;
-pub use environment::*;
-pub use flakes::*;
-pub use oidc::*;
-pub use server::*;
-pub use system::*;
-pub use vulnix::*;
+// Re-export everything from cf-config at the same path so existing imports
+// (e.g., `use crate::config::CrystalForgeConfig`) continue to work.
+pub use cf_config::config::*;
+
+// Re-export sub-modules that callers reference explicitly
+// (e.g., `use crate::config::deployment::DeploymentConfig`)
+pub use cf_config::config::deployment;
 
 use crate::models::systems::System;
 use crate::queries::environments::{
@@ -33,274 +24,135 @@ use crate::queries::environments::{
 use crate::queries::flakes::{get_flake_id_by_repo_url, insert_flake};
 use crate::queries::systems::insert_system;
 use anyhow::{Context, Result};
-use config::Config;
-use serde::Deserialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::env;
 use std::time::Duration;
 use tokio_postgres::NoTls;
-use tracing::debug;
 
-mod duration_serde {
-    use serde::{Deserialize, Deserializer, Serializer};
-    use std::time::Duration;
+// ─────────────────────────────────────────────────────────────────────────────
+// Server-side database operations for CrystalForgeConfig
+//
+// These functions require SQLx/PostgreSQL and therefore cannot live in cf-config.
+// Call them from the server binary after loading CrystalForgeConfig::load().
+// ─────────────────────────────────────────────────────────────────────────────
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let secs = u64::deserialize(deserializer)?;
-        Ok(Duration::from_secs(secs))
-    }
-    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_u64(duration.as_secs())
-    }
+/// Create and return a PostgreSQL connection pool from the loaded config.
+pub async fn db_pool_from_config(cfg: &CrystalForgeConfig) -> Result<PgPool> {
+    let db_url = cfg.database.to_url();
+    PgPoolOptions::new()
+        .max_connections(20)
+        .min_connections(5)
+        .acquire_timeout(Duration::from_secs(30))
+        .idle_timeout(Some(Duration::from_secs(600)))
+        .max_lifetime(Some(Duration::from_secs(1800)))
+        .test_before_acquire(true)
+        .connect(&db_url)
+        .await
+        .context("connecting to database")
 }
 
-#[derive(Debug, Deserialize, Clone)]
-#[serde(default)]
-pub struct CrystalForgeConfig {
-    #[serde(default)]
-    pub flakes: FlakeConfig,
-    #[serde(default)]
-    pub database: DatabaseConfig,
-    #[serde(default)]
-    pub server: ServerConfig,
-    #[serde(default)]
-    pub client: AgentConfig,
-    #[serde(default)]
-    pub builder: BuilderConfig,
-    #[serde(default)]
-    pub environments: Vec<EnvironmentConfig>,
-    #[serde(default)]
-    pub systems: Vec<SystemConfig>,
-    #[serde(default)]
-    pub vulnix: VulnixConfig,
-    #[serde(default)]
-    pub build: BuildConfig,
-    #[serde(default)]
-    pub cache: CacheConfig,
-    #[serde(default)]
-    pub auth: AuthConfig,
-    #[serde(default)]
-    pub deployment: DeploymentConfig,
+/// Convenience wrapper: loads config then creates a DB pool.
+///
+/// This mirrors the old `CrystalForgeConfig::db_pool()` associated function.
+/// Server code that needs a quick pool without an existing config can call this.
+pub async fn db_pool() -> Result<PgPool> {
+    let cfg = CrystalForgeConfig::load()?;
+    db_pool_from_config(&cfg).await
 }
 
-impl Default for CrystalForgeConfig {
-    fn default() -> Self {
-        Self {
-            flakes: FlakeConfig::default(),
-            database: DatabaseConfig::default(),
-            server: ServerConfig::default(),
-            client: AgentConfig::default(),
-            builder: BuilderConfig::default(),
-            environments: vec![],
-            systems: vec![],
-            vulnix: VulnixConfig::default(),
-            build: BuildConfig::default(),
-            cache: CacheConfig::default(),
-            auth: AuthConfig::default(),
-            deployment: DeploymentConfig::default(),
-        }
-    }
+/// Validate that a database connection can be established using the config.
+pub async fn validate_db_connection() -> anyhow::Result<()> {
+    let cfg = CrystalForgeConfig::load()?;
+    let db_url = cfg.database.to_url();
+    let (_client, connection) = tokio_postgres::connect(&db_url, NoTls).await?;
+    tokio::spawn(connection);
+    Ok(())
 }
 
-impl CrystalForgeConfig {
-    pub fn get_server_config(&self) -> &ServerConfig {
-        &self.server
-    }
-    /// Gets build config as reference
-    pub fn get_build_config(&self) -> &BuildConfig {
-        &self.build
-    }
+/// Synchronize static systems from TOML config into the database.
+///
+/// Upserts all systems declared in `config.toml` into the systems table,
+/// creating environment and flake records as needed.
+pub async fn sync_systems_to_db(cfg: &CrystalForgeConfig, pool: &PgPool) -> anyhow::Result<()> {
+    let reloaded = CrystalForgeConfig::load()?;
 
-    /// Gets vulnix config as reference
-    pub fn get_vulnix_config(&self) -> &VulnixConfig {
-        &self.vulnix
-    }
-
-    /// Get deployment config as reference
-    pub fn get_deployment_config(&self) -> &DeploymentConfig {
-        &self.deployment
-    }
-
-    /// Gets cache config as reference
-    pub fn get_cache_config(&self) -> &CacheConfig {
-        &self.cache
-    }
-
-    /// Gets build config as reference (legacy method, same as get_build_config)
-    pub fn build_config_ref(&self) -> &BuildConfig {
-        &self.build
-    }
-
-    pub fn get_auth_config(&self) -> &AuthConfig {
-        &self.auth
-    }
-
-    /// Gets builder config as reference
-    pub fn get_builder_config(&self) -> &BuilderConfig {
-        &self.builder
-    }
-
-    pub fn load() -> Result<Self> {
+    if cfg.systems.is_empty() {
         let config_path = env::var("CRYSTAL_FORGE_CONFIG")
             .unwrap_or_else(|_| "/var/lib/crystal_forge/config.toml".to_string());
-
-        debug!("CRYSTAL_FORGE_CONFIG => {}", config_path);
-
-        let settings = Config::builder()
-            .add_source(config::File::with_name(&config_path).required(false))
-            .add_source(config::Environment::with_prefix("CRYSTAL_FORGE").separator("__"))
-            .build()
-            .context("loading configuration")?;
-
-        let config: Self = settings
-            .try_deserialize()
-            .context("parsing configuration")?;
-
-        Ok(config)
+        tracing::info!(
+            "No systems defined in {}; skipping system sync.",
+            config_path
+        );
+        return Ok(());
     }
 
-    pub async fn db_pool() -> Result<PgPool> {
-        let cfg = Self::load()?;
-        let db_url = cfg.database.to_url();
-        PgPoolOptions::new()
-            .max_connections(20)
-            .min_connections(5) // Keep minimum connections alive
-            .acquire_timeout(Duration::from_secs(30)) // Timeout acquiring connections
-            .idle_timeout(Some(Duration::from_secs(600))) // Close idle connections after 10min
-            .max_lifetime(Some(Duration::from_secs(1800))) // Rotate connections after 30min
-            .test_before_acquire(true) // Test connections before use
-            .connect(&db_url)
-            .await
-            .context("connecting to database")
+    tracing::debug!("💡 Syncing Systems in Config to Database.");
+
+    // Sync environments first
+    for environment in &reloaded.environments {
+        let _ = get_or_insert_environment_id_by_config(pool, environment).await?;
     }
 
-    pub fn with_flakes(mut self, flakes: FlakeConfig) -> Self {
-        self.flakes = flakes;
-        self
-    }
+    for config in &cfg.systems {
+        tracing::info!("📥 Syncing system {}...", config.hostname);
 
-    pub fn with_database(mut self, database: DatabaseConfig) -> Self {
-        self.database = database;
-        self
-    }
+        let environment_id = get_environment_id_by_name(pool, &config.environment)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Environment '{}' not found in database for system '{}'",
+                    config.environment,
+                    config.hostname
+                )
+            })?;
 
-    pub fn with_server(mut self, server: ServerConfig) -> Self {
-        self.server = server;
-        self
-    }
-
-    pub fn with_client(mut self, client: AgentConfig) -> Self {
-        self.client = client;
-        self
-    }
-
-    pub fn with_environments<T>(mut self, environments: T) -> Self
-    where
-        T: Into<Vec<EnvironmentConfig>>,
-    {
-        self.environments = environments.into();
-        self
-    }
-
-    pub async fn validate_db_connection() -> anyhow::Result<()> {
-        let cfg = Self::load()?;
-        let db_url = cfg.database.to_url();
-        let (_client, connection) = tokio_postgres::connect(&db_url, NoTls).await?;
-        tokio::spawn(connection);
-        Ok(())
-    }
-
-    pub async fn sync_systems_to_db(&self, pool: &PgPool) -> anyhow::Result<()> {
-        let cfg = Self::load()?;
-
-        if self.systems.is_empty() {
-            let config_path = env::var("CRYSTAL_FORGE_CONFIG")
-                .unwrap_or_else(|_| "/var/lib/crystal_forge/config.toml".to_string());
-            tracing::info!(
-                "No systems defined in {}; skipping system sync.",
-                config_path
-            );
-            return Ok(());
-        }
-
-        debug!("💡 Syncing Systems in Config to Database.");
-
-        // Sync environments first
-        for environment in &cfg.environments {
-            let _ = get_or_insert_environment_id_by_config(pool, environment).await?;
-        }
-
-        for config in &self.systems {
-            tracing::info!("📥 Syncing system {}...", config.hostname);
-
-            // Fetch environment ID
-            let environment_id = get_environment_id_by_name(pool, &config.environment)
-                .await?
+        let flake_id = if let Some(flake_name) = &config.flake_name {
+            let watched_flake = cfg
+                .flakes
+                .watched
+                .iter()
+                .find(|wf| &wf.name == flake_name)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "Environment '{}' not found in database for system '{}'",
-                        config.environment,
+                        "Flake '{}' referenced by system '{}' not found in flakes.watched",
+                        flake_name,
                         config.hostname
                     )
                 })?;
 
-            // Fetch flake ID by repo URL if provided in your config (optional)
-            let flake_id = if let Some(flake_name) = &config.flake_name {
-                // Find watched flake in config by name
-                let watched_flake = self
-                    .flakes
-                    .watched
-                    .iter()
-                    .find(|wf| &wf.name == flake_name)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Flake '{}' referenced by system '{}' not found in flakes.watched",
-                            flake_name,
-                            config.hostname
-                        )
-                    })?;
-
-                // Lookup or insert in DB
-                let id = match get_flake_id_by_repo_url(pool, &watched_flake.repo_url).await? {
-                    Some(id) => id,
-                    None => {
-                        insert_flake(
-                            pool,
-                            &watched_flake.name,
-                            &watched_flake.repo_url,
-                            &watched_flake.branch(),
-                            "cf_systems_only",
-                        )
-                        .await?
-                        .id
-                    }
-                };
-                Some(id)
-            } else {
-                None
+            let id = match get_flake_id_by_repo_url(pool, &watched_flake.repo_url).await? {
+                Some(id) => id,
+                None => {
+                    insert_flake(
+                        pool,
+                        &watched_flake.name,
+                        &watched_flake.repo_url,
+                        &watched_flake.branch(),
+                        "cf_systems_only",
+                    )
+                    .await?
+                    .id
+                }
             };
+            Some(id)
+        } else {
+            None
+        };
 
-            let system = System::new(
-                pool,
-                config.hostname.clone(),
-                Some(environment_id),
-                true,
-                config.public_key.clone(),
-                flake_id,
-                None,
-                config.desired_target.clone(),
-                config.deployment_policy.clone(),
-            )
-            .await?;
-            insert_system(pool, &system).await;
-        }
-
-        Ok(())
+        let system = System::new(
+            pool,
+            config.hostname.clone(),
+            Some(environment_id),
+            true,
+            config.public_key.clone(),
+            flake_id,
+            None,
+            config.desired_target.clone(),
+            config.deployment_policy.clone(),
+        )
+        .await?;
+        insert_system(pool, &system).await;
     }
+
+    Ok(())
 }

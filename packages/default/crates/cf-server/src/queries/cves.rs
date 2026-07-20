@@ -824,7 +824,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires test database"]
     async fn fetch_cve_list_no_filters_returns_ok() {
-        let pool = crate::config::CrystalForgeConfig::db_pool()
+        let pool = crate::config::db_pool()
             .await
             .expect("test db pool");
         let result = fetch_cve_list(&pool, &CveFilters::default()).await;
@@ -834,7 +834,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires test database"]
     async fn fetch_cve_fleet_stats_returns_ok() {
-        let pool = crate::config::CrystalForgeConfig::db_pool()
+        let pool = crate::config::db_pool()
             .await
             .expect("test db pool");
         let result = fetch_cve_fleet_stats(&pool).await;
@@ -844,7 +844,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires test database"]
     async fn fetch_cve_list_severity_filter_constrains_results() {
-        let pool = crate::config::CrystalForgeConfig::db_pool()
+        let pool = crate::config::db_pool()
             .await
             .expect("test db pool");
         let f = CveFilters {
@@ -865,7 +865,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires test database"]
     async fn fetch_cve_list_limit_respected() {
-        let pool = crate::config::CrystalForgeConfig::db_pool()
+        let pool = crate::config::db_pool()
             .await
             .expect("test db pool");
         let f = CveFilters {

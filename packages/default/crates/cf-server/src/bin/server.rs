@@ -13,7 +13,7 @@ use crystal_forge::{
     auth::dev_mode::{
         ensure_bootstrap_oidc_admin_mapping, ensure_dev_users, ensure_local_bootstrap_admin,
     },
-    config::CrystalForgeConfig,
+    config::{CrystalForgeConfig, db_pool, validate_db_connection, sync_systems_to_db},
     fixtures::seed_from_fixture,
     flake::commits::initialize_flake_commits,
     handlers::{
@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     // Load and validate config
     let cfg = CrystalForgeConfig::load()?;
     cfg.server.validate().map_err(anyhow::Error::msg)?;
-    CrystalForgeConfig::validate_db_connection().await?;
+    validate_db_connection().await?;
 
     // Validate auth mode and apply production guard
     let auth_mode = &cfg.server.auth_mode;
@@ -90,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     debug!("======== INITIALIZING DATABASE ========");
-    let pool = CrystalForgeConfig::db_pool().await?;
+    let pool = db_pool().await?;
     tokio::spawn(memory_monitor_task(pool.clone()));
     sqlx::migrate!("./migrations").run(&pool).await?;
     let encrypted_rows = encrypt_plaintext_cache_secrets(&pool).await?;
@@ -100,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
             encrypted_rows
         );
     }
-    cfg.sync_systems_to_db(&pool).await?;
+    sync_systems_to_db(&cfg, &pool).await?;
 
     if let Ok(path) = std::env::var("FIXTURE_JSON_PATH") {
         if !path.is_empty() {

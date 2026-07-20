@@ -406,6 +406,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-config"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "cf-protocol",
+ "chrono",
+ "config",
+ "ed25519-dalek",
+ "humantime-serde",
+ "num_cpus",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "cf-protocol"
 version = "0.3.0"
 dependencies = [
@@ -682,6 +700,7 @@ dependencies = [
  "base64 0.21.7",
  "bigdecimal",
  "bytes",
+ "cf-config",
  "cf-protocol",
  "chrono",
  "chrono-tz",
