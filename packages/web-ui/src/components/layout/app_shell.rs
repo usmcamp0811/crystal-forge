@@ -4,10 +4,10 @@ use dioxus::prelude::*;
 
 use crate::api::client::{fetch_classification_config, fetch_config_health};
 use crate::api::models::{AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role};
-use crate::components::layout::TopBar;
 use crate::components::layout::sidebar::{MobileDrawer, SidebarContext, SidebarNav};
+use crate::components::layout::TopBar;
 use crate::components::layout::{
-    BannerPlacement, DEV_MODE_BANNER_HEIGHT_PX, DevModeBanner, use_dev_mode_enabled,
+    use_dev_mode_enabled, BannerPlacement, DevModeBanner, DEV_MODE_BANNER_HEIGHT_PX,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::onboarding::OnboardingCoachPanel;
@@ -221,6 +221,24 @@ pub fn AppShell() -> Element {
             .join(",")
     });
 
+    // Build a human-readable banner message that includes the specific issue(s).
+    let health_banner_msg: Option<String> = shared_health.as_ref().map(|h| {
+        let failing: Vec<&str> = h
+            .checks
+            .iter()
+            .filter(|c| !c.passed)
+            .map(|c| c.message.as_str())
+            .collect();
+        if failing.len() == 1 {
+            format!("Configuration issue: {}", failing[0])
+        } else {
+            format!(
+                "{} configuration issues detected — some pipeline stages may not function.",
+                h.total_issues
+            )
+        }
+    });
+
     // Determine whether the global notification bar should be shown.
     let show_health_bar = is_admin_user
         && shared_health
@@ -315,17 +333,13 @@ pub fn AppShell() -> Element {
                     class: "main",
                     TopBar { title: current_route.title() }
                     if show_health_bar {
-                        if let Some(ref h) = shared_health {
+                        if let Some(ref msg) = health_banner_msg {
                             div {
                                 class: "px-6 py-4 border-b border-amber-300/35 bg-gradient-to-r from-amber-950/90 via-amber-900/45 to-yellow-950/20 shadow-[inset_0_1px_0_rgba(252,211,77,0.16)]",
                                 style: "background: linear-gradient(180deg, rgba(120, 53, 15, 0.34), rgba(120, 53, 15, 0.18)); border-bottom-color: rgba(245, 158, 11, 0.28);",
                                 AlertBanner {
                                     severity: AlertSeverity::Warning,
-                                    message: format!(
-                                        "{} configuration issue{} detected — some pipeline stages may not function.",
-                                        h.total_issues,
-                                        if h.total_issues == 1 { "" } else { "s" }
-                                    ),
+                                    message: msg.clone(),
                                     action_label: Some("View details on Dashboard".to_string()),
                                     action_url: Some("/".to_string()),
                                     on_dismiss: Some(EventHandler::new(move |_| {
