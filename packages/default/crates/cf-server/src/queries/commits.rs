@@ -1,8 +1,9 @@
 use crate::api::models::{CancelEvalOutcome, EvalHistoryItem, EvalHistoryPage};
 use crate::models::commits::Commit;
 use crate::models::flakes::Flake;
+use crate::queries::attention;
 use anyhow::{Context, Result};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use std::collections::{BTreeSet, HashSet};
 use tracing::{debug, error, info, warn};
 
@@ -314,19 +315,30 @@ pub async fn mark_commit_evaluation_started(pool: &PgPool, commit_id: i32) -> Re
 
 /// Mark commit evaluation as successfully completed
 pub async fn mark_commit_evaluation_complete(pool: &PgPool, commit_id: i32) -> Result<()> {
-    sqlx::query!(
+    sqlx::query(
         r#"
         UPDATE commits
-        SET 
+        SET
             evaluation_status = 'complete',
             evaluation_completed_at = NOW(),
             evaluation_error_message = NULL
         WHERE id = $1
         "#,
-        commit_id
     )
+    .bind(commit_id)
     .execute(pool)
     .await?;
+
+    let _ = attention::resolve(
+        pool,
+        "evals",
+        "commit_eval",
+        &commit_id.to_string(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("failed to resolve evaluation attention occurrence: {e:#}")
+    });
 
     Ok(())
 }
@@ -345,11 +357,11 @@ pub async fn mark_commit_evaluation_failed(
     commit_id: i32,
     error: &str,
 ) -> Result<()> {
-    sqlx::query(
+    let row = sqlx::query(
         r#"
         UPDATE commits
-        SET 
-            evaluation_status = CASE 
+        SET
+            evaluation_status = CASE
                 WHEN COALESCE(evaluation_attempt_count, 0) >= 3 THEN 'failed'
                 ELSE 'pending'
             END,
@@ -359,12 +371,35 @@ pub async fn mark_commit_evaluation_failed(
             END,
             evaluation_error_message = $2
         WHERE id = $1
+        RETURNING evaluation_status, evaluation_completed_at
         "#,
     )
     .bind(commit_id)
     .bind(error)
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
+
+    let status: &str = row.try_get("evaluation_status")?;
+    if status == "failed" {
+        let completed_at: Option<chrono::DateTime<chrono::Utc>> =
+            row.try_get("evaluation_completed_at")?;
+        if let Some(completed_at) = completed_at {
+            let key = attention::eval_occurrence_key(commit_id, completed_at);
+            let _ = attention::open_or_observe(
+                pool,
+                "evals",
+                "commit_eval",
+                &commit_id.to_string(),
+                &key,
+                completed_at,
+                serde_json::json!({"commit_id": commit_id}),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("failed to open evaluation attention occurrence: {e:#}")
+            });
+        }
+    }
 
     Ok(())
 }
@@ -405,6 +440,17 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
         "🔄 Reset evaluation for commit {} ({})",
         result.id, result.git_commit_hash
     );
+
+    let _ = attention::resolve(
+        pool,
+        "evals",
+        "commit_eval",
+        &commit_id.to_string(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("failed to resolve stale evaluation attention occurrence: {e:#}")
+    });
 
     Ok(())
 }

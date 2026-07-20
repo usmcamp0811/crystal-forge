@@ -15,6 +15,7 @@ use crate::models::builders::{
     ReportMetricsRequest, UpdateBuilderRequest,
 };
 use crate::models::public_key::PublicKey;
+use crate::queries::attention;
 
 const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
     UPDATE build_jobs
@@ -1289,6 +1290,15 @@ pub async fn complete_job_atomic(
         .await
         .context("Failed to commit completion transaction")?;
 
+    let _ = attention::resolve(
+        pool,
+        "builds",
+        "build_job",
+        &job_id.to_string(),
+    )
+    .await
+    .map_err(|e| tracing::error!("failed to resolve build attention occurrence: {e:#}"));
+
     let job = get_build_job_by_id(pool, job_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("Build job disappeared after completion"))?;
@@ -1735,6 +1745,20 @@ pub async fn mark_job_failed_with_retry(
         let failed_job = get_build_job_by_id(pool, job_id).await?.ok_or_else(|| {
             anyhow::anyhow!("Build job disappeared after successful fail transition")
         })?;
+
+        // Open a canonical attention occurrence for the terminal failure.
+        let opened_at = failed_job.completed_at.unwrap_or_else(Utc::now);
+        let _ = attention::open_or_observe(
+            pool,
+            "builds",
+            "build_job",
+            &job_id.to_string(),
+            &attention::build_occurrence_key(*job_id),
+            opened_at,
+            serde_json::json!({"job_id": job_id.to_string()}),
+        )
+        .await
+        .map_err(|e| tracing::error!("failed to open build attention occurrence: {e:#}"));
 
         Ok(failed_job)
     }

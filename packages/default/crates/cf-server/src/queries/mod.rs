@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod agent_heartbeat;
+pub mod attention;
 pub mod auth_identity;
 pub mod build_jobs;
 pub mod build_reservations;

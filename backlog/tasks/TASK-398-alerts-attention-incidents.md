@@ -540,5 +540,15 @@ Keep this task in `Backlog` until a human selects it for a sprint. Once selected
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-<!-- Record design decisions, migrations, compatibility behavior, measurements, verification results, commits, and MR link here. -->
+- Migration 0178 added: `attention_occurrences` + `user_attention_dismissals` + cleanup function + indexes.
+- Canonical module created at `packages/default/crates/cf-server/src/queries/attention.rs`.
+- Wired terminal-failure producers:
+  - `packages/default/crates/cf-server/src/queries/builders.rs` `mark_job_failed_with_retry` (permanent failure branch) opens a `builds`/`build_job` occurrence.
+  - `packages/default/crates/cf-server/src/queries/build_jobs.rs` `mark_job_failed` opens a `builds`/`build_job` occurrence (defensive wiring for the helper path).
+  - `packages/default/crates/cf-server/src/queries/commits.rs` `mark_commit_evaluation_failed` opens an `evaluations`/`commit_eval` occurrence keyed by `evaluation_completed_at` microseconds.
+  - `mark_commit_evaluation_complete` and `reset_commit_evaluation` resolve the corresponding `evaluations`/`commit_eval` occurrence.
+  - `complete_job_atomic` resolves the `builds`/`build_job` occurrence.
+- Verified: `SQLX_OFFLINE=true nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server --all-targets` passes.
+- Verified: `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server attention` passes.
+- Next: rewrite `fetch_navigation_badges` and the dismissal endpoint to use the canonical occurrence model.
 <!-- SECTION:NOTES:END -->
