@@ -347,6 +347,109 @@ pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
     Ok(result.rows_affected())
 }
 
+/// Atomically reset a flake's source identity and purge its commit history.
+///
+/// Called when `repo_url` or `branch` changes.  In one transaction:
+///
+/// 1. Deletes the branch snapshot.
+/// 2. Purges all dependent commit data in the established order (caches →
+///    derivations → commits) — same cascade order as `purge_flake_commit_history`.
+/// 3. Updates the flake identity (name, repo_url, branch, build_scope).
+/// 4. Sets an empty ready snapshot (`snapshot_ready_at = now()` so readers never
+///    see stale commits through fallback ordering).
+///
+/// All errors are propagated via `?`.  Returns the updated `Flake` row.
+pub async fn reset_flake_source(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    flake_id: i32,
+    name: &str,
+    repo_url: &str,
+    branch: &str,
+    build_scope: &str,
+) -> Result<Flake> {
+    // 1. Clear snapshot
+    sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
+        .bind(flake_id)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to clear branch snapshot during source reset")?;
+
+    // 2. Purge commit-scoped caches (same order as purge_flake_commit_history)
+    sqlx::query(
+        r#"
+        DELETE FROM commit_artifacts_cache cac
+        USING commits c
+        WHERE cac.commit_id = c.id
+          AND c.flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .execute(&mut **tx)
+    .await
+    .context("Failed to clear commit artifacts cache during source reset")?;
+
+    sqlx::query(
+        r#"
+        DELETE FROM commit_metadata_cache cmc
+        USING commits c
+        WHERE cmc.commit_id = c.id
+          AND c.flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .execute(&mut **tx)
+    .await
+    .context("Failed to clear commit metadata cache during source reset")?;
+
+    // Remove derivations linked to this flake's commits
+    sqlx::query(
+        r#"
+        DELETE FROM derivations d
+        USING commits c
+        WHERE d.commit_id = c.id
+          AND c.flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .execute(&mut **tx)
+    .await
+    .context("Failed to clear derivations during source reset")?;
+
+    // Delete commits
+    sqlx::query("DELETE FROM commits WHERE flake_id = $1")
+        .bind(flake_id)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to clear commits during source reset")?;
+
+    // 3. Update flake identity
+    let flake = sqlx::query_as::<_, Flake>(
+        r#"
+        UPDATE flakes
+        SET name = $1, repo_url = $2, branch = $3, build_scope = $4
+        WHERE id = $5 AND deleted_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(name)
+    .bind(repo_url)
+    .bind(branch)
+    .bind(build_scope)
+    .bind(flake_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to update flake identity during source reset")?;
+
+    // 4. Set empty ready snapshot
+    sqlx::query("UPDATE flakes SET snapshot_ready_at = now() WHERE id = $1")
+        .bind(flake_id)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to set empty ready snapshot during source reset")?;
+
+    Ok(flake)
+}
+
 pub async fn purge_flake_commit_history(pool: &PgPool, flake_id: i32) -> Result<u64> {
     let mut tx = pool.begin().await?;
 

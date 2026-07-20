@@ -39,7 +39,7 @@ use crate::queries::flakes::{
     cascade_delete_flake, check_flake_dependencies, count_systems_for_flake, delete_flake_by_id,
     fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
     get_flake_id_by_repo_url, insert_flake, list_flake_registry, purge_flake_commit_history,
-    soft_delete_flake, update_flake,
+    reset_flake_source, soft_delete_flake, update_flake,
 };
 use crate::queries::users::get_by_email;
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
@@ -814,28 +814,57 @@ pub async fn create_flake(
         Err(response) => return response,
     };
 
-    // Insert uses ON CONFLICT (repo_url) which silently updates an existing
-    // flake's branch. If the branch changed, purge old commits and snapshot
-    // in one transaction, leaving an empty ready snapshot.
+    // If a flake with this repo_url already exists and the branch changed,
+    // atomically reset the source identity and commit history via
+    // reset_flake_source (which handles the identity update, purge, and
+    // empty ready snapshot in one transaction).
     if let Ok(Some(existing_id)) = get_flake_id_by_repo_url(&pool, repo_url).await {
         if let Ok(existing) = get_flake_by_id(&pool, existing_id).await {
             if existing.branch != branch {
-                if let Ok(mut tx) = pool.begin().await {
-                    let _ =
-                        sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
-                            .bind(existing_id)
-                            .execute(&mut *tx)
-                            .await;
-                    let _ = sqlx::query("DELETE FROM commits WHERE flake_id = $1")
-                        .bind(existing_id)
-                        .execute(&mut *tx)
-                        .await;
-                    let _ =
-                        sqlx::query("UPDATE flakes SET snapshot_ready_at = now() WHERE id = $1")
-                            .bind(existing_id)
-                            .execute(&mut *tx)
-                            .await;
-                    let _ = tx.commit().await;
+                match pool.begin().await {
+                    Ok(mut tx) => match reset_flake_source(
+                        &mut tx,
+                        existing_id,
+                        name,
+                        repo_url,
+                        &branch,
+                        build_scope,
+                    )
+                    .await
+                    {
+                        Ok(updated) => match tx.commit().await {
+                            Ok(_) => {
+                                return (
+                                    StatusCode::CREATED,
+                                    Json(FlakeRegistryItem {
+                                        id: updated.id,
+                                        name: updated.name,
+                                        repo_url: updated.repo_url,
+                                        branch: updated.branch,
+                                        build_scope: updated.build_scope,
+                                        system_count: 0,
+                                        sync_status: updated
+                                            .sync_status
+                                            .unwrap_or_else(|| "unknown".to_string()),
+                                        last_sync_at: updated.last_sync_at,
+                                        last_sync_error: updated.last_sync_error,
+                                        latest_commit_hash: None,
+                                        latest_commit_message: None,
+                                        latest_commit_author: None,
+                                        latest_commit_timestamp: None,
+                                        build_status: None,
+                                        evaluation_status: None,
+                                        environments: Vec::new(),
+                                        total_commit_count: 0,
+                                    }),
+                                )
+                                    .into_response();
+                            }
+                            Err(e) => error!("Failed to commit branch-change reset tx: {e:#}"),
+                        },
+                        Err(e) => error!("Failed to reset flake source for branch change: {e:#}"),
+                    },
+                    Err(e) => error!("Failed to begin branch-change reset tx: {e:#}"),
                 }
             }
         }
@@ -924,73 +953,59 @@ pub async fn update_flake_handler(
         Err(response) => return response,
     };
 
-    // If repo_url or branch changed, the existing commits and snapshot belong
-    // to the old source. Purge everything in one transaction and leave an empty
-    // ready snapshot so readers don't see stale commits via fallback ordering.
+    // If repo_url or branch changed, purge the history, update the identity,
+    // and leave an empty ready snapshot — all atomically via reset_flake_source.
     if let Ok(current) = get_flake_by_id(&pool, flake_id).await {
         let identity_changed = current.repo_url != repo_url || current.branch != branch;
         if identity_changed {
-            if let Ok(mut tx) = pool.begin().await {
-                // Clear snapshot
-                let _ = sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
-                    .bind(flake_id)
-                    .execute(&mut *tx)
-                    .await;
-                // Purge old commits (cascades: derivations, caches, etc.)
-                let _ = sqlx::query("DELETE FROM commits WHERE flake_id = $1")
-                    .bind(flake_id)
-                    .execute(&mut *tx)
-                    .await;
-                // Set empty ready snapshot (not NULL — avoids exposing old
-                // commits through fallback ordering before first sync).
-                let _ = sqlx::query("UPDATE flakes SET snapshot_ready_at = now() WHERE id = $1")
-                    .bind(flake_id)
-                    .execute(&mut *tx)
-                    .await;
-                // Update the flake identity within the same transaction.
-                let _ = sqlx::query(
-                    "UPDATE flakes SET name = $1, repo_url = $2, branch = $3, build_scope = $4 \
-                     WHERE id = $5 AND deleted_at IS NULL",
+            match pool.begin().await {
+                Ok(mut tx) => match reset_flake_source(
+                    &mut tx,
+                    flake_id,
+                    name,
+                    repo_url,
+                    &branch,
+                    build_scope,
                 )
-                .bind(name)
-                .bind(repo_url)
-                .bind(&branch)
-                .bind(build_scope)
-                .bind(flake_id)
-                .execute(&mut *tx)
-                .await;
-                let _ = tx.commit().await;
-
-                // Reload the updated flake for the response.
-                if let Ok(updated) = get_flake_by_id(&pool, flake_id).await {
-                    return (
-                        StatusCode::OK,
-                        Json(FlakeRegistryItem {
-                            id: updated.id,
-                            name: updated.name,
-                            repo_url: updated.repo_url,
-                            branch: updated.branch,
-                            build_scope: updated.build_scope,
-                            system_count: count_systems_for_flake(&pool, flake_id)
-                                .await
-                                .unwrap_or(0),
-                            sync_status: updated
-                                .sync_status
-                                .unwrap_or_else(|| "unknown".to_string()),
-                            last_sync_at: updated.last_sync_at,
-                            last_sync_error: updated.last_sync_error,
-                            latest_commit_hash: None,
-                            latest_commit_message: None,
-                            latest_commit_author: None,
-                            latest_commit_timestamp: None,
-                            build_status: None,
-                            evaluation_status: None,
-                            environments: Vec::new(),
-                            total_commit_count: 0,
-                        }),
-                    )
-                        .into_response();
-                }
+                .await
+                {
+                    Ok(updated) => match tx.commit().await {
+                        Ok(_) => {
+                            return (
+                                StatusCode::OK,
+                                Json(FlakeRegistryItem {
+                                    id: updated.id,
+                                    name: updated.name,
+                                    repo_url: updated.repo_url,
+                                    branch: updated.branch,
+                                    build_scope: updated.build_scope,
+                                    system_count: count_systems_for_flake(&pool, flake_id)
+                                        .await
+                                        .unwrap_or(0),
+                                    sync_status: updated
+                                        .sync_status
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    last_sync_at: updated.last_sync_at,
+                                    last_sync_error: updated.last_sync_error,
+                                    latest_commit_hash: None,
+                                    latest_commit_message: None,
+                                    latest_commit_author: None,
+                                    latest_commit_timestamp: None,
+                                    build_status: None,
+                                    evaluation_status: None,
+                                    environments: Vec::new(),
+                                    total_commit_count: 0,
+                                }),
+                            )
+                                .into_response();
+                        }
+                        Err(e) => {
+                            error!("Failed to commit source reset tx (flake {flake_id}): {e:#}")
+                        }
+                    },
+                    Err(e) => error!("Failed to reset flake source (flake {flake_id}): {e:#}"),
+                },
+                Err(e) => error!("Failed to begin source reset tx (flake {flake_id}): {e:#}"),
             }
         }
     }

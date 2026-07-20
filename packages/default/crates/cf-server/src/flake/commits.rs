@@ -369,8 +369,27 @@ pub async fn sync_flake_recorded(
             ordered_hashes = hashes;
         }
         Err(e) => {
-            let truncated = sanitize_and_truncate_sync_error(repo_url, &e.to_string(), 4000);
-            match sqlx::query(
+            record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+            return Err(e);
+        }
+    }
+
+    // Resolve ordered hashes to DB IDs (contiguous prefix, HEAD must resolve).
+    // If HEAD does not resolve, this is a sync failure — the remote HEAD was
+    // not inserted, so no snapshot should be published.
+    let resolved = match resolve_ordered_ids(pool, flake_id, &ordered_hashes).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            error!(
+                "Failed to resolve ordered commit IDs for snapshot \
+                 (flake {flake_id}): {e:#}; recording sync error"
+            );
+            let truncated = sanitize_and_truncate_sync_error(
+                repo_url,
+                &format!("Failed to resolve commit IDs for snapshot: {e:#}"),
+                4000,
+            );
+            let _ = sqlx::query(
                 "UPDATE flakes \
                  SET sync_status = 'error', last_sync_at = now(), last_sync_error = $2 \
                  WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $3",
@@ -379,32 +398,18 @@ pub async fn sync_flake_recorded(
             .bind(&truncated)
             .bind(attempt_id)
             .execute(pool)
-            .await
-            {
-                Ok(update) if update.rows_affected() == 0 => {
-                    info!(
-                        "Skipping sync_status=error for flake {flake_id}: attempt {attempt_id} was superseded"
-                    );
-                }
-                Ok(_) => {}
-                Err(update_err) => {
-                    error!("Failed to set sync_status=error for flake {flake_id}: {update_err:#}")
-                }
-            }
+            .await;
             return Err(e);
         }
-    }
-
-    // Resolve ordered hashes to DB IDs (contiguous prefix, HEAD must resolve).
-    // This uses the git log order from the SAME clone used to insert commits.
-    let resolved = resolve_ordered_ids(pool, flake_id, &ordered_hashes).await;
+    };
 
     // Publish sync_status AND snapshot atomically in one transaction.
-    // If snapshot publication fails, the status update is rolled back.
+    // Both must succeed together — otherwise we roll back and record error.
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
             error!("Failed to begin status/snapshot tx (flake {flake_id}): {e:#}");
+            record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
             return Err(e.into());
         }
     };
@@ -426,35 +431,29 @@ pub async fn sync_flake_recorded(
         }
     };
 
-    if status_applied {
-        // This attempt still owns the sync — publish the snapshot in the SAME
-        // transaction so readers never see synced with a stale snapshot.
-        if let Some(ref ids) = resolved {
-            // resolved is Some even when empty (empty ready snapshot).
-            if let Err(e) =
-                crate::queries::flakes::replace_flake_branch_snapshot(&mut tx, flake_id, ids).await
-            {
-                error!(
-                    "Snapshot publication failed (flake {flake_id}), rolling back status: {e:#}"
-                );
-                let _ = tx.rollback().await;
-                // Return the original sync success so the caller knows
-                // commits were inserted, but the snapshot is not updated.
-                return Ok(inserted_count);
-            }
-        }
-        // resolved.is_none() means HEAD could not resolve — skip snapshot
-        // but don't roll back status since sync itself succeeded.
-        // Readers simply continue using the previous snapshot.
-        if resolved.is_none() {
-            warn!(
-                "HEAD commit not found in DB after sync (flake {flake_id}); snapshot not updated"
-            );
-        }
+    if !status_applied {
+        // Attempt was superseded — close the no-op tx and return success.
+        let _ = tx.rollback().await;
+        return Ok(inserted_count);
     }
 
+    // Publish snapshot in the same transaction.
+    if let Err(e) =
+        crate::queries::flakes::replace_flake_branch_snapshot(&mut tx, flake_id, &resolved).await
+    {
+        error!(
+            "Snapshot publication failed (flake {flake_id}), \
+             rolling back status update and recording error: {e:#}"
+        );
+        let _ = tx.rollback().await;
+        record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+        return Err(e);
+    }
+
+    // Commit status + snapshot together.
     if let Err(e) = tx.commit().await {
         error!("Failed to commit status/snapshot tx (flake {flake_id}): {e:#}");
+        record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
         return Err(e.into());
     }
 
@@ -467,32 +466,53 @@ pub async fn sync_flake_recorded(
 /// satisfy every supported Flakes timeline request without git operations.
 const MAX_SNAPSHOT_COMMITS: i64 = 500;
 
+/// Record a sync error on the flake row (best-effort, errors logged only).
+async fn record_sync_error(
+    pool: &PgPool,
+    flake_id: i32,
+    attempt_id: Uuid,
+    repo_url: &str,
+    error_text: &str,
+) {
+    let truncated = sanitize_and_truncate_sync_error(repo_url, error_text, 4000);
+    if let Err(e) = sqlx::query(
+        "UPDATE flakes \
+         SET sync_status = 'error', last_sync_at = now(), last_sync_error = $2 \
+         WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $3",
+    )
+    .bind(flake_id)
+    .bind(&truncated)
+    .bind(attempt_id)
+    .execute(pool)
+    .await
+    {
+        warn!("Failed to record sync error for flake {flake_id}: {e:#}");
+    }
+}
+
 /// Resolve ordered git hashes to contiguous database commit IDs.
 ///
 /// Takes hashes in Git traversal order (HEAD first, from the sync's own git
 /// log), queries the DB for matching (hash, id) pairs, and builds a contiguous
 /// prefix starting from HEAD:
 ///
-///   - HEAD (index 0) MUST resolve to a DB ID. If it does not, returns `None`
-///     and the snapshot is not updated (previous snapshot remains visible).
+///   - HEAD (index 0) MUST resolve to a DB ID. If it does not, returns `Err`
+///     and the sync is treated as failed.
 ///   - Iterates forward until a hash does not resolve. The prefix up to (but
 ///     not including) that unresolvable hash is returned.  This prevents gaps
 ///     in `commits_behind`.
-///   - An empty prefix (no hashes or HEAD unresolvable) returns `None`.
-///
-/// Returns `Some(vec)` on success (possibly empty if the git log itself was
-/// empty, which produces an empty ready snapshot).
+///   - An empty slice is valid (empty Git log = empty ready snapshot).
 async fn resolve_ordered_ids(
     pool: &PgPool,
     flake_id: i32,
     ordered_hashes: &[String],
-) -> Option<Vec<i32>> {
+) -> Result<Vec<i32>> {
     if ordered_hashes.is_empty() {
-        return Some(Vec::new());
+        return Ok(Vec::new());
     }
 
     let hash_slice: Vec<&str> = ordered_hashes.iter().map(|h| h.as_str()).collect();
-    let rows: Vec<(String, i32)> = match sqlx::query_as(
+    let rows: Vec<(String, i32)> = sqlx::query_as(
         r#"
         SELECT git_commit_hash, id
         FROM commits
@@ -504,24 +524,19 @@ async fn resolve_ordered_ids(
     .bind(&hash_slice)
     .fetch_all(pool)
     .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            error!("Failed to resolve commit hashes for snapshot (flake {flake_id}): {e:#}");
-            return None;
-        }
-    };
+    .context("Failed to resolve commit hashes for snapshot")?;
 
     let map: std::collections::HashMap<&str, i32> =
         rows.iter().map(|(h, id)| (h.as_str(), *id)).collect();
 
     // HEAD (index 0) MUST resolve.
-    if !map.contains_key(ordered_hashes[0].as_str()) {
-        warn!(
-            "HEAD commit {} not found in DB for flake {flake_id}; snapshot not updated",
-            ordered_hashes[0]
+    let head = &ordered_hashes[0];
+    if !map.contains_key(head.as_str()) {
+        bail!(
+            "HEAD commit {} was not inserted into the database after sync (flake {})",
+            head,
+            flake_id
         );
-        return None;
     }
 
     // Build contiguous prefix: iterate from HEAD forward, stop at first gap.
@@ -529,11 +544,11 @@ async fn resolve_ordered_ids(
     for hash in ordered_hashes {
         match map.get(hash.as_str()) {
             Some(id) => ids.push(*id),
-            None => break, // gap — prefix ends here
+            None => break,
         }
     }
 
-    Some(ids)
+    Ok(ids)
 }
 
 fn sanitize_and_truncate_sync_error(repo_url: &str, raw: &str, max_chars: usize) -> String {
@@ -651,38 +666,68 @@ async fn sync_commits_for_repo_inner(
 
     let ordered_hashes: Vec<String> = commits.iter().map(|c| c.hash.clone()).collect();
 
-    // Force-push detection for incremental sync: if the flake already has
-    // commits, verify the last known hash appears in the current git log.
-    if flake_has_commits(pool, repo_url).await.unwrap_or(false) {
-        if let Ok(last_commit) = flake_last_commit(pool, repo_url).await {
-            let last_hash = &last_commit.git_commit_hash;
-            if !ordered_hashes.iter().any(|h| h == last_hash) {
-                let has_head = ordered_hashes.first().cloned();
-                if let Some(head) = has_head {
-                    if &head != last_hash {
-                        warn!(
-                            repo_url = %repo_url,
-                            branch = %branch,
-                            last_hash = %last_hash,
-                            remote_head = %head,
-                            "history_rewrite_detected via missing last commit"
-                        );
-                        return Err(anyhow::anyhow!(
-                            "{}: remote history diverged for {} on {}. Last known commit {} is no longer in branch history. Accept rewrite via POST /api/v1/flakes/:id/accept-rewrite before syncing again. Remote HEAD is {}.",
-                            HISTORY_REWRITE_ERROR_MARKER,
-                            repo_url,
-                            branch,
-                            last_hash,
-                            head,
-                        ));
-                    }
-                }
+    // Force-push detection: read the previous branch HEAD from the snapshot
+    // (position 0). If it differs from the current Git log HEAD and is not
+    // in the log, the branch was rewritten.  Using snapshot position 0 is
+    // authoritative — it is the previous Git HEAD, not the timestamp-max
+    // commit.
+    let previous_head: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT c.git_commit_hash
+        FROM flake_branch_commit_snapshot fbcs
+        JOIN commits c ON c.id = fbcs.commit_id
+        WHERE fbcs.flake_id = (SELECT id FROM flakes WHERE repo_url = $1)
+          AND fbcs.position = 0
+        "#,
+    )
+    .bind(repo_url)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+
+    if let Some(ref prev) = previous_head {
+        let current_head = ordered_hashes.first().cloned();
+        if let Some(ref head) = current_head {
+            if head != prev && !ordered_hashes.contains(prev) {
+                warn!(
+                    repo_url = %repo_url,
+                    branch = %branch,
+                    previous_head = %prev,
+                    remote_head = %head,
+                    "history_rewrite_detected via missing snapshot HEAD"
+                );
+                return Err(anyhow::anyhow!(
+                    "{}: remote history diverged for {} on {}. Previous HEAD {} is no longer in branch history. Accept rewrite via POST /api/v1/flakes/:id/accept-rewrite before syncing again. Remote HEAD is {}.",
+                    HISTORY_REWRITE_ERROR_MARKER,
+                    repo_url,
+                    branch,
+                    prev,
+                    head,
+                ));
             }
         }
     }
 
+    // Pre-filter: skip commits already present in the DB to avoid the
+    // per-insert advisory lock (pg_advisory_xact_lock) and the sequential
+    // eval-queue position calculation for existing commits.
+    let existing: std::collections::HashSet<String> = if let Ok(rows) = sqlx::query_scalar::<_, String>(
+        "SELECT git_commit_hash FROM commits WHERE flake_id = (SELECT id FROM flakes WHERE repo_url = $1)",
+    )
+    .bind(repo_url)
+    .fetch_all(pool)
+    .await
+    {
+        rows.into_iter().collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
     let mut inserted_count = 0;
     for commit_data in &commits {
+        if existing.contains(&commit_data.hash) {
+            continue;
+        }
         if let Err(e) = insert_commit_with_metadata(
             pool,
             &commit_data.hash,
@@ -699,13 +744,15 @@ async fn sync_commits_for_repo_inner(
         }
     }
 
-    info!(
-        "✅ Synced {} ({}): {} new commits ({} in git log)",
-        repo_url,
-        branch,
-        inserted_count,
-        ordered_hashes.len()
-    );
+    if inserted_count > 0 {
+        info!(
+            "✅ Synced {} ({}): {} new commits ({} in git log)",
+            repo_url,
+            branch,
+            inserted_count,
+            ordered_hashes.len()
+        );
+    }
 
     Ok((inserted_count, ordered_hashes))
 }
