@@ -9,6 +9,54 @@ let
   version = serverCargoToml.package.version;
   migrationsDir = ./crates/cf-server/migrations;
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # Source filtering
+  #
+  # Each component derivation filters its source to only the workspace metadata
+  # and its transitive local-crate closure. This prevents server-only changes
+  # from invalidating agent/builder derivations.
+  # ─────────────────────────────────────────────────────────────────────────
+
+  # All workspace member crate names (for workspace manifest inclusion)
+  allCrateNames = [ "cf-protocol" "cf-config" "cf-agent" "cf-builder" "cf-keygen" "cf-server" ];
+
+  # Helper: build a source filter that includes:
+  # 1. Workspace root metadata (Cargo.toml, Cargo.lock)
+  # 2. Cargo.toml of ALL workspace members (so Cargo can parse the workspace)
+  # 3. Full source of the specified crate directories
+  mkWorkspaceSrc = crates:
+    lib.cleanSourceWith {
+      src = src;
+      filter = path: type:
+        let
+          relPath = lib.removePrefix (toString src + "/") (toString path);
+          # Always include workspace root metadata
+          isWorkspaceMeta =
+            relPath == "Cargo.toml" ||
+            relPath == "Cargo.lock";
+          # Include the Cargo.toml manifest for every workspace member
+          # (needed for Cargo to parse the workspace, even for packages not being built)
+          isAnyMemberManifest = builtins.any
+            (crate: relPath == "crates/${crate}/Cargo.toml" || relPath == "crates/${crate}")
+            allCrateNames;
+          # Include full source only for the crates in the component's closure
+          isIncludedCrateSource = builtins.any
+            (crate: lib.hasPrefix "crates/${crate}/" relPath)
+            crates;
+        in
+        isWorkspaceMeta || isAnyMemberManifest || isIncludedCrateSource;
+    };
+
+  # Source closures for each component.
+  # cf-protocol and cf-config are shared foundational crates needed by all.
+  foundationalCrates = [ "cf-protocol" "cf-config" ];
+
+  # Each component's filtered source: workspace metadata + transitive local deps source.
+  agentSrc   = mkWorkspaceSrc (foundationalCrates ++ [ "cf-agent" ]);
+  builderSrc = mkWorkspaceSrc (foundationalCrates ++ [ "cf-builder" ]);
+  keygenSrc  = mkWorkspaceSrc [ "cf-keygen" ];
+  serverSrc  = src; # server builds the full workspace
+
   # Common Rust build infrastructure
   commonBuildInputs = with pkgs; [
     pkg-config
@@ -21,7 +69,8 @@ let
   # Server derivation — builds cf-server with embedded-ui
   # ─────────────────────────────────────────────────────────────────────────
   cf-server-drv = pkgs.rustPlatform.buildRustPackage rec {
-    inherit src version;
+    src = serverSrc;
+    inherit version;
     pname = "cf-server";
     cargoLock = { lockFile = ./Cargo.lock; };
     cargoBuildFlags = [ "--package" "cf-server" "--features" "cf-server/embedded-ui" ];
@@ -53,7 +102,8 @@ let
   # Does NOT compile cf-server, cf-builder, or server-only dependencies.
   # ─────────────────────────────────────────────────────────────────────────
   cf-agent-drv = pkgs.rustPlatform.buildRustPackage rec {
-    inherit src version;
+    src = agentSrc;
+    inherit version;
     pname = "cf-agent";
     cargoLock = { lockFile = ./Cargo.lock; };
     cargoBuildFlags = [ "--package" "cf-agent" ];
@@ -77,7 +127,8 @@ let
   # Does NOT compile cf-server or cf-agent packages.
   # ─────────────────────────────────────────────────────────────────────────
   cf-builder-drv = pkgs.rustPlatform.buildRustPackage rec {
-    inherit src version;
+    src = builderSrc;
+    inherit version;
     pname = "cf-builder";
     cargoLock = { lockFile = ./Cargo.lock; };
     cargoBuildFlags = [ "--package" "cf-builder" ];
@@ -100,7 +151,8 @@ let
   # Key generation utility — builds cf-keygen only
   # ─────────────────────────────────────────────────────────────────────────
   cf-keygen-drv = pkgs.rustPlatform.buildRustPackage rec {
-    inherit src version;
+    src = keygenSrc;
+    inherit version;
     pname = "cf-keygen";
     cargoLock = { lockFile = ./Cargo.lock; };
     cargoBuildFlags = [ "--package" "cf-keygen" ];
