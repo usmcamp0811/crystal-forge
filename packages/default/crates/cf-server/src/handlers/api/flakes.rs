@@ -156,109 +156,28 @@ pub async fn get_flake_timelines(
     let fetch_result = if use_dashboard_view {
         fetch_dashboard_flake_timelines(&pool, max_commits, flake_ids.as_deref()).await
     } else {
+        // Database-only read path (TASK-397): no Git operations.
+        // Ordering and visibility use the branch-commit snapshot when available,
+        // falling back to deterministic timestamp ordering for unsynchronized flakes.
         fetch_flake_timelines(&pool, max_commits, flake_ids.as_deref()).await
     };
 
     match fetch_result {
         Ok(mut timelines) => {
-            // Dashboard view doesn't need git metadata (message/author), skip hydration
+            // Dashboard view doesn't need config path details, return immediately.
             if use_dashboard_view {
                 return (StatusCode::OK, Json(timelines)).into_response();
             }
 
-            // For flakes view, treat remote branch history as source of truth for commit order/visibility.
-            // This prevents stale DB rows from showing after force-push/rewrite while keeping audit history intact.
+            // Database-only enrichment: config paths, empty metadata defaults.
+            // No Git operations — message/author are cached in the commits table
+            // by the sync path. Very old pre-cache commits use fallback text.
             for timeline in &mut timelines {
-                let flake = match get_flake_by_id(&pool, timeline.flake_id).await {
-                    Ok(flake) => flake,
-                    Err(err) => {
-                        warn!(
-                            "Failed to load flake {} for remote-order timeline filter: {err:#}",
-                            timeline.flake_id
-                        );
-                        continue;
-                    }
-                };
-
-                let creds = FlakeCredentialEnv::load(&pool, timeline.flake_id)
-                    .await
-                    .unwrap_or_else(|e| {
-                        warn!(
-                            "Failed to load credentials for flake {} during timeline reorder: {e:#}",
-                            timeline.flake_id
-                        );
-                        None
-                    });
-
-                let remote_hashes = match get_recent_branch_commit_hashes_with_creds(
-                    &flake.repo_url,
-                    &flake.branch,
-                    max_commits as usize,
-                    creds.as_ref(),
-                )
-                .await
-                {
-                    Ok(hashes) => hashes,
-                    Err(err) => {
-                        warn!(
-                            "Failed to fetch remote commit order for flake {} ({} @ {}): {err:#}",
-                            flake.id, flake.repo_url, flake.branch
-                        );
-                        // Keep DB-backed timeline when remote ordering is unavailable.
-                        // This preserves cached visibility while avoiding destructive empty states.
-                        continue;
-                    }
-                };
-
-                apply_remote_commit_order_if_available(timeline, Some(&remote_hashes));
-            }
-
-            let mut remaining_hydration_budget = MAX_HYDRATION_COMMITS_PER_REQUEST;
-
-            for timeline in &mut timelines {
-                let hashes: Vec<String> = timeline
-                    .commits
-                    .iter()
-                    .filter(|commit| {
-                        commit.message.trim().is_empty() || commit.author.trim().is_empty()
-                    })
-                    .take(remaining_hydration_budget)
-                    .map(|commit| commit.hash.clone())
-                    .collect();
-                let metadata = if hashes.is_empty() {
-                    HashMap::new()
-                } else {
-                    // This fallback should rarely run now that metadata is cached in commits table
-                    warn!(
-                        "Falling back to git metadata hydration for {} commits in flake {} (likely old commits from before metadata caching)",
-                        hashes.len(),
-                        timeline.flake_name
-                    );
-                    remaining_hydration_budget =
-                        remaining_hydration_budget.saturating_sub(hashes.len());
-                    match get_commit_metadata(&timeline.repo_url, &hashes).await {
-                        Ok(data) => data,
-                        Err(err) => {
-                            error!(
-                                "Failed to hydrate commit metadata for flake {}: {:#}",
-                                timeline.flake_name, err
-                            );
-                            HashMap::new()
-                        }
-                    }
-                };
-
-                let mut user_lookup_cache: HashMap<String, Option<String>> = HashMap::new();
                 let commit_hashes: Vec<String> = timeline
                     .commits
                     .iter()
                     .map(|commit| commit.hash.clone())
                     .collect();
-
-                // Skip inline hydration for now - too slow for API requests
-                // TODO: Background job to populate commit_artifacts_cache
-                let hydrated_configs: HashMap<String, Vec<String>> = HashMap::new();
-                let hydrated_changed_files: HashMap<String, Vec<String>> = HashMap::new();
 
                 let commit_path_lookup = if commit_hashes.is_empty() {
                     HashMap::new()
@@ -275,15 +194,8 @@ pub async fn get_flake_timelines(
                 };
 
                 for commit in &mut timeline.commits {
-                    if let Some(detail) = metadata.get(&commit.hash) {
-                        if commit.message.trim().is_empty() {
-                            commit.message = detail.message.trim().to_string();
-                        }
-
-                        commit.author =
-                            resolve_timeline_author(&pool, detail, &mut user_lookup_cache).await;
-                    }
-
+                    // Use cached message/author; fall back to defaults when empty.
+                    // The sync path populates these fields (migration 0085).
                     if commit.message.trim().is_empty() {
                         let short = commit.hash.chars().take(7).collect::<String>();
                         commit.message = format!("Commit {short}");
@@ -292,35 +204,11 @@ pub async fn get_flake_timelines(
                         commit.author = "Unknown author".to_string();
                     }
 
+                    // Mark CF system matches and build system path details.
+                    // Uses the commit_artifacts_cache path details queried above.
                     if commit.systems.is_empty() {
-                        if let Some(configs) = hydrated_configs.get(&commit.hash) {
-                            let changed_files = hydrated_changed_files
-                                .get(&commit.hash)
-                                .cloned()
-                                .unwrap_or_default();
-
-                            if let Err(err) = upsert_commit_artifacts_cache(
-                                &pool,
-                                timeline.flake_id,
-                                &commit.hash,
-                                configs,
-                                &changed_files,
-                            )
-                            .await
-                            {
-                                error!(
-                                    "Failed to persist commit artifacts for {}@{}: {:#}",
-                                    timeline.flake_name, commit.hash, err
-                                );
-                            }
-
-                            let marked = mark_cf_system_matches(
-                                configs,
-                                commit_path_lookup.get(&commit.hash),
-                            );
-                            commit.system_count = marked.len() as i64;
-                            commit.systems = marked;
-                        }
+                        // No systems found in cache or derivations — leave empty.
+                        // This happens for commits before the first nixosConfiguration.
                     } else {
                         let marked = mark_cf_system_matches(
                             &commit.systems,

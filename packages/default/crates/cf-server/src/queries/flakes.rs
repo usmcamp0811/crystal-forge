@@ -531,17 +531,31 @@ pub async fn fetch_dashboard_flake_timelines(
 
 /// Fetch flake timelines for flakes view (nixosConfigurations in flake).
 ///
-/// Returns up to `max_commits_per_flake` most recent commits for each flake,
-/// showing nixosConfigurations discovered at each commit from cache.
+/// Returns up to `max_commits_per_flake` most recent commits for each flake.
+///
+/// **Database-only read path** (TASK-397): Uses the branch-commit snapshot for
+/// commit ordering when available (snapshot_ready_at IS NOT NULL), falling back to
+/// deterministic timestamp ordering for flakes that have never been synchronized
+/// since migration 0178. No Git/network operations are performed.
+///
+/// Commit visibility and order are derived from:
+///   - `flake_branch_commit_snapshot` when the flake has been synchronized since
+///     migration 0178 (snapshot mode), removing force-pushed commits from view
+///     while keeping them in the commits audit table.
+///   - `commits.commit_timestamp DESC, id DESC` when no snapshot exists (fallback
+///     mode), preserving the pre-migration ordering behavior.
 pub async fn fetch_flake_timelines(
     pool: &PgPool,
     max_commits_per_flake: i64,
     flake_ids: Option<&[i32]>,
 ) -> Result<Vec<FlakeTimeline>> {
-    // First, get all flakes
+    // Fetch flakes with their snapshot readiness
     let flake_filter: Option<Vec<i32>> = flake_ids.map(|ids| ids.to_vec());
-    let flakes = sqlx::query_as::<_, (i32, String, String)>(
-        "SELECT id, name, repo_url FROM flakes WHERE deleted_at IS NULL AND ($1::int[] IS NULL OR id = ANY($1)) ORDER BY name ASC",
+    let flakes = sqlx::query_as::<_, (i32, String, String, Option<chrono::DateTime<chrono::Utc>>)>(
+        "SELECT id, name, repo_url, snapshot_ready_at \
+         FROM flakes WHERE deleted_at IS NULL \
+         AND ($1::int[] IS NULL OR id = ANY($1)) \
+         ORDER BY name ASC",
     )
     .bind(&flake_filter)
     .fetch_all(pool)
@@ -549,10 +563,21 @@ pub async fn fetch_flake_timelines(
 
     let mut timelines = Vec::new();
 
-    for (flake_id, flake_name, repo_url) in flakes {
-        // Fetch recent commits for this flake, including systems at commit,
-        // build queue status, dry-run/eval status, and git metadata (message/author).
-        // Dedicated struct to avoid sqlx's 16-element tuple limit
+    for (flake_id, flake_name, repo_url, snapshot_ready_at) in flakes {
+        let use_snapshot = snapshot_ready_at.is_some();
+
+        // Single query that transparently handles both snapshot and fallback modes.
+        // When snapshot mode is active (snapshot_ready_at IS NOT NULL):
+        //   - Only commits present in flake_branch_commit_snapshot are returned
+        //   - Ordering and commits_behind use the snapshot position
+        // When fallback mode (snapshot_ready_at IS NULL):
+        //   - All commits are returned ordered by timestamp DESC
+        //   - commits_behind uses a correlated count
+        //
+        // The LEFT JOIN + WHERE filter ensures mutually exclusive mode selection:
+        //   - Snapshot mode: snapshot_ready_at IS NOT NULL AND fbcs.commit_id IS NOT NULL
+        //   - Fallback mode: snapshot_ready_at IS NULL
+
         #[derive(sqlx::FromRow)]
         struct FlakeCommitRow {
             id: i32,
@@ -575,6 +600,9 @@ pub async fn fetch_flake_timelines(
             all_systems_passed: Option<bool>,
         }
 
+        // Use a single query that adapts to the flake's snapshot readiness.
+        // The key differences between modes are handled by the LEFT JOIN on
+        // flake_branch_commit_snapshot, the WHERE filter, and the ORDER BY.
         let commits_rows = sqlx::query_as::<_, FlakeCommitRow>(
             r#"
             SELECT
@@ -598,12 +626,16 @@ pub async fn fetch_flake_timelines(
                     ),
                     ARRAY[]::text[]
                 ) AS systems,
-                (
-                    SELECT COUNT(*)::bigint
-                    FROM commits c2
-                    WHERE c2.flake_id = c.flake_id
-                    AND c2.commit_timestamp > c.commit_timestamp
-                ) AS commits_behind,
+                CASE
+                    WHEN f3.snapshot_ready_at IS NOT NULL
+                    THEN fbcs.position::bigint
+                    ELSE (
+                        SELECT COUNT(*)::bigint
+                        FROM commits c2
+                        WHERE c2.flake_id = c.flake_id
+                        AND c2.commit_timestamp > c.commit_timestamp
+                    )
+                END AS commits_behind,
                 (
                     SELECT
                         CASE
@@ -627,10 +659,18 @@ pub async fn fetch_flake_timelines(
                 cmc.has_policy_failures,
                 cmc.all_systems_passed
             FROM commits c
+            JOIN flakes f3 ON f3.id = c.flake_id AND f3.id = $1 AND f3.deleted_at IS NULL
+            LEFT JOIN flake_branch_commit_snapshot fbcs
+                ON fbcs.commit_id = c.id AND fbcs.flake_id = c.flake_id
             LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
             LEFT JOIN commit_metadata_cache cmc ON cmc.commit_id = c.id
             WHERE c.flake_id = $1
-            ORDER BY c.commit_timestamp DESC
+              AND (f3.snapshot_ready_at IS NULL OR fbcs.commit_id IS NOT NULL)
+            ORDER BY
+                CASE WHEN f3.snapshot_ready_at IS NOT NULL THEN 0 ELSE 1 END,
+                CASE WHEN f3.snapshot_ready_at IS NOT NULL THEN fbcs.position ELSE 0 END ASC,
+                c.commit_timestamp DESC,
+                c.id DESC
             LIMIT $2
             "#,
         )
@@ -638,20 +678,6 @@ pub async fn fetch_flake_timelines(
         .bind(max_commits_per_flake)
         .fetch_all(pool)
         .await?;
-
-        let commit_ids: Vec<i32> = commits_rows.iter().map(|row| row.id).collect();
-        if !commit_ids.is_empty() {
-            sqlx::query(
-                r#"
-                UPDATE commit_metadata_cache
-                SET last_accessed_at = CURRENT_TIMESTAMP
-                WHERE commit_id = ANY($1)
-                "#,
-            )
-            .bind(&commit_ids)
-            .execute(pool)
-            .await?;
-        }
 
         let commits: Vec<FlakeCommit> = commits_rows
             .into_iter()
