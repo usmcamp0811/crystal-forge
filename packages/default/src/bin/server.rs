@@ -31,6 +31,7 @@ use crystal_forge::{
     queries::cache_destinations::encrypt_plaintext_cache_secrets,
     queries::derivations::reset_non_terminal_derivations,
     queue::QueueNotifier,
+    server::jobs::BackgroundJobRegistry,
     server::memory_monitor_task,
     server::spawn_background_tasks,
 };
@@ -159,7 +160,17 @@ async fn main() -> anyhow::Result<()> {
     let queue_notifier = Arc::new(QueueNotifier::new());
     info!("🔔 Initialized event-driven queue notification system");
 
-    let state = CFState::new(pool, server_cfg.clone(), queue_notifier.clone());
+    // Create the background job registry before CFState so the registry is
+    // available on server state from the start.  Jobs register themselves
+    // during spawn_background_tasks; the registry clone shares the same
+    // inner Arc so both CFState and spawn see the same registered handles.
+    let job_registry = BackgroundJobRegistry::new();
+    let state = CFState::new(
+        pool,
+        server_cfg.clone(),
+        queue_notifier.clone(),
+        job_registry.clone(),
+    );
     let state_arc = Arc::new(state.clone());
 
     spawn_background_tasks(
@@ -167,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
         background_pool,
         state_arc.clone(),
         queue_notifier.clone(),
+        job_registry,
     );
     let mut app = Router::new()
         .route("/status", get(status::status))

@@ -129,6 +129,7 @@ pub async fn authenticate_agent_request(
 
 use crate::config::ServerConfig;
 use crate::queue::QueueNotifier;
+use crate::server::jobs::BackgroundJobRegistry;
 
 /// Shared server state containing authorized signing keys for current-system auth
 #[derive(Clone)]
@@ -137,6 +138,7 @@ pub struct CFState {
     pub server_config: ServerConfig,
     pub started_at: Instant,
     pub queue_notifier: Arc<QueueNotifier>,
+    pub job_registry: BackgroundJobRegistry,
     pub eval_log_channels: Arc<
         tokio::sync::Mutex<std::collections::HashMap<i32, tokio::sync::broadcast::Sender<String>>>,
     >,
@@ -152,12 +154,14 @@ impl CFState {
         pool: PgPool,
         server_config: ServerConfig,
         queue_notifier: Arc<QueueNotifier>,
+        job_registry: BackgroundJobRegistry,
     ) -> Self {
         Self {
             pool,
             server_config,
             started_at: Instant::now(),
             queue_notifier,
+            job_registry,
             eval_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             eval_log_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             build_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
