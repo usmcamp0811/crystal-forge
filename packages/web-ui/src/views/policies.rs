@@ -66,6 +66,16 @@ pub fn PoliciesView() -> Element {
         }
     });
 
+    // Normalize matrix-API identifiers to canonical policy types.  The eval
+    // policy matrix returns internal keys such as "cf.agent_enabled" which do
+    // not match any policy_type, display name, or normalized form.
+    fn canonical_policy_type(name: &str) -> &str {
+        match name {
+            "cf.agent_enabled" => "require_cf_agent",
+            other => other,
+        }
+    }
+
     use_effect(move || {
         let Some(focus) = navigation_focus() else {
             return;
@@ -74,11 +84,12 @@ pub fn PoliciesView() -> Element {
             return;
         }
 
-        let Some(policy_name) = focus.policy_name.clone() else {
+        let Some(raw_name) = focus.policy_name.clone() else {
             navigation_focus.set(None);
             return;
         };
 
+        let policy_name = canonical_policy_type(&raw_name).to_string();
         let policy_snapshot = policy_library.read();
         let loaded = policies_loaded();
         let search_name = policy_name.to_ascii_lowercase();

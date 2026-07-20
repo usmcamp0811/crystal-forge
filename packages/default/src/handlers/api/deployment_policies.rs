@@ -13,7 +13,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
@@ -33,9 +33,10 @@ pub struct DeploymentPoliciesListResponse {
     pub total: usize,
     pub limit: i64,
     pub offset: i64,
-    /// Total number of NixOS derivations (systems) in the fleet.
+    /// Per-policy count of distinct active systems inheriting the policy
+    /// through environment_policies or system_policies.
     #[serde(default)]
-    pub fleet_system_count: i64,
+    pub system_counts: HashMap<Uuid, i64>,
 }
 
 // =============================================================================
@@ -469,24 +470,27 @@ pub async fn list_deployment_policies(
                 )
             })?;
 
-    // Count total NixOS derivations for the fleet system count.
-    let fleet_system_count =
-        deployment_policies::count_nixos_derivations(&state.pool)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to count NixOS derivations: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to count NixOS derivations".to_string(),
-                )
-            })?;
+    // Count distinct active systems per policy.
+    let policy_counts = deployment_policies::count_systems_for_all_policies(&state.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to count systems per policy: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to count systems per policy".to_string(),
+            )
+        })?;
+    let system_counts: HashMap<Uuid, i64> = policy_counts
+        .into_iter()
+        .map(|pc| (pc.policy_id, pc.system_count))
+        .collect();
 
     Ok(Json(DeploymentPoliciesListResponse {
         policies,
         total: total as usize,
         limit: params.limit,
         offset: params.offset,
-        fleet_system_count,
+        system_counts,
     }))
 }
 

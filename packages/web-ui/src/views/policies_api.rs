@@ -3,6 +3,8 @@
 //! This module provides the adapter layer between the policies UI and the backend API,
 //! with graceful fallback to mock data when the API is unavailable.
 
+use std::collections::HashMap;
+
 use uuid::Uuid;
 
 use crate::api::client::{fetch_deployment_policies, ApiClientError};
@@ -20,11 +22,14 @@ pub async fn load_policies_with_fallback() -> Vec<PolicyDefinition> {
             web_sys::console::log_1(
                 &format!("Loaded {} policies from API", response.policies.len()).into(),
             );
-            let sys_count = response.fleet_system_count;
+            let sys_counts = response.system_counts;
             response
                 .policies
                 .into_iter()
-                .map(|p| policy_record_to_definition_with_count(p, sys_count))
+                .map(|p| {
+                    let count = sys_counts.get(&p.id).copied().unwrap_or(0);
+                    policy_record_to_definition_with_count(p, count)
+                })
                 .collect()
         }
         Err(ApiClientError::Status { code, body }) => {

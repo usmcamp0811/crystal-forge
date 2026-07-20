@@ -243,6 +243,9 @@ pub fn BuildsView() -> Element {
     // NB: `refresh_trigger` is deliberately excluded — polling ticks every 5 s
     // and must not erase previously loaded rows (review finding #8).
     // Navigation focus also changes filters, but must not override FETCH_LIMIT_MAX.
+    // Use read_unchecked to avoid subscribing to navigation_focus changes: when
+    // the focus handler clears navigation_focus after finding a match, this effect
+    // must NOT rerun and overwrite FETCH_LIMIT_MAX with PAGE_SIZE.
     use_effect(move || {
         let _ = (
             filter_status(),
@@ -251,7 +254,7 @@ pub fn BuildsView() -> Element {
             filter_config(),
             filter_time_range(),
         );
-        if navigation_focus().is_some() {
+        if navigation_focus.read_unchecked().is_some() {
             return;
         }
         fetch_limit.set(PAGE_SIZE);
@@ -485,6 +488,8 @@ pub fn BuildsView() -> Element {
     let worker_data = workers.read().clone();
 
     let mut completed_rows = build_history.read().clone();
+    let nav_commit = filter_commit();
+    let nav_flake = filter_flake();
     completed_rows.retain(|item| {
         matches!(
             item.status,
@@ -494,7 +499,8 @@ pub fn BuildsView() -> Element {
             CompletedStatusFilter::Complete => item.status == BuildStatus::Complete,
             CompletedStatusFilter::Failed => item.status == BuildStatus::Failed,
             CompletedStatusFilter::Cancelled => item.status == BuildStatus::Cancelled,
-        }
+        } && (nav_commit.is_empty() || item.commit == nav_commit)
+        && (nav_flake.is_empty() || item.flake == nav_flake)
     });
     let completed_failed_count = build_history
         .read()

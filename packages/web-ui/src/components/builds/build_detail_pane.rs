@@ -18,28 +18,19 @@ pub enum DetailTab {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CachePushState {
-    Pending,
-    Pushing,
-    Pushed,
-    NotPushed,
+    Unknown,
 }
 
 impl CachePushState {
     fn label(self) -> &'static str {
         match self {
-            CachePushState::Pending => "pending",
-            CachePushState::Pushing => "pushing…",
-            CachePushState::Pushed => "pushed",
-            CachePushState::NotPushed => "not pushed",
+            CachePushState::Unknown => "unknown",
         }
     }
 
     fn color(self) -> &'static str {
         match self {
-            CachePushState::Pending => "#fbbf24",
-            CachePushState::Pushing => "#22d3ee",
-            CachePushState::Pushed => "#34d399",
-            CachePushState::NotPushed => "var(--cf-text-muted)",
+            CachePushState::Unknown => "var(--cf-text-muted)",
         }
     }
 }
@@ -50,41 +41,11 @@ struct CachePushRow {
     state: CachePushState,
 }
 
-fn cache_push_rows(build: &BuildItem) -> Option<Vec<CachePushRow>> {
-    if !matches!(build.status, BuildStatus::Complete | BuildStatus::Failed) {
-        return None;
-    }
-
-    let cache_names: &[&str] = match build.environment.as_deref().unwrap_or_default() {
-        "production" | "prod" => &["prod-attic", "prod-s3-mirror"],
-        "staging" | "stage" => &["staging-attic"],
-        "development" | "dev" => &["dev-attic"],
-        _ => &["shared-attic"],
-    };
-
-    let pushing = build.status == BuildStatus::Complete
-        && build.total_derivs > 0
-        && build.cached_derivs < build.total_derivs / 2;
-    let pushed = build.status == BuildStatus::Complete && !pushing;
-    let state = if build.status == BuildStatus::Failed {
-        CachePushState::NotPushed
-    } else if pushing {
-        CachePushState::Pushing
-    } else if pushed {
-        CachePushState::Pushed
-    } else {
-        CachePushState::Pending
-    };
-
-    Some(
-        cache_names
-            .iter()
-            .map(|name| CachePushRow {
-                name: (*name).to_string(),
-                state,
-            })
-            .collect(),
-    )
+fn cache_push_rows(_build: &BuildItem) -> Option<Vec<CachePushRow>> {
+    // Real cache-push data is not yet available from the backend.
+    // Returning None hides the cache-push status section entirely
+    // until per-cache-destination push state is wired (TASK-394 follow-up).
+    None
 }
 
 impl DetailTab {

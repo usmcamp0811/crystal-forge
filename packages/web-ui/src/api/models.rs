@@ -7,6 +7,8 @@
 //! - The server crate has native dependencies (OpenSSL, SQLx) incompatible with wasm32
 //! - Client-side DTOs may diverge (e.g. adding UI-only computed fields)
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use uuid::Uuid;
@@ -1159,9 +1161,9 @@ pub struct DeploymentPoliciesListResponse {
     pub total: usize,
     pub limit: i64,
     pub offset: i64,
-    /// Total number of NixOS derivations in the fleet.
+    /// Per-policy count of distinct active systems inheriting the policy.
     #[serde(default)]
-    pub fleet_system_count: i64,
+    pub system_counts: HashMap<Uuid, i64>,
 }
 
 /// Request to create a new deployment policy.

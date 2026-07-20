@@ -220,6 +220,38 @@ pub async fn check_policy_content_exists(
     Ok(count > 0)
 }
 
+/// Count distinct active systems that inherit each deployment policy through
+/// either their environment (environment_policies) or direct system assignment (system_policies).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PolicySystemCount {
+    pub policy_id: Uuid,
+    pub system_count: i64,
+}
+
+pub async fn count_systems_for_all_policies(pool: &PgPool) -> Result<Vec<PolicySystemCount>> {
+    let rows = sqlx::query_as::<_, PolicySystemCount>(
+        r#"
+        WITH policy_systems AS (
+            SELECT ep.policy_id, s.id AS system_id
+            FROM environment_policies ep
+            JOIN systems s ON s.environment_id = ep.environment_id AND s.is_active = TRUE
+            UNION
+            SELECT sp.policy_id, s.id AS system_id
+            FROM system_policies sp
+            JOIN systems s ON s.id = sp.system_id AND s.is_active = TRUE
+        )
+        SELECT dp.id AS policy_id, COUNT(DISTINCT ps.system_id) AS system_count
+        FROM deployment_policies dp
+        LEFT JOIN policy_systems ps ON ps.policy_id = dp.id
+        GROUP BY dp.id
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to count systems per policy")?;
+    Ok(rows)
+}
+
 /// Count total NixOS derivations (systems) in the fleet.
 pub async fn count_nixos_derivations(pool: &PgPool) -> Result<i64> {
     let count: i64 = sqlx::query_scalar(
