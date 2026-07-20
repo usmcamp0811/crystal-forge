@@ -9,7 +9,9 @@ use std::time::Instant;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommitContext {
     None,
-    Unresolved { commit_id: i32 },
+    Unresolved {
+        commit_id: i32,
+    },
     Resolved {
         short_hash: String,
         distance_from_head: Option<i32>,

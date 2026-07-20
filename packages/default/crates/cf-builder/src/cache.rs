@@ -8,7 +8,10 @@ use cf_protocol::builder::BuilderCachePushConfig;
 
 /// Convert a `BuilderCachePushConfig` (delivered from the server) into a
 /// local `CacheConfig`, filling missing fields from a local fallback.
-pub fn builder_cache_to_config(push: &BuilderCachePushConfig, fallback: &CacheConfig) -> CacheConfig {
+pub fn builder_cache_to_config(
+    push: &BuilderCachePushConfig,
+    fallback: &CacheConfig,
+) -> CacheConfig {
     let cache_type = match &push.cache_type {
         cf_protocol::cache::CacheType::S3 => CacheType::S3,
         cf_protocol::cache::CacheType::Attic => CacheType::Attic,

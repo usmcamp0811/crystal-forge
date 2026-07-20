@@ -13,7 +13,7 @@ use crystal_forge::{
     auth::dev_mode::{
         ensure_bootstrap_oidc_admin_mapping, ensure_dev_users, ensure_local_bootstrap_admin,
     },
-    config::{CrystalForgeConfig, db_pool, validate_db_connection, sync_systems_to_db},
+    config::{CrystalForgeConfig, db_pool, sync_systems_to_db, validate_db_connection},
     fixtures::seed_from_fixture,
     flake::commits::initialize_flake_commits,
     handlers::{

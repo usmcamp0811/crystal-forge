@@ -1,11 +1,11 @@
+use anyhow::{Context, Result};
+use base64::Engine;
 use cf_config::config::BuilderConfig;
 use cf_protocol::builder::{
     BuildFailurePhase, BuildProgressRequest, EstablishBuilderSessionRequest,
     EstablishBuilderSessionResponse, NextJobRequest, NextJobResponse, RemoteBuildExecutionStrategy,
     ReportMetricsRequest, ResolveBuilderIdRequest, ResolveBuilderIdResponse,
 };
-use anyhow::{Context, Result};
-use base64::Engine;
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use futures::SinkExt;
@@ -1422,13 +1422,9 @@ impl ApiBuildReporter {
     }
 }
 
-
 #[async_trait::async_trait]
 impl crate::build::BuildReporter for ApiBuildReporter {
-    async fn report_progress(
-        &self,
-        progress: &crate::build::BuildProgress,
-    ) -> Result<()> {
+    async fn report_progress(&self, progress: &crate::build::BuildProgress) -> Result<()> {
         let request = BuildProgressRequest {
             derivation_id: progress.derivation_id,
             elapsed_seconds: progress.elapsed_seconds,

@@ -824,9 +824,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires test database"]
     async fn fetch_cve_list_no_filters_returns_ok() {
-        let pool = crate::config::db_pool()
-            .await
-            .expect("test db pool");
+        let pool = crate::config::db_pool().await.expect("test db pool");
         let result = fetch_cve_list(&pool, &CveFilters::default()).await;
         assert!(result.is_ok(), "error: {:?}", result.err());
     }
@@ -834,9 +832,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires test database"]
     async fn fetch_cve_fleet_stats_returns_ok() {
-        let pool = crate::config::db_pool()
-            .await
-            .expect("test db pool");
+        let pool = crate::config::db_pool().await.expect("test db pool");
         let result = fetch_cve_fleet_stats(&pool).await;
         assert!(result.is_ok(), "error: {:?}", result.err());
     }
@@ -844,9 +840,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires test database"]
     async fn fetch_cve_list_severity_filter_constrains_results() {
-        let pool = crate::config::db_pool()
-            .await
-            .expect("test db pool");
+        let pool = crate::config::db_pool().await.expect("test db pool");
         let f = CveFilters {
             severity: Some("critical".to_string()),
             ..Default::default()
@@ -865,9 +859,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires test database"]
     async fn fetch_cve_list_limit_respected() {
-        let pool = crate::config::db_pool()
-            .await
-            .expect("test db pool");
+        let pool = crate::config::db_pool().await.expect("test db pool");
         let f = CveFilters {
             limit: Some(5),
             ..Default::default()

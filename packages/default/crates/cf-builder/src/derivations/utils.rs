@@ -1,5 +1,5 @@
-use cf_config::config::{BuildConfig, CacheConfig};
 use anyhow::{Result, anyhow};
+use cf_config::config::{BuildConfig, CacheConfig};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;

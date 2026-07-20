@@ -1308,8 +1308,7 @@ async fn execute_build_job(
     }
 
     // Build a Derivation from the API payload — no database read required.
-    let mut derivation =
-        Derivation::from_build_payload(&derivation_payload);
+    let mut derivation = Derivation::from_build_payload(&derivation_payload);
 
     // API-backed reporter: progress + cancel checks over HTTP (no DB pool).
     let reporter = ApiBuildReporter::new(client.clone(), job_id);
@@ -2345,7 +2344,8 @@ mod tests {
             derivation_type: "nixos".to_string(),
             derivation_path: None,
             store_path: None,
-            execution_strategy: cf_protocol::builder::RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            execution_strategy:
+                cf_protocol::builder::RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
             source: Some(source(None)),
             source_input_delivery: SourceInputDeliveryMode::LocalGitWorktree,
             expected_drv_path: Some("/nix/store/server-host.drv".to_string()),
@@ -2551,7 +2551,8 @@ mod tests {
             derivation_type: "nixos".to_string(),
             derivation_path: None,
             store_path: None,
-            execution_strategy: cf_protocol::builder::RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            execution_strategy:
+                cf_protocol::builder::RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
             source: Some(source(Some("/api/v1/builders/x/jobs/y/source-archive"))),
             source_input_delivery: SourceInputDeliveryMode::ServerBundledArchive,
             expected_drv_path: Some("/nix/store/server-host.drv".to_string()),
@@ -2603,7 +2604,8 @@ mod tests {
             derivation_type: "nixos".to_string(),
             derivation_path: None,
             store_path: None,
-            execution_strategy: cf_protocol::builder::RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            execution_strategy:
+                cf_protocol::builder::RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
             source: Some(source(None)),
             source_input_delivery: SourceInputDeliveryMode::LocalGitWorktree,
             expected_drv_path: None,
@@ -2688,12 +2690,11 @@ mod tests {
             "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-fake-two.drv".to_string(),
             "/nix/store/cccccccccccccccccccccccccccccccc-fake-three.drv".to_string(),
         ];
-        let max_bytes =
-            serde_json::to_vec(&cf_protocol::builder::DerivationArchiveRequest {
-                paths: vec![paths[0].clone(), paths[1].clone()],
-            })
-            .expect("test request should serialize")
-            .len();
+        let max_bytes = serde_json::to_vec(&cf_protocol::builder::DerivationArchiveRequest {
+            paths: vec![paths[0].clone(), paths[1].clone()],
+        })
+        .expect("test request should serialize")
+        .len();
 
         let chunks =
             super::chunk_paths_by_json_size(&paths, max_bytes).expect("chunking should not fail");
@@ -2703,12 +2704,11 @@ mod tests {
         assert_eq!(chunks[1], vec![paths[2].clone()]);
 
         for chunk in chunks {
-            let bytes =
-                serde_json::to_vec(&cf_protocol::builder::DerivationArchiveRequest {
-                    paths: chunk,
-                })
-                .expect("test request should serialize")
-                .len();
+            let bytes = serde_json::to_vec(&cf_protocol::builder::DerivationArchiveRequest {
+                paths: chunk,
+            })
+            .expect("test request should serialize")
+            .len();
             assert!(bytes <= max_bytes, "chunk serialized to {bytes} bytes");
         }
     }

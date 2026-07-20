@@ -1,7 +1,7 @@
-use cf_config::config::{CacheType, CrystalForgeConfig, deployment::DeploymentConfig};
-use cf_protocol::agent::{LogResponse, RuntimeCacheConfig};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use cf_config::config::{CacheType, CrystalForgeConfig, deployment::DeploymentConfig};
+use cf_protocol::agent::{LogResponse, RuntimeCacheConfig};
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Serialize;
 use std::fs;

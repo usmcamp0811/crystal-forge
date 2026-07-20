@@ -1,8 +1,8 @@
 use crate::build::Derivation;
 use crate::derivations::utils::*;
-use cf_config::config::{BuildConfig, CacheConfig};
 use anyhow::bail;
 use anyhow::{Context, Result};
+use cf_config::config::{BuildConfig, CacheConfig};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::time::{Duration, sleep};

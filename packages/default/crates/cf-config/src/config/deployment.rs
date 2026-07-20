@@ -170,8 +170,13 @@ pub struct PolicyRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DeploymentPolicy {
-    RequireCrystalForgeAgent { strict: bool },
-    RequirePackages { packages: Vec<String>, strict: bool },
+    RequireCrystalForgeAgent {
+        strict: bool,
+    },
+    RequirePackages {
+        packages: Vec<String>,
+        strict: bool,
+    },
     CustomCheck {
         #[serde(default)]
         expression: String,
@@ -185,11 +190,21 @@ pub enum DeploymentPolicy {
         #[serde(default)]
         mode: RuleMode,
     },
-    RequireCveCheck { config: CveCheckConfig },
-    TimeWindow { config: TimeWindowConfig },
-    RequireApprovals { config: ApprovalConfig },
-    CanaryRollout { config: CanaryConfig },
-    CveThreshold { config: CveThresholdConfig },
+    RequireCveCheck {
+        config: CveCheckConfig,
+    },
+    TimeWindow {
+        config: TimeWindowConfig,
+    },
+    RequireApprovals {
+        config: ApprovalConfig,
+    },
+    CanaryRollout {
+        config: CanaryConfig,
+    },
+    CveThreshold {
+        config: CveThresholdConfig,
+    },
 }
 
 impl DeploymentPolicy {
@@ -290,9 +305,7 @@ impl Default for DeploymentConfig {
             cache_public_key: None,
             deployment_poll_interval: Duration::from_secs(60),
             post_agent_start_deployment_delay: default_post_agent_start_deployment_delay(),
-            policies: vec![
-                DeploymentPolicy::RequireCrystalForgeAgent { strict: false },
-            ],
+            policies: vec![DeploymentPolicy::RequireCrystalForgeAgent { strict: false }],
             require_sigs: true,
             cache_type: CacheType::Nix,
             attic_cache_name: None,
