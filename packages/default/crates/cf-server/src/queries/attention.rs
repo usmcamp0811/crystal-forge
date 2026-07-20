@@ -341,6 +341,8 @@ pub async fn dismiss_occurrences(
     category: &str,
     observed_at: DateTime<Utc>,
     occurrence_ids: &[Uuid],
+    is_admin: bool,
+    member_environment_ids: &[Uuid],
 ) -> Result<NavigationAttentionCounts> {
     let mut tx = pool.begin().await.context("failed to begin dismissal transaction")?;
 
@@ -394,7 +396,7 @@ pub async fn dismiss_occurrences(
 
     tx.commit().await.context("failed to commit dismissal transaction")?;
 
-    count_attention_for_user(pool, user_id, observed_at).await
+    count_attention_for_user(pool, user_id, observed_at, is_admin, member_environment_ids).await
 }
 
 // ── Navigation badge counts ─────────────────────────────────────────────────
@@ -421,21 +423,18 @@ pub async fn count_attention_for_user(
     pool: &PgPool,
     user_id: Uuid,
     observed_at: DateTime<Utc>,
+    is_admin: bool,
+    member_environment_ids: &[Uuid],
 ) -> Result<NavigationAttentionCounts> {
     let cutoff = attention_cutoff(observed_at);
 
     let mut counts = NavigationAttentionCounts::default();
 
     // Systems and environments are scoped by environment membership.
-    let scoped_ids: Vec<Uuid> = if user_id == Uuid::nil() {
-        // Used by tests/admin paths; nil user means no scoping.
+    let scoped_ids: Vec<Uuid> = if is_admin {
         Vec::new()
     } else {
-        crate::queries::systems::get_user_environment_membership_ids(pool, user_id)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .collect()
+        member_environment_ids.to_vec()
     };
 
     let counts_ref = &mut counts;
@@ -445,6 +444,7 @@ pub async fn count_attention_for_user(
         "builds",
         cutoff,
         None,
+        is_admin,
         &mut counts_ref.builds_failed_new,
     )
     .await?;
@@ -454,6 +454,7 @@ pub async fn count_attention_for_user(
         "evals",
         cutoff,
         None,
+        is_admin,
         &mut counts_ref.evals_failed_new,
     )
     .await?;
@@ -463,6 +464,7 @@ pub async fn count_attention_for_user(
         "flakes",
         cutoff,
         None,
+        is_admin,
         &mut counts_ref.flakes_errored,
     )
     .await?;
@@ -472,6 +474,7 @@ pub async fn count_attention_for_user(
         "cves",
         cutoff,
         None,
+        is_admin,
         &mut counts_ref.cves_critical_new,
     )
     .await?;
@@ -481,6 +484,7 @@ pub async fn count_attention_for_user(
         "systems",
         cutoff,
         Some(&scoped_ids),
+        is_admin,
         &mut counts_ref.systems_attention,
     )
     .await?;
@@ -490,6 +494,7 @@ pub async fn count_attention_for_user(
         "environments",
         cutoff,
         Some(&scoped_ids),
+        is_admin,
         &mut counts_ref.environments_attention,
     )
     .await?;
@@ -503,6 +508,7 @@ async fn count_category(
     category: &str,
     cutoff: DateTime<Utc>,
     environment_ids: Option<&[Uuid]>,
+    is_admin: bool,
     out: &mut i64,
 ) -> Result<()> {
     let sql = match category {
@@ -549,7 +555,7 @@ async fn count_category(
         sqlx::query(sql)
             .bind(cutoff)
             .bind(user_id)
-            .bind(user_id == Uuid::nil())
+            .bind(is_admin)
             .bind(envs)
             .bind(category)
             .fetch_one(pool)
@@ -558,7 +564,7 @@ async fn count_category(
         sqlx::query(sql)
             .bind(cutoff)
             .bind(user_id)
-            .bind(false)
+            .bind(is_admin)
             .bind::<Vec<Uuid>>(vec![])
             .bind(category)
             .fetch_one(pool)
@@ -579,6 +585,7 @@ pub async fn list_eligible_occurrence_keys(
     user_id: Uuid,
     category: &str,
     observed_at: DateTime<Utc>,
+    is_admin: bool,
     environment_ids: Option<&[Uuid]>,
 ) -> Result<Vec<String>> {
     let cutoff = attention_cutoff(observed_at);
@@ -630,7 +637,7 @@ pub async fn list_eligible_occurrence_keys(
         sqlx::query(sql)
             .bind(cutoff)
             .bind(user_id)
-            .bind(user_id == Uuid::nil())
+            .bind(is_admin)
             .bind(envs)
             .bind(category)
             .fetch_all(pool)
@@ -639,7 +646,7 @@ pub async fn list_eligible_occurrence_keys(
         sqlx::query(sql)
             .bind(cutoff)
             .bind(user_id)
-            .bind(false)
+            .bind(is_admin)
             .bind::<Vec<Uuid>>(vec![])
             .bind(category)
             .fetch_all(pool)

@@ -1,5 +1,5 @@
-//! API handlers for sidebar navigation badge counts and their per-user
-//! acknowledgment baseline.
+//! API handlers for sidebar navigation badge counts and per-occurrence
+//! dismissal.
 
 use axum::{
     Json,
@@ -9,13 +9,15 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use uuid::Uuid;
 
 use crate::api::models::{ApiError, NavigationBadges};
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{
-    authenticated_user_roles, has_admin_role, has_viewer_or_above_role, require_viewer_or_above,
+    authenticated_user_roles, has_admin_role, has_viewer_or_above_role,
 };
-use crate::queries::navigation::{fetch_navigation_badges, upsert_user_alert_acknowledgment};
+use crate::queries::attention;
+use crate::queries::navigation::fetch_navigation_badges;
 use crate::queries::systems::get_user_environment_membership_ids;
 
 const VALID_CATEGORIES: &[&str] = &[
@@ -27,18 +29,37 @@ const VALID_CATEGORIES: &[&str] = &[
     "cves",
 ];
 
+async fn resolve_navigation_scope(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    roles: &[crate::models::auth_identity::AuthRole],
+) -> (bool, Vec<Uuid>) {
+    let is_admin = has_admin_role(roles);
+    let member_environment_ids = if is_admin {
+        Vec::new()
+    } else {
+        match get_user_environment_membership_ids(pool, user_id).await {
+            Ok(ids) => ids.into_iter().collect(),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load environment memberships for navigation (user {user_id}): {e:#}"
+                );
+                Vec::new()
+            }
+        }
+    };
+    (is_admin, member_environment_ids)
+}
+
 /// GET /api/v1/navigation/badges
 ///
-/// Returns badge counts for all sidebar navigation entries, computed relative
-/// to the requesting user's last acknowledgment of each category. Requires
-/// viewer-or-above access, matching the summarized surfaces. The UI should
-/// poll this endpoint approximately every 30 seconds.
+/// Returns badge counts for all sidebar navigation entries. Each attention
+/// count is the number of eligible undismissed canonical occurrences in the
+/// last 24 hours for the requesting user. Requires viewer-or-above access.
 ///
 /// Systems and Environments counts are scoped to the requesting user's
 /// environment memberships (admins see the fleet-wide total), matching the
-/// same visibility rule as `GET /api/v1/systems` and `GET /api/v1/environments`
-/// — otherwise a non-admin operator/viewer could see an attention badge for
-/// systems/environments they cannot actually see in those views.
+/// same visibility rule as `GET /api/v1/systems` and `GET /api/v1/environments`.
 pub async fn get_navigation_badges(
     State(state): State<CFState>,
     headers: HeaderMap,
@@ -50,20 +71,8 @@ pub async fn get_navigation_badges(
         return forbidden_viewer();
     }
 
-    let is_admin = has_admin_role(&roles);
-    let member_environment_ids = if is_admin {
-        Vec::new()
-    } else {
-        match get_user_environment_membership_ids(&state.pool, user_id).await {
-            Ok(ids) => ids.into_iter().collect(),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to load environment memberships for navigation badges (user {user_id}): {e:#}"
-                );
-                Vec::new()
-            }
-        }
-    };
+    let (is_admin, member_environment_ids) =
+        resolve_navigation_scope(&state.pool, user_id, &roles).await;
 
     match fetch_navigation_badges(&state.pool, user_id, is_admin, &member_environment_ids).await {
         Ok(badges) => (StatusCode::OK, Json(badges)).into_response(),
@@ -79,44 +88,33 @@ pub async fn get_navigation_badges(
 #[derive(Debug, Deserialize)]
 pub struct AcknowledgeNavigationCategoryRequest {
     pub category: String,
-    /// The `observed_at` cursor from the NavigationBadges response the client
-    /// was displaying when the user acknowledged. The server uses this as
-    /// `last_seen_at` so only failures that arrived *after* the rendered
-    /// snapshot count as new. Required: clients must not acknowledge without
-    /// the cursor from the badge response.
+    /// The `observed_at` cursor from the `NavigationBadges` response the client
+    /// was displaying when the user dismissed. Only occurrences opened at or
+    /// before this cursor may be dismissed.
     pub observed_at: DateTime<Utc>,
-    /// Current attention count for this category at acknowledgment time
-    /// (used as the count-diff baseline for systems/environments; ignored by
-    /// timestamp-based categories which use `observed_at` as their cutoff).
+    /// Exact server canonical occurrence IDs represented by the rendered
+    /// dataset or action. The server validates each id belongs to the requested
+    /// category and is visible to the requesting user.
     #[serde(default)]
-    pub current_count: i64,
-    /// MD5 fingerprint of the alerting-ID set from the badge response the
-    /// client was showing. Echoed back from `NavigationBadges.systems_fingerprint`
-    /// or `.environments_fingerprint` so replacement failures re-surface.
-    #[serde(default)]
-    pub fingerprint: Option<String>,
-    /// Sorted alerting item IDs the user actually saw for count-derived
-    /// categories (systems/environments). Used to compute current - acknowledged
-    /// so recoveries do not re-surface old alerts.
-    #[serde(default)]
-    pub alert_ids: Option<Vec<String>>,
+    pub occurrence_ids: Vec<Uuid>,
 }
 
 /// POST /api/v1/navigation/acknowledge
 ///
-/// Records that the requesting user has acknowledged (visited, or opened the
-/// failures tab for) a given alert category. Persists per-user so the
-/// corresponding badge stays hidden across page refresh, browser restart, and
-/// re-login until something new appears — see `queries::navigation` for the
-/// per-category "new since" computation this feeds.
+/// Persists dismissal of the supplied occurrence IDs for the requesting user.
+/// Returns the refreshed `NavigationBadges` state so the client can update the
+/// sidebar without an extra round-trip.
 pub async fn acknowledge_navigation_category(
     State(state): State<CFState>,
     headers: HeaderMap,
     Json(payload): Json<AcknowledgeNavigationCategoryRequest>,
 ) -> impl IntoResponse {
-    let Some(user_id) = require_viewer_or_above(&state.pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
         return forbidden_viewer();
     };
+    if !has_viewer_or_above_role(&roles) {
+        return forbidden_viewer();
+    }
 
     if !VALID_CATEGORIES.contains(&payload.category.as_str()) {
         return (
@@ -133,35 +131,77 @@ pub async fn acknowledge_navigation_category(
             .into_response();
     }
 
-    match upsert_user_alert_acknowledgment(
+    let (is_admin, member_environment_ids) =
+        resolve_navigation_scope(&state.pool, user_id, &roles).await;
+
+    let dismissal_result = attention::dismiss_occurrences(
         &state.pool,
         user_id,
         &payload.category,
         payload.observed_at,
-        payload.current_count,
-        payload.fingerprint.as_deref(),
-        payload.alert_ids.as_deref(),
+        &payload.occurrence_ids,
+        is_admin,
+        &member_environment_ids,
     )
-    .await
-    {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response(),
+    .await;
+
+    let counts = match dismissal_result {
+        Ok(counts) => counts,
         Err(e) => {
+            let status = if e.to_string().contains("not found")
+                || e.to_string().contains("belongs to category")
+                || e.to_string().contains("opened after")
+            {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
             tracing::error!(
-                "Failed to record alert acknowledgment for user {} category {}: {e:#}",
+                "Failed to dismiss occurrences for user {} category {}: {e:#}",
                 user_id,
                 payload.category
             );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
+            return (
+                status,
                 Json(ApiError {
-                    error: "internal_error".to_string(),
-                    message: "Failed to record acknowledgment".to_string(),
+                    error: "dismissal_failed".to_string(),
+                    message: "Failed to dismiss occurrences".to_string(),
                     details: None,
                 }),
             )
-                .into_response()
+                .into_response();
         }
-    }
+    };
+
+    let badges = match fetch_navigation_badges(
+        &state.pool,
+        user_id,
+        is_admin,
+        &member_environment_ids,
+    )
+    .await
+    {
+        Ok(badges) => badges,
+        Err(e) => {
+            // If dismissal succeeded but the refresh query failed, return the
+            // counts we already know so the client can update optimistically.
+            tracing::error!(
+                "Dismissal succeeded but failed to refresh badges for user {}: {e:#}",
+                user_id
+            );
+            let mut fallback = NavigationBadges::default();
+            fallback.observed_at = Some(payload.observed_at);
+            fallback.systems_attention = counts.systems_attention;
+            fallback.flakes_errored = counts.flakes_errored;
+            fallback.environments_attention = counts.environments_attention;
+            fallback.builds_failed_new = counts.builds_failed_new;
+            fallback.evals_failed_new = counts.evals_failed_new;
+            fallback.cves_critical_new = counts.cves_critical_new;
+            return (StatusCode::OK, Json(fallback)).into_response();
+        }
+    };
+
+    (StatusCode::OK, Json(badges)).into_response()
 }
 
 fn forbidden_viewer() -> axum::response::Response {

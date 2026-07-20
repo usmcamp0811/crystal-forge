@@ -1042,6 +1042,20 @@ pub struct NavigationBadges {
     /// Critical CVEs first detected after the user's last acknowledgment of
     /// the cves category.
     pub cves_critical_new: i64,
+    /// Server canonical occurrence IDs that the current user can dismiss for
+    /// each category. Empty when no eligible occurrences are present.
+    #[serde(default)]
+    pub builds_occurrence_ids: Vec<String>,
+    #[serde(default)]
+    pub evals_occurrence_ids: Vec<String>,
+    #[serde(default)]
+    pub flakes_occurrence_ids: Vec<String>,
+    #[serde(default)]
+    pub systems_occurrence_ids: Vec<String>,
+    #[serde(default)]
+    pub environments_occurrence_ids: Vec<String>,
+    #[serde(default)]
+    pub cves_occurrence_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
