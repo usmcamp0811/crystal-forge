@@ -406,6 +406,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-agent"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "base64 0.21.7",
+ "cf-config",
+ "cf-protocol",
+ "ed25519-dalek",
+ "hostname",
+ "nix",
+ "rand 0.8.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cf-config"
 version = "0.3.0"
 dependencies = [
