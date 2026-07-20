@@ -243,9 +243,10 @@ pub fn BuildsView() -> Element {
     // NB: `refresh_trigger` is deliberately excluded — polling ticks every 5 s
     // and must not erase previously loaded rows (review finding #8).
     // Navigation focus also changes filters, but must not override FETCH_LIMIT_MAX.
-    // Use read_unchecked to avoid subscribing to navigation_focus changes: when
-    // the focus handler clears navigation_focus after finding a match, this effect
-    // must NOT rerun and overwrite FETCH_LIMIT_MAX with PAGE_SIZE.
+    // Use peek() to read navigation_focus *without* subscribing: when the focus
+    // handler clears navigation_focus after finding a match, this effect must NOT
+    // rerun and overwrite FETCH_LIMIT_MAX with PAGE_SIZE. read_unchecked() still
+    // subscribes the current reactive scope in Dioxus 0.7 — only peek() avoids that.
     use_effect(move || {
         let _ = (
             filter_status(),
@@ -254,7 +255,7 @@ pub fn BuildsView() -> Element {
             filter_config(),
             filter_time_range(),
         );
-        if navigation_focus.read_unchecked().is_some() {
+        if navigation_focus.peek().is_some() {
             return;
         }
         fetch_limit.set(PAGE_SIZE);
