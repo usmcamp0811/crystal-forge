@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::api::client::delete_deployment_policy;
 use crate::components::layout::Card;
 use crate::components::policy::{
-    is_core_policy, policy_category, PolicyCard, PolicyCategory, PolicyDefinition,
-    PolicyEditorModal, PolicyFormat, POLICY_CATEGORIES,
+    is_core_policy, normalized_policy_type, policy_category, PolicyCard, PolicyCategory,
+    PolicyDefinition, PolicyEditorModal, PolicyFormat, POLICY_CATEGORIES,
 };
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::theme;
@@ -47,6 +47,24 @@ pub fn PoliciesView() -> Element {
     let mut type_filter = use_signal(|| "all".to_string());
     let mut delete_confirm: Signal<Option<Uuid>> = use_signal(|| None);
     let mut focused_policy_name = use_signal(|| None::<String>);
+    let mut policies_loaded = use_signal(|| false);
+    let mut pending_policy_focus = use_signal(|| None::<NavigationFocus>);
+
+    // Track when policies finish loading, so we can retry the focus match.
+    use_effect(move || {
+        let snapshot_empty = policy_library.read().is_empty();
+        if !snapshot_empty && !policies_loaded() {
+            policies_loaded.set(true);
+        }
+        // If there's a pending focus and policies are now loaded, re-fire the focus effect.
+        if policies_loaded() {
+            let pending = pending_policy_focus.read().clone();
+            if let Some(pf) = pending {
+                navigation_focus.set(Some(pf));
+                pending_policy_focus.set(None);
+            }
+        }
+    });
 
     use_effect(move || {
         let Some(focus) = navigation_focus() else {
@@ -62,12 +80,31 @@ pub fn PoliciesView() -> Element {
         };
 
         let policy_snapshot = policy_library.read();
+        let loaded = policies_loaded();
+        let search_name = policy_name.to_ascii_lowercase();
         let matched = policy_snapshot.iter().find(|policy| {
-            policy.name.eq_ignore_ascii_case(&policy_name)
-                || policy
-                    .name
-                    .to_ascii_lowercase()
-                    .contains(&policy_name.to_ascii_lowercase())
+            // Match against display name.
+            if policy.name.eq_ignore_ascii_case(&policy_name)
+                || policy.name.to_ascii_lowercase().contains(&search_name)
+            {
+                return true;
+            }
+            // Match against the policy_type field (e.g. "require_crystal_forge_agent").
+            if let Some(ref pt) = policy.policy_type {
+                if pt.eq_ignore_ascii_case(&policy_name)
+                    || pt.to_ascii_lowercase().contains(&search_name)
+                {
+                    return true;
+                }
+            }
+            // Match against the normalized policy type.
+            if normalized_policy_type(policy)
+                .to_ascii_lowercase()
+                .contains(&search_name)
+            {
+                return true;
+            }
+            false
         });
 
         if let Some(policy) = matched {
@@ -93,9 +130,15 @@ pub fn PoliciesView() -> Element {
                     }
                 });
             }
+            navigation_focus.set(None);
+        } else if loaded {
+            // Policies are loaded but no match found — genuinely missing.
+            navigation_focus.set(None);
+        } else {
+            // Policies not yet loaded — save focus and retry after load.
+            pending_policy_focus.set(Some(focus));
+            navigation_focus.set(None);
         }
-
-        navigation_focus.set(None);
     });
 
     let query = search_query.read().to_lowercase();

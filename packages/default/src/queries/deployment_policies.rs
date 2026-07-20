@@ -220,6 +220,17 @@ pub async fn check_policy_content_exists(
     Ok(count > 0)
 }
 
+/// Count total NixOS derivations (systems) in the fleet.
+pub async fn count_nixos_derivations(pool: &PgPool) -> Result<i64> {
+    let count: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM derivations WHERE derivation_type = 'nixos'"#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("Failed to count NixOS derivations")?;
+    Ok(count)
+}
+
 /// Check if a policy is in use by any environments or systems
 pub async fn check_policy_in_use(pool: &PgPool, policy_id: &Uuid) -> Result<bool> {
     let env_count: i64 =

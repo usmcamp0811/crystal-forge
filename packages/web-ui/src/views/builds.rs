@@ -242,6 +242,7 @@ pub fn BuildsView() -> Element {
     // Reset to page 1 limit whenever filters change so accumulated rows are cleared.
     // NB: `refresh_trigger` is deliberately excluded — polling ticks every 5 s
     // and must not erase previously loaded rows (review finding #8).
+    // Navigation focus also changes filters, but must not override FETCH_LIMIT_MAX.
     use_effect(move || {
         let _ = (
             filter_status(),
@@ -250,6 +251,9 @@ pub fn BuildsView() -> Element {
             filter_config(),
             filter_time_range(),
         );
+        if navigation_focus().is_some() {
+            return;
+        }
         fetch_limit.set(PAGE_SIZE);
     });
 
@@ -555,25 +559,31 @@ pub fn BuildsView() -> Element {
             return;
         }
 
-        let matching_job_id = focus_visible_rows.iter().find_map(|item| {
-            let commit_matches = match focus.commit_sha.as_deref() {
-                Some(commit_sha) => item.commit == commit_sha,
-                None => true,
-            };
-            let flake_matches = match focus.flake_name.as_deref() {
-                Some(flake_name) => item.flake == flake_name,
-                None => true,
-            };
-            if commit_matches && flake_matches {
-                item.job_id
-            } else {
-                None
-            }
-        });
+        let matching: Vec<uuid::Uuid> = focus_visible_rows
+            .iter()
+            .filter(|item| {
+                let commit_matches = match focus.commit_sha.as_deref() {
+                    Some(commit_sha) => item.commit == commit_sha,
+                    None => true,
+                };
+                let flake_matches = match focus.flake_name.as_deref() {
+                    Some(flake_name) => item.flake == flake_name,
+                    None => true,
+                };
+                commit_matches && flake_matches
+            })
+            .filter_map(|item| item.job_id)
+            .collect();
 
-        if let Some(job_id) = matching_job_id {
-            selected_build.set(Some(job_id));
+        if matching.len() == 1 {
+            // Single match — open the drawer.
+            selected_build.set(Some(matching[0]));
             active_tab.set(DetailTab::Details);
+            navigation_focus.set(None);
+            return;
+        }
+        if matching.len() > 1 {
+            // Multiple matches — filtered table already shows them, no drawer.
             navigation_focus.set(None);
             return;
         }

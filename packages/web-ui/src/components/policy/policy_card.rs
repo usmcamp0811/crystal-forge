@@ -104,7 +104,7 @@ pub fn PolicyCard(
                         rect { x: "3", y: "4", width: "18", height: "8", rx: "2" }
                         rect { x: "3", y: "14", width: "18", height: "6", rx: "2" }
                     }
-                    span { class: "mono font-semibold text-gray-300", "0" }
+                    span { class: "mono font-semibold text-gray-300", "{policy.system_count}" }
                     span { "systems use this" }
                 }
                 if is_core {

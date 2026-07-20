@@ -1159,6 +1159,9 @@ pub struct DeploymentPoliciesListResponse {
     pub total: usize,
     pub limit: i64,
     pub offset: i64,
+    /// Total number of NixOS derivations in the fleet.
+    #[serde(default)]
+    pub fleet_system_count: i64,
 }
 
 /// Request to create a new deployment policy.

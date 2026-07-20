@@ -20,6 +20,8 @@ pub struct PolicyDefinition {
     /// The policy type (e.g., "require_cf_agent", "require_crystal_forge_agent", "require_packages", "custom_check").
     /// Optional for backward compatibility with mock/TOML policies that don't have this field.
     pub policy_type: Option<String>,
+    /// Number of NixOS derivations (systems) this policy applies to.
+    pub system_count: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

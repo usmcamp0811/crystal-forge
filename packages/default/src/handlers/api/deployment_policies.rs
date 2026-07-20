@@ -33,6 +33,9 @@ pub struct DeploymentPoliciesListResponse {
     pub total: usize,
     pub limit: i64,
     pub offset: i64,
+    /// Total number of NixOS derivations (systems) in the fleet.
+    #[serde(default)]
+    pub fleet_system_count: i64,
 }
 
 // =============================================================================
@@ -466,11 +469,24 @@ pub async fn list_deployment_policies(
                 )
             })?;
 
+    // Count total NixOS derivations for the fleet system count.
+    let fleet_system_count =
+        deployment_policies::count_nixos_derivations(&state.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to count NixOS derivations: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to count NixOS derivations".to_string(),
+                )
+            })?;
+
     Ok(Json(DeploymentPoliciesListResponse {
         policies,
         total: total as usize,
         limit: params.limit,
         offset: params.offset,
+        fleet_system_count,
     }))
 }
 
