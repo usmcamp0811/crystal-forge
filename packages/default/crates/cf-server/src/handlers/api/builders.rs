@@ -330,12 +330,12 @@ async fn resolve_cache_destinations_for_derivation(
     Ok(destinations)
 }
 
-fn cache_type_from_destination(value: &str) -> crate::config::CacheType {
+fn cache_type_from_destination(value: &str) -> cf_protocol::cache::CacheType {
     match value {
-        "S3" => crate::config::CacheType::S3,
-        "Attic" => crate::config::CacheType::Attic,
-        "Http" => crate::config::CacheType::Http,
-        _ => crate::config::CacheType::Nix,
+        "S3" => cf_protocol::cache::CacheType::S3,
+        "Attic" => cf_protocol::cache::CacheType::Attic,
+        "Http" => cf_protocol::cache::CacheType::Http,
+        _ => cf_protocol::cache::CacheType::Nix,
     }
 }
 
@@ -2262,7 +2262,7 @@ pub async fn get_next_job(
     };
 
     Ok(Json(crate::models::builders::NextJobResponse {
-        job,
+        job: job.into(),
         derivation: payload,
     }))
 }

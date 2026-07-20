@@ -22,29 +22,12 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use serde::Deserialize;
-use serde::Serialize;
 use sqlx::PgPool;
 use tracing::{debug, info, warn};
 
-#[derive(Serialize, Deserialize)]
-pub struct RuntimeCacheConfig {
-    pub cache_type: String,
-    pub cache_url: String,
-    pub cache_public_key: Option<String>,
-    pub attic_cache_name: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct LogResponse {
-    pub desired_target: Option<String>,
-    #[serde(default)]
-    pub runtime_caches: Vec<RuntimeCacheConfig>,
-    /// Interval in seconds the agent should sleep between heartbeats.
-    /// Absent when the server cannot determine the value; agent falls back to 600s.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heartbeat_interval_secs: Option<u64>,
-}
+// Re-export protocol types so agent binary imports remain backward-compatible:
+//   use crystal_forge::handlers::agent::heartbeat::{LogResponse, RuntimeCacheConfig};
+pub use cf_protocol::agent::{LogResponse, RuntimeCacheConfig};
 
 fn destination_to_runtime_cache(destination: CacheDestination) -> Option<RuntimeCacheConfig> {
     let cache_url = destination.push_to?;

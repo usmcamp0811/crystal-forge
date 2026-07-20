@@ -8,6 +8,7 @@ default = []
 embedded-ui = ["dep:include_dir", "dep:mime_guess"]
 
 [dependencies]
+cf-protocol = { path = "../cf-protocol" }
 hostname = "0.3"
 anyhow = "1.0.98"
 dotenvy = "0.15.7"

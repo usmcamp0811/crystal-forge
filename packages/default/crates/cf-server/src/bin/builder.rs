@@ -4,8 +4,9 @@ use crystal_forge::builder::metrics::SystemMetrics;
 use crystal_forge::config::{CacheConfig, CacheType, CrystalForgeConfig};
 use crystal_forge::derivations::build::{BuildCancelledError, LogSink};
 use crystal_forge::models::builders::{
-    BuildFailurePhase, BuildJobDerivation, NextJobResponse, RemoteBuildExecutionStrategy,
-    ReportMetricsRequest, SourceInputDeliveryMode, VerifiedSourceIdentity,
+    BuildFailurePhase, BuildJobDerivation, BuilderCachePushConfigExt, NextJobResponse,
+    RemoteBuildExecutionStrategy, ReportMetricsRequest, SourceInputDeliveryMode,
+    VerifiedSourceIdentity,
 };
 #[allow(deprecated)]
 use nix::fcntl::{FlockArg, flock};

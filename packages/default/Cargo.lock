@@ -406,6 +406,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-protocol"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "base64 0.21.7",
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -665,6 +682,7 @@ dependencies = [
  "base64 0.21.7",
  "bigdecimal",
  "bytes",
+ "cf-protocol",
  "chrono",
  "chrono-tz",
  "clap",

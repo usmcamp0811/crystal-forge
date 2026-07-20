@@ -7,6 +7,13 @@
 //! - Resource limits (CPU, memory, concurrent jobs)
 //! - Status tracking (active/inactive/offline)
 //! - Environment assignments (1:many relationship)
+//!
+//! # Module layout
+//!
+//! Wire protocol types that are shared between server, builder, and agent are
+//! defined in `cf-protocol` and re-exported here for backward compatibility.
+//! Server-only types (those with `sqlx::FromRow` derives or that reference
+//! server-internal state) remain defined in this module.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -15,6 +22,151 @@ use uuid::Uuid;
 
 use crate::config::{CacheConfig, CacheType};
 use crate::models::public_key::PublicKey;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Re-exports: wire protocol types from cf-protocol (no SQLx, no server deps)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Re-export pure wire-protocol types (no SQLx derives).
+// NOTE: BuildJob is intentionally NOT re-exported from cf-protocol here.
+// The server keeps its own BuildJob (with sqlx::FromRow) for DB queries.
+// When cf-builder is extracted, it will use cf_protocol::builder::BuildJob
+// directly. The server maps BuildJob → cf_protocol::builder::BuildJob when
+// building NextJobResponse.
+pub use cf_protocol::builder::{
+    AppendLogsRequest, BuildFailurePhase, BuildJobDerivation, BuildProgressRequest,
+    BuilderCachePushConfig, CachePushCompleteRequest, CachePushFailRequest, CachePushJobPayload,
+    CveScanFailRequest, CveScanResultsRequest, CveScanTarget, DerivationArchiveRequest,
+    DerivationManifestResponse, EstablishBuilderSessionRequest, EstablishBuilderSessionResponse,
+    EvaluatorFingerprint, NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest,
+    ResolveBuilderIdRequest, ResolveBuilderIdResponse, SourceInputDeliveryMode,
+    VerifiedSourceIdentity,
+};
+
+// Re-export NextJobResponse as an alias using the protocol's BuildJob type.
+// Server handlers that build NextJobResponse should convert from BuildJob (server)
+// → cf_protocol::builder::BuildJob using the From impl below.
+pub use cf_protocol::builder::NextJobResponse;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Server-side extensions for wire types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Extension trait providing server-side conversions for `BuilderCachePushConfig`.
+///
+/// The `disabled()` associated function is defined in `cf-protocol` directly on
+/// `BuilderCachePushConfig`, so it is NOT part of this trait.
+pub trait BuilderCachePushConfigExt {
+    /// Convert the builder-delivered cache-push configuration to the server's
+    /// local `CacheConfig`, filling in any missing fields from `local_fallback`.
+    fn to_cache_config(&self, local_fallback: &CacheConfig) -> CacheConfig;
+}
+
+impl BuilderCachePushConfigExt for BuilderCachePushConfig {
+    fn to_cache_config(&self, local_fallback: &CacheConfig) -> CacheConfig {
+        // Map cf-protocol CacheType → server CacheType
+        let cache_type = match &self.cache_type {
+            cf_protocol::cache::CacheType::S3 => CacheType::S3,
+            cf_protocol::cache::CacheType::Attic => CacheType::Attic,
+            cf_protocol::cache::CacheType::Http => CacheType::Http,
+            cf_protocol::cache::CacheType::Nix => CacheType::Nix,
+        };
+        CacheConfig {
+            cache_type,
+            push_to: self.push_to.clone(),
+            push_after_build: self.push_after_build,
+            signing_key: self
+                .signing_key
+                .clone()
+                .or_else(|| local_fallback.signing_key.clone()),
+            compression: self.compression.clone(),
+            push_filter: None,
+            parallel_uploads: local_fallback.parallel_uploads,
+            s3_region: self.s3_region.clone(),
+            s3_profile: self.s3_profile.clone(),
+            s3_access_key_id: self.s3_access_key_id.clone(),
+            s3_secret_access_key: self.s3_secret_access_key.clone(),
+            s3_session_token: self.s3_session_token.clone(),
+            s3_endpoint_url: self.s3_endpoint_url.clone(),
+            attic_token: self.attic_token.clone(),
+            attic_cache_name: self.attic_cache_name.clone(),
+            attic_ignore_upstream_cache_filter: self.attic_ignore_upstream_cache_filter,
+            attic_jobs: if self.attic_jobs == 0 {
+                local_fallback.attic_jobs
+            } else {
+                self.attic_jobs
+            },
+            max_retries: self.max_retries,
+            retry_delay_seconds: self.retry_delay_seconds,
+            poll_interval: local_fallback.poll_interval,
+            push_timeout_seconds: self.push_timeout_seconds,
+            force_repush: self.force_repush,
+            require_sigs: self.require_sigs,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Server DB row types for build_jobs (sqlx::FromRow — server-only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Server-owned build job row used for both DB queries AND the wire protocol.
+///
+/// This type has `sqlx::FromRow` for efficient DB queries.  When the server
+/// returns `NextJobResponse`, it converts a `BuildJob` into
+/// `cf_protocol::builder::BuildJob` via `Into::into`.  The `cf-builder` crate
+/// (extracted in a later step) will use `cf_protocol::builder::BuildJob`
+/// directly and will never need `sqlx::FromRow`.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct BuildJob {
+    pub id: Uuid,
+    pub builder_id: Option<Uuid>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub builder_session_id: Option<Uuid>,
+    pub derivation_id: i32,
+    pub environment_id: Option<Uuid>,
+    pub status: String,
+    pub retry_count: i32,
+    pub max_retries: i32,
+    pub priority_weight: f64,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub logs: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Conversion from server's BuildJob to cf-protocol wire BuildJob.
+///
+/// Used by the API layer when constructing `NextJobResponse`.
+impl From<BuildJob> for cf_protocol::builder::BuildJob {
+    fn from(job: BuildJob) -> Self {
+        Self {
+            id: job.id,
+            builder_id: job.builder_id,
+            builder_session_id: job.builder_session_id,
+            derivation_id: job.derivation_id,
+            environment_id: job.environment_id,
+            status: job.status,
+            retry_count: job.retry_count,
+            max_retries: job.max_retries,
+            priority_weight: job.priority_weight,
+            started_at: job.started_at,
+            completed_at: job.completed_at,
+            logs: job.logs,
+            created_at: job.created_at,
+            updated_at: job.updated_at,
+        }
+    }
+}
+
+/// Internal alias for backward compatibility with query code.
+pub type BuildJobRow = BuildJob;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Builder status enum (server-owned: sqlx::Type for DB column mapping)
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Builder status enum
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
@@ -50,12 +202,16 @@ impl From<String> for BuilderStatus {
             "inactive" => BuilderStatus::Inactive,
             "offline" => BuilderStatus::Offline,
             "draining" => BuilderStatus::Draining,
-            _ => BuilderStatus::Inactive, // default to inactive for unknown values
+            _ => BuilderStatus::Inactive,
         }
     }
 }
 
-/// A registered builder
+// ─────────────────────────────────────────────────────────────────────────────
+// Server DB row types (sqlx::FromRow — server-only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A registered builder (server DB row).
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Builder {
     pub id: Uuid,
@@ -82,14 +238,14 @@ pub struct Builder {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Builder assigned environment info for summary view
+/// Builder assigned environment info for summary view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuilderEnvironmentInfo {
     pub name: String,
     pub color_hex: String,
 }
 
-/// Summary view of a builder (for list endpoints)
+/// Summary view of a builder (for list endpoints).
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct BuilderSummary {
     pub id: Uuid,
@@ -110,20 +266,16 @@ pub struct BuilderSummary {
     #[serde(default)]
     #[sqlx(default, json)]
     pub assigned_environments: Vec<BuilderEnvironmentInfo>,
-    /// SHA256 hex fingerprint derived from public_key
     #[serde(default)]
     #[sqlx(default)]
     pub public_key_fingerprint: String,
     pub registered: bool,
-    /// System load average (0.0-1.0), if reported in recent heartbeat
     #[serde(default)]
     #[sqlx(default)]
     pub load_avg: Option<f64>,
-    /// Build jobs completed in last 24 hours
     #[serde(default)]
     #[sqlx(default)]
     pub completed_24h: i32,
-    /// Build jobs failed in last 24 hours
     #[serde(default)]
     #[sqlx(default)]
     pub failed_24h: i32,
@@ -136,7 +288,7 @@ impl Builder {
     }
 }
 
-/// Builder with environment assignments
+/// Builder with environment assignments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuilderWithEnvironments {
     #[serde(flatten)]
@@ -144,7 +296,7 @@ pub struct BuilderWithEnvironments {
     pub assigned_environment_ids: Vec<Uuid>,
 }
 
-/// Builder environment assignment
+/// Builder environment assignment (server DB row).
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct BuilderEnvironmentAssignment {
     pub id: i32,
@@ -153,23 +305,21 @@ pub struct BuilderEnvironmentAssignment {
     pub created_at: DateTime<Utc>,
 }
 
-/// Request to create a new builder
+/// Request to create a new builder.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateBuilderRequest {
     pub name: String,
     pub host: Option<String>,
     pub arch: String,
-    /// Optional base64-encoded Ed25519 public key
-    /// If not provided, server will generate a proper Ed25519 keypair
     pub public_key: Option<String>,
     pub max_cpu_cores: Option<i32>,
     pub max_memory_mb: Option<i32>,
     pub max_concurrent_jobs: Option<i32>,
     pub enabled: Option<bool>,
-    pub environment_ids: Vec<Uuid>, // Optional environment assignments
+    pub environment_ids: Vec<Uuid>,
 }
 
-/// Request to update a builder
+/// Request to update a builder.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateBuilderRequest {
     pub name: Option<String>,
@@ -182,51 +332,19 @@ pub struct UpdateBuilderRequest {
     pub enabled: Option<bool>,
 }
 
-/// Request to update builder public key
+/// Request to update builder public key.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateBuilderPublicKeyRequest {
-    pub public_key: String, // base64-encoded Ed25519 public key
-}
-
-/// Request for a builder to resolve its server-assigned ID from its public key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResolveBuilderIdRequest {
-    /// Base64-encoded Ed25519 public key derived from the builder's local private key.
     pub public_key: String,
-    /// Per-process session UUID generated on builder startup.
-    #[serde(default)]
-    pub session_id: Option<Uuid>,
 }
 
-/// Response returned when a builder public key has been registered/approved.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResolveBuilderIdResponse {
-    pub builder_id: Uuid,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<Uuid>,
-}
-
-/// Request to establish a process/session for a configured builder ID.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EstablishBuilderSessionRequest {
-    pub session_id: Uuid,
-}
-
-/// Response returned after establishing a builder process/session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EstablishBuilderSessionResponse {
-    pub builder_id: Uuid,
-    pub session_id: Uuid,
-    pub recovered_jobs: usize,
-}
-
-/// Request to update builder environment assignments
+/// Request to update builder environment assignments.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateBuilderEnvironmentsRequest {
     pub environment_ids: Vec<Uuid>,
 }
 
-/// Builder resource metrics
+/// Builder resource metrics (server DB row).
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct BuilderMetrics {
     pub id: i64,
@@ -239,14 +357,28 @@ pub struct BuilderMetrics {
     pub system_memory_used_mb: Option<i64>,
 }
 
-/// Request to report builder metrics (via heartbeat)
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ReportMetricsRequest {
-    pub cpu_usage_percent: f64,
-    pub memory_usage_mb: i64,
-    pub system_cpu_usage_percent: Option<f64>,
-    pub system_memory_total_mb: Option<i64>,
-    pub system_memory_used_mb: Option<i64>,
+/// Response for builder creation with generated keypair.
+///
+/// WARNING: private_key is returned ONLY ONCE and never stored.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BuilderCreatedResponse {
+    pub builder: Builder,
+    /// Base64-encoded Ed25519 private key (64 bytes).
+    /// This is shown ONLY ONCE at creation time and NEVER stored server-side.
+    pub private_key: Option<String>,
+    pub assigned_environment_ids: Vec<Uuid>,
+}
+
+/// Response for keypair regeneration.
+///
+/// WARNING: private_key is returned ONLY ONCE and never stored.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct KeypairRegeneratedResponse {
+    /// Base64-encoded Ed25519 public key (32 bytes).
+    pub public_key: String,
+    /// Base64-encoded Ed25519 private key (64 bytes).
+    /// This is shown ONLY ONCE at creation time and NEVER stored server-side.
+    pub private_key: String,
 }
 
 #[cfg(test)]
@@ -342,424 +474,4 @@ mod tests {
         assert_eq!(value["source_input_delivery"], "server_bundled_archive");
         assert_eq!(value["expected_drv_path"], "/nix/store/server-host-a.drv");
     }
-}
-
-// =============================================================================
-// BUILD JOB MODELS (for work queue)
-// =============================================================================
-
-/// Status of a build job
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BuildJobStatus {
-    Queued,
-    Building,
-    Cancelling,
-    Success,
-    Failed,
-    Cancelled,
-}
-
-impl std::fmt::Display for BuildJobStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BuildJobStatus::Queued => write!(f, "queued"),
-            BuildJobStatus::Building => write!(f, "building"),
-            BuildJobStatus::Cancelling => write!(f, "cancelling"),
-            BuildJobStatus::Success => write!(f, "success"),
-            BuildJobStatus::Failed => write!(f, "failed"),
-            BuildJobStatus::Cancelled => write!(f, "cancelled"),
-        }
-    }
-}
-
-/// A build job in the queue
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct BuildJob {
-    pub id: Uuid,
-    pub builder_id: Option<Uuid>,
-    #[serde(default)]
-    #[sqlx(default)]
-    pub builder_session_id: Option<Uuid>,
-    pub derivation_id: i32,
-    pub environment_id: Option<Uuid>,
-    pub status: String, // Will be parsed to BuildJobStatus
-    pub retry_count: i32,
-    pub max_retries: i32,
-    pub priority_weight: f64,
-    pub started_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub logs: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// Response for append_job_logs endpoint
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AppendLogsRequest {
-    pub logs: String,
-}
-
-/// Minimal derivation build payload delivered to API-mode builders so they can
-/// build without any direct database access.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuildJobDerivation {
-    pub id: i32,
-    pub derivation_name: String,
-    /// "nixos" or "package"
-    pub derivation_type: String,
-    /// .drv path populated during the dry-run/eval phase.
-    pub derivation_path: Option<String>,
-    /// Resolved output store path, if already known.
-    pub store_path: Option<String>,
-    /// Explicit remote build execution strategy. Defaults to the current
-    /// server-authoritative derivation flow for older servers/clients.
-    #[serde(default)]
-    pub execution_strategy: RemoteBuildExecutionStrategy,
-    /// Source metadata used by verified source re-evaluation. This is optional
-    /// for `server_derivation` jobs and required for verified source jobs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<VerifiedSourceIdentity>,
-    /// How the builder should obtain flake inputs for local evaluation.
-    #[serde(default)]
-    pub source_input_delivery: SourceInputDeliveryMode,
-    /// Server-authorized toplevel derivation identity. For current
-    /// `server_derivation` jobs this is the same as `derivation_path`; for
-    /// verified source jobs the builder compares its local eval result to this
-    /// string before building.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_drv_path: Option<String>,
-    /// Server-recorded evaluator fingerprint for audit/debugging.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evaluator: Option<EvaluatorFingerprint>,
-    /// Server-selected cache destination for builder-side output pushes. Current
-    /// servers always include this field; it remains optional so newer builders
-    /// can still communicate with older servers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_push: Option<BuilderCachePushConfig>,
-}
-
-/// Cache-push settings selected by the server for a remote builder job.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuilderCachePushConfig {
-    #[serde(default)]
-    pub cache_type: CacheType,
-    pub push_to: Option<String>,
-    #[serde(default)]
-    pub push_after_build: bool,
-    pub signing_key: Option<String>,
-    pub compression: Option<String>,
-    pub s3_region: Option<String>,
-    pub s3_profile: Option<String>,
-    pub s3_access_key_id: Option<String>,
-    pub s3_secret_access_key: Option<String>,
-    pub s3_session_token: Option<String>,
-    pub s3_endpoint_url: Option<String>,
-    pub attic_token: Option<String>,
-    pub attic_cache_name: Option<String>,
-    #[serde(default)]
-    pub attic_ignore_upstream_cache_filter: bool,
-    #[serde(default)]
-    pub attic_jobs: u32,
-    #[serde(default)]
-    pub max_retries: u32,
-    #[serde(default)]
-    pub retry_delay_seconds: u64,
-    #[serde(default = "CacheConfig::default_push_timeout_seconds")]
-    pub push_timeout_seconds: u64,
-    #[serde(default)]
-    pub force_repush: bool,
-    #[serde(default)]
-    pub require_sigs: bool,
-}
-
-impl BuilderCachePushConfig {
-    pub fn disabled() -> Self {
-        Self {
-            cache_type: CacheType::Nix,
-            push_to: None,
-            push_after_build: false,
-            signing_key: None,
-            compression: None,
-            s3_region: None,
-            s3_profile: None,
-            s3_access_key_id: None,
-            s3_secret_access_key: None,
-            s3_session_token: None,
-            s3_endpoint_url: None,
-            attic_token: None,
-            attic_cache_name: None,
-            attic_ignore_upstream_cache_filter: true,
-            attic_jobs: 5,
-            max_retries: 3,
-            retry_delay_seconds: 5,
-            push_timeout_seconds: CacheConfig::default_push_timeout_seconds(),
-            force_repush: false,
-            require_sigs: true,
-        }
-    }
-
-    pub fn to_cache_config(&self, local_fallback: &CacheConfig) -> CacheConfig {
-        CacheConfig {
-            cache_type: self.cache_type.clone(),
-            push_to: self.push_to.clone(),
-            push_after_build: self.push_after_build,
-            signing_key: self
-                .signing_key
-                .clone()
-                .or_else(|| local_fallback.signing_key.clone()),
-            compression: self.compression.clone(),
-            push_filter: None,
-            parallel_uploads: local_fallback.parallel_uploads,
-            s3_region: self.s3_region.clone(),
-            s3_profile: self.s3_profile.clone(),
-            s3_access_key_id: self.s3_access_key_id.clone(),
-            s3_secret_access_key: self.s3_secret_access_key.clone(),
-            s3_session_token: self.s3_session_token.clone(),
-            s3_endpoint_url: self.s3_endpoint_url.clone(),
-            attic_token: self.attic_token.clone(),
-            attic_cache_name: self.attic_cache_name.clone(),
-            attic_ignore_upstream_cache_filter: self.attic_ignore_upstream_cache_filter,
-            attic_jobs: if self.attic_jobs == 0 {
-                local_fallback.attic_jobs
-            } else {
-                self.attic_jobs
-            },
-            max_retries: self.max_retries,
-            retry_delay_seconds: self.retry_delay_seconds,
-            poll_interval: local_fallback.poll_interval,
-            push_timeout_seconds: self.push_timeout_seconds,
-            force_repush: self.force_repush,
-            require_sigs: self.require_sigs,
-        }
-    }
-}
-
-/// Signed request body for POST /api/v1/builders/:id/next-job.
-///
-/// Older builders poll the same endpoint with GET and an empty body; the server
-/// treats those as protocol v1 builders that support only `server_derivation` so
-/// they never receive newer source-verified jobs by accident.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NextJobRequest {
-    #[serde(default = "default_builder_protocol_version")]
-    pub protocol_version: u32,
-    #[serde(default = "default_supported_execution_strategies")]
-    pub supported_execution_strategies: Vec<RemoteBuildExecutionStrategy>,
-}
-
-fn default_builder_protocol_version() -> u32 {
-    1
-}
-
-fn default_supported_execution_strategies() -> Vec<RemoteBuildExecutionStrategy> {
-    vec![RemoteBuildExecutionStrategy::ServerDerivation]
-}
-
-/// Explicit remote build execution strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RemoteBuildExecutionStrategy {
-    /// Server evaluates and provides the authoritative `.drv` path.
-    #[default]
-    ServerDerivation,
-    /// Builder evaluates immutable source locally and must match the server's
-    /// expected `.drvPath` before building.
-    SourceReEvaluateVerified,
-}
-
-/// Source/input delivery mode for verified source re-evaluation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceInputDeliveryMode {
-    /// Not applicable for the current job strategy.
-    #[default]
-    None,
-    /// Server packages the top-level flake repository as a tar.gz of its
-    /// bare Git mirror and serves it via an authenticated API endpoint.
-    /// The builder downloads, verifies (SHA-256), and extracts the archive
-    /// into a job-scoped bare mirror, then evaluates the flake from a
-    /// detached worktree.
-    ///
-    /// **Scope:** only the top-level repository is bundled. Locked flake
-    /// inputs that are NOT already in the builder's Nix store or reachable
-    /// via configured substituters may still require network access during
-    /// `nix eval`. Private flake inputs must be publicly accessible, cached,
-    /// or pre-seeded on the builder for air-gapped operation.
-    ServerBundledArchive,
-    /// Builder uses or creates a detached local Git worktree from a local mirror
-    /// at the authorized commit. Colocated server/builder deployments may share
-    /// these roots.
-    LocalGitWorktree,
-    /// Builder may fetch public flake inputs itself. Builders still must not
-    /// receive broad private Git credentials.
-    BuilderFetchPublicInputs,
-}
-
-/// Immutable source identity for verified source re-evaluation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerifiedSourceIdentity {
-    pub repo_url: String,
-    pub commit_hash: String,
-    pub flake_target: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mirror_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mirror_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lock_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub archive_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub archive_sha256: Option<String>,
-}
-
-/// Evaluator fingerprint recorded in the job manifest for auditability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EvaluatorFingerprint {
-    pub nix_version: String,
-    #[serde(default)]
-    pub pure_eval: bool,
-    #[serde(default)]
-    pub lockfile_mutation_allowed: bool,
-}
-
-/// Distinct pre-build/build failure phases reported by API builders.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BuildFailurePhase {
-    SourceFetch,
-    SourceInputAvailability,
-    Evaluation,
-    DerivationMismatch,
-    PathMaterialization,
-    Build,
-}
-
-impl std::fmt::Display for BuildFailurePhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BuildFailurePhase::SourceFetch => write!(f, "source_fetch"),
-            BuildFailurePhase::SourceInputAvailability => write!(f, "source_input_availability"),
-            BuildFailurePhase::Evaluation => write!(f, "evaluation"),
-            BuildFailurePhase::DerivationMismatch => write!(f, "derivation_mismatch"),
-            BuildFailurePhase::PathMaterialization => write!(f, "path_materialization"),
-            BuildFailurePhase::Build => write!(f, "build"),
-        }
-    }
-}
-
-/// Response returned by GET/POST /api/v1/builders/:id/next-job.
-///
-/// Embeds both the claimed job and the derivation build payload so the remote
-/// builder needs only a single round trip and no database connection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NextJobResponse {
-    pub job: BuildJob,
-    pub derivation: BuildJobDerivation,
-}
-
-/// Response for GET /api/v1/builders/:id/jobs/:job_id/derivation-manifest.
-///
-/// The authorized requisite path manifest for a job's server-evaluated `.drv`.
-/// The builder compares this list against its local store validity to compute
-/// the missing set, then requests only those paths via the delta archive
-/// endpoint. The server is the sole authority for this list — it is computed
-/// from persisted job state, never from builder-supplied input.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DerivationManifestResponse {
-    pub job_id: Uuid,
-    pub drv_path: String,
-    /// Sorted, deduplicated requisite store paths for `drv_path`.
-    pub paths: Vec<String>,
-}
-
-/// Request body for POST /api/v1/builders/:id/jobs/:job_id/derivation-archive.
-///
-/// The builder lists the store paths (a subset of the job's authorized
-/// manifest) it is missing locally. The server validates set membership and
-/// streams `nix-store --export` for exactly those paths.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DerivationArchiveRequest {
-    pub paths: Vec<String>,
-}
-
-/// Build progress report sent by API builders (HTTP fallback for the WS frame).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuildProgressRequest {
-    pub derivation_id: i32,
-    pub elapsed_seconds: i32,
-    pub current_target: Option<String>,
-    pub last_activity_seconds: i32,
-}
-
-/// A cache-push job handed to an API builder.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachePushJobPayload {
-    pub id: Uuid,
-    pub derivation_id: i32,
-    pub derivation_name: String,
-    /// Path to push: store_path or derivation_path.
-    pub path: String,
-    /// Optional cache destination name for last-used bookkeeping.
-    pub cache_destination_name: Option<String>,
-}
-
-/// Result of a successful cache push reported by an API builder.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachePushCompleteRequest {
-    pub duration_ms: Option<i32>,
-}
-
-/// Failure report for a cache push.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachePushFailRequest {
-    pub error_message: String,
-}
-
-/// A CVE scan target handed to an API builder, including the created scan id.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CveScanTarget {
-    pub scan_id: i32,
-    pub derivation_id: i32,
-    pub derivation_name: String,
-    pub store_path: String,
-}
-
-/// Raw vulnix output uploaded by an API builder for server-side parsing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CveScanResultsRequest {
-    /// Raw vulnix JSON (stdout) for server-side parsing/persistence.
-    pub raw_output: String,
-    pub scan_duration_ms: Option<i32>,
-}
-
-/// Failure report for a CVE scan.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CveScanFailRequest {
-    pub error_message: String,
-}
-
-/// Response for builder creation with generated keypair
-/// WARNING: private_key is returned ONLY ONCE and never stored
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BuilderCreatedResponse {
-    pub builder: Builder,
-    /// Base64-encoded Ed25519 private key (64 bytes)
-    /// This is shown ONLY ONCE at creation time and NEVER stored server-side
-    pub private_key: Option<String>,
-    pub assigned_environment_ids: Vec<Uuid>,
-}
-
-/// Response for keypair regeneration
-/// WARNING: private_key is returned ONLY ONCE and never stored
-#[derive(Debug, Serialize, Deserialize)]
-pub struct KeypairRegeneratedResponse {
-    /// Base64-encoded Ed25519 public key (32 bytes)
-    pub public_key: String,
-    /// Base64-encoded Ed25519 private key (64 bytes)
-    /// This is shown ONLY ONCE at creation time and NEVER stored server-side
-    pub private_key: String,
 }

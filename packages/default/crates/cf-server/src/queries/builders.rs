@@ -10,7 +10,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::models::builders::{
-    BuildJob, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderSummary,
+    BuildJob, BuildJobRow, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderSummary,
     BuilderWithEnvironments, CreateBuilderRequest, RemoteBuildExecutionStrategy,
     ReportMetricsRequest, UpdateBuilderRequest,
 };
@@ -719,7 +719,7 @@ pub async fn requeue_orphaned_building_jobs_with_reason(
     pool: &PgPool,
     reason: &str,
 ) -> Result<Vec<BuildJob>> {
-    let recovered = sqlx::query_as::<_, BuildJob>(
+    let recovered = sqlx::query_as::<_, BuildJobRow>(
         r#"
         UPDATE build_jobs bj
         SET status = 'queued',
@@ -846,7 +846,7 @@ pub async fn establish_builder_session(
     .await
     .context("Failed to update builder session")?;
 
-    let recovered = sqlx::query_as::<_, BuildJob>(REQUEUE_BUILDER_ASSIGNED_BUILDING_JOBS_SQL)
+    let recovered = sqlx::query_as::<_, BuildJobRow>(REQUEUE_BUILDER_ASSIGNED_BUILDING_JOBS_SQL)
         .bind(builder_id)
         .bind(reason)
         .bind(builder_session_id)
@@ -873,7 +873,7 @@ pub async fn requeue_builder_assigned_building_jobs_with_reason(
     builder_id: &Uuid,
     reason: &str,
 ) -> Result<Vec<BuildJob>> {
-    let recovered = sqlx::query_as::<_, BuildJob>(REQUEUE_BUILDER_ASSIGNED_BUILDING_JOBS_SQL)
+    let recovered = sqlx::query_as::<_, BuildJobRow>(REQUEUE_BUILDER_ASSIGNED_BUILDING_JOBS_SQL)
         .bind(builder_id)
         .bind(reason)
         .bind(Option::<Uuid>::None)
@@ -914,7 +914,7 @@ pub async fn get_next_queued_job(
 ) -> Result<Option<BuildJob>> {
     let job = if environment_ids.is_empty() {
         // Wildcard: builder can pick up jobs from any environment
-        sqlx::query_as::<_, BuildJob>(
+        sqlx::query_as::<_, BuildJobRow>(
             r#"
             SELECT *
             FROM build_jobs
@@ -937,7 +937,7 @@ pub async fn get_next_queued_job(
         .context("Failed to fetch next queued job (wildcard)")?
     } else {
         // Filtered: only jobs matching builder's environment assignments
-        sqlx::query_as::<_, BuildJob>(
+        sqlx::query_as::<_, BuildJobRow>(
             r#"
             SELECT *
             FROM build_jobs
@@ -1054,7 +1054,7 @@ pub async fn claim_next_job_atomic(
         // Wildcard: builder can claim jobs from any environment
         match execution_strategy {
             RemoteBuildExecutionStrategy::ServerDerivation => {
-                sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL)
+                sqlx::query_as::<_, BuildJobRow>(CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL)
                     .bind(builder_id)
                     .bind(builder_session_id)
                     .fetch_optional(&mut *tx)
@@ -1062,7 +1062,7 @@ pub async fn claim_next_job_atomic(
                     .context("Failed to claim job (wildcard server_derivation) in transaction")?
             }
             RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
-                sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL)
+                sqlx::query_as::<_, BuildJobRow>(CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL)
                     .bind(builder_id)
                     .bind(true)
                     .bind(builder_session_id)
@@ -1077,7 +1077,7 @@ pub async fn claim_next_job_atomic(
         // Filtered: only jobs matching builder's environment assignments
         match execution_strategy {
             RemoteBuildExecutionStrategy::ServerDerivation => {
-                sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL)
+                sqlx::query_as::<_, BuildJobRow>(CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL)
                     .bind(builder_id)
                     .bind(environment_ids)
                     .bind(builder_session_id)
@@ -1086,7 +1086,7 @@ pub async fn claim_next_job_atomic(
                     .context("Failed to claim job (filtered server_derivation) in transaction")?
             }
             RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
-                sqlx::query_as::<_, BuildJob>(CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL)
+                sqlx::query_as::<_, BuildJobRow>(CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL)
                     .bind(builder_id)
                     .bind(environment_ids)
                     .bind(true)
@@ -1112,7 +1112,7 @@ pub async fn assign_job_to_builder(
     job_id: &Uuid,
     builder_id: &Uuid,
 ) -> Result<BuildJob> {
-    let job = sqlx::query_as::<_, BuildJob>(
+    let job = sqlx::query_as::<_, BuildJobRow>(
         r#"
         UPDATE build_jobs
         SET builder_id = $2,
@@ -1446,7 +1446,7 @@ pub async fn cleanup_expired_build_logs(
 
 /// Get a build job by ID
 pub async fn get_build_job_by_id(pool: &PgPool, job_id: &Uuid) -> Result<Option<BuildJob>> {
-    let job = sqlx::query_as::<_, BuildJob>(
+    let job = sqlx::query_as::<_, BuildJobRow>(
         r#"
         SELECT *
         FROM build_jobs
@@ -1648,7 +1648,7 @@ pub async fn mark_job_failed_with_retry(
     error_message: Option<&str>,
 ) -> Result<BuildJob> {
     // First, get the current job state
-    let job = sqlx::query_as::<_, BuildJob>(
+    let job = sqlx::query_as::<_, BuildJobRow>(
         r#"
         SELECT *
         FROM build_jobs
@@ -1777,7 +1777,7 @@ pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> 
         other => bail!("Cannot cancel build in status: {}", other),
     };
 
-    let updated = sqlx::query_as::<_, BuildJob>(
+    let updated = sqlx::query_as::<_, BuildJobRow>(
         r#"
         UPDATE build_jobs
         SET status       = $2,
@@ -1812,7 +1812,7 @@ pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> 
 pub async fn force_cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
     // Atomic transition guard: only force-cancel while state is still
     // `cancelling`.
-    let updated = sqlx::query_as::<_, BuildJob>(
+    let updated = sqlx::query_as::<_, BuildJobRow>(
         r#"
         UPDATE build_jobs
         SET status       = 'cancelled',
@@ -1901,7 +1901,7 @@ pub async fn finalize_cancelled_job(
 /// New attempts are appended to the queue tail by assigning a weight lower than
 /// the current minimum queued weight.
 pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
-    let inserted = sqlx::query_as::<_, BuildJob>(
+    let inserted = sqlx::query_as::<_, BuildJobRow>(
         r#"
         WITH source_job AS (
             SELECT derivation_id, environment_id, max_retries
