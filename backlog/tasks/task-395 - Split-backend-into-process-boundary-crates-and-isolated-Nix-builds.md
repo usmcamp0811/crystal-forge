@@ -188,5 +188,59 @@ Keep this task in `Backlog` until a human selects it for a sprint. Given its siz
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Created from the backend build-isolation proposal reviewed against `dev` commit `bb58d92a`. No implementation has started.
+Implementation complete on branch TASK-395-split-backend.
+
+## Workspace shape achieved
+
+```
+packages/default/
+├── Cargo.toml          (virtual workspace)
+├── Cargo.lock
+└── crates/
+    ├── cf-protocol/    (wire types, no sqlx/axum/server deps)
+    ├── cf-config/      (config loading, no DB)
+    ├── cf-agent/       (deployment agent binary)
+    ├── cf-builder/     (remote build worker binary)
+    ├── cf-keygen/      (key generation utility binary)
+    └── cf-server/      (HTTP server, DB, migrations, tasks)
+```
+
+## Forbidden deps verification
+
+`cargo tree -p cf-agent --bin agent | grep -iE 'sqlx|axum|argon|oidc|jwt'` → no output ✅
+`cargo tree -p cf-builder --bin builder | grep -iE 'sqlx|axum|argon|oidc|jwt'` → no output ✅
+
+## Cargo timing evidence
+
+Machine: TASK-395-split-backend worktree, dev branch base `601c0267`
+
+BASELINE (monolithic, SQLX_OFFLINE=true, warm cache):
+- `cargo check --bin agent`:   35.23s
+- `cargo check --bin builder`: 31.98s
+- `cargo check --bin server`:  29.55s
+
+AFTER SPLIT (clean build, SQLX_OFFLINE=true):
+- `cargo check -p cf-agent --all-targets`:   13.93s (58 crates compiled)
+- `cargo check -p cf-builder --all-targets`: 11.24s
+- `cargo check -p cf-server --all-targets`:  68s
+- `cargo check -p cf-keygen`:                3.87s
+
+INCREMENTAL (warm cache, no changes):
+- `cargo check -p cf-agent --all-targets`:   0.25s
+
+Targeted agent and builder checks compile zero server-only crates (sqlx, axum,
+openidconnect, argon2, jsonwebtoken all absent from their dep graphs).
+
+## Nix derivations
+
+- `cf-agent-drv`:   `--package cf-agent`, source filtered to cf-protocol+cf-config+cf-agent
+- `cf-builder-drv`: `--package cf-builder`, source filtered to cf-protocol+cf-config+cf-builder
+- `cf-keygen-drv`:  `--package cf-keygen`, source filtered to cf-keygen
+- `cf-server-drv`:  `--package cf-server --features embedded-ui`, full source
+
+Source filtering: changing a file under `crates/cf-server/` does NOT change the
+content hash of agentSrc or builderSrc, so agent/builder derivations will not
+re-build on server-only changes.
+
+Developer documentation: `packages/default/WORKSPACE.md`
 <!-- SECTION:NOTES:END -->
