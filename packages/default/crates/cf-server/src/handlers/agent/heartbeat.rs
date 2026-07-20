@@ -1,0 +1,586 @@
+use crate::handlers::agent_request::{
+    CFState, authenticate_agent_request, deserialize_system_state_versioned,
+};
+use crate::models::agent_heartbeats::AgentHeartbeat;
+use crate::models::cache_destination::CacheDestination;
+use crate::queries::cache_destinations::{get_caches_for_environment, get_global_caches};
+use crate::queries::systems::{
+    BootIdChange, deactivate_duplicate_active_systems_by_public_key,
+    get_agent_desired_target_by_hostname, get_system_heartbeat_interval_secs, update_boot_id_tx,
+    update_restart_type_tx,
+};
+use crate::queries::{
+    agent_heartbeat::insert_agent_heartbeat,
+    system_events::mark_pending_deployment_delivered,
+    system_events::{lock_observed_system_state_by_hostname_tx, record_report_events_tx},
+    system_states::insert_system_state,
+};
+use axum::response::Response;
+use axum::{
+    body::Bytes,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+};
+use sqlx::PgPool;
+use tracing::{debug, info, warn};
+
+// Re-export protocol types so agent binary imports remain backward-compatible:
+//   use crystal_forge::handlers::agent::heartbeat::{LogResponse, RuntimeCacheConfig};
+pub use cf_protocol::agent::{LogResponse, RuntimeCacheConfig};
+
+fn destination_to_runtime_cache(destination: CacheDestination) -> Option<RuntimeCacheConfig> {
+    let cache_url = destination.push_to?;
+    Some(RuntimeCacheConfig {
+        cache_type: destination.cache_type,
+        cache_url,
+        cache_public_key: destination.attic_public_key,
+        attic_cache_name: destination.attic_cache_name,
+    })
+}
+
+async fn load_runtime_caches_for_agent(
+    pool: &PgPool,
+    environment_id: Option<uuid::Uuid>,
+) -> Vec<RuntimeCacheConfig> {
+    let destinations = match environment_id {
+        Some(env_id) => get_caches_for_environment(pool, env_id).await,
+        None => get_global_caches(pool).await,
+    };
+
+    match destinations {
+        Ok(dests) => dests
+            .into_iter()
+            .filter_map(destination_to_runtime_cache)
+            .collect(),
+        Err(e) => {
+            debug!("❌ Failed to load runtime cache config for agent: {e:?}");
+            Vec::new()
+        }
+    }
+}
+
+/// Best-effort result handler for duplicate-active-system cleanup.
+///
+/// Returns deactivated hostnames when successful, or empty vector on error.
+fn handle_duplicate_active_system_cleanup_result(
+    current_hostname: &str,
+    result: anyhow::Result<Vec<String>>,
+) -> Vec<String> {
+    match result {
+        Ok(deactivated) if !deactivated.is_empty() => {
+            warn!(
+                current_hostname = %current_hostname,
+                duplicate_hostnames = ?deactivated,
+                "Auto-deactivated duplicate active systems sharing agent public key"
+            );
+            deactivated
+        }
+        Ok(_) => Vec::new(),
+        Err(e) => {
+            // Non-fatal: do not reject heartbeat if de-duplication fails.
+            warn!(
+                current_hostname = %current_hostname,
+                error = ?e,
+                "Failed to auto-deactivate duplicate active systems; continuing heartbeat processing"
+            );
+            Vec::new()
+        }
+    }
+}
+/// Handles the `/current-system` POST route.
+/// Verifies the body signature using headers, parses the payload, and
+/// stores system state info in the database.
+pub async fn log(
+    State(state): State<CFState>,
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    // Get verified agent request
+    let agent_request = match authenticate_agent_request(&headers, body, &pool).await {
+        Ok(req) => req,
+        Err(status) => return status.into_response(),
+    };
+
+    // Hotfix: if the same public key appears on multiple active hostnames,
+    // deactivate the stale duplicates and keep only the authenticated hostname active.
+    // This prevents renamed/re-joined hosts from leaving old active rows that skew health.
+    let public_key_base64 = agent_request.system.public_key.to_base64();
+    let _ = handle_duplicate_active_system_cleanup_result(
+        &agent_request.system.hostname,
+        deactivate_duplicate_active_systems_by_public_key(
+            &pool,
+            &agent_request.system.hostname,
+            &public_key_base64,
+        )
+        .await,
+    );
+
+    // Try to deserialize with version detection
+    let (payload, version_compatible) = match deserialize_system_state_versioned(&agent_request) {
+        Ok((state, compatible)) => (state, compatible),
+        Err(e) => {
+            debug!("❌ All deserialization attempts failed: {e}");
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+    };
+
+    // TODO: Might want to just do payload need to see what it looks like
+    info!(
+        "System state received from {}: {}",
+        agent_request.system.hostname, payload
+    );
+
+    // Classify heartbeat vs state change (read-only; safe outside the transaction).
+    let heartbeat_or_state = AgentHeartbeat::from_system_state_if_heartbeat(&payload, &pool).await;
+
+    // P2-6 (atomic): the boot_id update and the heartbeat/state insert share one
+    // transaction. If the insert fails and we return an error, the boot_id write
+    // rolls back too — so the agent's retry still observes the boot_id change and
+    // the reboot event is not lost.
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            debug!("❌ failed to begin heartbeat transaction: {e:?}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let previous_observed =
+        match lock_observed_system_state_by_hostname_tx(&mut tx, &payload.hostname).await {
+            Ok(value) => value,
+            Err(e) => {
+                debug!(
+                    "❌ failed to lock observed state for {}: {e:?}",
+                    payload.hostname
+                );
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+
+    let boot_id_change = if let Some(ref new_boot_id) = payload.boot_id {
+        match update_boot_id_tx(&mut tx, &payload.hostname, new_boot_id).await {
+            Ok(change) => Some(change),
+            Err(e) => {
+                debug!(
+                    "❌ failed to update boot_id for {}: {e:?}",
+                    payload.hostname
+                );
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }
+    } else {
+        None // Older agent that does not send boot_id
+    };
+
+    // Persist restart classification inside the same transaction as the
+    // heartbeat/state insert. See `classify_restart_type` for the full decision table.
+    // A failure is logged and execution continues, but a SQL error here could leave
+    // the transaction unusable and cause the later insert/commit to fail.
+    let restart_type = classify_restart_type(boot_id_change, &payload.change_reason);
+    if let Some(rtype) = restart_type {
+        if let Err(e) = update_restart_type_tx(&mut tx, &payload.hostname, rtype).await {
+            debug!(
+                "⚠ failed to persist restart_type for {}: {e:?}",
+                payload.hostname
+            );
+            // Non-fatal: continue; the heartbeat/state insert is more important.
+        }
+    }
+
+    if let Err(e) = record_report_events_tx(
+        &mut tx,
+        previous_observed.as_ref(),
+        &payload,
+        boot_id_change,
+        restart_type,
+    )
+    .await
+    {
+        debug!(
+            "❌ failed to record system events for {}: {e:?}",
+            payload.hostname
+        );
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // P1 (critical): System reboots MUST always insert a full system_states row,
+    // even if from_system_state_if_heartbeat classified the payload as equivalent.
+    // BootIdChange::Changed is the authoritative reboot signal; it overrides the
+    // precomputed heartbeat_or_state decision to ensure we capture post-reboot state.
+    let force_full_state_for_reboot = matches!(boot_id_change, Some(BootIdChange::Changed));
+
+    if force_full_state_for_reboot {
+        // Reboot detected: always write full system state regardless of equivalence.
+        if let Err(e) = insert_system_state(
+            &mut *tx,
+            &payload,
+            version_compatible,
+            restart_type,
+            Some("startup"),
+        )
+        .await
+        {
+            debug!("❌ failed to insert reboot system state: {e:?}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    } else {
+        // No reboot: use the precomputed heartbeat vs state decision.
+        match &heartbeat_or_state {
+            Ok(heartbeat) => {
+                // This is a heartbeat - insert to heartbeats table
+                if let Err(e) = insert_agent_heartbeat(&mut *tx, heartbeat).await {
+                    debug!("❌ failed to insert heartbeat: {e:?}");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            }
+            Err(state_change_reason) => {
+                info!("🔍 Heartbeat became state change: {}", state_change_reason);
+                let (change_reason_override, event_restart_type) =
+                    classify_non_reboot_state_change_reason(
+                        &payload,
+                        restart_type,
+                        previous_observed.as_ref(),
+                    );
+
+                if let Err(e) = insert_system_state(
+                    &mut *tx,
+                    &payload,
+                    version_compatible,
+                    event_restart_type,
+                    Some(change_reason_override),
+                )
+                .await
+                {
+                    debug!("❌ failed to insert system state: {e:?}");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            }
+        }
+    }
+
+    if let Err(e) = tx.commit().await {
+        debug!("❌ failed to commit heartbeat transaction: {e:?}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Log only after the commit so we never report events that rolled back.
+    match boot_id_change {
+        Some(BootIdChange::Changed) => {
+            info!(
+                "🔄 System reboot detected for {} (boot_id changed)",
+                payload.hostname
+            );
+        }
+        Some(BootIdChange::Initialized) => {
+            debug!(
+                "boot_id initialized for {} (first heartbeat with boot_id; not a reboot)",
+                payload.hostname
+            );
+        }
+        Some(BootIdChange::Unchanged) | None => {}
+    }
+
+    // Log what was actually inserted (accounting for reboot override).
+    if force_full_state_for_reboot {
+        info!("📊 State change recorded for {} (reboot)", payload.hostname);
+    } else {
+        match heartbeat_or_state {
+            Ok(_) => info!("💓 Heartbeat recorded for {}", payload.hostname),
+            Err(_) => info!("📊 State change recorded for {}", payload.hostname),
+        }
+    }
+
+    // Fetch desired target for this system. Manual systems only receive fresh,
+    // explicit one-shot targets; stale manual targets are suppressed so agents
+    // cannot revert hosts after an out-of-band/manual nixos-rebuild.
+    let desired_target =
+        match get_agent_desired_target_by_hostname(&pool, &agent_request.system.hostname).await {
+            Ok(target) => target,
+            Err(e) => {
+                debug!("❌ Failed to fetch desired target: {e:?}");
+                None // Continue with None if query fails
+            }
+        };
+
+    if let Some(target) = desired_target.as_deref() {
+        if let Err(error) =
+            mark_pending_deployment_delivered(&pool, agent_request.system.id, target).await
+        {
+            warn!(
+                hostname = %agent_request.system.hostname,
+                target = %target,
+                ?error,
+                "Failed to mark pending deployment delivered; continuing heartbeat"
+            );
+        }
+    }
+
+    let runtime_caches =
+        load_runtime_caches_for_agent(&pool, agent_request.system.environment_id).await;
+
+    // Resolve per-system heartbeat interval, falling back to server-config default.
+    let heartbeat_interval_secs = {
+        let per_system = get_system_heartbeat_interval_secs(&pool, &agent_request.system.hostname)
+            .await
+            .unwrap_or_else(|e| {
+                debug!(
+                    "Failed to fetch heartbeat_interval_secs for {}: {e}",
+                    agent_request.system.hostname
+                );
+                None
+            });
+        let interval = per_system
+            .map(|v| v as u64)
+            .unwrap_or(state.server_config.heartbeat_interval_secs);
+        Some(interval)
+    };
+
+    let response = LogResponse {
+        desired_target,
+        runtime_caches,
+        heartbeat_interval_secs,
+    };
+
+    // Return JSON response with appropriate status
+    let status = if version_compatible {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED // 202 - accepted but agent should upgrade
+    };
+
+    (status, axum::Json(response)).into_response()
+}
+
+fn classify_non_reboot_state_change_reason(
+    payload: &crate::models::system_states::SystemState,
+    restart_type: Option<&str>,
+    previous: Option<&crate::queries::system_events::ObservedSystemState>,
+) -> (&'static str, Option<&'static str>) {
+    classify_non_reboot_state_change_reason_from_previous(
+        payload.change_reason.as_str(),
+        restart_type,
+        payload.generation,
+        payload.store_path.as_deref(),
+        previous.map(|previous| (previous.generation, previous.store_path.as_deref())),
+    )
+}
+
+fn classify_non_reboot_state_change_reason_from_previous(
+    payload_change_reason: &str,
+    restart_type: Option<&str>,
+    payload_generation: Option<i32>,
+    payload_store_path: Option<&str>,
+    previous: Option<(Option<i32>, Option<&str>)>,
+) -> (&'static str, Option<&'static str>) {
+    let generation_or_store_changed = previous
+        .map(|(previous_generation, previous_store_path)| {
+            payload_generation != previous_generation || payload_store_path != previous_store_path
+        })
+        .unwrap_or(false);
+
+    if generation_or_store_changed {
+        // A changed generation/store path is the local rebuild/config delta.
+        // It is not a restart classification event.
+        return ("config_change", None);
+    }
+
+    if payload_change_reason == "startup" && restart_type == Some("agent_restart") {
+        // Same generation/store path + unchanged boot_id means only the agent
+        // service restarted, even if metadata such as agent build hash changed.
+        return ("startup", Some("agent_restart"));
+    }
+
+    // Metadata-only full-state delta from heartbeat/startup. Do not invent a
+    // local rebuild and do not carry restart_type on generic state changes.
+    ("state_delta", None)
+}
+
+/// Pure function: given the boot_id comparison result and the change_reason string,
+/// return the restart type to persist, or `None` if the classification should not be
+/// updated (i.e. a routine periodic heartbeat with an unchanged boot_id).
+///
+/// Decision table:
+///
+/// | boot_id_change      | change_reason | result          |
+/// |---------------------|---------------|-----------------|
+/// | Changed             | any           | "system_reboot" |
+/// | Unchanged           | "startup"     | "agent_restart" |
+/// | Initialized         | "startup"     | "unknown"       |
+/// | None (no boot_id)   | "startup"     | "unknown"       |
+/// | Unchanged/Init/None | other         | None            |
+///
+/// `Changed` always classifies regardless of `change_reason` so that a reboot is
+/// never lost when the startup heartbeat fails and a later periodic heartbeat is
+/// the first to reach the server with the new `boot_id`.
+fn classify_restart_type(
+    boot_id_change: Option<BootIdChange>,
+    change_reason: &str,
+) -> Option<&'static str> {
+    match boot_id_change {
+        // A changed boot_id proves a host reboot on any heartbeat type.
+        Some(BootIdChange::Changed) => Some("system_reboot"),
+        // Same boot session, agent service restarted.
+        Some(BootIdChange::Unchanged) if change_reason == "startup" => Some("agent_restart"),
+        // No prior boot_id baseline; cannot distinguish reboot from restart.
+        Some(BootIdChange::Initialized) if change_reason == "startup" => Some("unknown"),
+        // Older agent without boot_id; overwrite any stale classification.
+        None if change_reason == "startup" => Some("unknown"),
+        // Periodic heartbeat with stable boot_id — keep the last classification.
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── classify_restart_type tests ───────────────────────────────────────
+
+    #[test]
+    fn changed_boot_id_is_system_reboot_on_startup() {
+        assert_eq!(
+            classify_restart_type(Some(BootIdChange::Changed), "startup"),
+            Some("system_reboot"),
+        );
+    }
+
+    #[test]
+    fn changed_boot_id_is_system_reboot_on_periodic_heartbeat() {
+        // P1: a reboot must be captured even when the startup heartbeat failed
+        // and the first successful request is a periodic "heartbeat".
+        assert_eq!(
+            classify_restart_type(Some(BootIdChange::Changed), "heartbeat"),
+            Some("system_reboot"),
+        );
+    }
+
+    #[test]
+    fn unchanged_boot_id_on_startup_is_agent_restart() {
+        assert_eq!(
+            classify_restart_type(Some(BootIdChange::Unchanged), "startup"),
+            Some("agent_restart"),
+        );
+    }
+
+    #[test]
+    fn unchanged_boot_id_on_heartbeat_returns_none() {
+        // Periodic heartbeat must not overwrite the last startup classification.
+        assert_eq!(
+            classify_restart_type(Some(BootIdChange::Unchanged), "heartbeat"),
+            None,
+        );
+    }
+
+    #[test]
+    fn initialized_boot_id_on_startup_is_unknown() {
+        // P2: no baseline means we cannot prove it is an agent restart.
+        assert_eq!(
+            classify_restart_type(Some(BootIdChange::Initialized), "startup"),
+            Some("unknown"),
+        );
+    }
+
+    #[test]
+    fn initialized_boot_id_on_heartbeat_returns_none() {
+        assert_eq!(
+            classify_restart_type(Some(BootIdChange::Initialized), "heartbeat"),
+            None,
+        );
+    }
+
+    #[test]
+    fn no_boot_id_on_startup_is_unknown() {
+        // P2: older agent without boot_id; overwrite stale classification.
+        assert_eq!(classify_restart_type(None, "startup"), Some("unknown"));
+    }
+
+    #[test]
+    fn no_boot_id_on_heartbeat_returns_none() {
+        assert_eq!(classify_restart_type(None, "heartbeat"), None);
+    }
+
+    // ─── classify_non_reboot_state_change_reason tests ──────────────────────
+
+    #[test]
+    fn non_reboot_generation_change_is_config_change_without_restart_type() {
+        assert_eq!(
+            classify_non_reboot_state_change_reason_from_previous(
+                "startup",
+                Some("agent_restart"),
+                Some(5056),
+                Some("/nix/store/new-system"),
+                Some((Some(5055), Some("/nix/store/old-system"))),
+            ),
+            ("config_change", None),
+        );
+    }
+
+    #[test]
+    fn unchanged_startup_preserves_agent_restart_classification() {
+        assert_eq!(
+            classify_non_reboot_state_change_reason_from_previous(
+                "startup",
+                Some("agent_restart"),
+                Some(5056),
+                Some("/nix/store/current-system"),
+                Some((Some(5056), Some("/nix/store/current-system"))),
+            ),
+            ("startup", Some("agent_restart")),
+        );
+    }
+
+    #[test]
+    fn heartbeat_metadata_only_delta_is_state_delta_not_config_change() {
+        assert_eq!(
+            classify_non_reboot_state_change_reason_from_previous(
+                "heartbeat",
+                None,
+                Some(5056),
+                Some("/nix/store/current-system"),
+                Some((Some(5056), Some("/nix/store/current-system"))),
+            ),
+            ("state_delta", None),
+        );
+    }
+
+    #[test]
+    fn missing_previous_state_does_not_invent_config_change() {
+        assert_eq!(
+            classify_non_reboot_state_change_reason_from_previous(
+                "heartbeat",
+                None,
+                Some(5056),
+                Some("/nix/store/current-system"),
+                None,
+            ),
+            ("state_delta", None),
+        );
+    }
+
+    // ─── duplicate-cleanup tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_duplicate_cleanup_returns_deactivated_hosts_on_success() {
+        let host = "nix-builder";
+        let deactivated =
+            handle_duplicate_active_system_cleanup_result(host, Ok(vec!["base".to_string()]));
+
+        assert_eq!(deactivated, vec!["base".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn handle_duplicate_cleanup_is_non_fatal_on_error() {
+        let host = "nix-builder";
+        let deactivated = handle_duplicate_active_system_cleanup_result(
+            host,
+            Err(anyhow::anyhow!("db unavailable")),
+        );
+
+        assert!(
+            deactivated.is_empty(),
+            "cleanup errors must be non-fatal and return empty deactivation set"
+        );
+    }
+}
