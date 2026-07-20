@@ -134,6 +134,66 @@ impl SystemState {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ensure `network_interfaces` serializes as a JSON *string* (double-encoded),
+    /// not as an array or object. This protects the existing wire and persisted-data
+    /// contract from accidental format changes.
+    #[test]
+    fn network_interfaces_serializes_as_json_string() {
+        let state = SystemState {
+            id: None,
+            hostname: "test-host".into(),
+            change_reason: "startup".into(),
+            timestamp: None,
+            store_path: Some("/nix/store/test".into()),
+            generation: None,
+            generation_matches_current_store_path: None,
+            os: None,
+            kernel: None,
+            memory_gb: None,
+            uptime_secs: None,
+            cpu_brand: None,
+            cpu_cores: None,
+            board_serial: None,
+            product_uuid: None,
+            rootfs_uuid: None,
+            chassis_serial: None,
+            bios_version: None,
+            cpu_microcode: None,
+            network_interfaces: Some(serde_json::Value::String(
+                r#"[{"name":"eth0","mac_address":"02:00:00:00:00:01","ip_addresses":[]}]"#.into(),
+            )),
+            primary_mac_address: None,
+            primary_ip_address: None,
+            gateway_ip: None,
+            selinux_status: None,
+            tpm_present: None,
+            secure_boot_enabled: None,
+            fips_mode: None,
+            agent_version: None,
+            agent_build_hash: None,
+            nixos_version: None,
+            agent_compatible: None,
+            partial_data: None,
+            boot_id: None,
+        };
+
+        let value = serde_json::to_value(&state).expect("serialize system state");
+        let ni = value["network_interfaces"]
+            .as_str()
+            .expect("network_interfaces should serialize as a JSON string");
+
+        // The string itself should be valid JSON containing an array.
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(ni).expect("string content should be valid JSON array");
+        assert_eq!(parsed.len(), 1, "expected one interface entry");
+        assert_eq!(parsed[0]["name"], "eth0");
+    }
+}
+
 impl std::fmt::Display for SystemState {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let uptime_days = self.uptime_secs.unwrap_or(0) / 86400;

@@ -22,10 +22,10 @@ packages/default/
 ## Crate boundaries
 
 | Crate | Binary | Purpose | Key deps |
-|---|---|---|---|
-| `cf-protocol` | — | Wire types (builder↔server, agent↔server) | serde, ed25519-dalek |
+|---|---|---|---|---|
+| `cf-protocol` | — | Wire types (builder↔server, agent↔server) | serde, chrono |
 | `cf-config` | — | TOML/env config loading | cf-protocol, config, serde |
-| `cf-agent` | `agent` | NixOS deployment agent | cf-protocol, cf-config, nix, reqwest |
+| `cf-agent` | `agent` | NixOS deployment agent | cf-protocol, cf-config, nix, reqwest, sysinfo |
 | `cf-builder` | `builder` | Remote Nix build worker | cf-protocol, cf-config, reqwest |
 | `cf-keygen` | `cf-keygen` | Ed25519 keypair generator | ed25519-dalek, rand |
 | `cf-server` | `server`, `test-agent` | API server, DB, jobs | sqlx, axum, cf-protocol, cf-config |
@@ -126,6 +126,19 @@ After split (incremental, no changes):
 
 The targeted agent and builder checks no longer compile the server crate
 dependency set (sqlx, axum, openidconnect, argon2, etc.).
+
+## Known follow-ups (outside this MR)
+
+- **Deployment-policy schema deduplication**: The `DeploymentPolicy` struct and
+  `DeploymentPolicyKind` enum are currently duplicated in both `cf-protocol`
+  and `cf-server`. After the `cf-server` row type is separated from the
+  serializable DTO, the protocol copy can become the single canonical
+  definition. (P2, not blocking merge.)
+
+- **SystemState unification**: `cf-server/src/models/system_states.rs` contains
+  a second `SystemState` definition (with `sqlx::FromRow`). Once server row
+  types are cleanly split from protocol DTOs, the server copy should delegate
+  to `cf_protocol::agent::SystemState`. (P1, deferred to keep this MR focused.)
 
 ## SQLx offline metadata
 

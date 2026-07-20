@@ -1,0 +1,5 @@
+lock_task_id: TASK-395
+locked_by: automated-agent
+locked_at: '2026-07-20'
+branch: TASK-395-split-backend
+worktree: /home/mcamp/code/crystal-forge/TASK-395-split-backend
