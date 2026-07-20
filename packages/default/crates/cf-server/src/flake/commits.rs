@@ -258,10 +258,14 @@ async fn sync_all_watched_flakes_commits_inner(
 
         info!("🔗 Syncing commits for flake: {}", flake.name);
 
-        let inserted = if let Some(flake_id) = flake_id_opt {
-            sync_flake_recorded(pool, flake_id, &flake.repo_url, &flake.branch()).await
+        let inserted: Result<usize> = if let Some(flake_id) = flake_id_opt {
+            sync_flake_recorded(pool, flake_id, &flake.repo_url, &flake.branch())
+                .await
+                .map(|r| r)
         } else {
-            sync_commits_for_repo(pool, &flake.repo_url, &flake.branch()).await
+            sync_commits_for_repo(pool, &flake.repo_url, &flake.branch())
+                .await
+                .map(|(count, _hashes)| count)
         };
 
         match inserted {
@@ -284,8 +288,13 @@ async fn sync_all_watched_flakes_commits_inner(
 
 /// Sync commits for a single flake repository URL.
 ///
-/// Returns the number of newly inserted commits.
-pub async fn sync_commits_for_repo(pool: &PgPool, repo_url: &str, branch: &str) -> Result<usize> {
+/// Returns `(newly_inserted_count, ordered_git_hashes)` where the hashes are in
+/// Git traversal order (HEAD first) from the same git log used for insertion.
+pub async fn sync_commits_for_repo(
+    pool: &PgPool,
+    repo_url: &str,
+    branch: &str,
+) -> Result<(usize, Vec<String>)> {
     sync_commits_for_repo_inner(pool, repo_url, branch, None).await
 }
 
@@ -298,7 +307,7 @@ pub async fn sync_commits_for_flake(
     repo_url: &str,
     branch: &str,
     flake_id: i32,
-) -> Result<usize> {
+) -> Result<(usize, Vec<String>)> {
     let creds = FlakeCredentialEnv::load(pool, flake_id)
         .await
         .unwrap_or_else(|e| {
@@ -325,15 +334,9 @@ pub async fn sync_flake_recorded(
     repo_url: &str,
     branch: &str,
 ) -> Result<usize> {
-    // Generate a unique token for this attempt.  The final status writes below
-    // are conditional on this token, so a concurrent newer attempt that has
-    // already overwritten sync_attempt_id will cause this attempt's writes to
-    // be no-ops rather than corrupting the newer result.
     let attempt_id = Uuid::new_v4();
 
-    // Mark syncing and persist the attempt token. This write is required:
-    // final status writes are conditional on sync_attempt_id, so continuing
-    // after this fails would guarantee that completion cannot be recorded.
+    // Mark syncing and persist the attempt token.
     let start_result = sqlx::query(
         "UPDATE flakes \
          SET sync_status = 'syncing', last_sync_at = now(), last_sync_error = NULL, \
@@ -348,71 +351,25 @@ pub async fn sync_flake_recorded(
         bail!("flake {flake_id} disappeared before sync could start");
     }
 
-    let result = sync_commits_for_flake(pool, repo_url, branch, flake_id).await;
+    let creds = FlakeCredentialEnv::load(pool, flake_id)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Failed to load credentials for flake {flake_id}: {e:#}");
+            None
+        });
 
-    match &result {
-        Ok(_) => {
-            // Obtain the authoritative Git log order before opening the
-            // snapshot transaction.  This ensures the Git/network work
-            // (clone + log) is never inside a long-held transaction.
-            let ordered_ids: Option<Vec<i32>> =
-                resolve_snapshot_order(pool, flake_id, repo_url, branch).await;
+    // Run the sync.  sync_commits_for_repo_inner returns the ordered commit
+    // hashes from the same Git observation used for insertion (no second clone).
+    let inserted_count: usize;
+    let ordered_hashes: Vec<String>;
 
-            // Publish sync_status and snapshot atomically so readers never
-            // see synced with a stale snapshot, and a concurrent sync never
-            // snapshots commits it did not insert.
-            match sqlx::query(
-                "UPDATE flakes \
-                 SET sync_status = 'synced', last_sync_at = now(), last_sync_error = NULL \
-                 WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $2",
-            )
-            .bind(flake_id)
-            .bind(attempt_id)
-            .execute(pool)
-            .await
-            {
-                Ok(update) if update.rows_affected() == 1 => {
-                    // This attempt still owns the sync — publish snapshot in
-                    // the same transaction (only if we resolved Git order).
-                    if let Some(ordered_ids) = ordered_ids {
-                        if ordered_ids.is_empty() {
-                            // Empty branch: clear snapshot, keep ready_at set.
-                            if let Ok(mut tx) = pool.begin().await {
-                                if sqlx::query(
-                                    "DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1",
-                                )
-                                .bind(flake_id)
-                                .execute(&mut *tx)
-                                .await
-                                .is_ok()
-                                {
-                                    let _ = tx.commit().await;
-                                }
-                            }
-                        } else if let Ok(mut tx) = pool.begin().await {
-                            if crate::queries::flakes::replace_flake_branch_snapshot(
-                                &mut tx,
-                                flake_id,
-                                &ordered_ids,
-                            )
-                            .await
-                            .is_ok()
-                            {
-                                let _ = tx.commit().await;
-                            }
-                        }
-                    }
-                }
-                Ok(_) => {
-                    info!(
-                        "Skipping sync_status=synced for flake {flake_id}: attempt {attempt_id} was superseded"
-                    );
-                }
-                Err(e) => warn!("Failed to set sync_status=synced for flake {flake_id}: {e:#}"),
-            }
+    match sync_commits_for_repo_inner(pool, repo_url, branch, creds.as_ref()).await {
+        Ok((count, hashes)) => {
+            inserted_count = count;
+            ordered_hashes = hashes;
         }
-        Err(sync_err) => {
-            let truncated = sanitize_and_truncate_sync_error(repo_url, &sync_err.to_string(), 4000);
+        Err(e) => {
+            let truncated = sanitize_and_truncate_sync_error(repo_url, &e.to_string(), 4000);
             match sqlx::query(
                 "UPDATE flakes \
                  SET sync_status = 'error', last_sync_at = now(), last_sync_error = $2 \
@@ -430,49 +387,112 @@ pub async fn sync_flake_recorded(
                     );
                 }
                 Ok(_) => {}
-                Err(e) => error!("Failed to set sync_status=error for flake {flake_id}: {e:#}"),
+                Err(update_err) => {
+                    error!("Failed to set sync_status=error for flake {flake_id}: {update_err:#}")
+                }
             }
+            return Err(e);
         }
     }
 
-    result
+    // Resolve ordered hashes to DB IDs (contiguous prefix, HEAD must resolve).
+    // This uses the git log order from the SAME clone used to insert commits.
+    let resolved = resolve_ordered_ids(pool, flake_id, &ordered_hashes).await;
+
+    // Publish sync_status AND snapshot atomically in one transaction.
+    // If snapshot publication fails, the status update is rolled back.
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            error!("Failed to begin status/snapshot tx (flake {flake_id}): {e:#}");
+            return Err(e.into());
+        }
+    };
+
+    let status_applied = match sqlx::query(
+        "UPDATE flakes \
+         SET sync_status = 'synced', last_sync_at = now(), last_sync_error = NULL \
+         WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $2",
+    )
+    .bind(flake_id)
+    .bind(attempt_id)
+    .execute(&mut *tx)
+    .await
+    {
+        Ok(upd) => upd.rows_affected() == 1,
+        Err(e) => {
+            warn!("Failed to update sync_status=synced (flake {flake_id}): {e:#}");
+            false
+        }
+    };
+
+    if status_applied {
+        // This attempt still owns the sync — publish the snapshot in the SAME
+        // transaction so readers never see synced with a stale snapshot.
+        if let Some(ref ids) = resolved {
+            // resolved is Some even when empty (empty ready snapshot).
+            if let Err(e) =
+                crate::queries::flakes::replace_flake_branch_snapshot(&mut tx, flake_id, ids).await
+            {
+                error!(
+                    "Snapshot publication failed (flake {flake_id}), rolling back status: {e:#}"
+                );
+                let _ = tx.rollback().await;
+                // Return the original sync success so the caller knows
+                // commits were inserted, but the snapshot is not updated.
+                return Ok(inserted_count);
+            }
+        }
+        // resolved.is_none() means HEAD could not resolve — skip snapshot
+        // but don't roll back status since sync itself succeeded.
+        // Readers simply continue using the previous snapshot.
+        if resolved.is_none() {
+            warn!(
+                "HEAD commit not found in DB after sync (flake {flake_id}); snapshot not updated"
+            );
+        }
+    }
+
+    if let Err(e) = tx.commit().await {
+        error!("Failed to commit status/snapshot tx (flake {flake_id}): {e:#}");
+        return Err(e.into());
+    }
+
+    Ok(inserted_count)
 }
 
-/// Run `git log --max-count=MAX_SNAPSHOT_COMMITS` on the tracked branch and
-/// resolve the resulting hashes (in Git traversal order, HEAD first) to
-/// database commit IDs. Returns `None` on error so the caller can still
-/// mark the flake synced even if the snapshot rebuild fails.
-async fn resolve_snapshot_order(
+/// Maximum number of commits to retain in the branch-commit snapshot.
+///
+/// Must be at least the maximum timeline limit (500) so the snapshot can
+/// satisfy every supported Flakes timeline request without git operations.
+const MAX_SNAPSHOT_COMMITS: i64 = 500;
+
+/// Resolve ordered git hashes to contiguous database commit IDs.
+///
+/// Takes hashes in Git traversal order (HEAD first, from the sync's own git
+/// log), queries the DB for matching (hash, id) pairs, and builds a contiguous
+/// prefix starting from HEAD:
+///
+///   - HEAD (index 0) MUST resolve to a DB ID. If it does not, returns `None`
+///     and the snapshot is not updated (previous snapshot remains visible).
+///   - Iterates forward until a hash does not resolve. The prefix up to (but
+///     not including) that unresolvable hash is returned.  This prevents gaps
+///     in `commits_behind`.
+///   - An empty prefix (no hashes or HEAD unresolvable) returns `None`.
+///
+/// Returns `Some(vec)` on success (possibly empty if the git log itself was
+/// empty, which produces an empty ready snapshot).
+async fn resolve_ordered_ids(
     pool: &PgPool,
     flake_id: i32,
-    repo_url: &str,
-    branch: &str,
+    ordered_hashes: &[String],
 ) -> Option<Vec<i32>> {
-    let creds = FlakeCredentialEnv::load(pool, flake_id)
-        .await
-        .unwrap_or_else(|e| {
-            warn!("Failed to load credentials for flake {flake_id}: {e:#}");
-            None
-        });
-
-    let max = MAX_SNAPSHOT_COMMITS as usize;
-    let commits =
-        match get_commits_with_full_metadata(repo_url, branch, Some(max), None, creds.as_ref())
-            .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Failed to fetch git log for snapshot (flake {flake_id}): {e:#}");
-                return None;
-            }
-        };
-
-    if commits.is_empty() {
+    if ordered_hashes.is_empty() {
         return Some(Vec::new());
     }
 
-    let hash_slice: Vec<&str> = commits.iter().map(|c| c.hash.as_str()).collect();
-    match sqlx::query_as::<_, (String, i32)>(
+    let hash_slice: Vec<&str> = ordered_hashes.iter().map(|h| h.as_str()).collect();
+    let rows: Vec<(String, i32)> = match sqlx::query_as(
         r#"
         SELECT git_commit_hash, id
         FROM commits
@@ -485,27 +505,36 @@ async fn resolve_snapshot_order(
     .fetch_all(pool)
     .await
     {
-        Ok(rows) => {
-            let map: std::collections::HashMap<&str, i32> =
-                rows.iter().map(|(h, id)| (h.as_str(), *id)).collect();
-            let ids: Vec<i32> = commits
-                .iter()
-                .filter_map(|c| map.get(c.hash.as_str()).copied())
-                .collect();
-            Some(ids)
-        }
+        Ok(r) => r,
         Err(e) => {
             error!("Failed to resolve commit hashes for snapshot (flake {flake_id}): {e:#}");
-            None
+            return None;
+        }
+    };
+
+    let map: std::collections::HashMap<&str, i32> =
+        rows.iter().map(|(h, id)| (h.as_str(), *id)).collect();
+
+    // HEAD (index 0) MUST resolve.
+    if !map.contains_key(ordered_hashes[0].as_str()) {
+        warn!(
+            "HEAD commit {} not found in DB for flake {flake_id}; snapshot not updated",
+            ordered_hashes[0]
+        );
+        return None;
+    }
+
+    // Build contiguous prefix: iterate from HEAD forward, stop at first gap.
+    let mut ids = Vec::with_capacity(ordered_hashes.len());
+    for hash in ordered_hashes {
+        match map.get(hash.as_str()) {
+            Some(id) => ids.push(*id),
+            None => break, // gap — prefix ends here
         }
     }
-}
 
-/// Maximum number of commits to retain in the branch-commit snapshot.
-///
-/// Must be at least the maximum timeline limit (500) so the snapshot can
-/// satisfy every supported Flakes timeline request without git operations.
-const MAX_SNAPSHOT_COMMITS: i64 = 500;
+    Some(ids)
+}
 
 fn sanitize_and_truncate_sync_error(repo_url: &str, raw: &str, max_chars: usize) -> String {
     let sanitized_repo = redact_url_credentials(repo_url);
@@ -600,55 +629,85 @@ fn redact_url_credentials(input: &str) -> String {
     url.to_string()
 }
 
+/// Run a full sync for a repository and return (inserted_count, ordered_hashes).
+///
+/// The ordered hashes are from `git log --max-count=MAX_SNAPSHOT_COMMITS` in Git
+/// traversal order (HEAD first). This is the SAME Git observation used for
+/// insertion — no second clone is performed for snapshot purposes.
+///
+/// Force-push detection: the last known commit hash is checked against the git
+/// log results. If the remote HEAD has changed and the last known commit is not
+/// in the git log, a `HISTORY_REWRITE_ERROR_MARKER` error is returned.
 async fn sync_commits_for_repo_inner(
     pool: &PgPool,
     repo_url: &str,
     branch: &str,
     creds: Option<&FlakeCredentialEnv>,
-) -> Result<usize> {
-    match flake_has_commits(pool, repo_url).await {
-        Ok(true) => {
-            let last_commit = flake_last_commit(pool, repo_url)
-                .await
-                .with_context(|| format!("Failed to load last commit for {repo_url}"))?;
-            let inserted = fetch_and_insert_commits_since_with_creds(
-                pool,
-                repo_url,
-                branch,
-                &last_commit,
-                creds,
-            )
-            .await
-            .with_context(|| {
-                format!("Failed to sync commits since last known hash for {repo_url}")
-            })?;
-            Ok(inserted.len())
-        }
-        Ok(false) => {
-            let commits = get_commits_with_full_metadata(repo_url, branch, Some(10), None, creds)
-                .await
-                .with_context(|| format!("Failed to initialize commits for {repo_url}"))?;
-            let mut inserted = Vec::new();
-            for commit_data in commits {
-                if let Err(e) = insert_commit_with_metadata(
-                    pool,
-                    &commit_data.hash,
-                    repo_url,
-                    commit_data.timestamp,
-                    Some(&commit_data.message),
-                    Some(&commit_data.author),
-                )
-                .await
-                {
-                    warn!("Failed to insert commit {}: {}", commit_data.hash, e);
-                } else {
-                    inserted.push(commit_data.hash);
+) -> Result<(usize, Vec<String>)> {
+    let max = MAX_SNAPSHOT_COMMITS as usize;
+    let commits = get_commits_with_full_metadata(repo_url, branch, Some(max), None, creds)
+        .await
+        .with_context(|| format!("Failed to list commits for {repo_url} on {branch}"))?;
+
+    let ordered_hashes: Vec<String> = commits.iter().map(|c| c.hash.clone()).collect();
+
+    // Force-push detection for incremental sync: if the flake already has
+    // commits, verify the last known hash appears in the current git log.
+    if flake_has_commits(pool, repo_url).await.unwrap_or(false) {
+        if let Ok(last_commit) = flake_last_commit(pool, repo_url).await {
+            let last_hash = &last_commit.git_commit_hash;
+            if !ordered_hashes.iter().any(|h| h == last_hash) {
+                let has_head = ordered_hashes.first().cloned();
+                if let Some(head) = has_head {
+                    if &head != last_hash {
+                        warn!(
+                            repo_url = %repo_url,
+                            branch = %branch,
+                            last_hash = %last_hash,
+                            remote_head = %head,
+                            "history_rewrite_detected via missing last commit"
+                        );
+                        return Err(anyhow::anyhow!(
+                            "{}: remote history diverged for {} on {}. Last known commit {} is no longer in branch history. Accept rewrite via POST /api/v1/flakes/:id/accept-rewrite before syncing again. Remote HEAD is {}.",
+                            HISTORY_REWRITE_ERROR_MARKER,
+                            repo_url,
+                            branch,
+                            last_hash,
+                            head,
+                        ));
+                    }
                 }
             }
-            Ok(inserted.len())
         }
-        Err(e) => Err(e).with_context(|| format!("Failed to inspect commit state for {repo_url}")),
     }
+
+    let mut inserted_count = 0;
+    for commit_data in &commits {
+        if let Err(e) = insert_commit_with_metadata(
+            pool,
+            &commit_data.hash,
+            repo_url,
+            commit_data.timestamp,
+            Some(&commit_data.message),
+            Some(&commit_data.author),
+        )
+        .await
+        {
+            warn!("Failed to insert commit {}: {}", commit_data.hash, e);
+        } else {
+            inserted_count += 1;
+        }
+    }
+
+    info!(
+        "✅ Synced {} ({}): {} new commits ({} in git log)",
+        repo_url,
+        branch,
+        inserted_count,
+        ordered_hashes.len()
+    );
+
+    Ok((inserted_count, ordered_hashes))
 }
 
 /// Resolve the remote default branch name for a repository.

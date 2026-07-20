@@ -36,10 +36,10 @@ use crate::queries::flake_credentials::{
     delete_flake_credential, get_flake_credential, update_flake_credential, upsert_flake_credential,
 };
 use crate::queries::flakes::{
-    cascade_delete_flake, check_flake_dependencies, clear_flake_branch_snapshot,
-    count_systems_for_flake, delete_flake_by_id, fetch_dashboard_flake_timelines,
-    fetch_flake_timelines, get_flake_by_id, get_flake_by_name, get_flake_id_by_repo_url,
-    insert_flake, list_flake_registry, purge_flake_commit_history, soft_delete_flake, update_flake,
+    cascade_delete_flake, check_flake_dependencies, count_systems_for_flake, delete_flake_by_id,
+    fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
+    get_flake_id_by_repo_url, insert_flake, list_flake_registry, purge_flake_commit_history,
+    soft_delete_flake, update_flake,
 };
 use crate::queries::users::get_by_email;
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
@@ -815,18 +815,27 @@ pub async fn create_flake(
     };
 
     // Insert uses ON CONFLICT (repo_url) which silently updates an existing
-    // flake's branch. If the branch changed, the old snapshot is stale.
-    // Clear it before the upsert so readers don't see old history.
+    // flake's branch. If the branch changed, purge old commits and snapshot
+    // in one transaction, leaving an empty ready snapshot.
     if let Ok(Some(existing_id)) = get_flake_id_by_repo_url(&pool, repo_url).await {
         if let Ok(existing) = get_flake_by_id(&pool, existing_id).await {
             if existing.branch != branch {
                 if let Ok(mut tx) = pool.begin().await {
-                    if clear_flake_branch_snapshot(&mut tx, existing.id)
-                        .await
-                        .is_ok()
-                    {
-                        let _ = tx.commit().await;
-                    }
+                    let _ =
+                        sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
+                            .bind(existing_id)
+                            .execute(&mut *tx)
+                            .await;
+                    let _ = sqlx::query("DELETE FROM commits WHERE flake_id = $1")
+                        .bind(existing_id)
+                        .execute(&mut *tx)
+                        .await;
+                    let _ =
+                        sqlx::query("UPDATE flakes SET snapshot_ready_at = now() WHERE id = $1")
+                            .bind(existing_id)
+                            .execute(&mut *tx)
+                            .await;
+                    let _ = tx.commit().await;
                 }
             }
         }
@@ -915,15 +924,72 @@ pub async fn update_flake_handler(
         Err(response) => return response,
     };
 
-    // If repo_url or branch changed, the existing branch snapshot is no longer
-    // authoritative. Clear it before updating so readers see fallback ordering
-    // until the next successful sync populates a fresh snapshot.
+    // If repo_url or branch changed, the existing commits and snapshot belong
+    // to the old source. Purge everything in one transaction and leave an empty
+    // ready snapshot so readers don't see stale commits via fallback ordering.
     if let Ok(current) = get_flake_by_id(&pool, flake_id).await {
         let identity_changed = current.repo_url != repo_url || current.branch != branch;
         if identity_changed {
             if let Ok(mut tx) = pool.begin().await {
-                if clear_flake_branch_snapshot(&mut tx, flake_id).await.is_ok() {
-                    let _ = tx.commit().await;
+                // Clear snapshot
+                let _ = sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
+                    .bind(flake_id)
+                    .execute(&mut *tx)
+                    .await;
+                // Purge old commits (cascades: derivations, caches, etc.)
+                let _ = sqlx::query("DELETE FROM commits WHERE flake_id = $1")
+                    .bind(flake_id)
+                    .execute(&mut *tx)
+                    .await;
+                // Set empty ready snapshot (not NULL — avoids exposing old
+                // commits through fallback ordering before first sync).
+                let _ = sqlx::query("UPDATE flakes SET snapshot_ready_at = now() WHERE id = $1")
+                    .bind(flake_id)
+                    .execute(&mut *tx)
+                    .await;
+                // Update the flake identity within the same transaction.
+                let _ = sqlx::query(
+                    "UPDATE flakes SET name = $1, repo_url = $2, branch = $3, build_scope = $4 \
+                     WHERE id = $5 AND deleted_at IS NULL",
+                )
+                .bind(name)
+                .bind(repo_url)
+                .bind(&branch)
+                .bind(build_scope)
+                .bind(flake_id)
+                .execute(&mut *tx)
+                .await;
+                let _ = tx.commit().await;
+
+                // Reload the updated flake for the response.
+                if let Ok(updated) = get_flake_by_id(&pool, flake_id).await {
+                    return (
+                        StatusCode::OK,
+                        Json(FlakeRegistryItem {
+                            id: updated.id,
+                            name: updated.name,
+                            repo_url: updated.repo_url,
+                            branch: updated.branch,
+                            build_scope: updated.build_scope,
+                            system_count: count_systems_for_flake(&pool, flake_id)
+                                .await
+                                .unwrap_or(0),
+                            sync_status: updated
+                                .sync_status
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            last_sync_at: updated.last_sync_at,
+                            last_sync_error: updated.last_sync_error,
+                            latest_commit_hash: None,
+                            latest_commit_message: None,
+                            latest_commit_author: None,
+                            latest_commit_timestamp: None,
+                            build_status: None,
+                            evaluation_status: None,
+                            environments: Vec::new(),
+                            total_commit_count: 0,
+                        }),
+                    )
+                        .into_response();
                 }
             }
         }
