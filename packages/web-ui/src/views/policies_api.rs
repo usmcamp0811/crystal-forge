@@ -5,7 +5,7 @@
 
 use uuid::Uuid;
 
-use crate::api::client::{ApiClientError, fetch_deployment_policies};
+use crate::api::client::{fetch_deployment_policies, ApiClientError};
 use crate::api::models::DeploymentPolicyRecord;
 use crate::components::policy::PolicyDefinition;
 

@@ -156,8 +156,8 @@ pub async fn fetch_hardening_top_services(
     fetch_json(&url).await
 }
 
-pub async fn fetch_hardening_system_postures()
--> Result<Vec<HardeningSystemPostureResponse>, ApiClientError> {
+pub async fn fetch_hardening_system_postures(
+) -> Result<Vec<HardeningSystemPostureResponse>, ApiClientError> {
     let url = format!("{}/hardening/systems", base_url());
     fetch_json(&url).await
 }
@@ -912,8 +912,8 @@ pub async fn fetch_environment_policies(
 }
 
 /// Fetch required policy assignments for visible environments.
-pub async fn fetch_environment_policies_map()
--> Result<Vec<EnvironmentPolicyMapEntry>, ApiClientError> {
+pub async fn fetch_environment_policies_map(
+) -> Result<Vec<EnvironmentPolicyMapEntry>, ApiClientError> {
     let url = format!("{}/environments/policies-map", base_url());
     fetch_json(&url).await
 }

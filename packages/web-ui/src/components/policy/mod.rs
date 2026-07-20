@@ -10,7 +10,7 @@ mod types;
 pub use policy_card::PolicyCard;
 pub use policy_editor_modal::PolicyEditorModal;
 pub use types::{
-    POLICY_CATEGORIES, POLICY_TOML_SAMPLE, PolicyCategory, PolicyDefinition, PolicyFormat,
-    PolicyRuleSummary, is_core_policy, is_policy_enabled, normalized_policy_type, policy_category,
-    policy_rule_summaries,
+    is_core_policy, is_policy_enabled, normalized_policy_type, policy_category,
+    policy_rule_summaries, PolicyCategory, PolicyDefinition, PolicyFormat, PolicyRuleSummary,
+    POLICY_CATEGORIES, POLICY_TOML_SAMPLE,
 };

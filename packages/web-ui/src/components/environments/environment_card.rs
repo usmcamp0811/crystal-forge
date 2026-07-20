@@ -441,5 +441,9 @@ fn pct(count: usize, total: f64) -> i32 {
 }
 
 fn plural(count: usize) -> &'static str {
-    if count == 1 { "" } else { "s" }
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
 }

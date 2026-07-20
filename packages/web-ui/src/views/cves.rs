@@ -9,7 +9,7 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::{NAV_BADGES, acknowledge_with_cursor_and_ids, should_flash};
+use crate::alerts::{acknowledge_with_cursor_and_ids, should_flash, NAV_BADGES};
 
 use crate::api::client;
 use crate::api::models::{
@@ -1367,8 +1367,8 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
         use_resource(move || async move { load_environment_colors_with_fallback().await.colors });
 
     use_effect(move || {
-        use wasm_bindgen::JsCast;
         use wasm_bindgen::closure::Closure;
+        use wasm_bindgen::JsCast;
 
         let Some(window) = web_sys::window() else {
             return;

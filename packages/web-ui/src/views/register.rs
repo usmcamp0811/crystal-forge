@@ -7,7 +7,7 @@ use crate::theme;
 
 #[path = "register_api.rs"]
 mod register_api;
-use register_api::{RegisterRequest, fetch_setup_status, register_user};
+use register_api::{fetch_setup_status, register_user, RegisterRequest};
 
 /// First-run registration view.
 ///

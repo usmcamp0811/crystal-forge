@@ -76,8 +76,8 @@ impl InfiniteScroll {
     pub fn check_and_register(&self) {
         #[cfg(target_arch = "wasm32")]
         {
-            use wasm_bindgen::JsCast;
             use wasm_bindgen::prelude::*;
+            use wasm_bindgen::JsCast;
 
             let page_size = self.page_size;
             let count = self.count;

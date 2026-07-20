@@ -16,10 +16,10 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::api::client::{
-    ApiClientError, create_system, deactivate_system, deploy_system, fetch_flake_timelines,
-    fetch_flakes, fetch_system, fetch_system_agent_events, fetch_system_commits,
-    fetch_system_generations, fetch_system_history, fetch_systems, get_system_deployment_progress,
-    update_system, update_system_public_key,
+    create_system, deactivate_system, deploy_system, fetch_flake_timelines, fetch_flakes,
+    fetch_system, fetch_system_agent_events, fetch_system_commits, fetch_system_generations,
+    fetch_system_history, fetch_systems, get_system_deployment_progress, update_system,
+    update_system_public_key, ApiClientError,
 };
 use crate::api::models::{
     CreateSystemRequest, CveSummary, DeploySystemRequest, DeploymentStatus, FlakeRegistryItem,
