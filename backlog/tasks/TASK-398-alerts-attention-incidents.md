@@ -1,7 +1,7 @@
 ---
 id: TASK-398
 title: Make attention alerts recent occurrence-based and permanently dismissible
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-07-20 00:00'
 updated_date: '2026-07-20 00:00'
