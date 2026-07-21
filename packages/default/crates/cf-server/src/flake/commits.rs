@@ -518,7 +518,7 @@ pub async fn sync_flake_recorded(
             // Superseded — a newer attempt was started. Roll back.
             info!("Flake {flake_id} sync was superseded before status commit; aborting");
             let _ = tx.rollback().await;
-            return Ok(inserted_count);
+            return Ok(0);
         }
         Err(e) => {
             error!("Status update failed (flake {flake_id}): {e:#}");

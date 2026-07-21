@@ -19,8 +19,7 @@ pub async fn insert_flake(
         INSERT INTO flakes (name, repo_url, branch, build_scope)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (repo_url) DO UPDATE SET 
-            name = EXCLUDED.name, 
-            branch = EXCLUDED.branch,
+            name = EXCLUDED.name,
             build_scope = EXCLUDED.build_scope,
             deleted_at = NULL
         RETURNING *
@@ -82,6 +81,40 @@ pub async fn update_flake(
     .bind(flake_id)
     .fetch_one(pool)
     .await?;
+
+    Ok(flake)
+}
+
+/// Update only the non-source-identity fields of a flake (`name`, `build_scope`).
+///
+/// This function panics if the flake does not exist (it is expected to be called
+/// only after the caller has verified the row exists).  Unlike `update_flake`,
+/// this does NOT touch `repo_url` or `branch` — source-identity changes must go
+/// through the locked `reset_flake_source()` path.
+///
+/// Takes a transaction reference so the caller can serialise identity changes
+/// with the per-flake advisory lock.
+pub async fn update_flake_metadata(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    flake_id: i32,
+    name: &str,
+    build_scope: &str,
+) -> Result<Flake> {
+    let flake = sqlx::query_as::<_, Flake>(
+        r#"
+        UPDATE flakes
+        SET name = $1,
+            build_scope = $2
+        WHERE id = $3 AND deleted_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(name)
+    .bind(build_scope)
+    .bind(flake_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to update flake metadata")?;
 
     Ok(flake)
 }
