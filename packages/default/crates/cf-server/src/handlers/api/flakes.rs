@@ -818,54 +818,85 @@ pub async fn create_flake(
     // atomically reset the source identity and commit history via
     // reset_flake_source (which handles the identity update, purge, and
     // empty ready snapshot in one transaction).
+    // Failure triggers an immediate error response — do NOT fall through
+    // to the non-atomic insert_flake() below.
     if let Ok(Some(existing_id)) = get_flake_id_by_repo_url(&pool, repo_url).await {
         if let Ok(existing) = get_flake_by_id(&pool, existing_id).await {
             if existing.branch != branch {
-                match pool.begin().await {
-                    Ok(mut tx) => match reset_flake_source(
-                        &mut tx,
-                        existing_id,
-                        name,
-                        repo_url,
-                        &branch,
-                        build_scope,
+                let mut tx = match pool.begin().await {
+                    Ok(tx) => tx,
+                    Err(e) => {
+                        error!("Failed to begin reset tx for branch change: {e:#}");
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ApiError {
+                                error: "reset_failed".to_string(),
+                                message: "Failed to reset flake source".to_string(),
+                                details: None,
+                            }),
+                        )
+                            .into_response();
+                    }
+                };
+                let updated = match reset_flake_source(
+                    &mut tx,
+                    existing_id,
+                    name,
+                    repo_url,
+                    &branch,
+                    build_scope,
+                )
+                .await
+                {
+                    Ok(u) => u,
+                    Err(e) => {
+                        error!("Failed to reset flake source for branch change: {e:#}");
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ApiError {
+                                error: "reset_failed".to_string(),
+                                message: "Failed to reset flake source".to_string(),
+                                details: None,
+                            }),
+                        )
+                            .into_response();
+                    }
+                };
+                if let Err(e) = tx.commit().await {
+                    error!("Failed to commit reset tx for branch change: {e:#}");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiError {
+                            error: "reset_failed".to_string(),
+                            message: "Failed to reset flake source".to_string(),
+                            details: None,
+                        }),
                     )
-                    .await
-                    {
-                        Ok(updated) => match tx.commit().await {
-                            Ok(_) => {
-                                return (
-                                    StatusCode::CREATED,
-                                    Json(FlakeRegistryItem {
-                                        id: updated.id,
-                                        name: updated.name,
-                                        repo_url: updated.repo_url,
-                                        branch: updated.branch,
-                                        build_scope: updated.build_scope,
-                                        system_count: 0,
-                                        sync_status: updated
-                                            .sync_status
-                                            .unwrap_or_else(|| "unknown".to_string()),
-                                        last_sync_at: updated.last_sync_at,
-                                        last_sync_error: updated.last_sync_error,
-                                        latest_commit_hash: None,
-                                        latest_commit_message: None,
-                                        latest_commit_author: None,
-                                        latest_commit_timestamp: None,
-                                        build_status: None,
-                                        evaluation_status: None,
-                                        environments: Vec::new(),
-                                        total_commit_count: 0,
-                                    }),
-                                )
-                                    .into_response();
-                            }
-                            Err(e) => error!("Failed to commit branch-change reset tx: {e:#}"),
-                        },
-                        Err(e) => error!("Failed to reset flake source for branch change: {e:#}"),
-                    },
-                    Err(e) => error!("Failed to begin branch-change reset tx: {e:#}"),
+                        .into_response();
                 }
+                return (
+                    StatusCode::CREATED,
+                    Json(FlakeRegistryItem {
+                        id: updated.id,
+                        name: updated.name,
+                        repo_url: updated.repo_url,
+                        branch: updated.branch,
+                        build_scope: updated.build_scope,
+                        system_count: 0,
+                        sync_status: updated.sync_status.unwrap_or_else(|| "unknown".to_string()),
+                        last_sync_at: updated.last_sync_at,
+                        last_sync_error: updated.last_sync_error,
+                        latest_commit_hash: None,
+                        latest_commit_message: None,
+                        latest_commit_author: None,
+                        latest_commit_timestamp: None,
+                        build_status: None,
+                        evaluation_status: None,
+                        environments: Vec::new(),
+                        total_commit_count: 0,
+                    }),
+                )
+                    .into_response();
             }
         }
     }
@@ -955,58 +986,83 @@ pub async fn update_flake_handler(
 
     // If repo_url or branch changed, purge the history, update the identity,
     // and leave an empty ready snapshot — all atomically via reset_flake_source.
-    if let Ok(current) = get_flake_by_id(&pool, flake_id).await {
-        let identity_changed = current.repo_url != repo_url || current.branch != branch;
-        if identity_changed {
-            match pool.begin().await {
-                Ok(mut tx) => match reset_flake_source(
-                    &mut tx,
-                    flake_id,
-                    name,
-                    repo_url,
-                    &branch,
-                    build_scope,
-                )
-                .await
+    // Any failure here must return an error immediately — do NOT fall through
+    // to the non-atomic update_flake() below.
+    {
+        let mut needs_reset = false;
+        if let Ok(current) = get_flake_by_id(&pool, flake_id).await {
+            needs_reset = current.repo_url != repo_url || current.branch != branch;
+        }
+        if needs_reset {
+            let mut tx = match pool.begin().await {
+                Ok(tx) => tx,
+                Err(e) => {
+                    error!("Failed to begin source reset tx (flake {flake_id}): {e:#}");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiError {
+                            error: "reset_failed".to_string(),
+                            message: "Failed to reset flake source".to_string(),
+                            details: None,
+                        }),
+                    )
+                        .into_response();
+                }
+            };
+            let updated =
+                match reset_flake_source(&mut tx, flake_id, name, repo_url, &branch, build_scope)
+                    .await
                 {
-                    Ok(updated) => match tx.commit().await {
-                        Ok(_) => {
-                            return (
-                                StatusCode::OK,
-                                Json(FlakeRegistryItem {
-                                    id: updated.id,
-                                    name: updated.name,
-                                    repo_url: updated.repo_url,
-                                    branch: updated.branch,
-                                    build_scope: updated.build_scope,
-                                    system_count: count_systems_for_flake(&pool, flake_id)
-                                        .await
-                                        .unwrap_or(0),
-                                    sync_status: updated
-                                        .sync_status
-                                        .unwrap_or_else(|| "unknown".to_string()),
-                                    last_sync_at: updated.last_sync_at,
-                                    last_sync_error: updated.last_sync_error,
-                                    latest_commit_hash: None,
-                                    latest_commit_message: None,
-                                    latest_commit_author: None,
-                                    latest_commit_timestamp: None,
-                                    build_status: None,
-                                    evaluation_status: None,
-                                    environments: Vec::new(),
-                                    total_commit_count: 0,
-                                }),
-                            )
-                                .into_response();
-                        }
-                        Err(e) => {
-                            error!("Failed to commit source reset tx (flake {flake_id}): {e:#}")
-                        }
-                    },
-                    Err(e) => error!("Failed to reset flake source (flake {flake_id}): {e:#}"),
-                },
-                Err(e) => error!("Failed to begin source reset tx (flake {flake_id}): {e:#}"),
+                    Ok(u) => u,
+                    Err(e) => {
+                        error!("Failed to reset flake source (flake {flake_id}): {e:#}");
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ApiError {
+                                error: "reset_failed".to_string(),
+                                message: "Failed to reset flake source".to_string(),
+                                details: None,
+                            }),
+                        )
+                            .into_response();
+                    }
+                };
+            if let Err(e) = tx.commit().await {
+                error!("Failed to commit source reset tx (flake {flake_id}): {e:#}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: "reset_failed".to_string(),
+                        message: "Failed to reset flake source".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
             }
+
+            return (
+                StatusCode::OK,
+                Json(FlakeRegistryItem {
+                    id: updated.id,
+                    name: updated.name,
+                    repo_url: updated.repo_url,
+                    branch: updated.branch,
+                    build_scope: updated.build_scope,
+                    system_count: count_systems_for_flake(&pool, flake_id).await.unwrap_or(0),
+                    sync_status: updated.sync_status.unwrap_or_else(|| "unknown".to_string()),
+                    last_sync_at: updated.last_sync_at,
+                    last_sync_error: updated.last_sync_error,
+                    latest_commit_hash: None,
+                    latest_commit_message: None,
+                    latest_commit_author: None,
+                    latest_commit_timestamp: None,
+                    build_status: None,
+                    evaluation_status: None,
+                    environments: Vec::new(),
+                    total_commit_count: 0,
+                }),
+            )
+                .into_response();
         }
     }
 

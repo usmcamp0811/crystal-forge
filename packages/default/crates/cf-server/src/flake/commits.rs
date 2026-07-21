@@ -414,7 +414,7 @@ pub async fn sync_flake_recorded(
         }
     };
 
-    let status_applied = match sqlx::query(
+    let update_result = sqlx::query(
         "UPDATE flakes \
          SET sync_status = 'synced', last_sync_at = now(), last_sync_error = NULL \
          WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $2",
@@ -422,17 +422,22 @@ pub async fn sync_flake_recorded(
     .bind(flake_id)
     .bind(attempt_id)
     .execute(&mut *tx)
-    .await
-    {
+    .await;
+
+    let status_applied = match update_result {
         Ok(upd) => upd.rows_affected() == 1,
         Err(e) => {
-            warn!("Failed to update sync_status=synced (flake {flake_id}): {e:#}");
-            false
+            // Genuine SQL error — not a superseded attempt.
+            error!("Failed to update sync_status=synced (flake {flake_id}): {e:#}");
+            let _ = tx.rollback().await;
+            record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+            return Err(e.into());
         }
     };
 
     if !status_applied {
-        // Attempt was superseded — close the no-op tx and return success.
+        // rows_affected() == 0 means the attempt_id was overwritten by
+        // a newer sync attempt. This is genuinely superseded — no error.
         let _ = tx.rollback().await;
         return Ok(inserted_count);
     }
@@ -689,38 +694,54 @@ async fn sync_commits_for_repo_inner(
         let current_head = ordered_hashes.first().cloned();
         if let Some(ref head) = current_head {
             if head != prev && !ordered_hashes.contains(prev) {
-                warn!(
-                    repo_url = %repo_url,
-                    branch = %branch,
-                    previous_head = %prev,
-                    remote_head = %head,
-                    "history_rewrite_detected via missing snapshot HEAD"
-                );
-                return Err(anyhow::anyhow!(
-                    "{}: remote history diverged for {} on {}. Previous HEAD {} is no longer in branch history. Accept rewrite via POST /api/v1/flakes/:id/accept-rewrite before syncing again. Remote HEAD is {}.",
-                    HISTORY_REWRITE_ERROR_MARKER,
-                    repo_url,
-                    branch,
-                    prev,
-                    head,
-                ));
+                // The previous HEAD is outside the MAX_SNAPSHOT_COMMITS window.
+                // Before declaring a force-push, deepen the clone and verify
+                // ancestry — the branch may have advanced by 500+ commits.
+                let is_ancestor = check_git_ancestry_deep(repo_url, branch, prev, creds)
+                    .await
+                    .unwrap_or(false);
+
+                if !is_ancestor {
+                    warn!(
+                        repo_url = %repo_url,
+                        branch = %branch,
+                        previous_head = %prev,
+                        remote_head = %head,
+                        "history_rewrite_detected via missing snapshot HEAD"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "{}: remote history diverged for {} on {}. Previous HEAD {} is no longer in branch history. Accept rewrite via POST /api/v1/flakes/:id/accept-rewrite before syncing again. Remote HEAD is {}.",
+                        HISTORY_REWRITE_ERROR_MARKER,
+                        repo_url,
+                        branch,
+                        prev,
+                        head,
+                    ));
+                }
             }
         }
     }
 
-    // Pre-filter: skip commits already present in the DB to avoid the
-    // per-insert advisory lock (pg_advisory_xact_lock) and the sequential
-    // eval-queue position calculation for existing commits.
-    let existing: std::collections::HashSet<String> = if let Ok(rows) = sqlx::query_scalar::<_, String>(
-        "SELECT git_commit_hash FROM commits WHERE flake_id = (SELECT id FROM flakes WHERE repo_url = $1)",
-    )
-    .bind(repo_url)
-    .fetch_all(pool)
-    .await
-    {
-        rows.into_iter().collect()
-    } else {
+    // Pre-filter: query which of our candidate hashes already exist.
+    // Querying only the candidates avoids scanning the entire commits table.
+    let candidate_hashes: Vec<&str> = commits.iter().map(|c| c.hash.as_str()).collect();
+    let existing: std::collections::HashSet<String> = if candidate_hashes.is_empty() {
         std::collections::HashSet::new()
+    } else {
+        let rows: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT git_commit_hash
+            FROM commits
+            WHERE flake_id = (SELECT id FROM flakes WHERE repo_url = $1)
+              AND git_commit_hash = ANY($2)
+            "#,
+        )
+        .bind(repo_url)
+        .bind(&candidate_hashes)
+        .fetch_all(pool)
+        .await
+        .context("Failed to query existing commit hashes")?;
+        rows.into_iter().collect()
     };
 
     let mut inserted_count = 0;
@@ -755,6 +776,82 @@ async fn sync_commits_for_repo_inner(
     }
 
     Ok((inserted_count, ordered_hashes))
+}
+
+/// Check whether `ancestor_hash` is an ancestor of `branch` HEAD using a
+/// deepened clone.  Falls back when the 500-commit snapshot window is exceeded.
+async fn check_git_ancestry_deep(
+    repo_url: &str,
+    branch: &str,
+    ancestor_hash: &str,
+    creds: Option<&FlakeCredentialEnv>,
+) -> Result<bool> {
+    let git_url = normalize_repo_url_for_git(repo_url, creds);
+    let temp_dir = tempfile::tempdir().context("Failed to create temp dir for ancestry check")?;
+    let clone_path = temp_dir.path();
+
+    // Clone with a depth large enough to cover the fast-forward case.
+    let mut clone = tokio::process::Command::new("git");
+    clone.args([
+        "clone",
+        "--depth",
+        "1000",
+        "--branch",
+        branch,
+        "--single-branch",
+        &git_url,
+        ".",
+    ]);
+    apply_optional_creds(&mut clone, creds);
+    clone.current_dir(clone_path);
+    let out = timeout(GIT_PROBE_TIMEOUT, clone.output())
+        .await
+        .with_context(|| "Timed out cloning for ancestry check")?
+        .with_context(|| "Failed to clone for ancestry check")?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("Git clone failed for ancestry check on {repo_url}: {stderr}");
+    }
+
+    // Check if the ancestor commit exists in this clone.
+    fn commit_exists(clone_path: &std::path::Path, hash: &str) -> Result<bool> {
+        let out = std::process::Command::new("git")
+            .args(["cat-file", "-t", hash])
+            .current_dir(clone_path)
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to check commit existence: {e}"))?;
+        Ok(out.status.success())
+    }
+
+    if !commit_exists(clone_path, ancestor_hash)? {
+        // Try deepening the clone — the ancestor may be just outside the window.
+        let deepen = tokio::process::Command::new("git")
+            .args(["fetch", "--deepen=1000", "origin", branch])
+            .current_dir(clone_path)
+            .output()
+            .await
+            .context("Failed to deepen clone for ancestry check")?;
+        if !deepen.status.success() {
+            let stderr = String::from_utf8_lossy(&deepen.stderr);
+            warn!("Git deepen failed for ancestry check on {repo_url}: {stderr}");
+            return Ok(false);
+        }
+
+        if !commit_exists(clone_path, ancestor_hash)? {
+            return Ok(false);
+        }
+    }
+
+    // Run git merge-base --is-ancestor.
+    let mb = tokio::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor_hash, "HEAD"])
+        .current_dir(clone_path)
+        .output()
+        .await
+        .context("Failed to run merge-base for ancestry check")?;
+
+    Ok(mb.status.success())
 }
 
 /// Resolve the remote default branch name for a repository.
