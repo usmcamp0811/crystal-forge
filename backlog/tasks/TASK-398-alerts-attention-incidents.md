@@ -573,10 +573,14 @@ Keep this task in `Backlog` until a human selects it for a sprint. Once selected
   - After each heartbeat/state-change commit, queries `view_system_list` for health_status
   - Critical/offline → `open_or_observe_by_subject` with reason matching health_status
   - Healthy/warning → `resolve_open_occurrences_for_subject`
-- Not yet wired: environment attention (requires system→environment occurrence mapping), CVE occurrences.
+- Wired environment attention producer in the same heartbeat handler — when a system opens/resolves an attention occurrence, the corresponding environment occurrence is also opened/resolved.
+- Wired CVE attention producer in `cve_scans.rs::save_scan_results_with_store_path_override` — after each scan, opens attention occurrences for critical CVEs (CVSS >= 9.0) found in that scan.
+- All 6 categories fully wired: builds, evaluations, flakes, systems, environments, CVEs.
 - Pushed commits:
   - `9f9f8250` — badge/dismissal API rewrite
   - `88f3d326` — web UI occurrence-id dismissal
   - `8a6186b5` — flake sync producer
   - `d4481b53` — system health producer
+  - `cb09adef` — environment attention producer
+  - `(next)` — CVE attention producer
 <!-- SECTION:NOTES:END -->

@@ -1,13 +1,15 @@
 use crate::derivations::utils::get_store_path_from_drv;
 use crate::derivations::{Derivation, DerivationType};
 use crate::models::cve_scans::{CveScan, ScanStatus};
+use crate::queries::attention;
 use crate::vulnix::vulnix_parser::{VulnixParser, VulnixScanOutput};
 use anyhow::Result;
 use bigdecimal::BigDecimal;
 use bigdecimal::FromPrimitive;
+use chrono::Utc;
 use sqlx::PgPool;
 use sqlx::Row;
-use tracing::debug;
+use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -466,6 +468,19 @@ pub(crate) async fn save_scan_results_with_store_path_override(
         }
     }
 
+    // Collect critical CVE IDs before the transaction so we can open attention
+    // occurrences after the commit.  A CVE is considered critical when its CVSS
+    // v3 base score is >= 9.0.
+    let critical_cve_ids: Vec<String> = cve_map
+        .iter()
+        .filter(|(_, rec)| {
+            rec.cvss
+                .as_ref()
+                .is_some_and(|s| s >= &BigDecimal::from(9u64))
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+
     // --- Step 3: single transaction with ~5 bulk statements ---
     let mut tx = pool.begin().await?;
 
@@ -652,6 +667,27 @@ pub(crate) async fn save_scan_results_with_store_path_override(
     }
 
     tx.commit().await?;
+
+    // Open attention occurrences for critical CVEs found in this scan.
+    if !critical_cve_ids.is_empty() {
+        let opened_at = Utc::now();
+        for cve_id in &critical_cve_ids {
+            let key = attention::cve_occurrence_key(cve_id);
+            if let Err(e) = attention::open_or_observe(
+                pool,
+                "cves",
+                "cve",
+                cve_id,
+                &key,
+                opened_at,
+                serde_json::json!({"cve_id": cve_id}),
+            )
+            .await
+            {
+                warn!("failed to open attention occurrence for CVE {cve_id}: {e:#}");
+            }
+        }
+    }
 
     Ok(())
 }
