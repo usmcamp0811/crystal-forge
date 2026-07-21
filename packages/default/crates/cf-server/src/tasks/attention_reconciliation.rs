@@ -48,31 +48,12 @@ pub async fn reconcile_system_attention(
         "critical" | "offline" => {
             let opened_at = Utc::now();
 
-            // Close any occurrence open for a *different* reason first (e.g.
-            // critical -> offline): the old episode ends and a new one opens
-            // for the current reason, rather than leaving both open
-            // simultaneously.
-            let _ = attention::resolve_open_occurrences_except_reason(
-                pool,
-                "systems",
-                &subject_id,
-                health,
-            )
-            .await
-            .map_err(|e| {
-                warn!("failed to resolve prior-reason system attention occurrence: {e:#}")
-            });
-            if let Some(env_id) = environment_id {
-                let _ = attention::resolve_environment_occurrences_for_system_except_reason(
-                    pool, env_id, system_id, health,
-                )
-                .await
-                .map_err(|e| {
-                    warn!("failed to resolve prior-reason environment attention occurrence: {e:#}")
-                });
-            }
-
-            let result = attention::open_or_observe_by_subject(
+            // Use the subject-level transition helper which atomically
+            // resolves any open occurrence for a *different* reason and opens
+            // or observes the current reason under a reason-independent lock.
+            // This prevents the critical↔offline race that could leave both
+            // reasons simultaneously unresolved.
+            let result = attention::transition_by_subject(
                 pool,
                 "systems",
                 "system_health",
@@ -103,6 +84,19 @@ pub async fn reconcile_system_attention(
                 .flatten();
 
                 if let (Some(env_id), Some(sys_source_key)) = (environment_id, source_key) {
+                    // Resolve any stale environment occurrence derived from
+                    // this system (e.g. from a prior reason like critical ->
+                    // offline) before opening the one for the current state.
+                    // Idempotent — resolves nothing when there is no stale
+                    // occurrence.
+                    let _ = attention::resolve_environment_occurrences_for_system(
+                        pool, env_id, system_id,
+                    )
+                    .await
+                    .map_err(|e| {
+                        warn!("failed to resolve stale environment occurrence: {e:#}")
+                    });
+
                     let env_key = attention::environment_occurrence_key(env_id, &sys_source_key);
                     let _ = attention::open_or_observe(
                         pool,
@@ -174,7 +168,16 @@ async fn reconcile_all_systems(pool: &PgPool) {
 /// * System attention occurrences for inactive or deleted systems.
 /// * Environment attention occurrences whose underlying system no longer
 ///   belongs to that environment (e.g. a system that moved environments
-///   while its occurrence was still open for the old environment).
+///   while its occurrence was still open for the old environment, or a
+///   system that was deactivated or deleted).
+///
+/// The environment predicate resolves an occurrence whenever no active
+/// system exists that both matches `underlying_system_id` and currently
+/// belongs to the occurrence's environment (`subject_id`). This naturally
+/// handles inactive, deleted, moved, and unassigned systems — a system
+/// with `environment_id = NULL` cannot match because `NULL::text <> ao.subject_id`
+/// evaluates to unknown (i.e. not true), so the NOT EXISTS subquery's
+/// JOIN rejects it.
 ///
 /// Run this after the active-system sweep so deactivated or moved systems
 /// do not leave permanent orphaned occurrences.
@@ -184,30 +187,34 @@ async fn reconcile_stale_occurrences(pool: &PgPool) {
         r#"
         UPDATE attention_occurrences ao
         SET resolved_at = NOW()
-        FROM systems s
         WHERE ao.category = 'systems'
-          AND ao.subject_id = s.id::text
           AND ao.resolved_at IS NULL
-          AND s.is_active = FALSE
+          AND NOT EXISTS (
+              SELECT 1 FROM systems s
+              WHERE s.id::text = ao.subject_id
+                AND s.is_active = TRUE
+          )
         "#,
     )
     .execute(pool)
     .await
     .map_err(|e| error!("failed to resolve occurrences for inactive systems: {e:#}"));
 
-    // Resolve environment occurrences where the underlying system no longer
-    // belongs to that environment (e.g. system was moved). We match on the
-    // metadata's underlying_system_id and compare with the system's current
-    // environment_id.
+    // Resolve environment occurrences where no active system with the
+    // matching underlying_system_id currently belongs to the occurrence's
+    // environment.
     let _ = sqlx::query(
         r#"
         UPDATE attention_occurrences ao
         SET resolved_at = NOW()
-        FROM systems s
         WHERE ao.category = 'environments'
           AND ao.resolved_at IS NULL
-          AND ao.metadata @> jsonb_build_object('underlying_system_id', s.id::text)
-          AND ao.subject_id != s.environment_id::text
+          AND NOT EXISTS (
+              SELECT 1 FROM systems s
+              WHERE s.id::text = ao.metadata->>'underlying_system_id'
+                AND s.is_active = TRUE
+                AND s.environment_id::text = ao.subject_id
+          )
         "#,
     )
     .execute(pool)
@@ -247,27 +254,178 @@ async fn reconcile_stale_flakes(pool: &PgPool) {
     let opened_at = Utc::now();
     for (flake_id,) in rows {
         let subject_id = flake_id.to_string();
-        // Use transition_by_subject to atomically resolve any open flake
-        // occurrence (e.g. a prior sync_error from the same attempt) before
-        // opening the stale_sync occurrence. Without this, a stale_sync that
-        // later fails would leave two simultaneously-open occurrences.
-        let result = attention::transition_by_subject(
-            pool,
-            "flakes",
-            "flake_sync",
-            &subject_id,
-            "stale_sync",
-            opened_at,
-            serde_json::json!({
-                "flake_id": flake_id,
-                "reason": "stale_sync",
-            }),
-            |_reason, episode_id| attention::flake_occurrence_key(flake_id, episode_id),
-        )
-        .await;
-        if let Err(e) = result {
-            warn!("failed to open attention occurrence for stale flake {flake_id}: {e:#}");
+        reconcile_single_stale_flake(pool, flake_id, &subject_id, opened_at).await;
+    }
+}
+
+/// Reconcile a single stale flake, with recheck inside the attention lock.
+///
+/// The flake ID was selected before the lock was acquired, so the flake
+/// could have completed or errored in the meantime. This function acquires
+/// the subject-level attention lock, rechecks the stale predicate against
+/// the current database state, and only transitions when the flake is still
+/// `syncing` and past the staleness threshold.
+async fn reconcile_single_stale_flake(
+    pool: &PgPool,
+    flake_id: i32,
+    subject_id: &str,
+    opened_at: chrono::DateTime<chrono::Utc>,
+) {
+    use anyhow::Context;
+
+    // Acquire the subject-level lock and recheck inside the transaction.
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            warn!("failed to begin stale flake transaction: {e:#}");
+            return;
         }
+    };
+
+    let lock_key = format!("attention_occurrence:flakes:{subject_id}");
+    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *tx)
+        .await
+    {
+        warn!("failed to acquire stale flake lock: {e:#}");
+        let _ = tx.rollback().await;
+        return;
+    }
+
+    // Recheck: is the flake still stale?
+    let still_stale: bool = match sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM flakes
+            WHERE id = $1
+              AND deleted_at IS NULL
+              AND sync_status = 'syncing'
+              AND last_sync_at IS NOT NULL
+              AND last_sync_at < now() - interval '30 minutes'
+        )
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_one(&mut *tx)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("failed to recheck stale flake predicate: {e:#}");
+            let _ = tx.rollback().await;
+            return;
+        }
+    };
+
+    if !still_stale {
+        // Flake is no longer stale — nothing to do.
+        let _ = tx.commit().await;
+        return;
+    }
+
+    // Still stale — use transition_by_subject logic inline.
+    // Check if there's already an open occurrence with reason = stale_sync.
+    let existing: Option<uuid::Uuid> = match sqlx::query_scalar(
+        r#"
+        SELECT id FROM attention_occurrences
+        WHERE category = 'flakes'
+          AND subject_id = $1
+          AND resolved_at IS NULL
+          AND metadata @> $2::jsonb
+        LIMIT 1
+        FOR UPDATE
+        "#,
+    )
+    .bind(subject_id)
+    .bind(serde_json::json!({"reason": "stale_sync"}))
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("failed to find existing stale flake occurrence: {e:#}");
+            let _ = tx.rollback().await;
+            return;
+        }
+    };
+
+    if let Some(existing_id) = existing {
+        // Already open for this reason — just update last_observed_at.
+        let metadata = serde_json::json!({
+            "reason": "stale_sync",
+            "flake_id": flake_id,
+        });
+        if let Err(e) = sqlx::query(
+            "UPDATE attention_occurrences SET last_observed_at = $1, metadata = $2 WHERE id = $3",
+        )
+        .bind(opened_at)
+        .bind(metadata)
+        .bind(existing_id)
+        .execute(&mut *tx)
+        .await
+        {
+            warn!("failed to update stale flake occurrence: {e:#}");
+            let _ = tx.rollback().await;
+            return;
+        }
+        if let Err(e) = tx.commit().await {
+            warn!("failed to commit stale flake update: {e:#}");
+        }
+        return;
+    }
+
+    // Resolve any other open occurrence (e.g. sync_error) and insert
+    // a new stale_sync occurrence.
+    if let Err(e) = sqlx::query(
+        r#"
+        UPDATE attention_occurrences
+        SET resolved_at = NOW()
+        WHERE category = 'flakes'
+          AND subject_id = $1
+          AND resolved_at IS NULL
+        "#,
+    )
+    .bind(subject_id)
+    .execute(&mut *tx)
+    .await
+    {
+        warn!("failed to resolve open flake occurrences: {e:#}");
+        let _ = tx.rollback().await;
+        return;
+    }
+
+    let episode_id = uuid::Uuid::new_v4();
+    let source_key = attention::flake_occurrence_key(flake_id, episode_id);
+    let metadata = serde_json::json!({
+        "reason": "stale_sync",
+        "flake_id": flake_id,
+    });
+
+    if let Err(e) = sqlx::query(
+        r#"
+        INSERT INTO attention_occurrences (
+            category, subject_type, subject_id, source_occurrence_key,
+            opened_at, last_observed_at, metadata
+        )
+        VALUES ('flakes', 'flake_sync', $1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(subject_id)
+    .bind(source_key)
+    .bind(opened_at)
+    .bind(opened_at)
+    .bind(metadata)
+    .execute(&mut *tx)
+    .await
+    {
+        warn!("failed to insert stale flake occurrence: {e:#}");
+        let _ = tx.rollback().await;
+        return;
+    }
+
+    if let Err(e) = tx.commit().await {
+        warn!("failed to commit stale flake transaction: {e:#}");
     }
 }
 
@@ -299,20 +457,33 @@ pub async fn run_attention_reconciliation_loop(pool: PgPool) {
 /// occurrence insertion is best-effort (error logged and ignored). If that
 /// insertion failed, no reconciliation would otherwise recreate it.
 ///
-/// The deterministic key-based helpers (`open_or_observe`) are idempotent:
-/// calling them again for an event that already has an occurrence is a safe
-/// no-op (ON CONFLICT DO UPDATE silently observes the existing row).
+/// Only selects events whose deterministic occurrence key does not already
+/// exist in `attention_occurrences`, so events that already have their
+/// occurrence are skipped. Ordered by `completed_at DESC` so the most
+/// recent (and most likely still attention-eligible) events are processed
+/// first, preventing a large backlog from permanently starving an event
+/// that needs recovery. Bounded to 500 rows per category per sweep.
 ///
-/// Only events from the last 24 hours are considered, matching the attention
-/// window. Bounded to 500 rows per category per sweep.
+/// The build occurrence's `opened_at` uses the build's own `completed_at`
+/// rather than the current time, so the 24-hour attention window reflects
+/// the actual failure time, not the reconciliation time.
 async fn reconcile_terminal_events(pool: &PgPool) {
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
 
-    // Recent build failures that may be missing their attention occurrence.
-    let builds: Vec<(uuid::Uuid,)> = match sqlx::query_as(
-        "SELECT id FROM build_jobs \
-         WHERE status = 'failed' AND completed_at >= $1 \
-         LIMIT 500",
+    // Recent build failures whose occurrence key does not exist yet.
+    let builds: Vec<(uuid::Uuid, chrono::DateTime<chrono::Utc>)> = match sqlx::query_as(
+        r#"
+        SELECT id, completed_at FROM build_jobs bj
+        WHERE status = 'failed'
+          AND completed_at >= $1
+          AND NOT EXISTS (
+              SELECT 1 FROM attention_occurrences ao
+              WHERE ao.category = 'builds'
+                AND ao.source_occurrence_key = 'build:' || bj.id::text
+          )
+        ORDER BY completed_at DESC
+        LIMIT 500
+        "#,
     )
     .bind(cutoff)
     .fetch_all(pool)
@@ -325,29 +496,38 @@ async fn reconcile_terminal_events(pool: &PgPool) {
         }
     };
 
-    for (job_id,) in &builds {
+    for (job_id, completed_at) in &builds {
         let _ = attention::open_or_observe(
             pool,
             "builds",
             "build_job",
             &job_id.to_string(),
             &attention::build_occurrence_key(*job_id),
-            chrono::Utc::now(),
+            *completed_at,
             serde_json::json!({"job_id": job_id.to_string()}),
         )
         .await
         .map_err(|e| warn!("failed to reconcile build attention occurrence: {e:#}"));
     }
 
-    // Recent evaluation failures that may be missing their attention
-    // occurrence. The occurrence key includes microsecond-precision
-    // completed_at, so we must query both commit_id and completed_at.
+    // Recent evaluation failures whose occurrence key does not exist yet.
+    // The key includes microsecond-precision completed_at, so we must
+    // query both commit_id and completed_at.
     let evals: Vec<(i32, chrono::DateTime<chrono::Utc>)> = match sqlx::query_as(
-        "SELECT id, evaluation_completed_at FROM commits \
-         WHERE evaluation_status = 'failed' \
-           AND evaluation_completed_at IS NOT NULL \
-           AND evaluation_completed_at >= $1 \
-         LIMIT 500",
+        r#"
+        SELECT c.id, c.evaluation_completed_at FROM commits c
+        WHERE c.evaluation_status = 'failed'
+          AND c.evaluation_completed_at IS NOT NULL
+          AND c.evaluation_completed_at >= $1
+          AND NOT EXISTS (
+              SELECT 1 FROM attention_occurrences ao
+              WHERE ao.category = 'evals'
+                AND ao.source_occurrence_key =
+                    'eval:' || c.id::text || ':' || (EXTRACT(EPOCH FROM c.evaluation_completed_at) * 1000000)::bigint::text
+          )
+        ORDER BY c.evaluation_completed_at DESC
+        LIMIT 500
+        "#,
     )
     .bind(cutoff)
     .fetch_all(pool)

@@ -339,7 +339,7 @@ fn EvaluationsPage() -> Element {
         .map(|page| page.total_count)
         .unwrap_or(0);
     use_effect(move || {
-        if active_tab() == EvaluationsTab::History && !evals_ack_sent() {
+        if active_tab() == EvaluationsTab::History {
             if let Some(Ok(page_data)) = history_resource.read().as_ref() {
                 let unfiltered_first_page =
                     history_status_filter() == "all" && history_flake_filter() == "all";
@@ -350,6 +350,8 @@ fn EvaluationsPage() -> Element {
                 // page are not silently consumed. The async acknowledgment has
                 // built-in payload deduplication, so redundant calls when the
                 // history resource refreshes with the same data are no-ops.
+                // As the user scrolls, new rendered subjects produce a different
+                // payload key, triggering a new POST for the additional items.
                 if unfiltered_first_page && !page_data.items.is_empty() {
                     let Some(cursor) = history_ack_cursor.read().clone() else {
                         return;
@@ -366,11 +368,10 @@ fn EvaluationsPage() -> Element {
                     let occurrence_ids =
                         occurrence_ids_for_rendered_subjects("evals", &rendered_commit_ids);
                     spawn(async move {
-                        if acknowledge_with_cursor_and_ids_async("evals", cursor, occurrence_ids)
-                            .await
-                        {
-                            evals_ack_sent.set(true);
-                        }
+                        let _ = acknowledge_with_cursor_and_ids_async(
+                            "evals", cursor, occurrence_ids,
+                        )
+                        .await;
                     });
                 }
             }

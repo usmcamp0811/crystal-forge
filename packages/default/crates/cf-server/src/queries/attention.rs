@@ -181,6 +181,19 @@ where
         .await
         .context("failed to acquire occurrence lock")?;
 
+    // Inject `reason` into metadata BEFORE the lookup so the
+    // UPDATE path preserves it. Without this, the UPDATE on line 220
+    // would overwrite metadata with the caller's value (which may not
+    // include `reason`), causing a third call to NOT find the row and
+    // insert a duplicate.
+    let mut metadata = metadata;
+    if let serde_json::Value::Object(ref mut map) = metadata {
+        map.insert(
+            "reason".to_string(),
+            serde_json::Value::String(reason.to_string()),
+        );
+    }
+
     let row = sqlx::query(
         r#"
         SELECT id
@@ -204,7 +217,9 @@ where
         // Update both `last_observed_at` AND `metadata` so re-observing
         // after an earlier transient failure reflects the latest diagnostic
         // details (e.g. the most recent sync error message), not the first
-        // one that opened the episode.
+        // one that opened the episode. `metadata` now includes `reason`
+        // because we injected it above, so the lookup on the next call
+        // will still succeed.
         sqlx::query(
             "UPDATE attention_occurrences SET last_observed_at = $1, metadata = $2 WHERE id = $3",
         )
@@ -222,13 +237,6 @@ where
 
     let episode_id = Uuid::new_v4();
     let source_key = source_key_factory(reason, episode_id);
-    let mut metadata = metadata;
-    if let serde_json::Value::Object(ref mut map) = metadata {
-        map.insert(
-            "reason".to_string(),
-            serde_json::Value::String(reason.to_string()),
-        );
-    }
 
     let row = sqlx::query(
         r#"
@@ -258,9 +266,10 @@ where
     Ok(id)
 }
 
-/// Atomically transition a subject to a new reason: resolve *all* open
-/// occurrences for the subject (regardless of their current reason), then
-/// open or observe a new occurrence for the given `reason`.
+/// Atomically transition a subject to a new reason: if the current open
+/// occurrence already has the given `reason`, observe it (update
+/// `last_observed_at` and `metadata`); otherwise, resolve *all* open
+/// occurrences and open a new one for the current `reason`.
 ///
 /// Unlike [`open_or_observe_by_subject`], this uses a reason-independent
 /// lock (`attention_occurrence:{category}:{subject_id}`) so that a
@@ -270,9 +279,13 @@ where
 /// fails and opens `sync_error` — without a shared lock they would create
 /// two open occurrences for what is conceptually one incident).
 ///
-/// The locked window is also used to refresh metadata unconditionally, so
-/// re-observing after a transition always carries the latest diagnostic
-/// context even when the occurrence was just opened by the same call.
+/// When the reason hasn't changed, the existing occurrence's `id`,
+/// `source_occurrence_key`, and `opened_at` are preserved so the episode
+/// represents one uninterrupted incident. This is essential for periodic
+/// reconcilers that call transition repeatedly on the same condition —
+/// without it, every sweep would generate a new episode with a new key,
+/// resetting `opened_at` and invalidating any user dismissal for the
+/// previous key.
 pub async fn transition_by_subject<F>(
     pool: &PgPool,
     category: &str,
@@ -300,7 +313,55 @@ where
         .await
         .context("failed to acquire transition lock")?;
 
-    // Resolve every open occurrence for this subject, regardless of reason.
+    // Inject `reason` into metadata early so both paths preserve it.
+    let mut metadata = metadata;
+    if let serde_json::Value::Object(ref mut map) = metadata {
+        map.insert(
+            "reason".to_string(),
+            serde_json::Value::String(reason.to_string()),
+        );
+    }
+
+    // Check if there is already an open occurrence with the same reason.
+    let existing = sqlx::query(
+        r#"
+        SELECT id
+        FROM attention_occurrences
+        WHERE category = $1
+          AND subject_id = $2
+          AND resolved_at IS NULL
+          AND metadata @> $3::jsonb
+        LIMIT 1
+        FOR UPDATE
+        "#,
+    )
+    .bind(category)
+    .bind(subject_id)
+    .bind(serde_json::json!({"reason": reason}))
+    .fetch_optional(&mut *tx)
+    .await
+    .context("failed to find existing occurrence in transition")?;
+
+    if let Some(row) = existing {
+        let id: Uuid = row.get("id");
+        // Reason matches — just observe the existing occurrence.
+        sqlx::query(
+            "UPDATE attention_occurrences SET last_observed_at = $1, metadata = $2 WHERE id = $3",
+        )
+        .bind(opened_at)
+        .bind(&metadata)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to update occurrence in transition")?;
+        tx.commit()
+            .await
+            .context("failed to commit transition observe")?;
+        return Ok(id);
+    }
+
+    // Reason differs or no occurrence exists — resolve all open occurrences
+    // and insert a new one.
     sqlx::query(
         r#"
         UPDATE attention_occurrences
@@ -316,16 +377,8 @@ where
     .await
     .context("failed to resolve open occurrences in transition")?;
 
-    // Now open the new occurrence for the current reason.
     let episode_id = Uuid::new_v4();
     let source_key = source_key_factory(reason, episode_id);
-    let mut metadata = metadata;
-    if let serde_json::Value::Object(ref mut map) = metadata {
-        map.insert(
-            "reason".to_string(),
-            serde_json::Value::String(reason.to_string()),
-        );
-    }
 
     let row = sqlx::query(
         r#"
@@ -343,7 +396,7 @@ where
     .bind(source_key)
     .bind(opened_at)
     .bind(opened_at)
-    .bind(&metadata)
+    .bind(metadata)
     .fetch_one(&mut *tx)
     .await
     .context("failed to insert transition occurrence")?;
@@ -550,10 +603,9 @@ pub async fn resolve_environment_occurrences_for_system(
 /// visibility from one that genuinely does not exist — both fail with the
 /// same message.
 ///
-/// Every error raised for a caller-supplied key is prefixed with
-/// `"occurrence key '"` so callers (the HTTP handler) can reliably classify
-/// these as client validation errors (400) rather than server errors (500)
-/// without depending on more specific, potentially visibility-leaking text.
+/// Validation is performed as a single set-based query with `ANY($keys)`
+/// rather than one query per supplied key, avoiding up to 1,000 sequential
+/// database round trips for a full badge batch.
 ///
 /// Returns the updated per-category undismissed counts for the user.
 pub async fn dismiss_occurrences(
@@ -567,47 +619,53 @@ pub async fn dismiss_occurrences(
 ) -> Result<NavigationAttentionCounts> {
     validate_category(category)?;
 
+    if occurrence_keys.is_empty() {
+        return count_attention_for_user(pool, user_id, observed_at, is_admin, member_environment_ids)
+            .await;
+    }
+
     let mut tx = pool
         .begin()
         .await
         .context("failed to begin dismissal transaction")?;
 
-    // Validate existence+visibility, category, and cursor for every
-    // requested occurrence key.
+    // Validate all keys in a single query. Returns the rows that exist,
+    // belong to the requested category, and are within the cursor bound.
+    // For non-admin callers, also filter by environment membership.
+    let rows: Vec<(String, chrono::DateTime<Utc>, String, Option<Uuid>)> = sqlx::query_as(
+        r#"
+        SELECT ao.source_occurrence_key, ao.opened_at, ao.subject_id,
+               s.environment_id AS system_environment_id
+        FROM attention_occurrences ao
+        LEFT JOIN systems s
+          ON ao.category = 'systems' AND s.id::text = ao.subject_id
+        WHERE ao.source_occurrence_key = ANY($1)
+          AND ao.category = $2
+          AND ao.opened_at <= $3
+        "#,
+    )
+    .bind(occurrence_keys)
+    .bind(category)
+    .bind(observed_at)
+    .fetch_all(&mut *tx)
+    .await
+    .context("failed to validate occurrence keys for dismissal")?;
+
+    // Verify every requested key is present in the result set. If a key is
+    // missing, it either doesn't exist, belongs to a different category, or
+    // opened after the cursor — indistinguishable to the caller.
+    let validated_keys: std::collections::HashSet<String> =
+        rows.iter().map(|(k, _, _, _)| k.clone()).collect();
     for key in occurrence_keys {
-        let row = sqlx::query(
-            r#"
-            SELECT ao.category, ao.opened_at, ao.subject_id, s.environment_id AS system_environment_id
-            FROM attention_occurrences ao
-            LEFT JOIN systems s
-              ON ao.category = 'systems' AND s.id::text = ao.subject_id
-            WHERE ao.source_occurrence_key = $1
-            "#,
-        )
-        .bind(key)
-        .fetch_optional(&mut *tx)
-        .await
-        .context("failed to look up occurrence for dismissal")?;
-
-        let Some(row) = row else {
-            anyhow::bail!("occurrence key '{}' is not available for dismissal", key);
-        };
-        let occ_category: String = row.get("category");
-        let opened_at: DateTime<Utc> = row.get("opened_at");
-        let subject_id: String = row.get("subject_id");
-        let system_environment_id: Option<Uuid> = row.get("system_environment_id");
-
-        if occ_category != category {
-            anyhow::bail!(
-                "occurrence key '{}' belongs to category {}, expected {}",
-                key,
-                occ_category,
-                category
-            );
+        if !validated_keys.contains(key) {
+            anyhow::bail!("occurrence key '{key}' is not available for dismissal");
         }
+    }
 
-        if !is_admin {
-            let visible = match occ_category.as_str() {
+    // For non-admin users, apply environment-scoped visibility.
+    if !is_admin {
+        for (key, _opened_at, subject_id, system_environment_id) in &rows {
+            let visible = match category {
                 "systems" => system_environment_id
                     .is_some_and(|env_id| member_environment_ids.contains(&env_id)),
                 "environments" => subject_id
@@ -616,54 +674,29 @@ pub async fn dismiss_occurrences(
                 _ => true,
             };
             if !visible {
-                // Deliberately identical to the "not found" message above —
-                // an unauthorized caller must not be able to tell an
-                // out-of-scope occurrence apart from one that does not exist.
-                anyhow::bail!("occurrence key '{}' is not available for dismissal", key);
+                anyhow::bail!("occurrence key '{key}' is not available for dismissal");
             }
-        }
-
-        if opened_at > observed_at {
-            anyhow::bail!(
-                "occurrence key '{}' opened after the observation cursor",
-                key
-            );
         }
     }
 
-    // Resolve keys to occurrence IDs and insert dismissals idempotently.
-    if !occurrence_keys.is_empty() {
-        let ids = occurrence_ids_by_keys(pool, category, occurrence_keys)
-            .await
-            .context("failed to resolve occurrence keys for dismissal")?;
-
-        let mut query = String::from(
-            "INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at) VALUES",
-        );
-        let now = Utc::now();
-        for (idx, _id) in ids.iter().enumerate() {
-            if idx > 0 {
-                query.push(',');
-            }
-            query.push_str(&format!(
-                " (${}, ${}, ${})",
-                idx * 3 + 1,
-                idx * 3 + 2,
-                idx * 3 + 3
-            ));
-        }
-        query.push_str(" ON CONFLICT (user_id, occurrence_id) DO NOTHING");
-
-        let mut q = sqlx::query(&query);
-        for id in ids {
-            q = q.bind(user_id);
-            q = q.bind(id);
-            q = q.bind(now);
-        }
-        q.execute(&mut *tx)
-            .await
-            .context("failed to insert dismissals")?;
-    }
+    // Insert dismissals for all validated occurrence keys in one statement
+    // using INSERT ... SELECT, avoiding individual lookups.
+    sqlx::query(
+        r#"
+        INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at)
+        SELECT $1, ao.id, NOW()
+        FROM attention_occurrences ao
+        WHERE ao.source_occurrence_key = ANY($2)
+          AND ao.category = $3
+        ON CONFLICT (user_id, occurrence_id) DO NOTHING
+        "#,
+    )
+    .bind(user_id)
+    .bind(occurrence_keys)
+    .bind(category)
+    .execute(&mut *tx)
+    .await
+    .context("failed to insert dismissals")?;
 
     tx.commit()
         .await
