@@ -330,7 +330,8 @@ where
 
 // ── Dismissal ───────────────────────────────────────────────────────────────
 
-/// Dismiss a bounded set of occurrences for a user. Each occurrence is validated:
+/// Dismiss a bounded set of occurrences for a user. Each occurrence is supplied
+/// as a canonical source occurrence key and is validated:
 /// * it must belong to the requested category
 /// * it must have been opened at or before the observation cursor
 ///
@@ -340,42 +341,51 @@ pub async fn dismiss_occurrences(
     user_id: Uuid,
     category: &str,
     observed_at: DateTime<Utc>,
-    occurrence_ids: &[Uuid],
+    occurrence_keys: &[String],
     is_admin: bool,
     member_environment_ids: &[Uuid],
 ) -> Result<NavigationAttentionCounts> {
     let mut tx = pool.begin().await.context("failed to begin dismissal transaction")?;
 
-    // Validate category and cursor for every requested occurrence.
-    for id in occurrence_ids {
+    // Validate category and cursor for every requested occurrence key.
+    for key in occurrence_keys {
         let row = sqlx::query(
-            "SELECT category, opened_at FROM attention_occurrences WHERE id = $1",
+            "SELECT category, opened_at FROM attention_occurrences WHERE source_occurrence_key = $1",
         )
-        .bind(id)
+        .bind(key)
         .fetch_optional(&mut *tx)
         .await
         .context("failed to look up occurrence for dismissal")?;
 
         let Some(row) = row else {
-            anyhow::bail!("occurrence {} not found", id);
+            anyhow::bail!("occurrence key '{}' not found", key);
         };
         let occ_category: String = row.get("category");
         let opened_at: DateTime<Utc> = row.get("opened_at");
         if occ_category != category {
-            anyhow::bail!("occurrence {} belongs to category {}, expected {}", id, occ_category, category);
+            anyhow::bail!(
+                "occurrence key '{}' belongs to category {}, expected {}",
+                key,
+                occ_category,
+                category
+            );
         }
         if opened_at > observed_at {
-            anyhow::bail!("occurrence {} opened after the observation cursor", id);
+            anyhow::bail!("occurrence key '{}' opened after the observation cursor", key);
         }
     }
 
-    // Idempotent insert of dismissals.
-    if !occurrence_ids.is_empty() {
+    // Resolve keys to occurrence IDs and insert dismissals idempotently.
+    if !occurrence_keys.is_empty() {
+        let ids = occurrence_ids_by_keys(pool, category, occurrence_keys)
+            .await
+            .context("failed to resolve occurrence keys for dismissal")?;
+
         let mut query = String::from(
             "INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at) VALUES",
         );
         let now = Utc::now();
-        for (idx, _id) in occurrence_ids.iter().enumerate() {
+        for (idx, _id) in ids.iter().enumerate() {
             if idx > 0 {
                 query.push(',');
             }
@@ -384,7 +394,7 @@ pub async fn dismiss_occurrences(
         query.push_str(" ON CONFLICT (user_id, occurrence_id) DO NOTHING");
 
         let mut q = sqlx::query(&query);
-        for id in occurrence_ids {
+        for id in ids {
             q = q.bind(user_id);
             q = q.bind(id);
             q = q.bind(now);

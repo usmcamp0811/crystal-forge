@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::alerts::{
     NAV_BADGES, acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item,
-    should_flash,
+    occurrence_id_for_subject, should_flash,
 };
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
@@ -245,46 +245,17 @@ pub fn SystemsListView() -> Element {
                 // Will be handled by early return below
                 return;
             }
-            let attention_count = result
-                .systems
-                .iter()
-                .filter(|s| {
-                    matches!(
-                        s.health_status,
-                        HealthStatus::Critical | HealthStatus::Offline
-                    )
-                })
-                .count() as i64;
-            let alert_ids = result
-                .systems
-                .iter()
-                .filter(|s| {
-                    matches!(
-                        s.health_status,
-                        HealthStatus::Critical | HealthStatus::Offline
-                    )
-                })
-                .map(system_alert_occurrence_id)
-                .collect::<Vec<_>>();
             let ack_snapshot = {
                 let badges = NAV_BADGES.read_unchecked();
-                (
-                    badges.observed_at.clone(),
-                    badges.systems_fingerprint.clone(),
-                )
+                badges.observed_at.clone()
             };
             local_systems.set(result.systems.clone());
             load_error.set(result.notice.clone());
             loading.set(false);
             if result.notice.is_none() {
-                if let (Some(cursor), fingerprint) = ack_snapshot {
-                    acknowledge_with_cursor_and_ids(
-                        "systems",
-                        attention_count,
-                        cursor,
-                        fingerprint,
-                        Some(alert_ids),
-                    );
+                if let Some(cursor) = ack_snapshot {
+                    let occurrence_ids = NAV_BADGES.read_unchecked().systems_occurrence_ids.clone();
+                    acknowledge_with_cursor_and_ids("systems", cursor, occurrence_ids);
                 }
             }
         }
@@ -913,9 +884,12 @@ pub fn SystemsListView() -> Element {
                             flash: flash_global && matches!(system.health_status, HealthStatus::Critical | HealthStatus::Offline),
                             on_open: {
                                 let system_id = system.id;
-                                let alert_key = system_alert_occurrence_id(&system);
                                 move |_| {
-                                    dismiss_attention_item("systems", &alert_key);
+                                    dismiss_attention_item(
+                                        "systems",
+                                        &system_id.to_string(),
+                                        occurrence_id_for_subject("systems", &system_id.to_string()).as_deref(),
+                                    );
                                     let mut preview_system = preview_system.clone();
                                     spawn(async move {
                                         let detail = load_system_detail_with_fallback(&system_id.to_string()).await;
@@ -978,9 +952,11 @@ pub fn SystemsListView() -> Element {
                         }
                     },
                     on_open: move |id: uuid::Uuid| {
-                        if let Some(system) = filtered_systems.iter().find(|system| system.id == id) {
-                            dismiss_attention_item("systems", &system_alert_occurrence_id(system));
-                        }
+                        dismiss_attention_item(
+                            "systems",
+                            &id.to_string(),
+                            occurrence_id_for_subject("systems", &id.to_string()).as_deref(),
+                        );
                         let mut preview_system = preview_system.clone();
                         spawn(async move {
                             let detail = load_system_detail_with_fallback(&id.to_string()).await;

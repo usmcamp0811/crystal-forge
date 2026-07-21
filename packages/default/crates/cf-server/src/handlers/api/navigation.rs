@@ -92,11 +92,11 @@ pub struct AcknowledgeNavigationCategoryRequest {
     /// was displaying when the user dismissed. Only occurrences opened at or
     /// before this cursor may be dismissed.
     pub observed_at: DateTime<Utc>,
-    /// Exact server canonical occurrence IDs represented by the rendered
-    /// dataset or action. The server validates each id belongs to the requested
+    /// Exact server canonical source occurrence keys represented by the rendered
+    /// dataset or action. The server validates each key belongs to the requested
     /// category and is visible to the requesting user.
     #[serde(default)]
-    pub occurrence_ids: Vec<Uuid>,
+    pub occurrence_ids: Vec<String>,
 }
 
 /// POST /api/v1/navigation/acknowledge

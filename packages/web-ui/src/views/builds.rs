@@ -503,11 +503,6 @@ pub fn BuildsView() -> Element {
         } && (nav_commit.is_empty() || item.commit == nav_commit)
             && (nav_flake.is_empty() || item.flake == nav_flake)
     });
-    let completed_failed_count = build_history
-        .read()
-        .iter()
-        .filter(|item| item.status == BuildStatus::Failed)
-        .count();
     use_effect(move || {
         if active_view() == BuildsTab::Completed
             && !builds_ack_sent()
@@ -516,21 +511,9 @@ pub fn BuildsView() -> Element {
             let Some(cursor) = build_history_ack_cursor.read().clone() else {
                 return;
             };
-            let alert_ids = build_history
-                .read()
-                .iter()
-                .filter(|item| item.status == BuildStatus::Failed)
-                .filter_map(|item| item.job_id.map(|id| id.to_string()))
-                .collect::<Vec<_>>();
+            let occurrence_ids = NAV_BADGES.read().builds_occurrence_ids.clone();
             spawn(async move {
-                if acknowledge_with_cursor_and_ids_async(
-                    "builds",
-                    completed_failed_count as i64,
-                    cursor,
-                    None,
-                    Some(alert_ids),
-                )
-                .await
+                if acknowledge_with_cursor_and_ids_async("builds", cursor, occurrence_ids).await
                 {
                     builds_ack_sent.set(true);
                 }

@@ -20,7 +20,7 @@ use web_sys::{Node, window};
 
 use crate::alerts::{
     NAV_BADGES, acknowledge_locally, acknowledge_with_cursor_and_ids_async, attention_row_class,
-    dismiss_attention_item, should_flash,
+    dismiss_attention_item, occurrence_id_for_subject, should_flash,
 };
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
@@ -3119,21 +3119,6 @@ pub fn FlakesListViewNew() -> Element {
     let synced_count = all_flakes.iter().filter(|f| f.status == "synced").count();
     let syncing_count = all_flakes.iter().filter(|f| f.status == "syncing").count();
     let error_count = all_flakes.iter().filter(|f| f.status == "error").count();
-    let flake_alert_ids = raw_flakes
-        .iter()
-        .filter(|flake| flake.sync_status == "error")
-        .map(|flake| {
-            format!(
-                "flake:{}:{}",
-                flake.id,
-                flake
-                    .last_sync_at
-                    .map(|at| at.timestamp().to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            )
-        })
-        .collect::<Vec<_>>();
-
     // Acknowledge the "flakes" sidebar badge on first visit and trigger attention
     // flash on errored rows (TASK-385).
     let has_flake_errors = error_count > 0;
@@ -3146,18 +3131,13 @@ pub fn FlakesListViewNew() -> Element {
                 if flakes_last_ack_attempt_cursor.read().as_deref() == Some(cursor.as_str()) {
                     return;
                 }
-                let alert_ids = flake_alert_ids.clone();
+                let occurrence_ids = NAV_BADGES.read().flakes_occurrence_ids.clone();
                 flakes_ack_in_flight.set(true);
                 flakes_last_ack_attempt_cursor.set(Some(cursor.clone()));
                 spawn(async move {
-                    let success = acknowledge_with_cursor_and_ids_async(
-                        "flakes",
-                        error_count as i64,
-                        cursor,
-                        None,
-                        Some(alert_ids),
-                    )
-                    .await;
+                    let success =
+                        acknowledge_with_cursor_and_ids_async("flakes", cursor, occurrence_ids)
+                            .await;
                     flakes_ack_in_flight.set(false);
                     if success {
                         flakes_ack_sent.set(true);
@@ -4643,7 +4623,11 @@ fn FlakeTableNew(
                                     style: "cursor: pointer;",
                                     onclick: move |_| {
                                         if is_error {
-                                            dismiss_attention_item("flakes", &flake_key);
+                                            dismiss_attention_item(
+                                                "flakes",
+                                                &flake_id_for_sync.to_string(),
+                                                occurrence_id_for_subject("flakes", &flake_id_for_sync.to_string()).as_deref(),
+                                            );
                                         }
                                         on_select.call(flake_for_select.clone());
                                     },
@@ -4842,7 +4826,11 @@ fn FlakeCardsNew(
                             style: "{border_style}",
                             onclick: move |_| {
                                 if is_error {
-                                    dismiss_attention_item("flakes", &flake_key);
+                                    dismiss_attention_item(
+                                        "flakes",
+                                        &flake_id_for_sync.to_string(),
+                                        occurrence_id_for_subject("flakes", &flake_id_for_sync.to_string()).as_deref(),
+                                    );
                                 }
                                 on_select.call(flake_for_select.clone());
                             },

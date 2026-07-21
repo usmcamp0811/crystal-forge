@@ -6,7 +6,7 @@ use gloo_timers::future::TimeoutFuture;
 
 use crate::alerts::{
     NAV_BADGES, acknowledge_with_cursor_and_ids_async, attention_row_class, dismiss_attention_item,
-    should_flash,
+    occurrence_id_for_subject, should_flash,
 };
 
 use crate::api::{
@@ -350,29 +350,13 @@ fn EvaluationsPage() -> Element {
                 let complete_page = page_data.total_count <= page_data.items.len() as i64
                     || page_data.items.len() as i64 >= FETCH_LIMIT_MAX;
                 if unfiltered_first_page && complete_page {
-                    let history_failed_count = page_data
-                        .items
-                        .iter()
-                        .filter(|item| item.evaluation_status == "failed")
-                        .count() as i64;
                     let Some(cursor) = history_ack_cursor.read().clone() else {
                         return;
                     };
-                    let alert_ids = page_data
-                        .items
-                        .iter()
-                        .filter(|item| item.evaluation_status == "failed")
-                        .map(|item| item.alert_occurrence_id.clone())
-                        .collect::<Vec<_>>();
+                    let occurrence_ids = NAV_BADGES.read().evals_occurrence_ids.clone();
                     spawn(async move {
-                        if acknowledge_with_cursor_and_ids_async(
-                            "evals",
-                            history_failed_count,
-                            cursor,
-                            None,
-                            Some(alert_ids),
-                        )
-                        .await
+                        if acknowledge_with_cursor_and_ids_async("evals", cursor, occurrence_ids)
+                            .await
                         {
                             evals_ack_sent.set(true);
                         }
@@ -1267,7 +1251,11 @@ fn EvalHistory(
                                             style: "cursor: pointer;",
                                             onclick: move |_| {
                                                 if is_failed {
-                                                    dismiss_attention_item("evals", &eval_key);
+                                                    dismiss_attention_item(
+                                                        "evals",
+                                                        &commit_id.to_string(),
+                                                        occurrence_id_for_subject("evals", &commit_id.to_string()).as_deref(),
+                                                    );
                                                 }
                                                 drawer_target.set(Some(EvalDrawerTarget::History(ev_for_row.clone())));
                                             },

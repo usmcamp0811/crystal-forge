@@ -5,7 +5,7 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::{attention_row_class, dismiss_attention_item};
+use crate::alerts::{attention_row_class, dismiss_attention_item, occurrence_id_for_subject};
 
 use super::helpers::{BuildAction, BuildItem, BuildStatus, extract_system_name, short_commit};
 
@@ -135,12 +135,13 @@ pub fn BuildQueuePane(
                             // the stable job_id instead of the synthetic row
                             // index because completed-history rows are
                             // re-indexed whenever ordering changes.
+                            let build_subject_id = build
+                                .job_id
+                                .map(|id| id.to_string())
+                                .unwrap_or_else(|| "missing-job-id".to_string());
                             let build_key = format!(
                                 "{}:{}",
-                                build
-                                    .job_id
-                                    .map(|id| id.to_string())
-                                    .unwrap_or_else(|| "missing-job-id".to_string()),
+                                build_subject_id,
                                 build.completed_at
                                     .map(|t| t.timestamp().to_string())
                                     .unwrap_or_default()
@@ -258,7 +259,11 @@ pub fn BuildQueuePane(
                                             selected_ids.set(Vec::new());
                                         }
                                         if is_failed {
-                                            dismiss_attention_item("builds", &build_key);
+                                            dismiss_attention_item(
+                                                "builds",
+                                                &build_subject_id,
+                                                occurrence_id_for_subject("builds", &build_subject_id).as_deref(),
+                                            );
                                         }
                                         if let Some(job_id) = build.job_id {
                                             selected_id.set(Some(job_id));
