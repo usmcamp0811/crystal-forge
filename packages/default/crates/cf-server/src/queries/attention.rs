@@ -201,12 +201,19 @@ where
     .context("failed to find open attention occurrence")?;
 
     if let Some(id) = row.map(|r| r.get::<Uuid, _>("id")) {
-        sqlx::query("UPDATE attention_occurrences SET last_observed_at = $1 WHERE id = $2")
-            .bind(opened_at)
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .context("failed to update last_observed_at")?;
+        // Update both `last_observed_at` AND `metadata` so re-observing
+        // after an earlier transient failure reflects the latest diagnostic
+        // details (e.g. the most recent sync error message), not the first
+        // one that opened the episode.
+        sqlx::query(
+            "UPDATE attention_occurrences SET last_observed_at = $1, metadata = $2 WHERE id = $3",
+        )
+        .bind(opened_at)
+        .bind(&metadata)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to update last_observed_at and metadata")?;
         tx.commit()
             .await
             .context("failed to commit occurrence update")?;
@@ -248,6 +255,103 @@ where
     tx.commit()
         .await
         .context("failed to commit occurrence insert")?;
+    Ok(id)
+}
+
+/// Atomically transition a subject to a new reason: resolve *all* open
+/// occurrences for the subject (regardless of their current reason), then
+/// open or observe a new occurrence for the given `reason`.
+///
+/// Unlike [`open_or_observe_by_subject`], this uses a reason-independent
+/// lock (`attention_occurrence:{category}:{subject_id}`) so that a
+/// concurrent call to transition the same subject from any reason to any
+/// other reason is serialized. This prevents two concurrent transitions
+/// from racing (e.g. reconciler opens `stale_sync` while the sync itself
+/// fails and opens `sync_error` — without a shared lock they would create
+/// two open occurrences for what is conceptually one incident).
+///
+/// The locked window is also used to refresh metadata unconditionally, so
+/// re-observing after a transition always carries the latest diagnostic
+/// context even when the occurrence was just opened by the same call.
+pub async fn transition_by_subject<F>(
+    pool: &PgPool,
+    category: &str,
+    subject_type: &str,
+    subject_id: &str,
+    reason: &str,
+    opened_at: DateTime<Utc>,
+    metadata: serde_json::Value,
+    source_key_factory: F,
+) -> Result<Uuid>
+where
+    F: FnOnce(&str, Uuid) -> String,
+{
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin transition transaction")?;
+
+    // Reason-independent lock so stale_sync ↔ sync_error transitions are
+    // serialized.
+    let lock_key = format!("attention_occurrence:{category}:{subject_id}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *tx)
+        .await
+        .context("failed to acquire transition lock")?;
+
+    // Resolve every open occurrence for this subject, regardless of reason.
+    sqlx::query(
+        r#"
+        UPDATE attention_occurrences
+        SET resolved_at = NOW()
+        WHERE category = $1
+          AND subject_id = $2
+          AND resolved_at IS NULL
+        "#,
+    )
+    .bind(category)
+    .bind(subject_id)
+    .execute(&mut *tx)
+    .await
+    .context("failed to resolve open occurrences in transition")?;
+
+    // Now open the new occurrence for the current reason.
+    let episode_id = Uuid::new_v4();
+    let source_key = source_key_factory(reason, episode_id);
+    let mut metadata = metadata;
+    if let serde_json::Value::Object(ref mut map) = metadata {
+        map.insert(
+            "reason".to_string(),
+            serde_json::Value::String(reason.to_string()),
+        );
+    }
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO attention_occurrences (
+            category, subject_type, subject_id, source_occurrence_key,
+            opened_at, last_observed_at, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id
+        "#,
+    )
+    .bind(category)
+    .bind(subject_type)
+    .bind(subject_id)
+    .bind(source_key)
+    .bind(opened_at)
+    .bind(opened_at)
+    .bind(&metadata)
+    .fetch_one(&mut *tx)
+    .await
+    .context("failed to insert transition occurrence")?;
+
+    let id = row.get::<Uuid, _>("id");
+    tx.commit()
+        .await
+        .context("failed to commit transition")?;
     Ok(id)
 }
 
@@ -612,6 +716,7 @@ pub async fn count_attention_for_user(
         user_id,
         "builds",
         cutoff,
+        observed_at,
         None,
         is_admin,
         &mut counts_ref.builds_failed_new,
@@ -622,6 +727,7 @@ pub async fn count_attention_for_user(
         user_id,
         "evals",
         cutoff,
+        observed_at,
         None,
         is_admin,
         &mut counts_ref.evals_failed_new,
@@ -632,6 +738,7 @@ pub async fn count_attention_for_user(
         user_id,
         "flakes",
         cutoff,
+        observed_at,
         None,
         is_admin,
         &mut counts_ref.flakes_errored,
@@ -642,6 +749,7 @@ pub async fn count_attention_for_user(
         user_id,
         "cves",
         cutoff,
+        observed_at,
         None,
         is_admin,
         &mut counts_ref.cves_critical_new,
@@ -652,6 +760,7 @@ pub async fn count_attention_for_user(
         user_id,
         "systems",
         cutoff,
+        observed_at,
         Some(&scoped_ids),
         is_admin,
         &mut counts_ref.systems_attention,
@@ -662,6 +771,7 @@ pub async fn count_attention_for_user(
         user_id,
         "environments",
         cutoff,
+        observed_at,
         Some(&scoped_ids),
         is_admin,
         &mut counts_ref.environments_attention,
@@ -676,6 +786,7 @@ async fn count_category(
     user_id: Uuid,
     category: &str,
     cutoff: DateTime<Utc>,
+    observed_at: DateTime<Utc>,
     environment_ids: Option<&[Uuid]>,
     is_admin: bool,
     out: &mut i64,
@@ -689,6 +800,7 @@ async fn count_category(
             WHERE ao.category = 'systems'
               AND ao.resolved_at IS NULL
               AND ao.opened_at >= $1
+              AND ao.opened_at <= $6
               AND NOT EXISTS (
                   SELECT 1 FROM user_attention_dismissals uad
                   WHERE uad.occurrence_id = ao.id AND uad.user_id = $2
@@ -704,6 +816,7 @@ async fn count_category(
             WHERE ao.category = 'environments'
               AND ao.resolved_at IS NULL
               AND ao.opened_at >= $1
+              AND ao.opened_at <= $6
               AND NOT EXISTS (
                   SELECT 1 FROM user_attention_dismissals uad
                   WHERE uad.occurrence_id = ao.id AND uad.user_id = $2
@@ -718,6 +831,7 @@ async fn count_category(
             WHERE ao.category = $5
               AND ao.resolved_at IS NULL
               AND ao.opened_at >= $1
+              AND ao.opened_at <= $6
               AND NOT EXISTS (
                   SELECT 1 FROM user_attention_dismissals uad
                   WHERE uad.occurrence_id = ao.id AND uad.user_id = $2
@@ -733,6 +847,7 @@ async fn count_category(
             .bind(is_admin)
             .bind(envs)
             .bind(category)
+            .bind(observed_at)
             .fetch_one(pool)
             .await?
     } else {
@@ -742,6 +857,7 @@ async fn count_category(
             .bind(is_admin)
             .bind::<Vec<Uuid>>(vec![])
             .bind(category)
+            .bind(observed_at)
             .fetch_one(pool)
             .await?
     };
@@ -773,13 +889,14 @@ pub async fn list_eligible_occurrence_keys(
             WHERE ao.category = 'systems'
               AND ao.resolved_at IS NULL
               AND ao.opened_at >= $1
+              AND ao.opened_at <= $6
               AND NOT EXISTS (
                   SELECT 1 FROM user_attention_dismissals uad
                   WHERE uad.occurrence_id = ao.id AND uad.user_id = $2
               )
               AND ($3 OR s.environment_id = ANY($4))
             ORDER BY ao.opened_at DESC
-            LIMIT 10000
+            LIMIT 1000
             "#
         }
         "environments" => {
@@ -790,13 +907,14 @@ pub async fn list_eligible_occurrence_keys(
             WHERE ao.category = 'environments'
               AND ao.resolved_at IS NULL
               AND ao.opened_at >= $1
+              AND ao.opened_at <= $6
               AND NOT EXISTS (
                   SELECT 1 FROM user_attention_dismissals uad
                   WHERE uad.occurrence_id = ao.id AND uad.user_id = $2
               )
               AND ($3 OR e.id = ANY($4))
             ORDER BY ao.opened_at DESC
-            LIMIT 10000
+            LIMIT 1000
             "#
         }
         _ => {
@@ -806,12 +924,13 @@ pub async fn list_eligible_occurrence_keys(
             WHERE ao.category = $5
               AND ao.resolved_at IS NULL
               AND ao.opened_at >= $1
+              AND ao.opened_at <= $6
               AND NOT EXISTS (
                   SELECT 1 FROM user_attention_dismissals uad
                   WHERE uad.occurrence_id = ao.id AND uad.user_id = $2
               )
             ORDER BY ao.opened_at DESC
-            LIMIT 10000
+            LIMIT 1000
             "#
         }
     };
@@ -823,6 +942,7 @@ pub async fn list_eligible_occurrence_keys(
             .bind(is_admin)
             .bind(envs)
             .bind(category)
+            .bind(observed_at)
             .fetch_all(pool)
             .await?
     } else {
@@ -832,6 +952,7 @@ pub async fn list_eligible_occurrence_keys(
             .bind(is_admin)
             .bind::<Vec<Uuid>>(vec![])
             .bind(category)
+            .bind(observed_at)
             .fetch_all(pool)
             .await?
     };

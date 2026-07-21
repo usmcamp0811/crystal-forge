@@ -169,6 +169,52 @@ async fn reconcile_all_systems(pool: &PgPool) {
     }
 }
 
+/// Resolve open occurrences that are stale due to lifecycle changes:
+///
+/// * System attention occurrences for inactive or deleted systems.
+/// * Environment attention occurrences whose underlying system no longer
+///   belongs to that environment (e.g. a system that moved environments
+///   while its occurrence was still open for the old environment).
+///
+/// Run this after the active-system sweep so deactivated or moved systems
+/// do not leave permanent orphaned occurrences.
+async fn reconcile_stale_occurrences(pool: &PgPool) {
+    // Resolve system occurrences for inactive/missing systems.
+    let _ = sqlx::query(
+        r#"
+        UPDATE attention_occurrences ao
+        SET resolved_at = NOW()
+        FROM systems s
+        WHERE ao.category = 'systems'
+          AND ao.subject_id = s.id::text
+          AND ao.resolved_at IS NULL
+          AND s.is_active = FALSE
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| error!("failed to resolve occurrences for inactive systems: {e:#}"));
+
+    // Resolve environment occurrences where the underlying system no longer
+    // belongs to that environment (e.g. system was moved). We match on the
+    // metadata's underlying_system_id and compare with the system's current
+    // environment_id.
+    let _ = sqlx::query(
+        r#"
+        UPDATE attention_occurrences ao
+        SET resolved_at = NOW()
+        FROM systems s
+        WHERE ao.category = 'environments'
+          AND ao.resolved_at IS NULL
+          AND ao.metadata @> jsonb_build_object('underlying_system_id', s.id::text)
+          AND ao.subject_id != s.environment_id::text
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| error!("failed to resolve stale environment occurrences: {e:#}"));
+}
+
 /// Reconcile attention for flakes stuck in `syncing` past the staleness
 /// threshold, using the same 30-minute predicate as the read-side "Sync
 /// appears stale" detection in `queries::flakes::list_flake_registry`.
@@ -201,7 +247,11 @@ async fn reconcile_stale_flakes(pool: &PgPool) {
     let opened_at = Utc::now();
     for (flake_id,) in rows {
         let subject_id = flake_id.to_string();
-        let result = attention::open_or_observe_by_subject(
+        // Use transition_by_subject to atomically resolve any open flake
+        // occurrence (e.g. a prior sync_error from the same attempt) before
+        // opening the stale_sync occurrence. Without this, a stale_sync that
+        // later fails would leave two simultaneously-open occurrences.
+        let result = attention::transition_by_subject(
             pool,
             "flakes",
             "flake_sync",
@@ -237,7 +287,92 @@ pub async fn run_attention_reconciliation_loop(pool: PgPool) {
         ticker.tick().await;
         reconcile_all_systems(&pool).await;
         reconcile_stale_flakes(&pool).await;
+        reconcile_terminal_events(&pool).await;
+        reconcile_stale_occurrences(&pool).await;
         debug!("Attention reconciliation sweep complete");
+    }
+}
+
+/// Reconcile terminal build failures and evaluation failures that may have
+/// been lost due to a transient database error after the domain transaction
+/// committed — the build/eval status update commits first, then the attention
+/// occurrence insertion is best-effort (error logged and ignored). If that
+/// insertion failed, no reconciliation would otherwise recreate it.
+///
+/// The deterministic key-based helpers (`open_or_observe`) are idempotent:
+/// calling them again for an event that already has an occurrence is a safe
+/// no-op (ON CONFLICT DO UPDATE silently observes the existing row).
+///
+/// Only events from the last 24 hours are considered, matching the attention
+/// window. Bounded to 500 rows per category per sweep.
+async fn reconcile_terminal_events(pool: &PgPool) {
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+
+    // Recent build failures that may be missing their attention occurrence.
+    let builds: Vec<(uuid::Uuid,)> = match sqlx::query_as(
+        "SELECT id FROM build_jobs \
+         WHERE status = 'failed' AND completed_at >= $1 \
+         LIMIT 500",
+    )
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("failed to load recent build failures for reconciliation: {e:#}");
+            return;
+        }
+    };
+
+    for (job_id,) in &builds {
+        let _ = attention::open_or_observe(
+            pool,
+            "builds",
+            "build_job",
+            &job_id.to_string(),
+            &attention::build_occurrence_key(*job_id),
+            chrono::Utc::now(),
+            serde_json::json!({"job_id": job_id.to_string()}),
+        )
+        .await
+        .map_err(|e| warn!("failed to reconcile build attention occurrence: {e:#}"));
+    }
+
+    // Recent evaluation failures that may be missing their attention
+    // occurrence. The occurrence key includes microsecond-precision
+    // completed_at, so we must query both commit_id and completed_at.
+    let evals: Vec<(i32, chrono::DateTime<chrono::Utc>)> = match sqlx::query_as(
+        "SELECT id, evaluation_completed_at FROM commits \
+         WHERE evaluation_status = 'failed' \
+           AND evaluation_completed_at IS NOT NULL \
+           AND evaluation_completed_at >= $1 \
+         LIMIT 500",
+    )
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("failed to load recent eval failures for reconciliation: {e:#}");
+            return;
+        }
+    };
+
+    for (commit_id, completed_at) in &evals {
+        let key = attention::eval_occurrence_key(*commit_id, *completed_at);
+        let _ = attention::open_or_observe(
+            pool,
+            "evals",
+            "commit_eval",
+            &commit_id.to_string(),
+            &key,
+            *completed_at,
+            serde_json::json!({"commit_id": commit_id}),
+        )
+        .await
+        .map_err(|e| warn!("failed to reconcile eval attention occurrence: {e:#}"));
     }
 }
 

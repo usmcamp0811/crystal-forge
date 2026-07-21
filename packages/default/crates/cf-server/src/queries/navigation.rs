@@ -61,6 +61,11 @@ async fn total_flakes(pool: &PgPool) -> Result<i64> {
 /// Attention counts come from eligible undismissed canonical occurrences in the
 /// 24-hour window. Systems and environments are scoped to the requesting user's
 /// environment memberships; admins see the fleet-wide counts.
+///
+/// All count and key queries enforce a bi-directional `opened_at` bound
+/// (`cutoff <= opened_at <= observed_at`) so that occurrences created after
+/// the cursor snapshot do not appear in the results, and the dismissal
+/// endpoint cannot reject them for opening after the cursor.
 pub async fn fetch_navigation_badges(
     pool: &PgPool,
     user_id: Uuid,

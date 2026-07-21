@@ -425,6 +425,11 @@ fn ensure_dismissed_loaded() {
 /// prior one resolved, since the stale local entry would still match. Callers
 /// must pass the same occurrence id (via `occurrence_id_for_subject`) to
 /// [`attention_row_class`]/[`attention_item_active`] so the two stay in sync.
+///
+/// If the server request fails, the optimistic LocalStorage and in-memory
+/// entry are removed so the row reappears on the next render. A previously
+/// dismissed item is not permanently hidden just because the server was
+/// briefly unreachable.
 pub fn dismiss_attention_item(view_key: &str, subject_id: &str, occurrence_id: Option<&str>) {
     ensure_dismissed_loaded();
     let storage_key = dismissed_storage_key();
@@ -436,11 +441,11 @@ pub fn dismiss_attention_item(view_key: &str, subject_id: &str, occurrence_id: O
     // Persist to LocalStorage — best-effort, ignore storage errors silently.
     if let Ok(mut stored) = LocalStorage::get::<Vec<String>>(&storage_key) {
         if !stored.contains(&local_key) {
-            stored.push(local_key);
+            stored.push(local_key.clone());
         }
         let _ = LocalStorage::set(&storage_key, stored);
     } else {
-        let _ = LocalStorage::set(&storage_key, vec![local_key]);
+        let _ = LocalStorage::set(&storage_key, vec![local_key.clone()]);
     }
 
     // Persist the dismissal server-side when we have the canonical key.
@@ -450,8 +455,27 @@ pub fn dismiss_attention_item(view_key: &str, subject_id: &str, occurrence_id: O
     ) {
         let occurrence_id = occurrence_id.to_string();
         let view_key = view_key.to_string();
+        let local_key_for_revert = local_key.clone();
+        let storage_key_for_revert = storage_key.clone();
         spawn(async move {
-            let _ = acknowledge_navigation_category(&view_key, &observed_at, &[occurrence_id]).await;
+            let result =
+                acknowledge_navigation_category(&view_key, &observed_at, &[occurrence_id]).await;
+            if result.is_ok() {
+                if let Ok(fresh_badges) = get_navigation_badges().await {
+                    *NAV_BADGES.write() = fresh_badges;
+                }
+            } else {
+                // Server request failed — revert the optimistic LocalStorage
+                // and in-memory entry so the row reappears on next render.
+                let mut state = ALERT_STATE.write();
+                state.dismissed_items.remove(&local_key_for_revert);
+                if let Ok(mut stored) =
+                    LocalStorage::get::<Vec<String>>(&storage_key_for_revert)
+                {
+                    stored.retain(|k| k != &local_key_for_revert);
+                    let _ = LocalStorage::set(&storage_key_for_revert, stored);
+                }
+            }
         });
     }
 }

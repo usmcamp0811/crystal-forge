@@ -343,13 +343,14 @@ fn EvaluationsPage() -> Element {
             if let Some(Ok(page_data)) = history_resource.read().as_ref() {
                 let unfiltered_first_page =
                     history_status_filter() == "all" && history_flake_filter() == "all";
-                // Acknowledge when the page is complete OR when we've reached the
-                // frontend fetch limit (10,000 rows). Beyond that cap, the UI cannot
-                // load more history, so acknowledge what we have rather than blocking
-                // acknowledgement permanently (review finding #2).
-                let complete_page = page_data.total_count <= page_data.items.len() as i64
-                    || page_data.items.len() as i64 >= FETCH_LIMIT_MAX;
-                if unfiltered_first_page && complete_page {
+                // Acknowledge occurrences for whatever is currently rendered,
+                // without waiting for the full history to load. Each rendered
+                // window acknowledges only the occurrences whose subjects are
+                // present in `history_items_acc`, so failures beyond the visible
+                // page are not silently consumed. The async acknowledgment has
+                // built-in payload deduplication, so redundant calls when the
+                // history resource refreshes with the same data are no-ops.
+                if unfiltered_first_page && !page_data.items.is_empty() {
                     let Some(cursor) = history_ack_cursor.read().clone() else {
                         return;
                     };
