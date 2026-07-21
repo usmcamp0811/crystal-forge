@@ -66,6 +66,52 @@ pub async fn insert_commit_with_metadata(
     Ok(if result.is_some() { 1 } else { 0 })
 }
 
+/// Advisory lock key space for per-flake sync/reset serialization.
+/// The key is `SYNC_LOCK_BASE + flake_id`.
+pub const SYNC_LOCK_BASE: i64 = 1_700_000;
+
+/// Insert a commit by flake_id inside an open transaction.
+///
+/// Uses `flake_id` directly (no `repo_url` lookup), so the caller can verify
+/// source identity before calling this function.  Returns 1 if inserted, 0 if
+/// `ON CONFLICT DO NOTHING` fired.
+pub async fn insert_commit_by_flake_id_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    flake_id: i32,
+    commit_hash: &str,
+    commit_timestamp: chrono::DateTime<chrono::Utc>,
+    message: Option<&str>,
+    author: Option<&str>,
+) -> Result<u64> {
+    let result = sqlx::query_scalar::<_, i32>(
+        r#"
+        WITH queue_lock AS (
+            SELECT pg_advisory_xact_lock($6)
+        ),
+        next_position AS (
+            SELECT COALESCE(MAX(eval_queue_position), 0) + 1 AS position
+            FROM commits
+            WHERE COALESCE(evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling')
+        )
+        INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, message, author, eval_queue_position)
+        SELECT $1, $2, $3, $4, $5, position
+        FROM next_position, queue_lock
+        ON CONFLICT DO NOTHING
+        RETURNING 1
+        "#,
+    )
+    .bind(flake_id)
+    .bind(commit_hash)
+    .bind(commit_timestamp)
+    .bind(message)
+    .bind(author)
+    .bind(EVAL_QUEUE_ADVISORY_LOCK_KEY)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(if result.is_some() { 1 } else { 0 })
+}
+
 pub async fn get_commit_by_hash(pool: &PgPool, commit_hash: &str) -> Result<Commit> {
     let commit = sqlx::query_as::<_, Commit>("SELECT * FROM commits WHERE git_commit_hash = $1")
         .bind(commit_hash)

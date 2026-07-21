@@ -132,7 +132,7 @@ pub async fn fetch_and_insert_recent_commits_with_creds(
 
     let mut inserted = Vec::new();
     for commit_data in commits {
-        if let Err(e) = insert_commit_with_metadata(
+        match insert_commit_with_metadata(
             pool,
             &commit_data.hash,
             repo_url,
@@ -142,9 +142,9 @@ pub async fn fetch_and_insert_recent_commits_with_creds(
         )
         .await
         {
-            warn!("Failed to insert commit {}: {}", commit_data.hash, e);
-        } else {
-            inserted.push(commit_data.hash);
+            Ok(n) if n > 0 => inserted.push(commit_data.hash),
+            Ok(_) => {}
+            Err(e) => warn!("Failed to insert commit {}: {}", commit_data.hash, e),
         }
     }
 
@@ -334,21 +334,27 @@ pub async fn sync_flake_recorded(
     repo_url: &str,
     branch: &str,
 ) -> Result<u64> {
+    use crate::queries::commits::{SYNC_LOCK_BASE, insert_commit_by_flake_id_tx};
+
     let attempt_id = Uuid::new_v4();
 
-    // Mark syncing and persist the attempt token.
+    // Guard the syncing mark on both id AND the current repo_url/branch.
+    // This prevents marking a freshly-reset flake as syncing with stale args.
     let start_result = sqlx::query(
         "UPDATE flakes \
          SET sync_status = 'syncing', last_sync_at = now(), last_sync_error = NULL, \
              sync_attempt_id = $2 \
-         WHERE id = $1 AND deleted_at IS NULL",
+         WHERE id = $1 AND deleted_at IS NULL \
+           AND repo_url = $3 AND branch = $4",
     )
     .bind(flake_id)
     .bind(attempt_id)
+    .bind(repo_url)
+    .bind(branch)
     .execute(pool)
     .await?;
     if start_result.rows_affected() != 1 {
-        bail!("flake {flake_id} disappeared before sync could start");
+        bail!("flake {flake_id} not found or repo_url/branch changed before sync could start");
     }
 
     let creds = FlakeCredentialEnv::load(pool, flake_id)
@@ -358,94 +364,147 @@ pub async fn sync_flake_recorded(
             None
         });
 
-    // Run the sync.  sync_commits_for_repo_inner returns the ordered commit
-    // hashes from the same Git observation used for insertion (no second clone).
-    let inserted_count: u64;
-    let ordered_hashes: Vec<String>;
-
-    match sync_commits_for_repo_inner(pool, repo_url, branch, creds.as_ref()).await {
-        Ok((count, hashes)) => {
-            inserted_count = count;
-            ordered_hashes = hashes;
-        }
+    // Phase 1: Git work — clone, log, force-push detection.  No DB writes.
+    let commits = match collect_git_commits(pool, flake_id, repo_url, branch, creds.as_ref()).await
+    {
+        Ok(c) => c,
         Err(e) => {
             record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
-            return Err(e);
-        }
-    }
-
-    // Resolve ordered hashes to DB IDs (contiguous prefix, HEAD must resolve).
-    // If HEAD does not resolve, this is a sync failure — the remote HEAD was
-    // not inserted, so no snapshot should be published.
-    let resolved = match resolve_ordered_ids(pool, flake_id, &ordered_hashes).await {
-        Ok(ids) => ids,
-        Err(e) => {
-            error!(
-                "Failed to resolve ordered commit IDs for snapshot \
-                 (flake {flake_id}): {e:#}; recording sync error"
-            );
-            let truncated = sanitize_and_truncate_sync_error(
-                repo_url,
-                &format!("Failed to resolve commit IDs for snapshot: {e:#}"),
-                4000,
-            );
-            let _ = sqlx::query(
-                "UPDATE flakes \
-                 SET sync_status = 'error', last_sync_at = now(), last_sync_error = $2 \
-                 WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $3",
-            )
-            .bind(flake_id)
-            .bind(&truncated)
-            .bind(attempt_id)
-            .execute(pool)
-            .await;
             return Err(e);
         }
     };
 
-    // Re-check that the flake hasn't been reset (repo_url/branch changed or
-    // sync_attempt_id cleared) while we were cloning.  If a concurrent
-    // reset_flake_source() ran, it would have cleared sync_attempt_id and
-    // possibly changed the branch — our attempt is then stale and must abort.
-    match sqlx::query_as::<_, (String, Option<uuid::Uuid>)>(
-        "SELECT branch, sync_attempt_id FROM flakes WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(flake_id)
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(Some((current_branch, current_attempt_id))) => {
-            if current_branch != branch || current_attempt_id != Some(attempt_id) {
-                info!(
-                    "Flake {flake_id} was reset during sync (branch changed or \
-                     sync_attempt_id invalidated); aborting snapshot publication"
-                );
-                return Ok(inserted_count);
-            }
-        }
-        Ok(None) => {
-            info!("Flake {flake_id} disappeared during sync; aborting");
-            return Ok(inserted_count);
-        }
-        Err(e) => {
-            error!("Failed to re-check flake state after sync (flake {flake_id}): {e:#}");
-            record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
-            return Err(e.into());
-        }
-    }
+    let ordered_hashes: Vec<String> = commits.iter().map(|c| c.hash.clone()).collect();
 
-    // Publish sync_status AND snapshot atomically in one transaction.
-    // Both must succeed together — otherwise we roll back and record error.
+    // Phase 2: Acquire the per-flake advisory lock, then perform ALL database
+    // mutations (insert commits, replace snapshot, update status) in ONE
+    // transaction.  reset_flake_source() acquires the same lock, so this
+    // transaction cannot race with a concurrent source reset.
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
-            error!("Failed to begin status/snapshot tx (flake {flake_id}): {e:#}");
+            error!("Failed to begin mutation tx (flake {flake_id}): {e:#}");
             record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
             return Err(e.into());
         }
     };
 
-    let update_result = sqlx::query(
+    // Acquire the per-flake advisory lock (transaction-scoped).
+    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_LOCK_BASE + i64::from(flake_id))
+        .execute(&mut *tx)
+        .await
+    {
+        error!("Failed to acquire advisory lock (flake {flake_id}): {e:#}");
+        let _ = tx.rollback().await;
+        record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+        return Err(e.into());
+    }
+
+    // Recheck inside the lock: if a reset ran before we got the lock,
+    // the attempt_id or branch would have changed.
+    let current_state = sqlx::query_as::<_, (String, Option<uuid::Uuid>)>(
+        "SELECT branch, sync_attempt_id FROM flakes WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(flake_id)
+    .fetch_optional(&mut *tx)
+    .await;
+
+    match current_state {
+        Ok(Some((cur_branch, cur_attempt))) => {
+            if cur_branch != branch || cur_attempt != Some(attempt_id) {
+                info!("Flake {flake_id} was reset or superseded before lock; aborting");
+                let _ = tx.rollback().await;
+                return Ok(0);
+            }
+        }
+        Ok(None) => {
+            let _ = tx.rollback().await;
+            bail!("Flake {flake_id} disappeared before mutation tx");
+        }
+        Err(e) => {
+            error!("Recheck failed (flake {flake_id}): {e:#}");
+            let _ = tx.rollback().await;
+            record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+            return Err(e.into());
+        }
+    }
+
+    // Pre-filter existing hashes inside the lock so concurrent syncs don't race.
+    let candidate_hashes: Vec<&str> = commits.iter().map(|c| c.hash.as_str()).collect();
+    let existing: std::collections::HashSet<String> = if candidate_hashes.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        match sqlx::query_scalar::<_, String>(
+            "SELECT git_commit_hash FROM commits WHERE flake_id = $1 AND git_commit_hash = ANY($2)",
+        )
+        .bind(flake_id)
+        .bind(&candidate_hashes)
+        .fetch_all(&mut *tx)
+        .await
+        {
+            Ok(rows) => rows.into_iter().collect(),
+            Err(e) => {
+                error!("Pre-filter query failed (flake {flake_id}): {e:#}");
+                let _ = tx.rollback().await;
+                record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+                return Err(e.into());
+            }
+        }
+    };
+
+    // Insert missing commits inside the transaction using flake_id directly.
+    let mut inserted_count: u64 = 0;
+    for commit_data in &commits {
+        if existing.contains(&commit_data.hash) {
+            continue;
+        }
+        match insert_commit_by_flake_id_tx(
+            &mut tx,
+            flake_id,
+            &commit_data.hash,
+            commit_data.timestamp,
+            Some(&commit_data.message),
+            Some(&commit_data.author),
+        )
+        .await
+        {
+            Ok(n) => inserted_count += n,
+            Err(e) => {
+                error!(
+                    "Insert failed for {} (flake {flake_id}): {e:#}",
+                    commit_data.hash
+                );
+                let _ = tx.rollback().await;
+                record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+                return Err(e);
+            }
+        }
+    }
+
+    // Resolve ordered hashes to DB IDs inside the tx (committed rows visible now).
+    let resolved = match resolve_ordered_ids_tx(&mut tx, flake_id, &ordered_hashes).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            error!("ID resolution failed (flake {flake_id}): {e:#}");
+            let _ = tx.rollback().await;
+            record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+            return Err(e);
+        }
+    };
+
+    // Replace snapshot.
+    if let Err(e) =
+        crate::queries::flakes::replace_flake_branch_snapshot(&mut tx, flake_id, &resolved).await
+    {
+        error!("Snapshot publication failed (flake {flake_id}): {e:#}");
+        let _ = tx.rollback().await;
+        record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+        return Err(e);
+    }
+
+    // Update final sync status inside the same transaction.
+    let status_update = sqlx::query(
         "UPDATE flakes \
          SET sync_status = 'synced', last_sync_at = now(), last_sync_error = NULL \
          WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $2",
@@ -455,42 +514,37 @@ pub async fn sync_flake_recorded(
     .execute(&mut *tx)
     .await;
 
-    let status_applied = match update_result {
-        Ok(upd) => upd.rows_affected() == 1,
+    match status_update {
+        Ok(upd) if upd.rows_affected() == 1 => {}
+        Ok(_) => {
+            // Superseded — a newer attempt was started. Roll back.
+            info!("Flake {flake_id} sync was superseded before status commit; aborting");
+            let _ = tx.rollback().await;
+            return Ok(inserted_count);
+        }
         Err(e) => {
-            // Genuine SQL error — not a superseded attempt.
-            error!("Failed to update sync_status=synced (flake {flake_id}): {e:#}");
+            error!("Status update failed (flake {flake_id}): {e:#}");
             let _ = tx.rollback().await;
             record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
             return Err(e.into());
         }
-    };
-
-    if !status_applied {
-        // rows_affected() == 0 means the attempt_id was overwritten by
-        // a newer sync attempt. This is genuinely superseded — no error.
-        let _ = tx.rollback().await;
-        return Ok(inserted_count);
     }
 
-    // Publish snapshot in the same transaction.
-    if let Err(e) =
-        crate::queries::flakes::replace_flake_branch_snapshot(&mut tx, flake_id, &resolved).await
-    {
-        error!(
-            "Snapshot publication failed (flake {flake_id}), \
-             rolling back status update and recording error: {e:#}"
-        );
-        let _ = tx.rollback().await;
-        record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
-        return Err(e);
-    }
-
-    // Commit status + snapshot together.
+    // Commit everything: inserts + snapshot + status.
     if let Err(e) = tx.commit().await {
-        error!("Failed to commit status/snapshot tx (flake {flake_id}): {e:#}");
+        error!("Commit failed (flake {flake_id}): {e:#}");
         record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
         return Err(e.into());
+    }
+
+    if inserted_count > 0 {
+        info!(
+            "✅ Synced {} ({}): {} new commits ({} in git log)",
+            repo_url,
+            branch,
+            inserted_count,
+            ordered_hashes.len()
+        );
     }
 
     Ok(inserted_count)
@@ -576,6 +630,55 @@ async fn resolve_ordered_ids(
     }
 
     // Build contiguous prefix: iterate from HEAD forward, stop at first gap.
+    let mut ids = Vec::with_capacity(ordered_hashes.len());
+    for hash in ordered_hashes {
+        match map.get(hash.as_str()) {
+            Some(id) => ids.push(*id),
+            None => break,
+        }
+    }
+
+    Ok(ids)
+}
+
+/// Like `resolve_ordered_ids` but runs inside an open transaction so newly
+/// inserted commits are visible without waiting for a commit.
+async fn resolve_ordered_ids_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    flake_id: i32,
+    ordered_hashes: &[String],
+) -> Result<Vec<i32>> {
+    if ordered_hashes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let hash_slice: Vec<&str> = ordered_hashes.iter().map(|h| h.as_str()).collect();
+    let rows: Vec<(String, i32)> = sqlx::query_as(
+        r#"
+        SELECT git_commit_hash, id
+        FROM commits
+        WHERE flake_id = $1
+          AND git_commit_hash = ANY($2)
+        "#,
+    )
+    .bind(flake_id)
+    .bind(&hash_slice)
+    .fetch_all(&mut **tx)
+    .await
+    .context("Failed to resolve commit hashes for snapshot")?;
+
+    let map: std::collections::HashMap<&str, i32> =
+        rows.iter().map(|(h, id)| (h.as_str(), *id)).collect();
+
+    let head = &ordered_hashes[0];
+    if !map.contains_key(head.as_str()) {
+        bail!(
+            "HEAD commit {} was not inserted into the database after sync (flake {})",
+            head,
+            flake_id
+        );
+    }
+
     let mut ids = Vec::with_capacity(ordered_hashes.len());
     for hash in ordered_hashes {
         match map.get(hash.as_str()) {
@@ -680,6 +783,75 @@ fn redact_url_credentials(input: &str) -> String {
     url.to_string()
 }
 
+/// Fetch commits from the remote and run force-push detection.  Does NOT insert.
+///
+/// Returns the commits in Git log order (HEAD first) so the caller can insert
+/// them inside a guarded transaction that holds the per-flake advisory lock.
+async fn collect_git_commits(
+    pool: &PgPool,
+    flake_id: i32,
+    repo_url: &str,
+    branch: &str,
+    creds: Option<&FlakeCredentialEnv>,
+) -> Result<Vec<CommitData>> {
+    let max = MAX_SNAPSHOT_COMMITS as usize;
+    let (commits, clone_dir) =
+        get_commits_with_full_metadata_and_dir(repo_url, branch, Some(max), None, creds)
+            .await
+            .with_context(|| format!("Failed to list commits for {repo_url} on {branch}"))?;
+    let clone_path = clone_dir.path().to_owned();
+    let ordered_hashes: Vec<String> = commits.iter().map(|c| c.hash.clone()).collect();
+
+    // Force-push detection using the authoritative snapshot HEAD (position 0),
+    // not the timestamp-max commit.  DB error propagates as sync failure.
+    let previous_head: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT c.git_commit_hash
+        FROM flake_branch_commit_snapshot fbcs
+        JOIN commits c ON c.id = fbcs.commit_id
+        WHERE fbcs.flake_id = $1
+          AND fbcs.position = 0
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to read previous snapshot HEAD")?;
+
+    if let Some(ref prev) = previous_head {
+        if let Some(ref head) = ordered_hashes.first() {
+            if *head != prev && !ordered_hashes.contains(prev) {
+                let is_ancestor =
+                    check_git_ancestry_in_clone(&clone_path, prev, head, branch, creds).await?;
+                if !is_ancestor {
+                    warn!(
+                        repo_url = %repo_url,
+                        branch = %branch,
+                        previous_head = %prev,
+                        remote_head = %head,
+                        "history_rewrite_detected via missing snapshot HEAD"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "{}: remote history diverged for {} on {}. \
+                         Previous HEAD {} is no longer in branch history. \
+                         Accept rewrite via POST /api/v1/flakes/:id/accept-rewrite \
+                         before syncing again. Remote HEAD is {}.",
+                        HISTORY_REWRITE_ERROR_MARKER,
+                        repo_url,
+                        branch,
+                        prev,
+                        head,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Keep the TempDir alive until we're done with force-push detection.
+    drop(clone_dir);
+    Ok(commits)
+}
+
 /// Run a full sync for a repository and return (inserted_count, ordered_hashes).
 ///
 /// The ordered hashes are from `git log --max-count=MAX_SNAPSHOT_COMMITS` in Git
@@ -696,9 +868,12 @@ async fn sync_commits_for_repo_inner(
     creds: Option<&FlakeCredentialEnv>,
 ) -> Result<(u64, Vec<String>)> {
     let max = MAX_SNAPSHOT_COMMITS as usize;
-    let commits = get_commits_with_full_metadata(repo_url, branch, Some(max), None, creds)
-        .await
-        .with_context(|| format!("Failed to list commits for {repo_url} on {branch}"))?;
+    // Retain the temp_dir so the clone stays alive for ancestry verification.
+    let (commits, _clone_dir) =
+        get_commits_with_full_metadata_and_dir(repo_url, branch, Some(max), None, creds)
+            .await
+            .with_context(|| format!("Failed to list commits for {repo_url} on {branch}"))?;
+    let clone_path = _clone_dir.path().to_owned();
 
     let ordered_hashes: Vec<String> = commits.iter().map(|c| c.hash.clone()).collect();
 
@@ -719,7 +894,7 @@ async fn sync_commits_for_repo_inner(
     .bind(repo_url)
     .fetch_optional(pool)
     .await
-    .unwrap_or(None);
+    .context("Failed to read previous snapshot HEAD")?;
 
     if let Some(ref prev) = previous_head {
         let current_head = ordered_hashes.first().cloned();
@@ -731,11 +906,12 @@ async fn sync_commits_for_repo_inner(
                 // Verify ancestry against the exact observed HEAD from the
                 // first clone — not a second clone's potentially different HEAD.
                 let observed = ordered_hashes.first().cloned();
+                // Propagate ancestry verification errors as sync failures so
+                // transient failures do not appear as history rewrites.
                 let is_ancestor = match observed {
                     Some(ref observed_head) => {
-                        check_git_ancestry_deep(repo_url, branch, prev, observed_head, creds)
-                            .await
-                            .unwrap_or(false)
+                        check_git_ancestry_in_clone(&clone_path, prev, observed_head, branch, creds)
+                            .await?
                     }
                     None => false,
                 };
@@ -816,43 +992,20 @@ async fn sync_commits_for_repo_inner(
     Ok((inserted_count, ordered_hashes))
 }
 
-/// Check whether `ancestor_hash` is an ancestor of `observed_head` using a
-/// deepened clone.  The observed HEAD is from the sync's own git log, not a
-/// second clone's potentially different HEAD.
-async fn check_git_ancestry_deep(
-    repo_url: &str,
-    branch: &str,
+/// Check whether `ancestor_hash` is an ancestor of `observed_head` using the
+/// SAME clone directory that produced the git log.  This avoids a second clone
+/// and ensures both hashes come from the same Git observation.
+///
+/// Deepens the existing shallow clone (with credentials) until the ancestor
+/// commit is reachable, then runs `git merge-base --is-ancestor`.
+/// Exit code 0 = is ancestor; 1 = not an ancestor; other = propagated Err.
+async fn check_git_ancestry_in_clone(
+    clone_path: &std::path::Path,
     ancestor_hash: &str,
     observed_head: &str,
+    branch: &str,
     creds: Option<&FlakeCredentialEnv>,
 ) -> Result<bool> {
-    let git_url = normalize_repo_url_for_git(repo_url, creds);
-    let temp_dir = tempfile::tempdir().context("Failed to create temp dir for ancestry check")?;
-    let clone_path = temp_dir.path();
-
-    // Clone the exact observed HEAD with a bounded depth.
-    let mut clone = tokio::process::Command::new("git");
-    clone.args([
-        "clone",
-        "--depth",
-        "1000",
-        "--branch",
-        branch,
-        "--single-branch",
-        &git_url,
-        ".",
-    ]);
-    apply_optional_creds(&mut clone, creds);
-    clone.current_dir(clone_path);
-    let out = timeout(GIT_PROBE_TIMEOUT, clone.output())
-        .await
-        .with_context(|| "Timed out cloning for ancestry check")?
-        .with_context(|| "Failed to clone for ancestry check")?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        bail!("Git clone failed for ancestry check on {repo_url}: {stderr}");
-    }
-
     fn commit_exists(clone_path: &std::path::Path, hash: &str) -> Result<bool> {
         let out = std::process::Command::new("git")
             .args(["cat-file", "-t", hash])
@@ -862,42 +1015,52 @@ async fn check_git_ancestry_deep(
         Ok(out.status.success())
     }
 
-    // Loop deepen: keep increasing depth until the ancestor is found or
-    // we reach a practical limit.  Each iteration deepens by 2000 commits.
-    let mut total_depth = 1000u32;
+    // Deepen the clone (with credentials) until the ancestor is reachable or
+    // we exhaust history.  Each call adds 2 000 commits.
+    let mut added = 0u32;
     while !commit_exists(clone_path, ancestor_hash)? {
-        total_depth += 2000;
-        let deepen = tokio::process::Command::new("git")
-            .args([
-                "fetch",
-                &format!("--deepen={}", total_depth),
-                "origin",
-                branch,
-            ])
-            .current_dir(clone_path)
+        added += 2000;
+        let mut deepen = tokio::process::Command::new("git");
+        deepen.args(["fetch", "--deepen=2000", "origin", branch]);
+        apply_optional_creds(&mut deepen, creds);
+        deepen.current_dir(clone_path);
+        let out = deepen
             .output()
             .await
             .with_context(|| "Failed to deepen clone for ancestry check")?;
-        if !deepen.status.success() {
-            let stderr = String::from_utf8_lossy(&deepen.stderr);
-            warn!("Git deepen failed at depth {total_depth} for {repo_url}: {stderr}");
-            return Ok(false);
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            bail!("Git deepen failed during ancestry check: {}", stderr.trim());
         }
-        if total_depth > 20000 {
-            warn!("Exceeded max deepen depth (20000) for ancestry check on {repo_url}");
-            return Ok(false);
+        if added >= 20_000 {
+            bail!(
+                "Ancestor {} not found after 20 000 commits of deepening; \
+                 ancestry check inconclusive",
+                ancestor_hash
+            );
         }
     }
 
-    // Run git merge-base --is-ancestor against the exact observed HEAD.
-    let mb = tokio::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", ancestor_hash, observed_head])
-        .current_dir(clone_path)
+    let mut mb = tokio::process::Command::new("git");
+    mb.args(["merge-base", "--is-ancestor", ancestor_hash, observed_head]);
+    mb.current_dir(clone_path);
+    let out = mb
         .output()
         .await
-        .with_context(|| "Failed to run merge-base for ancestry check")?;
+        .with_context(|| "Failed to spawn git merge-base for ancestry check")?;
 
-    Ok(mb.status.success())
+    match out.status.code() {
+        Some(0) => Ok(true),  // is ancestor — normal fast-forward
+        Some(1) => Ok(false), // not an ancestor — rewrite
+        code => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            bail!(
+                "git merge-base exited with unexpected code {:?}: {}",
+                code,
+                stderr.trim()
+            )
+        }
+    }
 }
 
 /// Resolve the remote default branch name for a repository.
@@ -1045,13 +1208,16 @@ struct CommitData {
     author: String,
 }
 
-async fn get_commits_with_full_metadata(
+/// Like `get_commits_with_full_metadata` but also returns the temporary clone
+/// directory so the caller can run additional git operations (e.g. ancestry
+/// verification) on the SAME clone without creating a second network request.
+async fn get_commits_with_full_metadata_and_dir(
     repo_url: &str,
     branch: &str,
     limit: Option<usize>,
     since_commit: Option<&str>,
     creds: Option<&FlakeCredentialEnv>,
-) -> Result<Vec<CommitData>> {
+) -> Result<(Vec<CommitData>, tempfile::TempDir)> {
     let git_url = normalize_repo_url_for_git(repo_url, creds);
     let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
     let clone_path = temp_dir.path();
@@ -1158,7 +1324,21 @@ async fn get_commits_with_full_metadata(
         })
         .collect();
 
-    commits
+    Ok((commits?, temp_dir))
+}
+
+/// Convenience wrapper that discards the temporary clone directory.
+async fn get_commits_with_full_metadata(
+    repo_url: &str,
+    branch: &str,
+    limit: Option<usize>,
+    since_commit: Option<&str>,
+    creds: Option<&FlakeCredentialEnv>,
+) -> Result<Vec<CommitData>> {
+    let (commits, _dir) =
+        get_commits_with_full_metadata_and_dir(repo_url, branch, limit, since_commit, creds)
+            .await?;
+    Ok(commits)
 }
 
 /// Read recent commit hashes from the remote branch in source-of-truth order.

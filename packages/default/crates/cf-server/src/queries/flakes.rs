@@ -367,6 +367,18 @@ pub async fn reset_flake_source(
     branch: &str,
     build_scope: &str,
 ) -> Result<Flake> {
+    use crate::queries::commits::SYNC_LOCK_BASE;
+
+    // 0. Acquire the per-flake advisory lock that serializes source reset
+    //    with sync_flake_recorded's publication transaction.  This prevents
+    //    an in-flight old-branch sync from inserting commits or publishing its
+    //    snapshot after the reset changes the branch identity.
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_LOCK_BASE + i64::from(flake_id))
+        .execute(&mut **tx)
+        .await
+        .context("Failed to acquire per-flake advisory lock for source reset")?;
+
     // 1. Clear snapshot
     sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
         .bind(flake_id)
@@ -422,11 +434,21 @@ pub async fn reset_flake_source(
         .await
         .context("Failed to clear commits during source reset")?;
 
-    // 3. Update flake identity
+    // 3+4. Update flake identity and reset all sync/snapshot state atomically.
+    //      Combining these into one UPDATE ensures the RETURNING row reflects
+    //      the final state, not an intermediate one.
     let flake = sqlx::query_as::<_, Flake>(
         r#"
         UPDATE flakes
-        SET name = $1, repo_url = $2, branch = $3, build_scope = $4
+        SET name             = $1,
+            repo_url         = $2,
+            branch           = $3,
+            build_scope      = $4,
+            snapshot_ready_at = now(),
+            sync_attempt_id  = NULL,
+            sync_status      = 'unknown',
+            last_sync_at     = NULL,
+            last_sync_error  = NULL
         WHERE id = $5 AND deleted_at IS NULL
         RETURNING *
         "#,
@@ -438,25 +460,7 @@ pub async fn reset_flake_source(
     .bind(flake_id)
     .fetch_one(&mut **tx)
     .await
-    .context("Failed to update flake identity during source reset")?;
-
-    // 4. Set empty ready snapshot, invalidate any in-flight sync attempt, and
-    //    reset sync state to unsynchronized.  Clearing sync_attempt_id prevents
-    //    a concurrently running old-branch sync from publishing; resetting
-    //    sync_status/errors ensures the new branch isn't shown as synced.
-    sqlx::query(
-        "UPDATE flakes \
-         SET snapshot_ready_at = now(), \
-             sync_attempt_id = NULL, \
-             sync_status = 'unknown', \
-             last_sync_at = NULL, \
-             last_sync_error = NULL \
-         WHERE id = $1",
-    )
-    .bind(flake_id)
-    .execute(&mut **tx)
-    .await
-    .context("Failed to set empty ready snapshot during source reset")?;
+    .context("Failed to update flake identity and reset state during source reset")?;
 
     Ok(flake)
 }
