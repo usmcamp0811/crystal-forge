@@ -93,7 +93,7 @@ pub async fn fetch_and_insert_recent_commits(
 
     let mut inserted = Vec::new();
     for commit_data in commits {
-        if let Err(e) = insert_commit_with_metadata(
+        match insert_commit_with_metadata(
             pool,
             &commit_data.hash,
             repo_url,
@@ -103,9 +103,9 @@ pub async fn fetch_and_insert_recent_commits(
         )
         .await
         {
-            warn!("Failed to insert commit {}: {}", commit_data.hash, e);
-        } else {
-            inserted.push(commit_data.hash);
+            Ok(n) if n > 0 => inserted.push(commit_data.hash),
+            Ok(_) => {}
+            Err(e) => warn!("Failed to insert commit {}: {}", commit_data.hash, e),
         }
     }
 
@@ -221,7 +221,7 @@ pub async fn initialize_flake_commits(
 pub async fn sync_all_watched_flakes_commits(
     pool: &PgPool,
     watched_flakes: &[config::WatchedFlake],
-) -> Result<usize> {
+) -> Result<u64> {
     sync_all_watched_flakes_commits_inner(pool, watched_flakes, &[]).await
 }
 
@@ -232,7 +232,7 @@ pub async fn sync_all_watched_flakes_commits_with_ids(
     pool: &PgPool,
     watched_flakes: &[config::WatchedFlake],
     flake_ids: &[Option<i32>],
-) -> Result<usize> {
+) -> Result<u64> {
     sync_all_watched_flakes_commits_inner(pool, watched_flakes, flake_ids).await
 }
 
@@ -240,7 +240,7 @@ async fn sync_all_watched_flakes_commits_inner(
     pool: &PgPool,
     watched_flakes: &[config::WatchedFlake],
     flake_ids: &[Option<i32>],
-) -> Result<usize> {
+) -> Result<u64> {
     info!(
         "🔄 Syncing commits for {} watched flakes",
         watched_flakes.len()
@@ -258,7 +258,7 @@ async fn sync_all_watched_flakes_commits_inner(
 
         info!("🔗 Syncing commits for flake: {}", flake.name);
 
-        let inserted: Result<usize> = if let Some(flake_id) = flake_id_opt {
+        let inserted: Result<u64> = if let Some(flake_id) = flake_id_opt {
             sync_flake_recorded(pool, flake_id, &flake.repo_url, &flake.branch())
                 .await
                 .map(|r| r)
@@ -294,7 +294,7 @@ pub async fn sync_commits_for_repo(
     pool: &PgPool,
     repo_url: &str,
     branch: &str,
-) -> Result<(usize, Vec<String>)> {
+) -> Result<(u64, Vec<String>)> {
     sync_commits_for_repo_inner(pool, repo_url, branch, None).await
 }
 
@@ -307,7 +307,7 @@ pub async fn sync_commits_for_flake(
     repo_url: &str,
     branch: &str,
     flake_id: i32,
-) -> Result<(usize, Vec<String>)> {
+) -> Result<(u64, Vec<String>)> {
     let creds = FlakeCredentialEnv::load(pool, flake_id)
         .await
         .unwrap_or_else(|e| {
@@ -333,7 +333,7 @@ pub async fn sync_flake_recorded(
     flake_id: i32,
     repo_url: &str,
     branch: &str,
-) -> Result<usize> {
+) -> Result<u64> {
     let attempt_id = Uuid::new_v4();
 
     // Mark syncing and persist the attempt token.
@@ -360,7 +360,7 @@ pub async fn sync_flake_recorded(
 
     // Run the sync.  sync_commits_for_repo_inner returns the ordered commit
     // hashes from the same Git observation used for insertion (no second clone).
-    let inserted_count: usize;
+    let inserted_count: u64;
     let ordered_hashes: Vec<String>;
 
     match sync_commits_for_repo_inner(pool, repo_url, branch, creds.as_ref()).await {
@@ -402,6 +402,37 @@ pub async fn sync_flake_recorded(
             return Err(e);
         }
     };
+
+    // Re-check that the flake hasn't been reset (repo_url/branch changed or
+    // sync_attempt_id cleared) while we were cloning.  If a concurrent
+    // reset_flake_source() ran, it would have cleared sync_attempt_id and
+    // possibly changed the branch — our attempt is then stale and must abort.
+    match sqlx::query_as::<_, (String, Option<uuid::Uuid>)>(
+        "SELECT branch, sync_attempt_id FROM flakes WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(flake_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some((current_branch, current_attempt_id))) => {
+            if current_branch != branch || current_attempt_id != Some(attempt_id) {
+                info!(
+                    "Flake {flake_id} was reset during sync (branch changed or \
+                     sync_attempt_id invalidated); aborting snapshot publication"
+                );
+                return Ok(inserted_count);
+            }
+        }
+        Ok(None) => {
+            info!("Flake {flake_id} disappeared during sync; aborting");
+            return Ok(inserted_count);
+        }
+        Err(e) => {
+            error!("Failed to re-check flake state after sync (flake {flake_id}): {e:#}");
+            record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+            return Err(e.into());
+        }
+    }
 
     // Publish sync_status AND snapshot atomically in one transaction.
     // Both must succeed together — otherwise we roll back and record error.
@@ -663,7 +694,7 @@ async fn sync_commits_for_repo_inner(
     repo_url: &str,
     branch: &str,
     creds: Option<&FlakeCredentialEnv>,
-) -> Result<(usize, Vec<String>)> {
+) -> Result<(u64, Vec<String>)> {
     let max = MAX_SNAPSHOT_COMMITS as usize;
     let commits = get_commits_with_full_metadata(repo_url, branch, Some(max), None, creds)
         .await
@@ -697,9 +728,17 @@ async fn sync_commits_for_repo_inner(
                 // The previous HEAD is outside the MAX_SNAPSHOT_COMMITS window.
                 // Before declaring a force-push, deepen the clone and verify
                 // ancestry — the branch may have advanced by 500+ commits.
-                let is_ancestor = check_git_ancestry_deep(repo_url, branch, prev, creds)
-                    .await
-                    .unwrap_or(false);
+                // Verify ancestry against the exact observed HEAD from the
+                // first clone — not a second clone's potentially different HEAD.
+                let observed = ordered_hashes.first().cloned();
+                let is_ancestor = match observed {
+                    Some(ref observed_head) => {
+                        check_git_ancestry_deep(repo_url, branch, prev, observed_head, creds)
+                            .await
+                            .unwrap_or(false)
+                    }
+                    None => false,
+                };
 
                 if !is_ancestor {
                     warn!(
@@ -744,12 +783,12 @@ async fn sync_commits_for_repo_inner(
         rows.into_iter().collect()
     };
 
-    let mut inserted_count = 0;
+    let mut inserted_count: u64 = 0;
     for commit_data in &commits {
         if existing.contains(&commit_data.hash) {
             continue;
         }
-        if let Err(e) = insert_commit_with_metadata(
+        match insert_commit_with_metadata(
             pool,
             &commit_data.hash,
             repo_url,
@@ -759,9 +798,8 @@ async fn sync_commits_for_repo_inner(
         )
         .await
         {
-            warn!("Failed to insert commit {}: {}", commit_data.hash, e);
-        } else {
-            inserted_count += 1;
+            Ok(n) => inserted_count += n,
+            Err(e) => warn!("Failed to insert commit {}: {}", commit_data.hash, e),
         }
     }
 
@@ -778,19 +816,21 @@ async fn sync_commits_for_repo_inner(
     Ok((inserted_count, ordered_hashes))
 }
 
-/// Check whether `ancestor_hash` is an ancestor of `branch` HEAD using a
-/// deepened clone.  Falls back when the 500-commit snapshot window is exceeded.
+/// Check whether `ancestor_hash` is an ancestor of `observed_head` using a
+/// deepened clone.  The observed HEAD is from the sync's own git log, not a
+/// second clone's potentially different HEAD.
 async fn check_git_ancestry_deep(
     repo_url: &str,
     branch: &str,
     ancestor_hash: &str,
+    observed_head: &str,
     creds: Option<&FlakeCredentialEnv>,
 ) -> Result<bool> {
     let git_url = normalize_repo_url_for_git(repo_url, creds);
     let temp_dir = tempfile::tempdir().context("Failed to create temp dir for ancestry check")?;
     let clone_path = temp_dir.path();
 
-    // Clone with a depth large enough to cover the fast-forward case.
+    // Clone the exact observed HEAD with a bounded depth.
     let mut clone = tokio::process::Command::new("git");
     clone.args([
         "clone",
@@ -808,13 +848,11 @@ async fn check_git_ancestry_deep(
         .await
         .with_context(|| "Timed out cloning for ancestry check")?
         .with_context(|| "Failed to clone for ancestry check")?;
-
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         bail!("Git clone failed for ancestry check on {repo_url}: {stderr}");
     }
 
-    // Check if the ancestor commit exists in this clone.
     fn commit_exists(clone_path: &std::path::Path, hash: &str) -> Result<bool> {
         let out = std::process::Command::new("git")
             .args(["cat-file", "-t", hash])
@@ -824,32 +862,40 @@ async fn check_git_ancestry_deep(
         Ok(out.status.success())
     }
 
-    if !commit_exists(clone_path, ancestor_hash)? {
-        // Try deepening the clone — the ancestor may be just outside the window.
+    // Loop deepen: keep increasing depth until the ancestor is found or
+    // we reach a practical limit.  Each iteration deepens by 2000 commits.
+    let mut total_depth = 1000u32;
+    while !commit_exists(clone_path, ancestor_hash)? {
+        total_depth += 2000;
         let deepen = tokio::process::Command::new("git")
-            .args(["fetch", "--deepen=1000", "origin", branch])
+            .args([
+                "fetch",
+                &format!("--deepen={}", total_depth),
+                "origin",
+                branch,
+            ])
             .current_dir(clone_path)
             .output()
             .await
-            .context("Failed to deepen clone for ancestry check")?;
+            .with_context(|| "Failed to deepen clone for ancestry check")?;
         if !deepen.status.success() {
             let stderr = String::from_utf8_lossy(&deepen.stderr);
-            warn!("Git deepen failed for ancestry check on {repo_url}: {stderr}");
+            warn!("Git deepen failed at depth {total_depth} for {repo_url}: {stderr}");
             return Ok(false);
         }
-
-        if !commit_exists(clone_path, ancestor_hash)? {
+        if total_depth > 20000 {
+            warn!("Exceeded max deepen depth (20000) for ancestry check on {repo_url}");
             return Ok(false);
         }
     }
 
-    // Run git merge-base --is-ancestor.
+    // Run git merge-base --is-ancestor against the exact observed HEAD.
     let mb = tokio::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", ancestor_hash, "HEAD"])
+        .args(["merge-base", "--is-ancestor", ancestor_hash, observed_head])
         .current_dir(clone_path)
         .output()
         .await
-        .context("Failed to run merge-base for ancestry check")?;
+        .with_context(|| "Failed to run merge-base for ancestry check")?;
 
     Ok(mb.status.success())
 }
@@ -1231,7 +1277,7 @@ pub async fn fetch_and_insert_commits_since_with_creds(
     let mut inserted = Vec::new();
     // Insert in reverse (oldest first) for chronological order
     for commit_data in commits.into_iter().rev() {
-        if let Err(e) = insert_commit_with_metadata(
+        match insert_commit_with_metadata(
             pool,
             &commit_data.hash,
             repo_url,
@@ -1241,10 +1287,12 @@ pub async fn fetch_and_insert_commits_since_with_creds(
         )
         .await
         {
-            warn!("Failed to insert commit {}: {}", commit_data.hash, e);
-        } else {
-            debug!("✅ Inserted commit {} for {}", commit_data.hash, repo_url);
-            inserted.push(commit_data.hash);
+            Ok(n) if n > 0 => {
+                debug!("✅ Inserted commit {} for {}", commit_data.hash, repo_url);
+                inserted.push(commit_data.hash);
+            }
+            Ok(_) => {}
+            Err(e) => warn!("Failed to insert commit {}: {}", commit_data.hash, e),
         }
     }
 

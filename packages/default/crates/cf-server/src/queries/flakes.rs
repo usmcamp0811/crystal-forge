@@ -440,11 +440,18 @@ pub async fn reset_flake_source(
     .await
     .context("Failed to update flake identity during source reset")?;
 
-    // 4. Set empty ready snapshot and invalidate any in-flight sync attempt.
-    //    Clearing sync_attempt_id prevents a concurrently running old-branch
-    //    sync from publishing a snapshot under the new branch identity.
+    // 4. Set empty ready snapshot, invalidate any in-flight sync attempt, and
+    //    reset sync state to unsynchronized.  Clearing sync_attempt_id prevents
+    //    a concurrently running old-branch sync from publishing; resetting
+    //    sync_status/errors ensures the new branch isn't shown as synced.
     sqlx::query(
-        "UPDATE flakes SET snapshot_ready_at = now(), sync_attempt_id = NULL WHERE id = $1",
+        "UPDATE flakes \
+         SET snapshot_ready_at = now(), \
+             sync_attempt_id = NULL, \
+             sync_status = 'unknown', \
+             last_sync_at = NULL, \
+             last_sync_error = NULL \
+         WHERE id = $1",
     )
     .bind(flake_id)
     .execute(&mut **tx)
