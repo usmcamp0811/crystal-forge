@@ -97,6 +97,28 @@ pub async fn get_flake_id_by_repo_url(pool: &PgPool, repo_url: &str) -> Result<O
     Ok(flake_id)
 }
 
+/// Find any flake (active or soft-deleted) with this `repo_url`.
+///
+/// Used by the create-flake path to detect reactivation of a soft-deleted
+/// row so its stale commit history/snapshot can be reset instead of silently
+/// resurfacing under a possibly different branch.  Returns
+/// `(id, branch, is_deleted)`.
+pub async fn find_flake_for_repo_url_any(
+    pool: &PgPool,
+    repo_url: &str,
+) -> Result<Option<(i32, String, bool)>> {
+    let row = sqlx::query_as::<_, (i32, String, bool)>(
+        "SELECT id, branch, (deleted_at IS NOT NULL) AS is_deleted \
+         FROM flakes WHERE repo_url = $1",
+    )
+    .bind(repo_url)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to look up flake by repo_url (including deleted)")?;
+
+    Ok(row)
+}
+
 pub async fn get_all_flakes_from_db(
     pool: &PgPool,
     config: &FlakeConfig,
@@ -349,14 +371,22 @@ pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
 
 /// Atomically reset a flake's source identity and purge its commit history.
 ///
-/// Called when `repo_url` or `branch` changes.  In one transaction:
+/// Called when `repo_url` or `branch` changes, OR when reactivating a
+/// soft-deleted flake row under a (possibly new) repo_url/branch.  In one
+/// transaction:
 ///
 /// 1. Deletes the branch snapshot.
 /// 2. Purges all dependent commit data in the established order (caches →
 ///    derivations → commits) — same cascade order as `purge_flake_commit_history`.
-/// 3. Updates the flake identity (name, repo_url, branch, build_scope).
+/// 3. Updates the flake identity (name, repo_url, branch, build_scope) and
+///    clears `deleted_at` (reactivates a soft-deleted row; a no-op for
+///    already-active flakes).
 /// 4. Sets an empty ready snapshot (`snapshot_ready_at = now()` so readers never
 ///    see stale commits through fallback ordering).
+///
+/// Deliberately does NOT filter `WHERE deleted_at IS NULL` — this function is
+/// also the reactivation path for soft-deleted flakes, and must be able to
+/// find and update those rows.
 ///
 /// All errors are propagated via `?`.  Returns the updated `Flake` row.
 pub async fn reset_flake_source(
@@ -434,9 +464,11 @@ pub async fn reset_flake_source(
         .await
         .context("Failed to clear commits during source reset")?;
 
-    // 3+4. Update flake identity and reset all sync/snapshot state atomically.
-    //      Combining these into one UPDATE ensures the RETURNING row reflects
-    //      the final state, not an intermediate one.
+    // 3+4. Update flake identity, reactivate (clear deleted_at), and reset all
+    //      sync/snapshot state atomically.  Combining these into one UPDATE
+    //      ensures the RETURNING row reflects the final state, not an
+    //      intermediate one.  No `deleted_at IS NULL` filter — this is also
+    //      the reactivation path for soft-deleted rows.
     let flake = sqlx::query_as::<_, Flake>(
         r#"
         UPDATE flakes
@@ -444,12 +476,13 @@ pub async fn reset_flake_source(
             repo_url         = $2,
             branch           = $3,
             build_scope      = $4,
+            deleted_at       = NULL,
             snapshot_ready_at = now(),
             sync_attempt_id  = NULL,
             sync_status      = 'unknown',
             last_sync_at     = NULL,
             last_sync_error  = NULL
-        WHERE id = $5 AND deleted_at IS NULL
+        WHERE id = $5
         RETURNING *
         "#,
     )
@@ -465,8 +498,37 @@ pub async fn reset_flake_source(
     Ok(flake)
 }
 
-pub async fn purge_flake_commit_history(pool: &PgPool, flake_id: i32) -> Result<u64> {
+/// Purge a flake's commit history and reset its sync/snapshot state when an
+/// operator explicitly accepts a detected history rewrite.
+///
+/// Acquires the SAME per-flake advisory lock (`SYNC_LOCK_BASE + flake_id`)
+/// used by `sync_flake_recorded` and `reset_flake_source`. This prevents a
+/// race where an in-flight sync — started before the rewrite was accepted —
+/// inserts commits or publishes a snapshot from the old (divergent) branch
+/// state after this purge completes, since that sync's mutation transaction
+/// cannot run until this transaction's lock is released.
+///
+/// In one transaction:
+/// 1. Acquires the per-flake advisory lock.
+/// 2. Purges commit-scoped caches, derivations, and commits (same order as
+///    the identity-reset path).
+/// 3. Clears the branch snapshot.
+/// 4. Invalidates any in-flight `sync_attempt_id` so a stale sync started
+///    before the lock cannot publish under the old `sync_attempt_id` match.
+/// 5. Resets `snapshot_ready_at` to `NULL` (not ready) — the caller is
+///    expected to immediately re-sync, which will populate a fresh snapshot.
+///
+/// Returns the number of purged commit rows.
+pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Result<u64> {
+    use crate::queries::commits::SYNC_LOCK_BASE;
+
     let mut tx = pool.begin().await?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_LOCK_BASE + i64::from(flake_id))
+        .execute(&mut *tx)
+        .await
+        .context("Failed to acquire per-flake advisory lock for rewrite acceptance")?;
 
     // Clear commit-scoped caches first for deterministic cleanup.
     sqlx::query(
@@ -479,7 +541,8 @@ pub async fn purge_flake_commit_history(pool: &PgPool, flake_id: i32) -> Result<
     )
     .bind(flake_id)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .context("Failed to clear commit artifacts cache during rewrite acceptance")?;
 
     sqlx::query(
         r#"
@@ -491,7 +554,8 @@ pub async fn purge_flake_commit_history(pool: &PgPool, flake_id: i32) -> Result<
     )
     .bind(flake_id)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .context("Failed to clear commit metadata cache during rewrite acceptance")?;
 
     // Remove derivations linked to this flake's commits.
     sqlx::query(
@@ -504,7 +568,8 @@ pub async fn purge_flake_commit_history(pool: &PgPool, flake_id: i32) -> Result<
     )
     .bind(flake_id)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .context("Failed to clear derivations during rewrite acceptance")?;
 
     let deleted_commits = sqlx::query(
         r#"
@@ -514,8 +579,26 @@ pub async fn purge_flake_commit_history(pool: &PgPool, flake_id: i32) -> Result<
     )
     .bind(flake_id)
     .execute(&mut *tx)
-    .await?
+    .await
+    .context("Failed to clear commits during rewrite acceptance")?
     .rows_affected();
+
+    // Clear the branch snapshot and invalidate any in-flight sync attempt.
+    sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
+        .bind(flake_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to clear branch snapshot during rewrite acceptance")?;
+
+    sqlx::query(
+        "UPDATE flakes \
+         SET snapshot_ready_at = NULL, sync_attempt_id = NULL \
+         WHERE id = $1",
+    )
+    .bind(flake_id)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to reset snapshot/sync state during rewrite acceptance")?;
 
     tx.commit().await?;
     Ok(deleted_commits)

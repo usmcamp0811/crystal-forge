@@ -2,9 +2,7 @@ use crate::config;
 use crate::derivations::utils::build_flake_reference;
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
-use crate::queries::commits::{
-    flake_has_commits, flake_last_commit, insert_commit, insert_commit_with_metadata,
-};
+use crate::queries::commits::{flake_has_commits, insert_commit, insert_commit_with_metadata};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -996,9 +994,19 @@ async fn sync_commits_for_repo_inner(
 /// SAME clone directory that produced the git log.  This avoids a second clone
 /// and ensures both hashes come from the same Git observation.
 ///
-/// Deepens the existing shallow clone (with credentials) until the ancestor
-/// commit is reachable, then runs `git merge-base --is-ancestor`.
-/// Exit code 0 = is ancestor; 1 = not an ancestor; other = propagated Err.
+/// Deepens the existing shallow clone (with credentials) until either:
+///   - the ancestor commit becomes reachable (proceed to merge-base), or
+///   - the repository is no longer shallow (`git rev-parse
+///     --is-shallow-repository` returns false) and the ancestor is still
+///     absent — this is conclusive proof of a genuine history rewrite.
+///
+/// A fixed iteration cap is NOT used to distinguish rewrite from incomplete
+/// history: `git fetch --deepen` naturally stops adding commits once the
+/// repository root is reached, at which point the repo becomes non-shallow.
+///
+/// Exit code 0 from merge-base = is ancestor; 1 = not an ancestor (rewrite);
+/// any other outcome (including deepen/rev-parse failures) propagates as Err
+/// so transient Git failures are never misreported as a history rewrite.
 async fn check_git_ancestry_in_clone(
     clone_path: &std::path::Path,
     ancestor_hash: &str,
@@ -1015,13 +1023,32 @@ async fn check_git_ancestry_in_clone(
         Ok(out.status.success())
     }
 
-    // Deepen the clone (with credentials) until the ancestor is reachable or
-    // we exhaust history.  Each call adds 2 000 commits.
-    let mut added = 0u32;
+    fn is_shallow(clone_path: &std::path::Path) -> Result<bool> {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "--is-shallow-repository"])
+            .current_dir(clone_path)
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to check shallow state: {e}"))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            bail!(
+                "git rev-parse --is-shallow-repository failed: {}",
+                stderr.trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim() == "true")
+    }
+
     while !commit_exists(clone_path, ancestor_hash)? {
-        added += 2000;
+        if !is_shallow(clone_path)? {
+            // Full history has been fetched and the ancestor is still absent.
+            // This is conclusive: the commit was genuinely removed from the
+            // branch's reachable history — a real force-push/rewrite.
+            return Ok(false);
+        }
+
         let mut deepen = tokio::process::Command::new("git");
-        deepen.args(["fetch", "--deepen=2000", "origin", branch]);
+        deepen.args(["fetch", "--deepen=5000", "origin", branch]);
         apply_optional_creds(&mut deepen, creds);
         deepen.current_dir(clone_path);
         let out = deepen
@@ -1031,13 +1058,6 @@ async fn check_git_ancestry_in_clone(
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             bail!("Git deepen failed during ancestry check: {}", stderr.trim());
-        }
-        if added >= 20_000 {
-            bail!(
-                "Ancestor {} not found after 20 000 commits of deepening; \
-                 ancestry check inconclusive",
-                ancestor_hash
-            );
         }
     }
 

@@ -36,10 +36,10 @@ use crate::queries::flake_credentials::{
     delete_flake_credential, get_flake_credential, update_flake_credential, upsert_flake_credential,
 };
 use crate::queries::flakes::{
-    cascade_delete_flake, check_flake_dependencies, count_systems_for_flake, delete_flake_by_id,
-    fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
-    get_flake_id_by_repo_url, insert_flake, list_flake_registry, purge_flake_commit_history,
-    reset_flake_source, soft_delete_flake, update_flake,
+    accept_history_rewrite_reset, cascade_delete_flake, check_flake_dependencies,
+    count_systems_for_flake, delete_flake_by_id, fetch_dashboard_flake_timelines,
+    fetch_flake_timelines, find_flake_for_repo_url_any, get_flake_by_id, get_flake_by_name,
+    insert_flake, list_flake_registry, reset_flake_source, soft_delete_flake, update_flake,
 };
 use crate::queries::users::get_by_email;
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
@@ -814,32 +814,18 @@ pub async fn create_flake(
         Err(response) => return response,
     };
 
-    // If a flake with this repo_url already exists and the branch changed,
-    // atomically reset the source identity and commit history via
-    // reset_flake_source (which handles the identity update, purge, and
-    // empty ready snapshot in one transaction).
+    // If a flake with this repo_url already exists (active OR soft-deleted)
+    // and the branch changed, or the row is being reactivated from a soft
+    // delete, atomically reset the source identity and commit history via
+    // reset_flake_source. Soft-deleted rows are included in this lookup so
+    // reactivation cannot silently resurrect stale history through the plain
+    // insert_flake() upsert path (which only touches active rows implicitly
+    // via ON CONFLICT and does not purge commits).
     // Genuine database lookup errors return an error response immediately
     // so they do not fall through to the non-atomic insert_flake().
-    let existing_flake: Option<(i32, String)> =
-        match get_flake_id_by_repo_url(&pool, repo_url).await {
-            Ok(maybe_id) => match maybe_id {
-                Some(id) => match get_flake_by_id(&pool, id).await {
-                    Ok(f) => Some((id, f.branch)),
-                    Err(e) => {
-                        error!("Database error reading flake {id}: {e:#}");
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ApiError {
-                                error: "database_error".to_string(),
-                                message: "Failed to check existing flake".to_string(),
-                                details: None,
-                            }),
-                        )
-                            .into_response();
-                    }
-                },
-                None => None,
-            },
+    let existing_flake: Option<(i32, String, bool)> =
+        match find_flake_for_repo_url_any(&pool, repo_url).await {
+            Ok(found) => found,
             Err(e) => {
                 error!("Database error checking repo_url {repo_url}: {e:#}");
                 return (
@@ -854,8 +840,8 @@ pub async fn create_flake(
             }
         };
 
-    if let Some((existing_id, existing_branch)) = existing_flake {
-        if existing_branch != branch {
+    if let Some((existing_id, existing_branch, is_deleted)) = existing_flake {
+        if existing_branch != branch || is_deleted {
             let mut tx = match pool.begin().await {
                 Ok(tx) => tx,
                 Err(e) => {
@@ -1925,7 +1911,7 @@ pub async fn accept_flake_history_rewrite(
     .ok()
     .flatten();
 
-    let deleted_commits = match purge_flake_commit_history(&pool, flake.id).await {
+    let deleted_commits = match accept_history_rewrite_reset(&pool, flake.id).await {
         Ok(count) => count,
         Err(e) => {
             error!(
