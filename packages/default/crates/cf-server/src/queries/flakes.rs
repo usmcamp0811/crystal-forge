@@ -542,20 +542,124 @@ pub async fn mutate_flake_locked(
     Ok(Some(flake))
 }
 
+/// Outcome of `mutate_conflicting_flake_locked`.
+enum ConflictMutation {
+    /// The row still owned `expected_repo_url` when the lock was acquired,
+    /// and has now been mutated (reset or metadata-updated) accordingly.
+    Mutated(Flake),
+    /// The row no longer owns `expected_repo_url` — a concurrent request
+    /// already moved it to a different `repo_url` between the caller's
+    /// unlocked conflict lookup and this function acquiring the lock (or
+    /// the row was hard-deleted). The caller must NOT treat this as an
+    /// intentional identity change; it must retry conflict resolution from
+    /// scratch instead of forcibly reclaiming the row.
+    Stale,
+}
+
+/// Mutate a flake row that the caller resolved via a create-path
+/// `INSERT ... ON CONFLICT` lookup (i.e. the id was inferred indirectly from
+/// `repo_url`, not supplied directly by the caller as in `mutate_flake_locked`).
+///
+/// Acquires the per-flake advisory lock and re-reads the row's CURRENT
+/// `repo_url` before doing anything. If it no longer equals
+/// `expected_repo_url`, the conflict lookup that produced `flake_id` is
+/// stale — some other request already changed this row's identity between
+/// our unlocked lookup and acquiring the lock — so this returns
+/// `ConflictMutation::Stale` without writing anything. Forcibly resetting
+/// the row back to `expected_repo_url` in that situation would silently
+/// undo the concurrent request's completed, committed work.
+///
+/// When the row's `repo_url` still matches, this behaves like
+/// `mutate_flake_locked`: reset the source if `branch`/deletion state
+/// differs from the request, otherwise update only non-source metadata.
+async fn mutate_conflicting_flake_locked(
+    pool: &PgPool,
+    flake_id: i32,
+    expected_repo_url: &str,
+    name: &str,
+    branch: &str,
+    build_scope: &str,
+) -> Result<ConflictMutation> {
+    use crate::queries::commits::SYNC_LOCK_BASE;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin flake mutation tx")?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_LOCK_BASE + i64::from(flake_id))
+        .execute(&mut *tx)
+        .await
+        .context("Failed to acquire advisory lock for flake mutation")?;
+
+    let current = sqlx::query_as::<_, (String, String, bool)>(
+        "SELECT repo_url, branch, (deleted_at IS NOT NULL) AS is_deleted \
+         FROM flakes WHERE id = $1",
+    )
+    .bind(flake_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to re-read flake identity under lock")?;
+
+    let Some((cur_repo_url, cur_branch, is_deleted)) = current else {
+        let _ = tx.rollback().await;
+        return Ok(ConflictMutation::Stale);
+    };
+
+    if cur_repo_url != expected_repo_url {
+        // The row we resolved via the unlocked conflict lookup no longer
+        // owns expected_repo_url. Do NOT reset it back — that would
+        // silently clobber whatever concurrent request already moved it
+        // (see create_or_mutate_flake's doc comment for the exact race).
+        let _ = tx.rollback().await;
+        return Ok(ConflictMutation::Stale);
+    }
+
+    let flake = if cur_branch != branch || is_deleted {
+        reset_flake_source(
+            &mut tx,
+            flake_id,
+            name,
+            expected_repo_url,
+            branch,
+            build_scope,
+        )
+        .await?
+    } else {
+        update_flake_metadata(&mut tx, flake_id, name, build_scope).await?
+    };
+
+    tx.commit()
+        .await
+        .context("Failed to commit flake mutation")?;
+
+    Ok(ConflictMutation::Mutated(flake))
+}
+
 /// Atomically create a flake for `repo_url`, or — if a row already exists for
 /// it (active or soft-deleted) — mutate that row under the per-flake
 /// advisory lock instead of silently upserting a stale branch.
 ///
 /// The initial insert uses `ON CONFLICT DO NOTHING`, so a genuine conflict
 /// never overwrites another row's `branch`/`repo_url`. On conflict, the
-/// existing row's id is resolved and the mutation is delegated to
-/// `mutate_flake_locked`, which re-reads identity under the lock before
-/// deciding between a full source reset and a metadata-only update. This
-/// keeps the create path linearizable with concurrent creates, updates, and
-/// syncs for the same `repo_url`.
+/// existing row's id is resolved (via an unlocked `SELECT`) and the
+/// mutation is delegated to `mutate_conflicting_flake_locked`, which
+/// re-reads `repo_url` under the lock and refuses to touch the row if it no
+/// longer matches — that id resolution is inherently racy against a
+/// concurrent request that moves the row to a different `repo_url` between
+/// our unlocked lookup and acquiring the lock. In that case the row is left
+/// untouched and this function retries the whole insert-or-resolve loop,
+/// which correctly re-evaluates whether `repo_url` is now free (insert
+/// succeeds) or owned by a different row (resolve+lock that one instead).
 ///
-/// Bounded retry (5 attempts) handles the rare race where the conflicting
-/// row is hard-deleted between the insert conflict and the locked mutation.
+/// This is unlike `mutate_flake_locked`, used by the update-by-id handler:
+/// there the caller supplies `flake_id` directly (from the URL path), so a
+/// changed identity under the lock is an intentional correction to make,
+/// not a stale lookup to discard.
+///
+/// Bounded retry (5 attempts) handles both the hard-delete race and the
+/// stale-conflict race described above.
 pub async fn create_or_mutate_flake(
     pool: &PgPool,
     name: &str,
@@ -595,9 +699,21 @@ pub async fn create_or_mutate_flake(
             continue;
         };
 
-        match mutate_flake_locked(pool, existing_id, name, repo_url, branch, build_scope).await? {
-            Some(flake) => return Ok(flake),
-            None => continue, // row vanished mid-lock; retry
+        match mutate_conflicting_flake_locked(
+            pool,
+            existing_id,
+            repo_url,
+            name,
+            branch,
+            build_scope,
+        )
+        .await?
+        {
+            ConflictMutation::Mutated(flake) => return Ok(flake),
+            // The resolved row no longer owns repo_url (or vanished) —
+            // retry from the top: repo_url may now be free (insert
+            // succeeds) or owned by a different, current row.
+            ConflictMutation::Stale => continue,
         }
     }
 
@@ -1371,5 +1487,131 @@ mod task_397_tests {
             .expect("registry item");
         assert_eq!(item.latest_commit_hash.as_deref(), Some("oldest"));
         assert_eq!(item.total_commit_count, 2);
+    }
+
+    /// Regression test for the create-path stale-conflict race: a row
+    /// resolved by `create_or_mutate_flake`'s unlocked `repo_url` lookup
+    /// must NOT be forcibly reset back to the looked-up `repo_url` if a
+    /// concurrent request already moved it elsewhere before the lock was
+    /// acquired. `mutate_conflicting_flake_locked` must detect this and
+    /// report `Stale` without touching the row.
+    #[sqlx::test]
+    #[ignore = "requires a test database role with CREATE DATABASE privileges"]
+    async fn mutate_conflicting_flake_locked_detects_stale_repo_url(pool: PgPool) {
+        // Simulates: create(A) resolved this row's id via an unlocked
+        // repo_url lookup...
+        let flake = insert_flake(
+            &pool,
+            "stale-conflict-test",
+            "https://example.invalid/stale-conflict-a.git",
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("insert test flake");
+
+        // ...then, before the create path acquired the lock, a concurrent
+        // update moved the SAME row to a different repo_url and committed.
+        let mut tx = pool.begin().await.expect("begin tx");
+        reset_flake_source(
+            &mut tx,
+            flake.id,
+            "stale-conflict-test",
+            "https://example.invalid/stale-conflict-b.git",
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("simulate concurrent update to repo B");
+        tx.commit().await.expect("commit simulated update");
+
+        // The create path's conflict-resolution mutation now runs, still
+        // holding the STALE id + the ORIGINAL repo_url ("A") it resolved
+        // before the concurrent update above.
+        let result = mutate_conflicting_flake_locked(
+            &pool,
+            flake.id,
+            "https://example.invalid/stale-conflict-a.git",
+            "stale-conflict-test",
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("mutate_conflicting_flake_locked should not error");
+
+        assert!(
+            matches!(result, ConflictMutation::Stale),
+            "expected Stale when the row's repo_url no longer matches the conflict lookup"
+        );
+
+        // The row must be untouched: still on repo B, not reset back to A.
+        let current = get_flake_by_id(&pool, flake.id)
+            .await
+            .expect("row must still exist and be readable");
+        assert_eq!(
+            current.repo_url, "https://example.invalid/stale-conflict-b.git",
+            "stale conflict resolution must not clobber the concurrently-updated row"
+        );
+    }
+
+    /// End-to-end regression test for the exact scenario from review: a
+    /// create request for repo A resolves an existing row via conflict,
+    /// a concurrent update moves that SAME row to repo B and commits, then
+    /// the create request resumes. It must NOT reclaim the row for A;
+    /// instead it must create a distinct row for A, leaving the original
+    /// row on B untouched.
+    #[sqlx::test]
+    #[ignore = "requires a test database role with CREATE DATABASE privileges"]
+    async fn create_or_mutate_flake_does_not_clobber_concurrently_moved_row(pool: PgPool) {
+        let repo_a = "https://example.invalid/race-repo-a.git";
+        let repo_b = "https://example.invalid/race-repo-b.git";
+
+        // Initial state: flake row owns repo A (as if an earlier
+        // create_or_mutate_flake(..., repo_a, ...) had already resolved and
+        // returned this row).
+        let original = insert_flake(&pool, "race-test", repo_a, "main", "cf_systems_only")
+            .await
+            .expect("insert initial flake on repo A");
+
+        // Concurrent update: moves the SAME row from A to B and commits,
+        // simulating update_flake_handler racing ahead of a create(A) that
+        // already captured this row's id via its unlocked conflict lookup.
+        let mut tx = pool.begin().await.expect("begin tx");
+        reset_flake_source(
+            &mut tx,
+            original.id,
+            "race-test",
+            repo_b,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("simulate concurrent update moving row to repo B");
+        tx.commit().await.expect("commit simulated update");
+
+        // The create(A) request "resumes": at this point repo A is free
+        // again (the only row that owned it moved to B), so
+        // create_or_mutate_flake must retry past the stale conflict and
+        // insert a brand-new, distinct row for A.
+        let created =
+            create_or_mutate_flake(&pool, "race-test-2", repo_a, "main", "cf_systems_only")
+                .await
+                .expect("create_or_mutate_flake must succeed by creating a distinct row");
+
+        assert_ne!(
+            created.id, original.id,
+            "a distinct row must be created for repo A, not the row that moved to B"
+        );
+        assert_eq!(created.repo_url, repo_a);
+
+        // The original row must remain exactly as the concurrent update
+        // left it: untouched, still on repo B.
+        let original_after = get_flake_by_id(&pool, original.id)
+            .await
+            .expect("original row must still exist");
+        assert_eq!(
+            original_after.repo_url, repo_b,
+            "original row must remain on repo B, not be reclaimed for repo A"
+        );
     }
 }
