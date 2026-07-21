@@ -387,8 +387,8 @@ pub fn SystemsListView() -> Element {
         // after a dismiss because the rendered key drifts on every
         // heartbeat/count change.
         let system_id_str = system.id.to_string();
-        let system_key = occurrence_id_for_subject("systems", &system_id_str)
-            .unwrap_or(system_id_str);
+        let system_key =
+            occurrence_id_for_subject("systems", &system_id_str).unwrap_or(system_id_str);
         let ac = attention_row_class(
             "",
             "systems",

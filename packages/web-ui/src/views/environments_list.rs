@@ -98,7 +98,10 @@ pub fn EnvironmentsListView() -> Element {
             loading.set(false);
             if loaded_without_notice {
                 if let Some(cursor) = ack_snapshot {
-                    let occurrence_ids = NAV_BADGES.read_unchecked().environments_occurrence_ids.clone();
+                    let occurrence_ids = NAV_BADGES
+                        .read_unchecked()
+                        .environments_occurrence_ids
+                        .clone();
                     acknowledge_with_cursor_and_ids("environments", cursor, occurrence_ids);
                 }
             }
@@ -160,8 +163,8 @@ pub fn EnvironmentsListView() -> Element {
             // which changes on every rollup poll and would never match after
             // a dismiss.
             let env_id_str = env.id.to_string();
-            let env_key = occurrence_id_for_subject("environments", &env_id_str)
-                .unwrap_or(env_id_str);
+            let env_key =
+                occurrence_id_for_subject("environments", &env_id_str).unwrap_or(env_id_str);
             let is_attention = env_needs_attention(env);
             let flash_now = flash_global && is_attention;
             attention_row_class("", "environments", &env_key, is_attention, flash_now)

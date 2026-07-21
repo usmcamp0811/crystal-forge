@@ -526,8 +526,7 @@ pub fn BuildsView() -> Element {
                 .collect();
             let occurrence_ids = occurrence_ids_for_rendered_subjects("builds", &rendered_job_ids);
             spawn(async move {
-                if acknowledge_with_cursor_and_ids_async("builds", cursor, occurrence_ids).await
-                {
+                if acknowledge_with_cursor_and_ids_async("builds", cursor, occurrence_ids).await {
                     builds_ack_sent.set(true);
                 }
             });

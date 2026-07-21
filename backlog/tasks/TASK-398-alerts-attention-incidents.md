@@ -540,7 +540,7 @@ Keep this task in `Backlog` until a human selects it for a sprint. Once selected
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-- Migration 0178 added: `attention_occurrences` + `user_attention_dismissals` + cleanup function + indexes.
+- Migration 0180 added: `attention_occurrences` + `user_attention_dismissals` + cleanup function + indexes. (Originally numbered 0178; renumbered after rebasing onto `dev` post-TASK-397 merge, which took 0178 and 0179.)
 - Canonical module created at `packages/default/crates/cf-server/src/queries/attention.rs`.
 - Wired terminal-failure producers:
   - `packages/default/crates/cf-server/src/queries/builders.rs` `mark_job_failed_with_retry` (permanent failure branch) opens a `builds`/`build_job` occurrence.
@@ -591,7 +591,7 @@ Reviewer findings and fixes, verified against a fresh isolated database
 started via this repository's `db-only` process-compose workflow (never
 against a shared/production database):
 
-- **[P0] Migration 0178 invalid SQL** — removed an index predicate using
+- **[P0] Migration 0178 invalid SQL** (now renumbered 0180 after rebasing onto `dev`) — removed an index predicate using
   `NOW()` (not immutable, illegal in an index predicate) and fixed
   `cleanup_attention_occurrences` to use a candidates-CTE instead of
   unsupported `DELETE ... LIMIT`. Verified: all 178 migrations apply
