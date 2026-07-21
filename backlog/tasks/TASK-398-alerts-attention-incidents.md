@@ -582,5 +582,67 @@ Keep this task in `Backlog` until a human selects it for a sprint. Once selected
   - `8a6186b5` — flake sync producer
   - `d4481b53` — system health producer
   - `cb09adef` — environment attention producer
-  - `(next)` — CVE attention producer
+  - `98e5c6a7` — CVE attention producer
+  - `9543f20f` — move to Review, add MR link
+
+### MR !307 review round 1 (request changes) — fixes pushed in `320cb1cd`
+
+Reviewer findings and fixes, verified against a fresh isolated database
+started via this repository's `db-only` process-compose workflow (never
+against a shared/production database):
+
+- **[P0] Migration 0178 invalid SQL** — removed an index predicate using
+  `NOW()` (not immutable, illegal in an index predicate) and fixed
+  `cleanup_attention_occurrences` to use a candidates-CTE instead of
+  unsupported `DELETE ... LIMIT`. Verified: all 178 migrations apply
+  cleanly via `sqlx migrate run` against a fresh database.
+- **[P1] `attention::resolve()` used nonexistent columns** — fixed to use
+  the actual `subject_type`/`subject_id` schema columns (was silently
+  resolving zero rows via `source_kind`/`source_id`).
+- **[P1] Sidebar poll dropped `*_occurrence_ids`** — fixed in
+  `components/layout/sidebar.rs` to copy the occurrence-id arrays alongside
+  their counts, not just scalar counts.
+- **[P1] Row/card dismissal used mismatched keys** — `systems_list.rs`,
+  `flakes_list.rs`, `environments_list.rs`, `evaluations.rs` all rendered
+  the attention-row class with a different key than `dismiss_attention_item`
+  stored. Fixed by resolving both through the same canonical-occurrence-key
+  lookup (`occurrence_id_for_subject`), which also prevents a recurrence
+  after resolution from being hidden by a stale local dismissal.
+- **[P1] Critical→offline could leave duplicate open incidents** — added
+  `resolve_open_occurrences_except_reason` calls before opening the new
+  reason, plus new `resolve_environment_occurrences_for_system(_except_reason)`
+  helpers scoped by underlying-system metadata.
+- **[P1] No time-driven reconciliation for offline systems/stale flakes** —
+  added `tasks::attention_reconciliation` with a bounded periodic sweep
+  (2 min interval); the heartbeat handler now delegates to the same shared
+  logic.
+- **[P1] Concurrent-open race in `open_or_observe_by_subject`** — added a
+  transaction-scoped advisory lock keyed by `(category, subject_id, reason)`.
+- **[P1] Dismissal API did not validate occurrence visibility** — added the
+  same environment-membership check used by badge/list queries, with a
+  uniform error message so existence and out-of-scope cannot be
+  distinguished.
+- **[P1] CVE occurrence identity had no resolution/recurrence path** —
+  changed to episode-based keys via `open_or_observe_by_subject` and added
+  a fleet-relevance resolution sweep after each scan.
+- **[P2] Builds/Evaluations acknowledgment sent the full 24h-bounded array**
+  instead of only rendered rows — added `occurrence_ids_for_rendered_subjects`
+  to intersect the badge array with actually-rendered subject ids.
+
+Also found and fixed via new DB-gated tests (not on the review's list):
+`attention::cleanup` bound `batch_size` as `i64` against a SQL function
+parameter declared `INT`, and read a `RETURNS TABLE` result as a single
+composite column sqlx cannot decode — both caused every cleanup call to
+fail. Also wired `cleanup()` into a new daily `run_attention_cleanup_loop`
+background job (it was never called anywhere before).
+
+Verification for this round:
+- 7 new DB-gated tests in `queries::attention` (concurrent race, resolve
+  correctness, critical→offline transition, dismissal visibility
+  accept/reject, cleanup retention) — all passing.
+- Existing `navigation` DB-gated tests still pass.
+- Full `cf-server` lib test suite: 635 passed, 0 failed.
+- `web-ui`: `cargo check` clean, 106 tests passed.
+- `cargo fmt` applied only to files this change authored/materially
+  rewrote; pre-existing unrelated formatting drift left untouched.
 <!-- SECTION:NOTES:END -->
