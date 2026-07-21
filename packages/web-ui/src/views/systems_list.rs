@@ -7,8 +7,8 @@ use gloo_storage::{LocalStorage, Storage};
 use uuid::Uuid;
 
 use crate::alerts::{
-    acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item, should_flash,
-    NAV_BADGES,
+    NAV_BADGES, acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item,
+    should_flash,
 };
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
@@ -18,15 +18,15 @@ use crate::api::models::{
 };
 use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::filters::ViewMode;
-use crate::components::forms::{validate_new_system, AddSystemForm, NewSystemDraft};
+use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::icon::{Icon, IconName};
 use crate::components::modals::{
-    generate_key_pair, GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal,
+    GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::system::{
-    deployment_state_label, EditSystemModal, PendingDeployBanner, SystemCardV2,
+    EditSystemModal, PendingDeployBanner, SystemCardV2, deployment_state_label,
 };
 use crate::components::systems_stat_strip::SystemsStatStrip;
 use crate::components::tables::SystemsTable;

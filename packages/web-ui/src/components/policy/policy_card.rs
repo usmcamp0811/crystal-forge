@@ -4,8 +4,8 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use super::types::{
-    is_core_policy, is_policy_enabled, normalized_policy_type, policy_category,
-    policy_rule_summaries, PolicyDefinition,
+    PolicyDefinition, is_core_policy, is_policy_enabled, normalized_policy_type, policy_category,
+    policy_rule_summaries,
 };
 
 /// Card component for displaying a policy definition with design-parity rule summaries.

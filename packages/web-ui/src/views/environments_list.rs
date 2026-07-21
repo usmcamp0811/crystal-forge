@@ -4,17 +4,17 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use crate::alerts::{
-    acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item, should_flash,
-    NAV_BADGES,
+    NAV_BADGES, acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item,
+    should_flash,
 };
 use crate::api::client::fetch_systems;
 use crate::api::models::{HealthStatus, SortOrder, SystemsListParams};
 
 use crate::components::environments::{
+    EnvironmentCard, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentFormModal,
+    EnvironmentItem, EnvironmentTable, NewEnvironmentDraft, PolicyOption, RemoveEnvironmentDialog,
     environment_name_for_id, normalize_color_hex, normalize_optional, policy_library,
-    required_agent_policy_id, validate_environment, validate_environment_form, EnvironmentCard,
-    EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentFormModal, EnvironmentItem,
-    EnvironmentTable, NewEnvironmentDraft, PolicyOption, RemoveEnvironmentDialog,
+    required_agent_policy_id, validate_environment, validate_environment_form,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::notifications::{AlertBanner, AlertSeverity};
@@ -935,11 +935,7 @@ fn pct_f(count: usize, total: f64) -> i32 {
 }
 
 fn plural_s(count: usize) -> &'static str {
-    if count == 1 {
-        ""
-    } else {
-        "s"
-    }
+    if count == 1 { "" } else { "s" }
 }
 
 #[cfg(test)]

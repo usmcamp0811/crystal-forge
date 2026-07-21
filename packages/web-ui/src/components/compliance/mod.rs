@@ -66,11 +66,7 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
 }
 
 fn env_count_suffix(n: i64) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
+    if n == 1 { "" } else { "s" }
 }
 
 // ─── Bundle header card ──────────────────────────────────────────────────────
