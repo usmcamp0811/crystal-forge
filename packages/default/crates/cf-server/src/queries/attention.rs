@@ -217,8 +217,15 @@ where
         // one that opened the episode. `metadata` now includes `reason`
         // because we injected it above, so the lookup on the next call
         // will still succeed.
+        //
+        // Condition metadata replacement on observation ordering so an
+        // older caller that acquires the lock later cannot overwrite
+        // newer diagnostic information with stale metadata.
         sqlx::query(
-            "UPDATE attention_occurrences SET last_observed_at = GREATEST(last_observed_at, $1), metadata = $2 WHERE id = $3",
+            "UPDATE attention_occurrences \
+             SET metadata = CASE WHEN $1 >= last_observed_at THEN $2 ELSE metadata END, \
+                 last_observed_at = GREATEST(last_observed_at, $1) \
+             WHERE id = $3",
         )
         .bind(opened_at)
         .bind(&metadata)
@@ -342,8 +349,14 @@ where
     if let Some(row) = existing {
         let id: Uuid = row.get("id");
         // Reason matches — just observe the existing occurrence.
+        // Condition metadata replacement on observation ordering so an
+        // older caller that acquires the lock later cannot overwrite
+        // newer diagnostic information with stale metadata.
         sqlx::query(
-            "UPDATE attention_occurrences SET last_observed_at = GREATEST(last_observed_at, $1), metadata = $2 WHERE id = $3",
+            "UPDATE attention_occurrences \
+             SET metadata = CASE WHEN $1 >= last_observed_at THEN $2 ELSE metadata END, \
+                 last_observed_at = GREATEST(last_observed_at, $1) \
+             WHERE id = $3",
         )
         .bind(opened_at)
         .bind(&metadata)

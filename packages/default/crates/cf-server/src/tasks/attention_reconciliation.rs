@@ -41,12 +41,17 @@ const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(120);
 /// atomically inside a single transaction under the reason-independent system
 /// subject lock (`attention_occurrence:systems:{system_id}`), preventing races
 /// between concurrent heartbeat handlers and the periodic reconciliation sweep.
+///
+/// After acquiring the lock, the function re-reads the system's current health,
+/// hostname, and environment from the database. If the health has changed since
+/// the caller's snapshot, the operation is skipped — the caller that wrote the
+/// newer health already handled the transition.
 pub async fn reconcile_system_attention(
     pool: &PgPool,
     system_id: Uuid,
-    hostname: &str,
-    health: &str,
-    environment_id: Option<Uuid>,
+    _caller_health: &str,
+    _caller_hostname: &str,
+    _caller_environment_id: Option<Uuid>,
 ) {
     let subject_id = system_id.to_string();
     let opened_at = Utc::now();
@@ -74,7 +79,35 @@ pub async fn reconcile_system_attention(
         return;
     }
 
-    match health {
+    // ── Re-read authoritative state inside the lock ──────────────────────
+    // The caller's `health` and `environment_id` were read before the lock
+    // was acquired, so a stale snapshot could race with a newer transition
+    // and re-open an already-resolved incident.  Re-read from the database
+    // under the lock so we act on the latest committed state.
+    let (health, hostname, environment_id): (String, String, Option<Uuid>) =
+        match sqlx::query_as::<_, (String, String, Option<Uuid>)>(
+            "SELECT vsl.health_status, s.hostname, s.environment_id \
+             FROM view_system_list vsl \
+             JOIN systems s ON s.id = vsl.id \
+             WHERE vsl.id = $1",
+        )
+        .bind(system_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| warn!("failed to re-read system state: {e:#}"))
+        .ok()
+        .flatten()
+        .unwrap_or_default()  // (empty, empty, None) if system gone
+    {
+        (h, hn, eid) if !h.is_empty() => (h, hn, eid),
+        _ => {
+            debug!("system {system_id} not found during attention reconciliation");
+            let _ = tx.rollback().await;
+            return;
+        }
+    };
+
+    match health.as_str() {
         "critical" | "offline" => {
             // ── System transition (inline transition_by_subject logic) ──────
             //
@@ -86,13 +119,13 @@ pub async fn reconcile_system_attention(
             // Inject reason into metadata early so both paths preserve it.
             let mut metadata = serde_json::json!({
                 "system_id": system_id.to_string(),
-                "hostname": hostname,
-                "health_status": health,
+                "hostname": &hostname,
+                "health_status": &health,
             });
             if let serde_json::Value::Object(ref mut map) = metadata {
                 map.insert(
                     "reason".to_string(),
-                    serde_json::Value::String(health.to_string()),
+                    serde_json::Value::String(health.clone()),
                 );
             }
 
@@ -110,7 +143,7 @@ pub async fn reconcile_system_attention(
                     "#,
                 )
                 .bind(&subject_id)
-                .bind(serde_json::json!({"reason": health}))
+                .bind(serde_json::json!({"reason": &health}))
                 .fetch_optional(&mut *tx)
                 .await
                 {
@@ -124,9 +157,14 @@ pub async fn reconcile_system_attention(
 
                 match existing {
                     Some(existing_id) => {
-                        // Reason matches — just observe the existing occurrence.
+                        // Condition metadata replacement on observation ordering
+                        // so an older caller that acquires the lock later cannot
+                        // overwrite newer diagnostic information with stale metadata.
                         if let Err(e) = sqlx::query(
-                            "UPDATE attention_occurrences SET last_observed_at = GREATEST(last_observed_at, $1), metadata = $2 WHERE id = $3",
+                            "UPDATE attention_occurrences \
+                             SET metadata = CASE WHEN $1 >= last_observed_at THEN $2 ELSE metadata END, \
+                                 last_observed_at = GREATEST(last_observed_at, $1) \
+                             WHERE id = $3",
                         )
                         .bind(opened_at)
                         .bind(&metadata)
@@ -163,7 +201,7 @@ pub async fn reconcile_system_attention(
 
                         let episode_id = uuid::Uuid::new_v4();
                         let source_key =
-                            attention::system_occurrence_key(system_id, health, episode_id);
+                            attention::system_occurrence_key(system_id, &health, episode_id);
 
                         match sqlx::query_scalar::<_, uuid::Uuid>(
                             r#"
@@ -211,21 +249,36 @@ pub async fn reconcile_system_attention(
                 .flatten();
 
                 if let Some(sys_source_key) = source_key {
-                    // Resolve stale env occurrences for this system EXCEPT
-                    // the current health_status, so the env occurrence for
-                    // this same reason is preserved (not destroyed and
-                    // recreated) when the health status hasn't changed.
-                    let _ =
-                        attention::resolve_environment_occurrences_for_system_except_reason(
-                            &mut *tx,
-                            env_id,
-                            system_id,
-                            health,
-                        )
-                        .await
-                        .map_err(|e| {
-                            warn!("failed to resolve stale environment occurrence: {e:#}")
-                        });
+                    // Resolve env occurrences for this system ACROSS EVERY
+                    // ENVIRONMENT, except the exact current tuple:
+                    //   current environment
+                    //   current underlying_system_occurrence_key
+                    //   current reason
+                    //
+                    // This prevents reusing an env occurrence from a prior
+                    // system episode (e.g. a system that moved away and back)
+                    // while keeping the one for the current episode open.
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE attention_occurrences
+                        SET resolved_at = NOW()
+                        WHERE category = 'environments'
+                          AND resolved_at IS NULL
+                          AND metadata @> $1::jsonb
+                          AND NOT (
+                              subject_id = $2
+                              AND metadata @> $3::jsonb
+                              AND metadata @> $4::jsonb
+                          )
+                        "#,
+                    )
+                    .bind(serde_json::json!({"underlying_system_id": system_id.to_string()}))
+                    .bind(env_id.to_string())
+                    .bind(serde_json::json!({"underlying_system_occurrence_key": &sys_source_key}))
+                    .bind(serde_json::json!({"reason": &health}))
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| warn!("failed to resolve stale environment occurrence: {e:#}"));
 
                     // Open or observe the env occurrence inline (we are
                     // already inside a transaction holding the system subject
@@ -233,12 +286,17 @@ pub async fn reconcile_system_attention(
                     // starts its own transaction). Use episode-based keys so
                     // each env incident gets a unique source_occurrence_key
                     // that cannot collide with a previously resolved row.
+                    //
+                    // The existing-row lookup includes
+                    // `underlying_system_occurrence_key` so a resolved env
+                    // occurrence from a prior system episode cannot be
+                    // recycled for a different one.
                     let env_metadata = serde_json::json!({
-                        "reason": health,
+                        "reason": &health,
                         "environment_id": env_id.to_string(),
                         "underlying_system_id": system_id.to_string(),
                         "underlying_system_occurrence_key": &sys_source_key,
-                        "health_status": health,
+                        "health_status": &health,
                     });
 
                     let existing_env: Option<uuid::Uuid> = sqlx::query_scalar(
@@ -253,7 +311,11 @@ pub async fn reconcile_system_attention(
                         "#,
                     )
                     .bind(env_id.to_string())
-                    .bind(serde_json::json!({"underlying_system_id": system_id.to_string(), "reason": health}))
+                    .bind(serde_json::json!({
+                        "underlying_system_id": system_id.to_string(),
+                        "underlying_system_occurrence_key": &sys_source_key,
+                        "reason": &health,
+                    }))
                     .fetch_optional(&mut *tx)
                     .await
                     .map_err(|e| warn!("failed to find existing env occurrence: {e:#}"))
@@ -295,7 +357,7 @@ pub async fn reconcile_system_attention(
                 }
             }
         }
-        _ => {
+        "healthy" | "warning" | "" => {
             // ── Healthy recovery (inside the lock) ─────────────────────────
             // System is healthy/warning — resolve all open occurrences for
             // this system, which prevents the stale reconciler from racing
@@ -321,6 +383,9 @@ pub async fn reconcile_system_attention(
                     warn!("failed to resolve environment attention occurrence: {e:#}")
                 });
             }
+        }
+        other => {
+            debug!("unknown health status '{other}' for system {system_id}; skipping");
         }
     }
 
@@ -700,18 +765,12 @@ async fn reconcile_terminal_events(pool: &PgPool) {
         .map_err(|e| warn!("failed to reconcile build attention occurrence: {e:#}"));
     }
 
-    // Recent evaluation failures whose occurrence key does not exist yet.
-    // The key includes microsecond-precision completed_at, so we must
-    // query both commit_id and completed_at.
-    //
-    // IMPORTANT: The key MUST use EXTRACT(MICROSECONDS FROM interval)
-    // (exact integer arithmetic) rather than EXTRACT(EPOCH FROM ...) *
-    // 1000000 (float64-based), because float64 cannot represent all epoch
-    // microsecond values exactly (~16-17 significant digits vs float64's
-    // ~15.95), causing off-by-one truncation errors. The Rust side uses
-    // DateTime::timestamp_micros() which is exact integer arithmetic;
-    // interval-based subtraction is the only PostgreSQL approach that
-    // reproduces the exact same value.
+    // Recent evaluation failures whose occurrence does not exist yet.
+    // Match on (subject_type, subject_id, opened_at) rather than
+    // duplicating the source_occurrence_key encoding in SQL, which is
+    // fragile and can diverge from the Rust encoding.  The attention
+    // producer stores opened_at = evaluation_completed_at, so the
+    // equality is exact at microsecond precision.
     let evals: Vec<(i32, chrono::DateTime<chrono::Utc>)> = match sqlx::query_as(
         r#"
         SELECT c.id, c.evaluation_completed_at FROM commits c
@@ -721,8 +780,9 @@ async fn reconcile_terminal_events(pool: &PgPool) {
           AND NOT EXISTS (
               SELECT 1 FROM attention_occurrences ao
               WHERE ao.category = 'evals'
-                AND ao.source_occurrence_key =
-                    'eval:' || c.id::text || ':' || EXTRACT(MICROSECONDS FROM (c.evaluation_completed_at - 'epoch'::timestamptz))::bigint::text
+                AND ao.subject_type = 'commit_eval'
+                AND ao.subject_id = c.id::text
+                AND ao.opened_at = c.evaluation_completed_at
           )
         ORDER BY c.evaluation_completed_at DESC
         LIMIT 500
