@@ -3,6 +3,7 @@ use crate::handlers::agent_request::{
 };
 use crate::models::agent_heartbeats::AgentHeartbeat;
 use crate::models::cache_destination::CacheDestination;
+use crate::queries::attention;
 use crate::queries::cache_destinations::{get_caches_for_environment, get_global_caches};
 use crate::queries::systems::{
     BootIdChange, deactivate_duplicate_active_systems_by_public_key,
@@ -15,6 +16,8 @@ use crate::queries::{
     system_events::{lock_observed_system_state_by_hostname_tx, record_report_events_tx},
     system_states::insert_system_state,
 };
+use chrono::Utc;
+use uuid::Uuid;
 use axum::response::Response;
 use axum::{
     body::Bytes,
@@ -265,6 +268,14 @@ pub async fn log(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
+    // Reconcile system health attention after the heartbeat/state change.
+    let _ = reconcile_system_health_attention(
+        &pool,
+        agent_request.system.id,
+        &agent_request.system.hostname,
+    )
+    .await;
+
     // Log only after the commit so we never report events that rolled back.
     match boot_id_change {
         Some(BootIdChange::Changed) => {
@@ -429,6 +440,66 @@ fn classify_restart_type(
         None if change_reason == "startup" => Some("unknown"),
         // Periodic heartbeat with stable boot_id — keep the last classification.
         _ => None,
+    }
+}
+
+/// Reconcile system health attention after a heartbeat or state change.
+///
+/// Queries the current health status from `view_system_list` and opens or
+/// resolves an attention occurrence based on whether the system is in an
+/// attention-worthy state (critical/offline) or has recovered.
+async fn reconcile_system_health_attention(
+    pool: &PgPool,
+    system_id: Uuid,
+    hostname: &str,
+) {
+    let health: Option<String> = sqlx::query_scalar(
+        "SELECT health_status FROM view_system_list WHERE id = $1",
+    )
+    .bind(system_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    let Some(health) = health else {
+        debug!("Could not determine health status for system {hostname}; skipping attention reconciliation");
+        return;
+    };
+
+    let subject_id = system_id.to_string();
+    match health.as_str() {
+        "critical" | "offline" => {
+            let opened_at = Utc::now();
+            let _ = attention::open_or_observe_by_subject(
+                pool,
+                "systems",
+                "system_health",
+                &subject_id,
+                &health,
+                opened_at,
+                serde_json::json!({
+                    "system_id": system_id.to_string(),
+                    "hostname": hostname,
+                    "health_status": &health,
+                }),
+                |reason, episode_id| {
+                    attention::system_occurrence_key(system_id, reason, episode_id)
+                },
+            )
+            .await
+            .map_err(|e| warn!("failed to open system attention occurrence: {e:#}"));
+        }
+        _ => {
+            // System is healthy/warning — resolve any unresolved occurrence.
+            let _ = attention::resolve_open_occurrences_for_subject(
+                pool,
+                "systems",
+                &subject_id,
+            )
+            .await
+            .map_err(|e| warn!("failed to resolve system attention occurrence: {e:#}"));
+        }
     }
 }
 
