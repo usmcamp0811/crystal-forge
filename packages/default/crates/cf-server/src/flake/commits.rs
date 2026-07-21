@@ -2,6 +2,7 @@ use crate::config;
 use crate::derivations::utils::build_flake_reference;
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
+use crate::queries::attention;
 use crate::queries::commits::{flake_has_commits, insert_commit, insert_commit_with_metadata};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -535,6 +536,14 @@ pub async fn sync_flake_recorded(
         return Err(e.into());
     }
 
+    // Sync succeeded and committed durably — resolve any open attention
+    // occurrence for this flake. Every terminal error path routes through
+    // record_sync_error() below, which opens/observes the occurrence, so
+    // this is the single corresponding success-side resolution point.
+    let _ = attention::resolve(pool, "flakes", "flake_sync", &flake_id.to_string())
+        .await
+        .map_err(|e| warn!("failed to resolve flake attention occurrence: {e:#}"));
+
     if inserted_count > 0 {
         info!(
             "✅ Synced {} ({}): {} new commits ({} in git log)",
@@ -555,6 +564,12 @@ pub async fn sync_flake_recorded(
 const MAX_SNAPSHOT_COMMITS: i64 = 500;
 
 /// Record a sync error on the flake row (best-effort, errors logged only).
+///
+/// This is the single consolidated error-recording path for every failure
+/// mode in `sync_flake_recorded` (git fetch failure, lock failure, insert
+/// failure, snapshot failure, status-update failure, commit failure), so it
+/// is also the single place that opens/re-observes the flake's attention
+/// occurrence for a sync error.
 async fn record_sync_error(
     pool: &PgPool,
     flake_id: i32,
@@ -563,7 +578,7 @@ async fn record_sync_error(
     error_text: &str,
 ) {
     let truncated = sanitize_and_truncate_sync_error(repo_url, error_text, 4000);
-    if let Err(e) = sqlx::query(
+    let update_result = sqlx::query(
         "UPDATE flakes \
          SET sync_status = 'error', last_sync_at = now(), last_sync_error = $2 \
          WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $3",
@@ -572,9 +587,36 @@ async fn record_sync_error(
     .bind(&truncated)
     .bind(attempt_id)
     .execute(pool)
-    .await
-    {
-        warn!("Failed to record sync error for flake {flake_id}: {e:#}");
+    .await;
+
+    match update_result {
+        Ok(update) if update.rows_affected() == 0 => {
+            // Superseded by a newer attempt — do not open an attention
+            // occurrence on behalf of an attempt that is no longer current.
+        }
+        Ok(_) => {
+            let subject_id = flake_id.to_string();
+            let opened_at = Utc::now();
+            let metadata = serde_json::json!({
+                "flake_id": flake_id,
+                "last_sync_error": &truncated,
+            });
+            let _ = attention::open_or_observe_by_subject(
+                pool,
+                "flakes",
+                "flake_sync",
+                &subject_id,
+                "sync_error",
+                opened_at,
+                metadata,
+                |_reason, episode_id| format!("flake:{flake_id}:{episode_id}"),
+            )
+            .await
+            .map_err(|e| error!("failed to open flake attention occurrence: {e:#}"));
+        }
+        Err(e) => {
+            warn!("Failed to record sync error for flake {flake_id}: {e:#}");
+        }
     }
 }
 
