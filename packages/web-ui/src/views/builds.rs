@@ -3,7 +3,9 @@
 use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
-use crate::alerts::{NAV_BADGES, acknowledge_with_cursor_and_ids_async};
+use crate::alerts::{
+    NAV_BADGES, acknowledge_with_cursor_and_ids_async, occurrence_ids_for_rendered_subjects,
+};
 
 use crate::api::{
     self,
@@ -511,7 +513,18 @@ pub fn BuildsView() -> Element {
             let Some(cursor) = build_history_ack_cursor.read().clone() else {
                 return;
             };
-            let occurrence_ids = NAV_BADGES.read().builds_occurrence_ids.clone();
+            // Bound acknowledgment to occurrences for jobs actually present in
+            // the loaded history window, not every eligible occurrence
+            // fleet-wide — otherwise a failure outside this bounded window
+            // (loaded via build_history_fetch_limit) would be silently
+            // consumed without ever being shown.
+            let rendered_job_ids: std::collections::HashSet<String> = build_history
+                .read()
+                .iter()
+                .filter_map(|item| item.job_id)
+                .map(|id| id.to_string())
+                .collect();
+            let occurrence_ids = occurrence_ids_for_rendered_subjects("builds", &rendered_job_ids);
             spawn(async move {
                 if acknowledge_with_cursor_and_ids_async("builds", cursor, occurrence_ids).await
                 {

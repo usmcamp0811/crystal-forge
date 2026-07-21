@@ -4595,16 +4595,17 @@ fn FlakeTableNew(
                         {
                             let is_selected = selected_id == Some(flake.id);
                             let is_error = flake.status == "error";
-                            // Include the sync-attempt timestamp in the key so
-                            // a recovered-then-re-failed flake generates a new
-                            // dismissal key (different last_sync_at epoch).
-                            let flake_key = format!(
-                                "{}:{}",
-                                flake.id,
-                                flake.last_sync_at_raw
-                                    .map(|t| t.timestamp().to_string())
-                                    .unwrap_or_default()
-                            );
+                            // Resolve the same way dismiss_attention_item
+                            // resolves its local key: prefer the canonical
+                            // server occurrence key (a fresh episode id once
+                            // the flake recovers and fails again), falling
+                            // back to the stable flake id. Never a composite
+                            // including last_sync_at, which changes on every
+                            // retry of the same unresolved error and would
+                            // never match after a dismiss.
+                            let flake_id_str = flake.id.to_string();
+                            let flake_key = occurrence_id_for_subject("flakes", &flake_id_str)
+                                .unwrap_or(flake_id_str);
                             let row_class = attention_row_class(
                                 if is_selected { "selected" } else { "" },
                                 "flakes",
@@ -4803,14 +4804,13 @@ fn FlakeCardsNew(
                     } else {
                         ""
                     };
-                    // Same versioned key as the table view (id:last_sync_epoch).
-                    let flake_key = format!(
-                        "{}:{}",
-                        flake.id,
-                        flake.last_sync_at_raw
-                            .map(|t| t.timestamp().to_string())
-                            .unwrap_or_default()
-                    );
+                    // Same resolution as the table view — prefer the
+                    // canonical server occurrence key, falling back to the
+                    // stable flake id, matching what dismiss_attention_item
+                    // resolves for its local key.
+                    let flake_id_str = flake.id.to_string();
+                    let flake_key = occurrence_id_for_subject("flakes", &flake_id_str)
+                        .unwrap_or(flake_id_str);
                     let card_class = attention_row_class(
                         "sys-card compact",
                         "flakes",

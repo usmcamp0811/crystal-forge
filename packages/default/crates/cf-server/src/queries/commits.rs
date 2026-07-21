@@ -329,16 +329,9 @@ pub async fn mark_commit_evaluation_complete(pool: &PgPool, commit_id: i32) -> R
     .execute(pool)
     .await?;
 
-    let _ = attention::resolve(
-        pool,
-        "evals",
-        "commit_eval",
-        &commit_id.to_string(),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!("failed to resolve evaluation attention occurrence: {e:#}")
-    });
+    let _ = attention::resolve(pool, "evals", "commit_eval", &commit_id.to_string())
+        .await
+        .map_err(|e| tracing::error!("failed to resolve evaluation attention occurrence: {e:#}"));
 
     Ok(())
 }
@@ -395,9 +388,7 @@ pub async fn mark_commit_evaluation_failed(
                 serde_json::json!({"commit_id": commit_id}),
             )
             .await
-            .map_err(|e| {
-                tracing::error!("failed to open evaluation attention occurrence: {e:#}")
-            });
+            .map_err(|e| tracing::error!("failed to open evaluation attention occurrence: {e:#}"));
         }
     }
 
@@ -441,16 +432,11 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
         result.id, result.git_commit_hash
     );
 
-    let _ = attention::resolve(
-        pool,
-        "evals",
-        "commit_eval",
-        &commit_id.to_string(),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!("failed to resolve stale evaluation attention occurrence: {e:#}")
-    });
+    let _ = attention::resolve(pool, "evals", "commit_eval", &commit_id.to_string())
+        .await
+        .map_err(|e| {
+            tracing::error!("failed to resolve stale evaluation attention occurrence: {e:#}")
+        });
 
     Ok(())
 }

@@ -153,42 +153,67 @@ fn occurrence_ids_for_category(badges: &NavigationBadges, view_key: &str) -> Vec
     }
 }
 
+/// The occurrence-key prefix that identifies all occurrences belonging to a
+/// given subject within a category, matching the canonical key formats
+/// produced server-side in `queries::attention`:
+/// * builds: `build:<subject_id>` (the whole key; the job id alone is the identity)
+/// * evals: `eval:<subject_id>:<microseconds>`
+/// * systems: `system:<subject_id>:<reason>:<episode_uuid>`
+/// * environments: `environment:<subject_id>:<underlying_system_source_key>`
+/// * flakes: `flake:<subject_id>:<episode_uuid>`
+/// * cves: `cve:<subject_id>:<episode_uuid>`
+fn occurrence_key_prefix(view_key: &str, subject_id: &str) -> Option<String> {
+    match view_key {
+        "builds" => Some(format!("build:{subject_id}")),
+        "evals" => Some(format!("eval:{subject_id}:")),
+        "systems" => Some(format!("system:{subject_id}:")),
+        "environments" => Some(format!("environment:{subject_id}:")),
+        "flakes" => Some(format!("flake:{subject_id}:")),
+        "cves" => Some(format!("cve:{subject_id}:")),
+        _ => None,
+    }
+}
+
 /// Look up the server canonical occurrence key for a subject within the latest
 /// badge response. This lets row/card dismissers use the same stable ID as the
 /// sidebar without recomputing the key from mutable fields.
 ///
 /// `subject_id` is the stable subject identifier (job id, commit id, system id,
-/// environment id, flake id) as rendered by the view. The matching key prefix
-/// depends on the category:
-/// * builds: `build:<subject_id>`
-/// * evals: `eval:<subject_id>:<microseconds>`
-/// * systems: `system:<subject_id>:...`
-/// * environments: `environment:<subject_id>:...`
-/// * flakes: `flake:<subject_id>:...`
-/// * cves: `cve:<subject_id>`
+/// environment id, flake id) as rendered by the view.
 pub fn occurrence_id_for_subject(view_key: &str, subject_id: &str) -> Option<String> {
     let badges = NAV_BADGES.read_unchecked();
     let keys = occurrence_ids_for_category(&badges, view_key);
-    let prefix = match view_key {
-        "builds" => format!("build:{subject_id}"),
-        "evals" => format!("eval:{subject_id}:"),
-        "systems" => format!("system:{subject_id}:"),
-        "environments" => format!("environment:{subject_id}:"),
-        "flakes" => format!("flake:{subject_id}:"),
-        "cves" => format!("cve:{subject_id}"),
-        _ => return None,
-    };
-    keys.iter()
-        .find(|key| key.starts_with(&prefix))
-        .cloned()
-        .or_else(|| {
-            // For cves and builds the source key itself is the stable identity;
-            // fall back to an exact match if the prefix helper did not find it.
-            match view_key {
-                "builds" | "cves" => keys.into_iter().find(|key| key == subject_id),
-                _ => None,
-            }
+    let prefix = occurrence_key_prefix(view_key, subject_id)?;
+    keys.into_iter().find(|key| key.starts_with(&prefix))
+}
+
+/// Bound a category acknowledgment to only the occurrences whose subject was
+/// actually part of the caller's successfully rendered dataset.
+///
+/// The badge response's `*_occurrence_ids` array is scoped to the 24-hour
+/// attention window fleet/scope-wide, not to what a paginated view actually
+/// displayed — a view showing only the first page of a bounded history
+/// window (e.g. Builds `Completed`, Evaluations `History`) must not
+/// acknowledge occurrences for rows outside that page, or a genuinely new
+/// failure the user never saw could be silently consumed. Categories whose
+/// canonical key embeds a server-generated episode id that the client cannot
+/// reconstruct (flakes, systems, environments, cves) still resolve correctly
+/// here because matching is by subject-id prefix against the badge's already
+/// server-authoritative key list, not by reconstructing the key itself.
+pub fn occurrence_ids_for_rendered_subjects(
+    view_key: &str,
+    rendered_subject_ids: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let badges = NAV_BADGES.read_unchecked();
+    occurrence_ids_for_category(&badges, view_key)
+        .into_iter()
+        .filter(|key| {
+            rendered_subject_ids.iter().any(|subject_id| {
+                occurrence_key_prefix(view_key, subject_id)
+                    .is_some_and(|prefix| key.starts_with(&prefix))
+            })
         })
+        .collect()
 }
 
 pub fn acknowledge(view_key: &str) {
@@ -391,10 +416,19 @@ fn ensure_dismissed_loaded() {
 /// does not have the server key yet). The row is hidden immediately and the
 /// dismissal is persisted to LocalStorage. When a server key is supplied, the
 /// dismissal is also pushed to the server so it follows the user across devices.
+///
+/// The *local* optimistic-hide identity is the canonical occurrence key when
+/// available, not the bare subject id. Categories such as evaluations and
+/// systems reuse the same subject (commit id, system id) across distinct
+/// occurrences/episodes — keying the local dismissal on the subject alone
+/// would permanently suppress a genuinely new occurrence that recurs after a
+/// prior one resolved, since the stale local entry would still match. Callers
+/// must pass the same occurrence id (via `occurrence_id_for_subject`) to
+/// [`attention_row_class`]/[`attention_item_active`] so the two stay in sync.
 pub fn dismiss_attention_item(view_key: &str, subject_id: &str, occurrence_id: Option<&str>) {
     ensure_dismissed_loaded();
     let storage_key = dismissed_storage_key();
-    let local_key = attention_item_key(view_key, subject_id);
+    let local_key = attention_item_key(view_key, occurrence_id.unwrap_or(subject_id));
     {
         let mut state = ALERT_STATE.write();
         state.dismissed_items.insert(local_key.clone());

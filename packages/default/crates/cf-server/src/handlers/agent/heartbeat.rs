@@ -3,7 +3,6 @@ use crate::handlers::agent_request::{
 };
 use crate::models::agent_heartbeats::AgentHeartbeat;
 use crate::models::cache_destination::CacheDestination;
-use crate::queries::attention;
 use crate::queries::cache_destinations::{get_caches_for_environment, get_global_caches};
 use crate::queries::systems::{
     BootIdChange, deactivate_duplicate_active_systems_by_public_key,
@@ -16,8 +15,6 @@ use crate::queries::{
     system_events::{lock_observed_system_state_by_hostname_tx, record_report_events_tx},
     system_states::insert_system_state,
 };
-use chrono::Utc;
-use uuid::Uuid;
 use axum::response::Response;
 use axum::{
     body::Bytes,
@@ -27,6 +24,7 @@ use axum::{
 };
 use sqlx::PgPool;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 // Re-export protocol types so agent binary imports remain backward-compatible:
 //   use crystal_forge::handlers::agent::heartbeat::{LogResponse, RuntimeCacheConfig};
@@ -445,16 +443,13 @@ fn classify_restart_type(
 
 /// Reconcile system health attention after a heartbeat or state change.
 ///
-/// Queries the current health status from `view_system_list` and opens or
-/// resolves an attention occurrence based on whether the system is in an
-/// attention-worthy state (critical/offline) or has recovered. Also
-/// reconciles environment attention derived from this system's state.
-async fn reconcile_system_health_attention(
-    pool: &PgPool,
-    system_id: Uuid,
-    hostname: &str,
-) {
-    // Fetch environment_id and current health_status in one query.
+/// Queries the current health status from `view_system_list` and delegates
+/// to the shared [`crate::tasks::attention_reconciliation::reconcile_system_attention`],
+/// which also drives the periodic reconciliation sweep for systems that stop
+/// heartbeating entirely (see that module for why a single request-triggered
+/// hook cannot be the only producer for a continuously-recomputed health
+/// status).
+async fn reconcile_system_health_attention(pool: &PgPool, system_id: Uuid, hostname: &str) {
     let row: Option<(String, Option<Uuid>)> = sqlx::query_as(
         "SELECT vsl.health_status, s.environment_id \
          FROM view_system_list vsl \
@@ -468,107 +463,20 @@ async fn reconcile_system_health_attention(
     .flatten();
 
     let Some((health, environment_id)) = row else {
-        debug!("Could not determine health status for system {hostname}; skipping attention reconciliation");
+        debug!(
+            "Could not determine health status for system {hostname}; skipping attention reconciliation"
+        );
         return;
     };
 
-    let subject_id = system_id.to_string();
-    match health.as_str() {
-        "critical" | "offline" => {
-            let opened_at = Utc::now();
-            let result = attention::open_or_observe_by_subject(
-                pool,
-                "systems",
-                "system_health",
-                &subject_id,
-                &health,
-                opened_at,
-                serde_json::json!({
-                    "system_id": system_id.to_string(),
-                    "hostname": hostname,
-                    "health_status": &health,
-                }),
-                |reason, episode_id| {
-                    attention::system_occurrence_key(system_id, reason, episode_id)
-                },
-            )
-            .await;
-
-            if let Ok(occurrence_id) = result {
-                // Look up the source_occurrence_key so we can create
-                // the corresponding environment occurrence.
-                let source_key: Option<String> = sqlx::query_scalar(
-                    "SELECT source_occurrence_key FROM attention_occurrences WHERE id = $1",
-                )
-                .bind(occurrence_id)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten();
-
-                if let (Some(env_id), Some(sys_source_key)) = (environment_id, source_key) {
-                    let env_key = attention::environment_occurrence_key(env_id, &sys_source_key);
-                    let _ = attention::open_or_observe(
-                        pool,
-                        "environments",
-                        "environment",
-                        &env_id.to_string(),
-                        &env_key,
-                        opened_at,
-                        serde_json::json!({
-                            "environment_id": env_id.to_string(),
-                            "underlying_system_id": system_id.to_string(),
-                            "underlying_system_occurrence_key": &sys_source_key,
-                            "health_status": &health,
-                        }),
-                    )
-                    .await
-                    .map_err(|e| warn!("failed to open environment attention occurrence: {e:#}"));
-                }
-            } else if let Err(e) = result {
-                warn!("failed to open system attention occurrence: {e:#}");
-            }
-        }
-        _ => {
-            // System is healthy/warning — resolve any unresolved occurrence.
-            let _ = attention::resolve_open_occurrences_for_subject(
-                pool,
-                "systems",
-                &subject_id,
-            )
-            .await
-            .map_err(|e| warn!("failed to resolve system attention occurrence: {e:#}"));
-
-            // Also resolve the corresponding environment occurrence now that
-            // this system's underlying occurrence is resolved.
-            if let Some(env_id) = environment_id {
-                // Find the environment occurrence tied to this system.
-                let prefix = format!("environment:{env_id}:system:{system_id}:");
-                let env_occ_id: Option<uuid::Uuid> = sqlx::query_scalar(
-                    "SELECT id FROM attention_occurrences \
-                     WHERE category = 'environments' \
-                       AND subject_id = $1 \
-                       AND source_occurrence_key LIKE $2 \
-                       AND resolved_at IS NULL \
-                     LIMIT 1",
-                )
-                .bind(env_id.to_string())
-                .bind(prefix)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten();
-
-                if let Some(env_occ_id) = env_occ_id {
-                    let _ = attention::resolve_occurrence(pool, env_occ_id)
-                        .await
-                        .map_err(|e| {
-                            warn!("failed to resolve environment attention occurrence: {e:#}")
-                        });
-                }
-            }
-        }
-    }
+    crate::tasks::attention_reconciliation::reconcile_system_attention(
+        pool,
+        system_id,
+        hostname,
+        &health,
+        environment_id,
+    )
+    .await;
 }
 
 #[cfg(test)]

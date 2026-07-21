@@ -41,14 +41,12 @@ async fn total_environments(
     is_admin: bool,
     member_environment_ids: &[Uuid],
 ) -> Result<i64> {
-    sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM environments WHERE ($1 OR id = ANY($2))",
-    )
-    .bind(is_admin)
-    .bind(member_environment_ids)
-    .fetch_one(pool)
-    .await
-    .context("failed to fetch environments total")
+    sqlx::query_scalar("SELECT COUNT(*)::bigint FROM environments WHERE ($1 OR id = ANY($2))")
+        .bind(is_admin)
+        .bind(member_environment_ids)
+        .fetch_one(pool)
+        .await
+        .context("failed to fetch environments total")
 }
 
 async fn total_flakes(pool: &PgPool) -> Result<i64> {
@@ -96,12 +94,54 @@ pub async fn fetch_navigation_badges(
         systems_occurrence_ids,
         environments_occurrence_ids,
     ) = tokio::try_join!(
-        attention::list_eligible_occurrence_keys(pool, user_id, "builds", observed_at, is_admin, None),
-        attention::list_eligible_occurrence_keys(pool, user_id, "evals", observed_at, is_admin, None),
-        attention::list_eligible_occurrence_keys(pool, user_id, "flakes", observed_at, is_admin, None),
-        attention::list_eligible_occurrence_keys(pool, user_id, "cves", observed_at, is_admin, None),
-        attention::list_eligible_occurrence_keys(pool, user_id, "systems", observed_at, is_admin, envs_option),
-        attention::list_eligible_occurrence_keys(pool, user_id, "environments", observed_at, is_admin, envs_option),
+        attention::list_eligible_occurrence_keys(
+            pool,
+            user_id,
+            "builds",
+            observed_at,
+            is_admin,
+            None
+        ),
+        attention::list_eligible_occurrence_keys(
+            pool,
+            user_id,
+            "evals",
+            observed_at,
+            is_admin,
+            None
+        ),
+        attention::list_eligible_occurrence_keys(
+            pool,
+            user_id,
+            "flakes",
+            observed_at,
+            is_admin,
+            None
+        ),
+        attention::list_eligible_occurrence_keys(
+            pool,
+            user_id,
+            "cves",
+            observed_at,
+            is_admin,
+            None
+        ),
+        attention::list_eligible_occurrence_keys(
+            pool,
+            user_id,
+            "systems",
+            observed_at,
+            is_admin,
+            envs_option
+        ),
+        attention::list_eligible_occurrence_keys(
+            pool,
+            user_id,
+            "environments",
+            observed_at,
+            is_admin,
+            envs_option
+        ),
     )?;
 
     Ok(NavigationBadges {

@@ -433,6 +433,21 @@ pub fn spawn_background_tasks(
         cfg.server.failed_build_log_retention_days,
     ));
 
+    // Bounded time-driven reconciliation for systems that stop heartbeating
+    // and flakes stuck syncing past the staleness threshold — see
+    // `tasks::attention_reconciliation` for why these need a periodic sweep
+    // rather than only a request-triggered hook.
+    let attention_reconciliation_pool = pool.clone();
+    tokio::spawn(
+        crate::tasks::attention_reconciliation::run_attention_reconciliation_loop(
+            attention_reconciliation_pool,
+        ),
+    );
+    let attention_cleanup_pool = pool.clone();
+    tokio::spawn(
+        crate::tasks::attention_reconciliation::run_attention_cleanup_loop(attention_cleanup_pool),
+    );
+
     let commit_cache_pool = pool.clone();
     tokio::spawn(run_commit_cache_gc_loop(
         commit_cache_pool,

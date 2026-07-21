@@ -1290,14 +1290,9 @@ pub async fn complete_job_atomic(
         .await
         .context("Failed to commit completion transaction")?;
 
-    let _ = attention::resolve(
-        pool,
-        "builds",
-        "build_job",
-        &job_id.to_string(),
-    )
-    .await
-    .map_err(|e| tracing::error!("failed to resolve build attention occurrence: {e:#}"));
+    let _ = attention::resolve(pool, "builds", "build_job", &job_id.to_string())
+        .await
+        .map_err(|e| tracing::error!("failed to resolve build attention occurrence: {e:#}"));
 
     let job = get_build_job_by_id(pool, job_id)
         .await?

@@ -13,7 +13,8 @@
 //! * `flakes`    -> `flake:<flake_id>:<episode_uuid>` (resolved/recovery opens a new episode)
 //! * `systems`   -> `system:<system_id>:<reason>:<episode_uuid>`
 //! * `environments` -> `environment:<environment_id>:<underlying_system_source_key>`
-//! * `cves`      -> `cve:<cve_id>`
+//! * `cves`      -> `cve:<cve_id>:<episode_uuid>` (fleet-relevance episode; resolving and
+//!   later recurring as fleet-relevant opens a new episode, mirroring flakes/systems)
 //!
 //! The 24-hour eligibility rule is applied uniformly by all read paths; it is
 //! a query predicate, not a cleanup requirement.
@@ -85,8 +86,13 @@ pub fn environment_occurrence_key(
     format!("environment:{environment_id}:{underlying_system_source_key}")
 }
 
-pub fn cve_occurrence_key(cve_id: &str) -> String {
-    format!("cve:{cve_id}")
+/// Build the source occurrence key for a CVE fleet-relevance episode. A CVE
+/// can leave and later re-enter fleet relevance (patched everywhere, then
+/// reintroduced, or rescored back to critical); each such episode gets a
+/// fresh `episode_id` via [`open_or_observe_by_subject`] rather than reusing
+/// a single deterministic key, so recurrence after resolution is representable.
+pub fn cve_occurrence_key(cve_id: &str, episode_id: Uuid) -> String {
+    format!("cve:{cve_id}:{episode_id}")
 }
 
 // ── Core occurrence lifecycle ───────────────────────────────────────────────
@@ -141,6 +147,15 @@ where
 ///
 /// The `source_key_factory` is called with a fresh episode UUID when a new
 /// occurrence is needed.
+///
+/// Concurrent producer/reconciler runs for the same `(category, subject_id,
+/// reason)` are serialized with a transaction-scoped PostgreSQL advisory
+/// lock. Without it, two concurrent callers could both observe "no open row"
+/// (there is nothing yet to lock with `SELECT ... FOR UPDATE`) and each
+/// insert a distinct, randomly keyed episode — the unique constraint on
+/// `(category, source_occurrence_key)` would not catch this because the two
+/// generated keys differ. The advisory lock is released automatically at
+/// commit/rollback, so it never outlives this call.
 pub async fn open_or_observe_by_subject<F>(
     pool: &PgPool,
     category: &str,
@@ -154,7 +169,17 @@ pub async fn open_or_observe_by_subject<F>(
 where
     F: FnOnce(&str, Uuid) -> String,
 {
-    let mut tx = pool.begin().await.context("failed to begin occurrence transaction")?;
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin occurrence transaction")?;
+
+    let lock_key = format!("attention_occurrence:{category}:{subject_id}:{reason}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *tx)
+        .await
+        .context("failed to acquire occurrence lock")?;
 
     let row = sqlx::query(
         r#"
@@ -176,15 +201,15 @@ where
     .context("failed to find open attention occurrence")?;
 
     if let Some(id) = row.map(|r| r.get::<Uuid, _>("id")) {
-        sqlx::query(
-            "UPDATE attention_occurrences SET last_observed_at = $1 WHERE id = $2",
-        )
-        .bind(opened_at)
-        .bind(id)
-        .execute(&mut *tx)
-        .await
-        .context("failed to update last_observed_at")?;
-        tx.commit().await.context("failed to commit occurrence update")?;
+        sqlx::query("UPDATE attention_occurrences SET last_observed_at = $1 WHERE id = $2")
+            .bind(opened_at)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to update last_observed_at")?;
+        tx.commit()
+            .await
+            .context("failed to commit occurrence update")?;
         return Ok(id);
     }
 
@@ -192,7 +217,10 @@ where
     let source_key = source_key_factory(reason, episode_id);
     let mut metadata = metadata;
     if let serde_json::Value::Object(ref mut map) = metadata {
-        map.insert("reason".to_string(), serde_json::Value::String(reason.to_string()));
+        map.insert(
+            "reason".to_string(),
+            serde_json::Value::String(reason.to_string()),
+        );
     }
 
     let row = sqlx::query(
@@ -217,20 +245,26 @@ where
     .context("failed to open attention occurrence by subject")?;
 
     let id = row.get::<Uuid, _>("id");
-    tx.commit().await.context("failed to commit occurrence insert")?;
+    tx.commit()
+        .await
+        .context("failed to commit occurrence insert")?;
     Ok(id)
 }
 
-/// Resolve a single open occurrence identified by its category, source kind,
-/// and source id.
+/// Resolve a single open occurrence identified by its category, subject type,
+/// and subject id.
 ///
 /// Returns the number of rows updated (0 or 1). Resolution is a one-way
 /// transition: callers must open a new occurrence if the condition recurs.
+///
+/// `subject_type` and `subject_id` must match the columns of the same name on
+/// `attention_occurrences` (the schema has no separate `source_kind`/
+/// `source_id` columns).
 pub async fn resolve(
     pool: &PgPool,
     category: &str,
-    source_kind: &str,
-    source_id: &str,
+    subject_type: &str,
+    subject_id: &str,
 ) -> Result<u64> {
     validate_category(category)?;
 
@@ -239,14 +273,14 @@ pub async fn resolve(
         UPDATE attention_occurrences
         SET resolved_at = NOW()
         WHERE category = $1
-          AND source_kind = $2
-          AND source_id = $3
+          AND subject_type = $2
+          AND subject_id = $3
           AND resolved_at IS NULL
         "#,
     )
     .bind(category)
-    .bind(source_kind)
-    .bind(source_id)
+    .bind(subject_type)
+    .bind(subject_id)
     .execute(pool)
     .await
     .context("failed to resolve attention occurrence")?;
@@ -328,12 +362,94 @@ where
     Ok(result.rows_affected() as usize)
 }
 
+/// Resolve any open environment occurrence tied to a specific underlying
+/// system, except one whose recorded `health_status` metadata matches
+/// `reason`. Used when a system's attention reason changes (e.g.
+/// critical -> offline): the derived environment incident for the *old*
+/// reason closes so it does not accumulate alongside the new one.
+///
+/// Scoped to `environment_id` + `underlying_system_id` (via metadata) rather
+/// than just `environment_id`, because an environment can have several
+/// systems each contributing an independent, still-open derived occurrence —
+/// resolving by environment alone would incorrectly close incidents for
+/// other systems in the same environment.
+pub async fn resolve_environment_occurrences_for_system_except_reason(
+    pool: &PgPool,
+    environment_id: Uuid,
+    system_id: Uuid,
+    reason: &str,
+) -> Result<usize> {
+    let result = sqlx::query(
+        r#"
+        UPDATE attention_occurrences
+        SET resolved_at = NOW()
+        WHERE category = 'environments'
+          AND subject_id = $1
+          AND metadata @> $2::jsonb
+          AND NOT (metadata @> $3::jsonb)
+          AND resolved_at IS NULL
+        "#,
+    )
+    .bind(environment_id.to_string())
+    .bind(serde_json::json!({"underlying_system_id": system_id.to_string()}))
+    .bind(serde_json::json!({"health_status": reason}))
+    .execute(pool)
+    .await
+    .context("failed to resolve environment occurrences for system except reason")?;
+
+    Ok(result.rows_affected() as usize)
+}
+
+/// Resolve all open environment occurrences tied to a specific underlying
+/// system (used when the system recovers to healthy/warning). Scoped by
+/// `underlying_system_id` metadata for the same reason as above — and
+/// resolves every matching row rather than an arbitrary single one, so a
+/// prior bug or race that left more than one open occurrence for the same
+/// system cannot leave a duplicate permanently unresolved.
+pub async fn resolve_environment_occurrences_for_system(
+    pool: &PgPool,
+    environment_id: Uuid,
+    system_id: Uuid,
+) -> Result<usize> {
+    let result = sqlx::query(
+        r#"
+        UPDATE attention_occurrences
+        SET resolved_at = NOW()
+        WHERE category = 'environments'
+          AND subject_id = $1
+          AND metadata @> $2::jsonb
+          AND resolved_at IS NULL
+        "#,
+    )
+    .bind(environment_id.to_string())
+    .bind(serde_json::json!({"underlying_system_id": system_id.to_string()}))
+    .execute(pool)
+    .await
+    .context("failed to resolve environment occurrences for system")?;
+
+    Ok(result.rows_affected() as usize)
+}
+
 // ── Dismissal ───────────────────────────────────────────────────────────────
 
 /// Dismiss a bounded set of occurrences for a user. Each occurrence is supplied
 /// as a canonical source occurrence key and is validated:
+/// * it must exist and be visible to the requesting user
 /// * it must belong to the requested category
 /// * it must have been opened at or before the observation cursor
+///
+/// Visibility mirrors the same environment-membership scoping used by the
+/// badge/list queries: `systems` and `environments` occurrences are
+/// restricted to environments in `member_environment_ids` unless `is_admin`;
+/// other categories are not environment-scoped. A caller must not be able to
+/// dismiss, or distinguish the existence of, an occurrence outside their
+/// visibility from one that genuinely does not exist — both fail with the
+/// same message.
+///
+/// Every error raised for a caller-supplied key is prefixed with
+/// `"occurrence key '"` so callers (the HTTP handler) can reliably classify
+/// these as client validation errors (400) rather than server errors (500)
+/// without depending on more specific, potentially visibility-leaking text.
 ///
 /// Returns the updated per-category undismissed counts for the user.
 pub async fn dismiss_occurrences(
@@ -345,12 +461,24 @@ pub async fn dismiss_occurrences(
     is_admin: bool,
     member_environment_ids: &[Uuid],
 ) -> Result<NavigationAttentionCounts> {
-    let mut tx = pool.begin().await.context("failed to begin dismissal transaction")?;
+    validate_category(category)?;
 
-    // Validate category and cursor for every requested occurrence key.
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin dismissal transaction")?;
+
+    // Validate existence+visibility, category, and cursor for every
+    // requested occurrence key.
     for key in occurrence_keys {
         let row = sqlx::query(
-            "SELECT category, opened_at FROM attention_occurrences WHERE source_occurrence_key = $1",
+            r#"
+            SELECT ao.category, ao.opened_at, ao.subject_id, s.environment_id AS system_environment_id
+            FROM attention_occurrences ao
+            LEFT JOIN systems s
+              ON ao.category = 'systems' AND s.id::text = ao.subject_id
+            WHERE ao.source_occurrence_key = $1
+            "#,
         )
         .bind(key)
         .fetch_optional(&mut *tx)
@@ -358,10 +486,13 @@ pub async fn dismiss_occurrences(
         .context("failed to look up occurrence for dismissal")?;
 
         let Some(row) = row else {
-            anyhow::bail!("occurrence key '{}' not found", key);
+            anyhow::bail!("occurrence key '{}' is not available for dismissal", key);
         };
         let occ_category: String = row.get("category");
         let opened_at: DateTime<Utc> = row.get("opened_at");
+        let subject_id: String = row.get("subject_id");
+        let system_environment_id: Option<Uuid> = row.get("system_environment_id");
+
         if occ_category != category {
             anyhow::bail!(
                 "occurrence key '{}' belongs to category {}, expected {}",
@@ -370,8 +501,29 @@ pub async fn dismiss_occurrences(
                 category
             );
         }
+
+        if !is_admin {
+            let visible = match occ_category.as_str() {
+                "systems" => system_environment_id
+                    .is_some_and(|env_id| member_environment_ids.contains(&env_id)),
+                "environments" => subject_id
+                    .parse::<Uuid>()
+                    .is_ok_and(|env_id| member_environment_ids.contains(&env_id)),
+                _ => true,
+            };
+            if !visible {
+                // Deliberately identical to the "not found" message above —
+                // an unauthorized caller must not be able to tell an
+                // out-of-scope occurrence apart from one that does not exist.
+                anyhow::bail!("occurrence key '{}' is not available for dismissal", key);
+            }
+        }
+
         if opened_at > observed_at {
-            anyhow::bail!("occurrence key '{}' opened after the observation cursor", key);
+            anyhow::bail!(
+                "occurrence key '{}' opened after the observation cursor",
+                key
+            );
         }
     }
 
@@ -389,7 +541,12 @@ pub async fn dismiss_occurrences(
             if idx > 0 {
                 query.push(',');
             }
-            query.push_str(&format!(" (${}, ${}, ${})", idx * 3 + 1, idx * 3 + 2, idx * 3 + 3));
+            query.push_str(&format!(
+                " (${}, ${}, ${})",
+                idx * 3 + 1,
+                idx * 3 + 2,
+                idx * 3 + 3
+            ));
         }
         query.push_str(" ON CONFLICT (user_id, occurrence_id) DO NOTHING");
 
@@ -404,7 +561,9 @@ pub async fn dismiss_occurrences(
             .context("failed to insert dismissals")?;
     }
 
-    tx.commit().await.context("failed to commit dismissal transaction")?;
+    tx.commit()
+        .await
+        .context("failed to commit dismissal transaction")?;
 
     count_attention_for_user(pool, user_id, observed_at, is_admin, member_environment_ids).await
 }
@@ -522,7 +681,8 @@ async fn count_category(
     out: &mut i64,
 ) -> Result<()> {
     let sql = match category {
-        "systems" => r#"
+        "systems" => {
+            r#"
             SELECT COUNT(*)::bigint
             FROM attention_occurrences ao
             JOIN systems s ON s.id::text = ao.subject_id
@@ -534,8 +694,10 @@ async fn count_category(
                   WHERE uad.occurrence_id = ao.id AND uad.user_id = $2
               )
               AND ($3 OR s.environment_id = ANY($4))
-            "#,
-        "environments" => r#"
+            "#
+        }
+        "environments" => {
+            r#"
             SELECT COUNT(*)::bigint
             FROM attention_occurrences ao
             JOIN environments e ON e.id::text = ao.subject_id
@@ -547,8 +709,10 @@ async fn count_category(
                   WHERE uad.occurrence_id = ao.id AND uad.user_id = $2
               )
               AND ($3 OR e.id = ANY($4))
-            "#,
-        _ => r#"
+            "#
+        }
+        _ => {
+            r#"
             SELECT COUNT(*)::bigint
             FROM attention_occurrences ao
             WHERE ao.category = $5
@@ -558,7 +722,8 @@ async fn count_category(
                   SELECT 1 FROM user_attention_dismissals uad
                   WHERE uad.occurrence_id = ao.id AND uad.user_id = $2
               )
-            "#,
+            "#
+        }
     };
 
     let row = if let Some(envs) = environment_ids {
@@ -600,7 +765,8 @@ pub async fn list_eligible_occurrence_keys(
 ) -> Result<Vec<String>> {
     let cutoff = attention_cutoff(observed_at);
     let sql = match category {
-        "systems" => r#"
+        "systems" => {
+            r#"
             SELECT ao.source_occurrence_key
             FROM attention_occurrences ao
             JOIN systems s ON s.id::text = ao.subject_id
@@ -613,8 +779,11 @@ pub async fn list_eligible_occurrence_keys(
               )
               AND ($3 OR s.environment_id = ANY($4))
             ORDER BY ao.opened_at DESC
-            "#,
-        "environments" => r#"
+            LIMIT 10000
+            "#
+        }
+        "environments" => {
+            r#"
             SELECT ao.source_occurrence_key
             FROM attention_occurrences ao
             JOIN environments e ON e.id::text = ao.subject_id
@@ -627,8 +796,11 @@ pub async fn list_eligible_occurrence_keys(
               )
               AND ($3 OR e.id = ANY($4))
             ORDER BY ao.opened_at DESC
-            "#,
-        _ => r#"
+            LIMIT 10000
+            "#
+        }
+        _ => {
+            r#"
             SELECT ao.source_occurrence_key
             FROM attention_occurrences ao
             WHERE ao.category = $5
@@ -640,7 +812,8 @@ pub async fn list_eligible_occurrence_keys(
               )
             ORDER BY ao.opened_at DESC
             LIMIT 10000
-            "#,
+            "#
+        }
     };
 
     let rows = if let Some(envs) = environment_ids {
@@ -696,19 +869,39 @@ pub async fn occurrence_ids_by_keys(
 pub async fn cleanup(
     pool: &PgPool,
     resolved_retention: Duration,
-    batch_size: i64,
+    batch_size: i32,
 ) -> Result<(i64, i64)> {
-    let row = sqlx::query(
-        "SELECT cleanup_attention_occurrences($1, $2) AS result",
-    )
-    .bind(resolved_retention)
-    .bind(batch_size)
-    .fetch_one(pool)
-    .await
-    .context("cleanup_attention_occurrences failed")?;
+    // Two independent runtime type-mismatch bugs existed here, neither
+    // caught by `cargo check` because this is an unprepared runtime
+    // `sqlx::query` (not `sqlx::query!`):
+    //   1. `chrono::Duration` has no `Encode<Postgres>` for the `interval`
+    //      wire type — convert to `PgInterval` explicitly.
+    //   2. `cleanup_attention_occurrences`'s second parameter is `INT`
+    //      (4 bytes) in the migration, but this previously bound an `i64`
+    //      (`bigint`); Postgres does not implicitly resolve that overload,
+    //      so every call failed with "function ... does not exist".
+    let interval = sqlx::postgres::types::PgInterval {
+        months: 0,
+        days: 0,
+        microseconds: resolved_retention.num_microseconds().unwrap_or(i64::MAX),
+    };
 
-    let result: (i64, i64) = row.get("result");
-    Ok(result)
+    // `cleanup_attention_occurrences` is a RETURNS TABLE function.
+    // `SELECT cleanup_attention_occurrences(...) AS result` returns one
+    // column holding an anonymous composite row value (Postgres renders it
+    // as e.g. `(1,0)`), which sqlx cannot decode as `(i64, i64)` without a
+    // matching composite `Decode` impl. Calling it in the FROM clause
+    // instead correctly projects it into two typed columns.
+    let row = sqlx::query("SELECT * FROM cleanup_attention_occurrences($1, $2)")
+        .bind(interval)
+        .bind(batch_size)
+        .fetch_one(pool)
+        .await
+        .context("cleanup_attention_occurrences failed")?;
+
+    let deleted_occurrences: i64 = row.get("deleted_occurrences");
+    let deleted_dismissals: i64 = row.get("deleted_dismissals");
+    Ok((deleted_occurrences, deleted_dismissals))
 }
 
 #[cfg(test)]
@@ -721,7 +914,10 @@ mod tests {
         let observed = Utc::now();
         let cutoff = observed - ATTENTION_WINDOW;
         assert!(is_attention_eligible(cutoff, observed));
-        assert!(!is_attention_eligible(cutoff - Duration::microseconds(1), observed));
+        assert!(!is_attention_eligible(
+            cutoff - Duration::microseconds(1),
+            observed
+        ));
     }
 
     #[test]
@@ -745,5 +941,485 @@ mod tests {
         let episode_id = Uuid::new_v4();
         let key = system_occurrence_key(system_id, "offline", episode_id);
         assert_eq!(key, format!("system:{system_id}:offline:{episode_id}"));
+    }
+
+    // ── Live-database lifecycle tests ───────────────────────────────────────
+    //
+    // These exercise the dynamic SQL paths that cannot be caught by
+    // `cargo check` under `SQLX_OFFLINE=true` (runtime `sqlx::query`, not
+    // `sqlx::query!`). Run against a repository-provided isolated database:
+    //   DATABASE_URL=postgres://crystal_forge:password@localhost:3042/crystal_forge \
+    //     cargo test -p cf-server --lib queries::attention -- --ignored
+
+    async fn test_pool() -> PgPool {
+        PgPool::connect(
+            &std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"),
+        )
+        .await
+        .expect("failed to connect to test database")
+    }
+
+    async fn insert_throwaway_user(pool: &PgPool) -> Uuid {
+        let user_id = Uuid::new_v4();
+        let short = user_id.simple().to_string()[..12].to_string();
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email, user_type) \
+             VALUES ($1, $2, 'Test', 'User', $3, 'human')",
+        )
+        .bind(user_id)
+        .bind(format!("att-{short}"))
+        .bind(format!("att-{short}@example.com"))
+        .execute(pool)
+        .await
+        .expect("failed to insert throwaway test user");
+        user_id
+    }
+
+    async fn insert_throwaway_environment(pool: &PgPool, name_hint: &str) -> Uuid {
+        let env_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(env_id)
+            .bind(format!(
+                "att-{name_hint}-{}",
+                &env_id.simple().to_string()[..8]
+            ))
+            .execute(pool)
+            .await
+            .expect("failed to insert throwaway test environment");
+        env_id
+    }
+
+    async fn insert_throwaway_system(pool: &PgPool, environment_id: Uuid) -> Uuid {
+        let system_id = Uuid::new_v4();
+        let short = system_id.simple().to_string()[..12].to_string();
+        sqlx::query(
+            "INSERT INTO systems (id, hostname, environment_id, is_active, public_key, derivation) \
+             VALUES ($1, $2, $3, TRUE, $4, $5)",
+        )
+        .bind(system_id)
+        .bind(format!("att-sys-{short}"))
+        .bind(environment_id)
+        .bind(format!("ssh-ed25519 AAAA-test-{short}"))
+        .bind("/nix/store/att-test-derivation")
+        .execute(pool)
+        .await
+        .expect("failed to insert throwaway test system");
+        system_id
+    }
+
+    async fn cleanup_user(pool: &PgPool, user_id: Uuid) {
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(pool)
+            .await;
+    }
+
+    async fn cleanup_environment(pool: &PgPool, environment_id: Uuid) {
+        let _ = sqlx::query("DELETE FROM environments WHERE id = $1")
+            .bind(environment_id)
+            .execute(pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_open_or_observe_by_subject_opens_then_observes() {
+        let pool = test_pool().await;
+        let subject_id = Uuid::new_v4().to_string();
+
+        let first = open_or_observe_by_subject(
+            &pool,
+            "flakes",
+            "flake_sync",
+            &subject_id,
+            "sync_error",
+            Utc::now(),
+            serde_json::json!({}),
+            |reason, episode_id| format!("flake:{subject_id}:{reason}:{episode_id}"),
+        )
+        .await
+        .expect("first open should succeed");
+
+        let second = open_or_observe_by_subject(
+            &pool,
+            "flakes",
+            "flake_sync",
+            &subject_id,
+            "sync_error",
+            Utc::now(),
+            serde_json::json!({}),
+            |reason, episode_id| format!("flake:{subject_id}:{reason}:{episode_id}"),
+        )
+        .await
+        .expect("second call should observe the existing occurrence");
+
+        assert_eq!(
+            first, second,
+            "same subject+reason must converge to one occurrence"
+        );
+
+        let open_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(&subject_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(open_count, 1);
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&subject_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_open_or_observe_by_subject_concurrent_calls_converge_to_one_occurrence() {
+        // Regression test for the race where two concurrent callers could
+        // both observe "no open row" and each insert a distinct, randomly
+        // keyed episode. The transaction-scoped advisory lock in
+        // open_or_observe_by_subject must serialize these.
+        let pool = test_pool().await;
+        let subject_id = Uuid::new_v4().to_string();
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let pool = pool.clone();
+            let subject_id = subject_id.clone();
+            handles.push(tokio::spawn(async move {
+                open_or_observe_by_subject(
+                    &pool,
+                    "systems",
+                    "system_health",
+                    &subject_id,
+                    "critical",
+                    Utc::now(),
+                    serde_json::json!({}),
+                    |reason, episode_id| format!("system:{subject_id}:{reason}:{episode_id}"),
+                )
+                .await
+            }));
+        }
+
+        let mut ids = Vec::new();
+        for h in handles {
+            ids.push(h.await.unwrap().expect("open_or_observe_by_subject failed"));
+        }
+
+        let distinct: std::collections::HashSet<_> = ids.into_iter().collect();
+        assert_eq!(
+            distinct.len(),
+            1,
+            "concurrent calls for the same (category, subject, reason) must converge to exactly one occurrence"
+        );
+
+        let open_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences WHERE category = 'systems' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(&subject_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(open_count, 1);
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&subject_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_resolve_actually_resolves_by_subject_type_and_id() {
+        // Regression test: resolve() previously referenced nonexistent
+        // source_kind/source_id columns and silently resolved zero rows.
+        let pool = test_pool().await;
+        let subject_id = Uuid::new_v4().to_string();
+        let key = format!("build:{subject_id}");
+
+        open_or_observe(
+            &pool,
+            "builds",
+            "build_job",
+            &subject_id,
+            &key,
+            Utc::now(),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("open should succeed");
+
+        let affected = resolve(&pool, "builds", "build_job", &subject_id)
+            .await
+            .expect("resolve should succeed");
+        assert_eq!(
+            affected, 1,
+            "resolve() must actually resolve the matching row"
+        );
+
+        let still_open: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences WHERE category = 'builds' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(&subject_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(still_open, 0);
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&subject_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_critical_to_offline_transition_leaves_exactly_one_open_occurrence() {
+        let pool = test_pool().await;
+        let subject_id = Uuid::new_v4().to_string();
+
+        open_or_observe_by_subject(
+            &pool,
+            "systems",
+            "system_health",
+            &subject_id,
+            "critical",
+            Utc::now(),
+            serde_json::json!({}),
+            |reason, episode_id| format!("system:{subject_id}:{reason}:{episode_id}"),
+        )
+        .await
+        .expect("open critical should succeed");
+
+        // Simulate the critical -> offline transition the way the
+        // reconciler does: resolve the old reason family, then open/observe
+        // the new one.
+        resolve_open_occurrences_except_reason(&pool, "systems", &subject_id, "offline")
+            .await
+            .expect("resolve except reason should succeed");
+
+        open_or_observe_by_subject(
+            &pool,
+            "systems",
+            "system_health",
+            &subject_id,
+            "offline",
+            Utc::now(),
+            serde_json::json!({}),
+            |reason, episode_id| format!("system:{subject_id}:{reason}:{episode_id}"),
+        )
+        .await
+        .expect("open offline should succeed");
+
+        let open_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences WHERE category = 'systems' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(&subject_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            open_count, 1,
+            "a critical -> offline transition must not leave two simultaneously-open occurrences"
+        );
+
+        let total_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences WHERE category = 'systems' AND subject_id = $1",
+        )
+        .bind(&subject_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            total_count, 2,
+            "the critical episode should still exist, resolved"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&subject_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_dismiss_occurrences_rejects_out_of_scope_system() {
+        let pool = test_pool().await;
+        let user_id = insert_throwaway_user(&pool).await;
+        let other_env_id = insert_throwaway_environment(&pool, "other").await;
+        let system_id = insert_throwaway_system(&pool, other_env_id).await;
+
+        let subject_id = system_id.to_string();
+        let key = format!("system:{subject_id}:critical:{}", Uuid::new_v4());
+        let opened_at = Utc::now();
+        open_or_observe(
+            &pool,
+            "systems",
+            "system_health",
+            &subject_id,
+            &key,
+            opened_at,
+            serde_json::json!({}),
+        )
+        .await
+        .expect("open should succeed");
+
+        // Non-admin user with NO membership in other_env_id must not be able
+        // to dismiss an occurrence scoped to that environment.
+        let result = dismiss_occurrences(
+            &pool,
+            user_id,
+            "systems",
+            opened_at,
+            &[key.clone()],
+            false,
+            &[],
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "dismissal of an out-of-scope system occurrence must be rejected"
+        );
+
+        let dismissed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_attention_dismissals uad \
+             JOIN attention_occurrences ao ON ao.id = uad.occurrence_id \
+             WHERE ao.source_occurrence_key = $1",
+        )
+        .bind(&key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(dismissed, 0, "no dismissal row should have been inserted");
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&subject_id)
+            .execute(&pool)
+            .await;
+        cleanup_user(&pool, user_id).await;
+        cleanup_environment(&pool, other_env_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_dismiss_occurrences_allows_in_scope_system() {
+        let pool = test_pool().await;
+        let user_id = insert_throwaway_user(&pool).await;
+        let member_env_id = insert_throwaway_environment(&pool, "member").await;
+        let system_id = insert_throwaway_system(&pool, member_env_id).await;
+
+        let subject_id = system_id.to_string();
+        let key = format!("system:{subject_id}:critical:{}", Uuid::new_v4());
+        let opened_at = Utc::now();
+        open_or_observe(
+            &pool,
+            "systems",
+            "system_health",
+            &subject_id,
+            &key,
+            opened_at,
+            serde_json::json!({}),
+        )
+        .await
+        .expect("open should succeed");
+
+        let result = dismiss_occurrences(
+            &pool,
+            user_id,
+            "systems",
+            opened_at,
+            &[key.clone()],
+            false,
+            &[member_env_id],
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "dismissal of an in-scope system occurrence must succeed: {:?}",
+            result.err()
+        );
+
+        let dismissed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_attention_dismissals uad \
+             JOIN attention_occurrences ao ON ao.id = uad.occurrence_id \
+             WHERE ao.source_occurrence_key = $1 AND uad.user_id = $2",
+        )
+        .bind(&key)
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(dismissed, 1);
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&subject_id)
+            .execute(&pool)
+            .await;
+        cleanup_user(&pool, user_id).await;
+        cleanup_environment(&pool, member_env_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_cleanup_deletes_only_old_resolved_occurrences() {
+        let pool = test_pool().await;
+        let old_id = Uuid::new_v4().to_string();
+        let recent_id = Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at, resolved_at) \
+             VALUES (gen_random_uuid(), 'builds', 'build_job', $1, $2, now() - interval '40 days', now() - interval '40 days', now() - interval '35 days')",
+        )
+        .bind(&old_id)
+        .bind(format!("build:{old_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at, resolved_at) \
+             VALUES (gen_random_uuid(), 'builds', 'build_job', $1, $2, now() - interval '2 days', now() - interval '2 days', now() - interval '1 days')",
+        )
+        .bind(&recent_id)
+        .bind(format!("build:{recent_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (deleted_occ, _deleted_dis) = cleanup(&pool, Duration::days(30), 1000)
+            .await
+            .expect("cleanup should succeed");
+        assert!(
+            deleted_occ >= 1,
+            "cleanup must delete at least the old resolved occurrence"
+        );
+
+        let old_remains: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM attention_occurrences WHERE subject_id = $1")
+                .bind(&old_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            old_remains, 0,
+            "the old resolved occurrence must be deleted"
+        );
+
+        let recent_remains: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM attention_occurrences WHERE subject_id = $1")
+                .bind(&recent_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            recent_remains, 1,
+            "the recently resolved occurrence must be kept"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&recent_id)
+            .execute(&pool)
+            .await;
     }
 }

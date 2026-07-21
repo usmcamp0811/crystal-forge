@@ -148,10 +148,13 @@ pub async fn acknowledge_navigation_category(
     let counts = match dismissal_result {
         Ok(counts) => counts,
         Err(e) => {
-            let status = if e.to_string().contains("not found")
-                || e.to_string().contains("belongs to category")
-                || e.to_string().contains("opened after")
-            {
+            // Every caller-facing validation error raised by
+            // dismiss_occurrences (not found / not visible / wrong category /
+            // opened after cursor) is prefixed with "occurrence key '" so it
+            // can be classified as a 400 without matching on more specific
+            // text that could otherwise hint at *why* an occurrence was
+            // rejected (existence vs. authorization).
+            let status = if e.to_string().starts_with("occurrence key '") {
                 StatusCode::BAD_REQUEST
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR

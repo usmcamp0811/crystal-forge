@@ -97,32 +97,46 @@ pub fn SidebarNav() -> Element {
                 // After the grace window the server returns 0 for that
                 // category anyway, so normal polling resumes transparently.
                 const GRACE: u64 = 10;
+                let mut fresh = fresh;
                 let mut badges = NAV_BADGES.write();
+                // Each category's count and its occurrence-id array must move
+                // together — leaving the array stale (e.g. empty on first
+                // load) means the next dismiss action has nothing to send to
+                // the server, silently discarding the acknowledgment and
+                // letting the badge reappear once the optimistic zero's grace
+                // window expires.
                 if !badge_recently_zeroed("flakes", GRACE) {
                     badges.flakes_errored = fresh.flakes_errored;
+                    badges.flakes_occurrence_ids = std::mem::take(&mut fresh.flakes_occurrence_ids);
                 }
                 if !badge_recently_zeroed("systems", GRACE) {
                     badges.systems_attention = fresh.systems_attention;
+                    badges.systems_occurrence_ids = std::mem::take(&mut fresh.systems_occurrence_ids);
                 }
                 if !badge_recently_zeroed("environments", GRACE) {
                     badges.environments_attention = fresh.environments_attention;
+                    badges.environments_occurrence_ids =
+                        std::mem::take(&mut fresh.environments_occurrence_ids);
                 }
                 if !badge_recently_zeroed("builds", GRACE) {
                     badges.builds_failed_new = fresh.builds_failed_new;
+                    badges.builds_occurrence_ids = std::mem::take(&mut fresh.builds_occurrence_ids);
                 }
                 if !badge_recently_zeroed("evals", GRACE) {
                     badges.evals_failed_new = fresh.evals_failed_new;
+                    badges.evals_occurrence_ids = std::mem::take(&mut fresh.evals_occurrence_ids);
                 }
                 if !badge_recently_zeroed("cves", GRACE) {
                     badges.cves_critical_new = fresh.cves_critical_new;
+                    badges.cves_occurrence_ids = std::mem::take(&mut fresh.cves_occurrence_ids);
                 }
                 // Always update cursor/fingerprint/total fields from fresh poll.
-                badges.observed_at = fresh.observed_at;
+                badges.observed_at = fresh.observed_at.clone();
                 badges.systems_total = fresh.systems_total;
                 badges.flakes_total = fresh.flakes_total;
                 badges.environments_total = fresh.environments_total;
-                badges.systems_fingerprint = fresh.systems_fingerprint;
-                badges.environments_fingerprint = fresh.environments_fingerprint;
+                badges.systems_fingerprint = fresh.systems_fingerprint.clone();
+                badges.environments_fingerprint = fresh.environments_fingerprint.clone();
             }
             gloo_timers::future::TimeoutFuture::new(30_000).await;
         }

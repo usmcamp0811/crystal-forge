@@ -30,13 +30,15 @@ CREATE TABLE IF NOT EXISTS user_attention_dismissals (
 );
 
 -- Indexes for badge queries, reconciliation, and cleanup.
+--
+-- A single partial index on (category, opened_at) WHERE resolved_at IS NULL
+-- covers both "all unresolved occurrences for a category" and "unresolved
+-- occurrences opened after some cutoff" (via a range scan on opened_at) — the
+-- 24-hour eligibility predicate is applied by the query, not by a second
+-- index, since NOW() is not immutable and cannot appear in an index predicate.
 CREATE INDEX IF NOT EXISTS idx_attention_occurrences_category_opened
     ON attention_occurrences (category, opened_at)
     WHERE resolved_at IS NULL;
-
-CREATE INDEX IF NOT EXISTS idx_attention_occurrences_recent_eligible
-    ON attention_occurrences (category, opened_at)
-    WHERE resolved_at IS NULL AND opened_at > NOW() - INTERVAL '24 hours';
 
 CREATE INDEX IF NOT EXISTS idx_attention_occurrences_subject
     ON attention_occurrences (subject_type, subject_id);
@@ -82,23 +84,40 @@ DECLARE
     deleted_dis BIGINT;
 BEGIN
     -- Delete resolved occurrences older than the retention threshold.
-    WITH deleted AS (
-        DELETE FROM attention_occurrences
+    -- PostgreSQL DELETE does not support LIMIT directly; bound the batch by
+    -- selecting candidate rows first and deleting exactly those ids.
+    WITH candidates AS (
+        SELECT id
+        FROM attention_occurrences
         WHERE resolved_at IS NOT NULL
           AND resolved_at < NOW() - resolved_retention
+        ORDER BY resolved_at
         LIMIT batch_size
-        RETURNING id
+    ),
+    deleted AS (
+        DELETE FROM attention_occurrences
+        USING candidates
+        WHERE attention_occurrences.id = candidates.id
+        RETURNING attention_occurrences.id
     )
     SELECT COUNT(*) INTO deleted_occ FROM deleted;
 
-    -- Delete dismissals for occurrences that no longer exist.
-    WITH deleted AS (
-        DELETE FROM user_attention_dismissals
+    -- Delete dismissals for occurrences that no longer exist (orphaned by the
+    -- delete above, or by any other cascade path).
+    WITH candidates AS (
+        SELECT uad.user_id, uad.occurrence_id
+        FROM user_attention_dismissals uad
         WHERE NOT EXISTS (
-            SELECT 1 FROM attention_occurrences ao WHERE ao.id = user_attention_dismissals.occurrence_id
+            SELECT 1 FROM attention_occurrences ao WHERE ao.id = uad.occurrence_id
         )
         LIMIT batch_size
-        RETURNING occurrence_id
+    ),
+    deleted AS (
+        DELETE FROM user_attention_dismissals
+        USING candidates
+        WHERE user_attention_dismissals.user_id = candidates.user_id
+          AND user_attention_dismissals.occurrence_id = candidates.occurrence_id
+        RETURNING user_attention_dismissals.occurrence_id
     )
     SELECT COUNT(*) INTO deleted_dis FROM deleted;
 

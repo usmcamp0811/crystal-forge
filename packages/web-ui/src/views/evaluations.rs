@@ -6,7 +6,7 @@ use gloo_timers::future::TimeoutFuture;
 
 use crate::alerts::{
     NAV_BADGES, acknowledge_with_cursor_and_ids_async, attention_row_class, dismiss_attention_item,
-    occurrence_id_for_subject, should_flash,
+    occurrence_id_for_subject, occurrence_ids_for_rendered_subjects, should_flash,
 };
 
 use crate::api::{
@@ -353,7 +353,17 @@ fn EvaluationsPage() -> Element {
                     let Some(cursor) = history_ack_cursor.read().clone() else {
                         return;
                     };
-                    let occurrence_ids = NAV_BADGES.read().evals_occurrence_ids.clone();
+                    // Bound acknowledgment to occurrences for commits actually
+                    // present in the loaded/accumulated history, not every
+                    // eligible occurrence fleet-wide — a failure beyond the
+                    // 10,000-row fetch cap must not be silently consumed.
+                    let rendered_commit_ids: std::collections::HashSet<String> = history_items_acc
+                        .read()
+                        .iter()
+                        .map(|item| item.commit_id.to_string())
+                        .collect();
+                    let occurrence_ids =
+                        occurrence_ids_for_rendered_subjects("evals", &rendered_commit_ids);
                     spawn(async move {
                         if acknowledge_with_cursor_and_ids_async("evals", cursor, occurrence_ids)
                             .await
@@ -1226,16 +1236,21 @@ fn EvalHistory(
                                     let is_focused = focused_index() == Some(row_i);
 
                                     let is_failed = ev.evaluation_status == "failed";
-                                    // Include evaluation_completed_at epoch so
-                                    // a commit that is re-evaluated and fails
-                                    // again generates a new dismissal key.
-                                    let eval_key = format!(
-                                        "{}:{}",
-                                        commit_id,
-                                        ev.evaluation_completed_at
-                                            .map(|t| t.timestamp().to_string())
-                                            .unwrap_or_default()
-                                    );
+                                    // Resolve the same way dismiss_attention_item
+                                    // resolves its local key: prefer the
+                                    // canonical server occurrence key (keyed by
+                                    // commit_id + evaluation_completed_at
+                                    // microseconds server-side), falling back
+                                    // to the commit id. This must stay in sync
+                                    // with the identity dismiss_attention_item
+                                    // stores, or a re-evaluation that fails
+                                    // again would either fail to clear on
+                                    // click (mismatched key) or stay
+                                    // permanently hidden (stale local entry
+                                    // from a resolved prior occurrence).
+                                    let commit_id_str = commit_id.to_string();
+                                    let eval_key = occurrence_id_for_subject("evals", &commit_id_str)
+                                        .unwrap_or(commit_id_str);
                                     let row_class = attention_row_class(
                                         if is_focused { "kbd-focused" } else { "" },
                                         "evals",

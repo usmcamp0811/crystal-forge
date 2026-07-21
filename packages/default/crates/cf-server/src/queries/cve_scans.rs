@@ -668,25 +668,56 @@ pub(crate) async fn save_scan_results_with_store_path_override(
 
     tx.commit().await?;
 
-    // Open attention occurrences for critical CVEs found in this scan.
+    // Open (or observe an already-open) fleet-relevance episode for every
+    // critical CVE found in this scan. Episode-based rather than a single
+    // deterministic key so a CVE that later stops being fleet-relevant
+    // (resolved below) and is subsequently reintroduced or rescored back to
+    // critical gets a new occurrence eligible for a fresh attention window,
+    // instead of colliding with a resolved historical row.
     if !critical_cve_ids.is_empty() {
         let opened_at = Utc::now();
         for cve_id in &critical_cve_ids {
-            let key = attention::cve_occurrence_key(cve_id);
-            if let Err(e) = attention::open_or_observe(
+            let cve_id = cve_id.clone();
+            if let Err(e) = attention::open_or_observe_by_subject(
                 pool,
                 "cves",
                 "cve",
-                cve_id,
-                &key,
+                &cve_id,
+                "critical",
                 opened_at,
-                serde_json::json!({"cve_id": cve_id}),
+                serde_json::json!({"cve_id": &cve_id}),
+                |_reason, episode_id| attention::cve_occurrence_key(&cve_id, episode_id),
             )
             .await
             {
                 warn!("failed to open attention occurrence for CVE {cve_id}: {e:#}");
             }
         }
+    }
+
+    // Resolve any open CVE occurrence whose CVE is no longer fleet-relevant
+    // (no longer CRITICAL severity, or no longer affecting any active
+    // system). This is a fleet-wide check independent of which derivation
+    // this particular scan covered, since a CVE can stop being fleet-relevant
+    // due to changes on a system unrelated to the one just scanned.
+    if let Err(e) = sqlx::query(
+        r#"
+        UPDATE attention_occurrences ao
+        SET resolved_at = NOW()
+        WHERE ao.category = 'cves'
+          AND ao.resolved_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM view_cve_list_with_metadata v
+              WHERE v.cve_id = ao.subject_id
+                AND v.severity = 'CRITICAL'
+                AND v.affected_count > 0
+          )
+        "#,
+    )
+    .execute(pool)
+    .await
+    {
+        warn!("failed to resolve stale CVE attention occurrences: {e:#}");
     }
 
     Ok(())

@@ -139,25 +139,6 @@ fn activity_row_from_history(entry: &SystemHistoryEntry) -> ActivityRow {
     }
 }
 
-fn system_alert_occurrence_id(system: &SystemSummary) -> String {
-    format!(
-        "{}:{}:{}:{}:{}",
-        system.id,
-        match system.health_status {
-            HealthStatus::Healthy => "healthy",
-            HealthStatus::Warning => "warning",
-            HealthStatus::Critical => "critical",
-            HealthStatus::Offline => "offline",
-        },
-        system
-            .last_seen
-            .map(|at| at.timestamp().to_string())
-            .unwrap_or_else(|| "never".to_string()),
-        system.cve_counts.critical,
-        system.cve_counts.high
-    )
-}
-
 /// Systems list with toggles and filters.
 #[component]
 pub fn SystemsListView() -> Element {
@@ -397,7 +378,17 @@ pub fn SystemsListView() -> Element {
             system.health_status,
             HealthStatus::Critical | HealthStatus::Offline
         );
-        let system_key = system_alert_occurrence_id(system);
+        // The row-class dismissal identity must resolve the same way
+        // dismiss_attention_item resolves its local-storage key: prefer the
+        // canonical server occurrence key (which changes across episodes so
+        // a recurrence is not permanently hidden by a stale local entry),
+        // falling back to the stable subject id. Using a composite of
+        // mutable health/last_seen/CVE-count fields here would never match
+        // after a dismiss because the rendered key drifts on every
+        // heartbeat/count change.
+        let system_id_str = system.id.to_string();
+        let system_key = occurrence_id_for_subject("systems", &system_id_str)
+            .unwrap_or(system_id_str);
         let ac = attention_row_class(
             "",
             "systems",

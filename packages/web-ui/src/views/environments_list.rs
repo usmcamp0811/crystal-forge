@@ -47,13 +47,6 @@ fn came_from_setup() -> bool {
     false
 }
 
-fn environment_alert_occurrence_id(env: &EnvironmentItem) -> String {
-    format!(
-        "{}:{}:{}:{}",
-        env.id, env.health.critical, env.health.offline, env.cve_critical_high
-    )
-}
-
 #[component]
 pub fn EnvironmentsListView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
@@ -159,7 +152,16 @@ pub fn EnvironmentsListView() -> Element {
     let attention_classes: Vec<String> = filtered
         .iter()
         .map(|env| {
-            let env_key = environment_alert_occurrence_id(env);
+            // Resolve the same way dismiss_attention_item resolves its local
+            // key: prefer the canonical server occurrence key (so a
+            // recurrence after resolution is not permanently hidden by a
+            // stale local entry), falling back to the stable environment id.
+            // Never a composite of mutable critical/offline/CVE counts,
+            // which changes on every rollup poll and would never match after
+            // a dismiss.
+            let env_id_str = env.id.to_string();
+            let env_key = occurrence_id_for_subject("environments", &env_id_str)
+                .unwrap_or(env_id_str);
             let is_attention = env_needs_attention(env);
             let flash_now = flash_global && is_attention;
             attention_row_class("", "environments", &env_key, is_attention, flash_now)
