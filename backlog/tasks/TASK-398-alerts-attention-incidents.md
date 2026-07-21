@@ -552,8 +552,19 @@ Keep this task in `Backlog` until a human selects it for a sprint. Once selected
 - Verified: `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server attention` passes.
 - Verified: `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server navigation` passes (DB tests ignored, no compile errors).
 - Rewrote `fetch_navigation_badges` to use canonical occurrences via `attention::count_attention_for_user` and `attention::list_eligible_occurrence_keys`.
-- Rewrote `POST /api/v1/navigation/acknowledge` to dismiss exact server occurrence IDs and return refreshed `NavigationBadges`.
+- Rewrote `POST /api/v1/navigation/acknowledge` to dismiss exact server occurrence keys and return refreshed `NavigationBadges`.
 - Added per-category `*_occurrence_ids` vectors to `NavigationBadges`.
-- Pushed commit `9f9f8250` to branch `TASK-398-alerts-attention-incidents`.
-- Next: update web UI to use server occurrence IDs and the new acknowledge response, then wire remaining category producers (flakes, systems, environments, CVEs).
+- Updated web UI `alerts` module, `api/client.rs`, and all view call sites to use server occurrence IDs and the new acknowledge response.
+- Added `occurrence_id_for_subject` helper to map rendered subject IDs to server occurrence keys.
+- LocalStorage dismissal namespace bumped to `cf.attention.dismissed.v2.` to avoid stale generated keys.
+- Pushed commits:
+  - `9f9f8250` — badge/dismissal API rewrite
+  - `88f3d326` — web UI occurrence-id dismissal
+- Verified:
+  - `SQLX_OFFLINE=true nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-server --all-targets` ✅
+  - `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server attention` ✅
+  - `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server navigation` ✅
+  - `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` ✅
+  - `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml` ✅
+- Next: wire remaining category producers (flakes, systems, environments, CVEs).
 <!-- SECTION:NOTES:END -->
