@@ -537,12 +537,13 @@ pub async fn sync_flake_recorded(
     }
 
     // Sync succeeded and committed durably — resolve any open attention
-    // occurrence for this flake. Every terminal error path routes through
-    // record_sync_error() below, which uses transition_by_subject to
-    // atomically resolve any prior reason (e.g. stale_sync) and open the
-    // sync_error occurrence, so this resolve cleans up whatever state
-    // the transition left behind.
-    let _ = attention::resolve(pool, "flakes", "flake_sync", &flake_id.to_string())
+    // occurrence for this flake under the same per-subject advisory lock
+    // used by the stale reconciler. Without the lock, the stale reconciler
+    // could race: it might recheck the flake before the sync commit (see
+    // it as still syncing), then proceed to insert a stale_sync occurrence
+    // just after this resolve cleared it, leaving a stale_sync occurrence
+    // open for a now-synced flake.
+    let _ = attention::resolve_under_lock(pool, "flakes", &flake_id.to_string())
         .await
         .map_err(|e| warn!("failed to resolve flake attention occurrence: {e:#}"));
 

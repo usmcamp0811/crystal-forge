@@ -79,11 +79,8 @@ pub fn system_occurrence_key(system_id: Uuid, reason: &str, episode_id: Uuid) ->
     format!("system:{system_id}:{reason}:{episode_id}")
 }
 
-pub fn environment_occurrence_key(
-    environment_id: Uuid,
-    underlying_system_source_key: &str,
-) -> String {
-    format!("environment:{environment_id}:{underlying_system_source_key}")
+pub fn environment_occurrence_key(environment_id: Uuid, episode_id: Uuid) -> String {
+    format!("environment:{environment_id}:{episode_id}")
 }
 
 /// Build the source occurrence key for a CVE fleet-relevance episode. A CVE
@@ -123,7 +120,7 @@ where
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (category, source_occurrence_key) DO UPDATE
-        SET last_observed_at = EXCLUDED.last_observed_at
+        SET last_observed_at = GREATEST(attention_occurrences.last_observed_at, EXCLUDED.last_observed_at)
         WHERE attention_occurrences.resolved_at IS NULL
         RETURNING id
         "#,
@@ -221,7 +218,7 @@ where
         // because we injected it above, so the lookup on the next call
         // will still succeed.
         sqlx::query(
-            "UPDATE attention_occurrences SET last_observed_at = $1, metadata = $2 WHERE id = $3",
+            "UPDATE attention_occurrences SET last_observed_at = GREATEST(last_observed_at, $1), metadata = $2 WHERE id = $3",
         )
         .bind(opened_at)
         .bind(&metadata)
@@ -346,7 +343,7 @@ where
         let id: Uuid = row.get("id");
         // Reason matches — just observe the existing occurrence.
         sqlx::query(
-            "UPDATE attention_occurrences SET last_observed_at = $1, metadata = $2 WHERE id = $3",
+            "UPDATE attention_occurrences SET last_observed_at = GREATEST(last_observed_at, $1), metadata = $2 WHERE id = $3",
         )
         .bind(opened_at)
         .bind(&metadata)
@@ -487,6 +484,58 @@ where
     Ok(result.rows_affected() as usize)
 }
 
+/// Resolve all open occurrences for a subject, serialized with the same
+/// subject-level advisory lock used by [`transition_by_subject`] and the
+/// stale reconciler. This prevents a race where a concurrent transition
+/// (e.g. reconciler inserting `stale_sync`) runs immediately after the
+/// resolve and creates a new open occurrence for a subject that should no
+/// longer have one.
+///
+/// Acquires the reason-independent lock
+/// `attention_occurrence:{category}:{subject_id}` (matching
+/// [`transition_by_subject`]), then resolves all open occurrences for the
+/// subject, then commits.
+pub async fn resolve_under_lock(
+    pool: &PgPool,
+    category: &str,
+    subject_id: &str,
+) -> Result<usize> {
+    validate_category(category)?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin resolve-under-lock transaction")?;
+
+    let lock_key = format!("attention_occurrence:{category}:{subject_id}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *tx)
+        .await
+        .context("failed to acquire resolve-under-lock advisory lock")?;
+
+    let result = sqlx::query(
+        r#"
+        UPDATE attention_occurrences
+        SET resolved_at = NOW()
+        WHERE category = $1
+          AND subject_id = $2
+          AND resolved_at IS NULL
+        "#,
+    )
+    .bind(category)
+    .bind(subject_id)
+    .execute(&mut *tx)
+    .await
+    .context("failed to resolve open occurrences under lock")?;
+
+    tx.commit()
+        .await
+        .context("failed to commit resolve-under-lock transaction")?;
+
+    Ok(result.rows_affected() as usize)
+}
+
 /// Resolve all open occurrences for a subject, except those matching the given
 /// reason. This is used when a system transitions from critical to offline:
 /// the critical episode closes, a new offline episode opens.
@@ -530,12 +579,15 @@ where
 /// systems each contributing an independent, still-open derived occurrence —
 /// resolving by environment alone would incorrectly close incidents for
 /// other systems in the same environment.
-pub async fn resolve_environment_occurrences_for_system_except_reason(
-    pool: &PgPool,
+pub async fn resolve_environment_occurrences_for_system_except_reason<'e, E>(
+    executor: E,
     environment_id: Uuid,
     system_id: Uuid,
     reason: &str,
-) -> Result<usize> {
+) -> Result<usize>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let result = sqlx::query(
         r#"
         UPDATE attention_occurrences
@@ -550,7 +602,7 @@ pub async fn resolve_environment_occurrences_for_system_except_reason(
     .bind(environment_id.to_string())
     .bind(serde_json::json!({"underlying_system_id": system_id.to_string()}))
     .bind(serde_json::json!({"health_status": reason}))
-    .execute(pool)
+    .execute(executor)
     .await
     .context("failed to resolve environment occurrences for system except reason")?;
 
@@ -563,11 +615,14 @@ pub async fn resolve_environment_occurrences_for_system_except_reason(
 /// resolves every matching row rather than an arbitrary single one, so a
 /// prior bug or race that left more than one open occurrence for the same
 /// system cannot leave a duplicate permanently unresolved.
-pub async fn resolve_environment_occurrences_for_system(
-    pool: &PgPool,
+pub async fn resolve_environment_occurrences_for_system<'e, E>(
+    executor: E,
     environment_id: Uuid,
     system_id: Uuid,
-) -> Result<usize> {
+) -> Result<usize>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let result = sqlx::query(
         r#"
         UPDATE attention_occurrences
@@ -580,7 +635,7 @@ pub async fn resolve_environment_occurrences_for_system(
     )
     .bind(environment_id.to_string())
     .bind(serde_json::json!({"underlying_system_id": system_id.to_string()}))
-    .execute(pool)
+    .execute(executor)
     .await
     .context("failed to resolve environment occurrences for system")?;
 
