@@ -537,15 +537,13 @@ pub async fn sync_flake_recorded(
     }
 
     // Sync succeeded and committed durably — resolve any open attention
-    // occurrence for this flake under the same per-subject advisory lock
-    // used by the stale reconciler. Without the lock, the stale reconciler
-    // could race: it might recheck the flake before the sync commit (see
-    // it as still syncing), then proceed to insert a stale_sync occurrence
-    // just after this resolve cleared it, leaving a stale_sync occurrence
-    // open for a now-synced flake.
-    let _ = attention::resolve_under_lock(pool, "flakes", &flake_id.to_string())
-        .await
-        .map_err(|e| warn!("failed to resolve flake attention occurrence: {e:#}"));
+    // occurrence for this flake, but only if this attempt is still the
+    // current, synced result recorded on the flake row. A delayed caller
+    // (e.g. this async call stalls after the tx.commit() above) could
+    // otherwise resolve an attention occurrence opened by a NEWER attempt
+    // that started and failed after this one committed — see
+    // resolve_flake_attention_if_current for the full race description.
+    resolve_flake_attention_if_current(pool, flake_id, attempt_id).await;
 
     if inserted_count > 0 {
         info!(
@@ -598,33 +596,262 @@ async fn record_sync_error(
             // occurrence on behalf of an attempt that is no longer current.
         }
         Ok(_) => {
-            let subject_id = flake_id.to_string();
-            let opened_at = Utc::now();
             let metadata = serde_json::json!({
                 "flake_id": flake_id,
                 "last_sync_error": &truncated,
             });
-            // Use transition_by_subject to atomically resolve any open flake
-            // occurrence (e.g. a stale_sync from the reconciler) before
-            // opening the sync_error occurrence. The reason-independent lock
-            // prevents the reconciler from racing to open stale_sync at the
-            // same time.
-            let _ = attention::transition_by_subject(
-                pool,
-                "flakes",
-                "flake_sync",
-                &subject_id,
-                "sync_error",
-                opened_at,
-                metadata,
-                |_reason, episode_id| format!("flake:{flake_id}:{episode_id}"),
-            )
-            .await
-            .map_err(|e| error!("failed to open flake attention occurrence: {e:#}"));
+            // Open the sync_error occurrence, but only if this attempt is
+            // still the current, errored result recorded on the flake row.
+            // A delayed caller here could otherwise open a stale sync_error
+            // occurrence after a NEWER attempt has already succeeded (and
+            // resolved attention) — see
+            // transition_flake_attention_to_error_if_current.
+            transition_flake_attention_to_error_if_current(pool, flake_id, attempt_id, metadata)
+                .await;
         }
         Err(e) => {
             warn!("Failed to record sync error for flake {flake_id}: {e:#}");
         }
+    }
+}
+
+/// Resolve flake attention occurrences, but only if `attempt_id` is still
+/// the current, synced attempt recorded on the flake row.
+///
+/// The status commit (`sync_status = 'synced'`) and this attention action
+/// are two separate operations, so a delay between them (e.g. this async
+/// call is scheduled late) leaves a window in which a NEWER sync attempt
+/// can start and fail, opening a `sync_error` occurrence. Without this
+/// recheck, this (now-stale) success handler would resolve that newer
+/// attempt's `sync_error` occurrence — even though the flake's actual
+/// current state is `error`, not `synced`.
+///
+/// Acquires the same per-subject advisory lock used by
+/// [`transition_flake_attention_to_error_if_current`] and the stale-flake
+/// reconciler, so the recheck-then-act sequence is atomic with respect to
+/// any concurrent attention transition for this flake.
+async fn resolve_flake_attention_if_current(pool: &PgPool, flake_id: i32, attempt_id: Uuid) {
+    let subject_id = flake_id.to_string();
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            warn!("failed to begin flake attention resolve transaction: {e:#}");
+            return;
+        }
+    };
+
+    let lock_key = format!("attention_occurrence:flakes:{subject_id}");
+    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *tx)
+        .await
+    {
+        warn!("failed to acquire flake attention lock: {e:#}");
+        let _ = tx.rollback().await;
+        return;
+    }
+
+    // Recheck under the lock: is this attempt still the current, synced
+    // result? If a newer attempt has since started or failed, do nothing —
+    // that newer attempt owns the flake's attention state now.
+    let still_current: bool = match sqlx::query_scalar(
+        "SELECT sync_attempt_id = $2 AND sync_status = 'synced' FROM flakes WHERE id = $1",
+    )
+    .bind(flake_id)
+    .bind(attempt_id)
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(Some(v)) => v,
+        Ok(None) => false,
+        Err(e) => {
+            warn!("failed to recheck flake state before resolving attention: {e:#}");
+            let _ = tx.rollback().await;
+            return;
+        }
+    };
+
+    if !still_current {
+        // Superseded — commit the (no-op) transaction to release the lock.
+        let _ = tx.commit().await;
+        return;
+    }
+
+    if let Err(e) = sqlx::query(
+        "UPDATE attention_occurrences SET resolved_at = NOW() \
+         WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+    )
+    .bind(&subject_id)
+    .execute(&mut *tx)
+    .await
+    {
+        warn!("failed to resolve flake attention occurrence: {e:#}");
+        let _ = tx.rollback().await;
+        return;
+    }
+
+    if let Err(e) = tx.commit().await {
+        warn!("failed to commit flake attention resolve: {e:#}");
+    }
+}
+
+/// Transition flake attention to `sync_error`, but only if `attempt_id` is
+/// still the current, errored attempt recorded on the flake row.
+///
+/// Mirrors [`resolve_flake_attention_if_current`]'s reasoning for the
+/// opposite direction: the status commit (`sync_status = 'error'`) and this
+/// attention action are separate operations, so a delay here could open a
+/// stale `sync_error` occurrence after a NEWER attempt has already
+/// succeeded and resolved attention. Acquires the same per-subject
+/// advisory lock, so this recheck-then-act sequence is atomic with respect
+/// to any concurrent attention transition for this flake.
+async fn transition_flake_attention_to_error_if_current(
+    pool: &PgPool,
+    flake_id: i32,
+    attempt_id: Uuid,
+    mut metadata: serde_json::Value,
+) {
+    let subject_id = flake_id.to_string();
+    let opened_at = Utc::now();
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            warn!("failed to begin flake attention transition transaction: {e:#}");
+            return;
+        }
+    };
+
+    let lock_key = format!("attention_occurrence:flakes:{subject_id}");
+    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *tx)
+        .await
+    {
+        warn!("failed to acquire flake attention lock: {e:#}");
+        let _ = tx.rollback().await;
+        return;
+    }
+
+    // Recheck under the lock: is this attempt still the current, errored
+    // result? If a newer attempt has since started or succeeded, do
+    // nothing — that newer attempt owns the flake's attention state now.
+    let still_current: bool = match sqlx::query_scalar(
+        "SELECT sync_attempt_id = $2 AND sync_status = 'error' FROM flakes WHERE id = $1",
+    )
+    .bind(flake_id)
+    .bind(attempt_id)
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(Some(v)) => v,
+        Ok(None) => false,
+        Err(e) => {
+            warn!("failed to recheck flake state before opening attention: {e:#}");
+            let _ = tx.rollback().await;
+            return;
+        }
+    };
+
+    if !still_current {
+        let _ = tx.commit().await;
+        return;
+    }
+
+    if let serde_json::Value::Object(ref mut map) = metadata {
+        map.insert(
+            "reason".to_string(),
+            serde_json::Value::String("sync_error".to_string()),
+        );
+    }
+
+    // Check for an already-open occurrence with the same reason.
+    let existing: Option<Uuid> = match sqlx::query_scalar(
+        r#"
+        SELECT id FROM attention_occurrences
+        WHERE category = 'flakes'
+          AND subject_id = $1
+          AND resolved_at IS NULL
+          AND metadata @> $2::jsonb
+        LIMIT 1
+        FOR UPDATE
+        "#,
+    )
+    .bind(&subject_id)
+    .bind(serde_json::json!({"reason": "sync_error"}))
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("failed to find existing flake occurrence: {e:#}");
+            let _ = tx.rollback().await;
+            return;
+        }
+    };
+
+    if let Some(id) = existing {
+        if let Err(e) = sqlx::query(
+            "UPDATE attention_occurrences \
+             SET metadata = CASE WHEN $1 >= last_observed_at THEN $2 ELSE metadata END, \
+                 last_observed_at = GREATEST(last_observed_at, $1) \
+             WHERE id = $3",
+        )
+        .bind(opened_at)
+        .bind(&metadata)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        {
+            warn!("failed to update flake attention occurrence: {e:#}");
+            let _ = tx.rollback().await;
+            return;
+        }
+    } else {
+        // Reason differs or no occurrence exists — resolve all open
+        // occurrences (e.g. a stale_sync from the reconciler) and insert a
+        // new sync_error occurrence.
+        if let Err(e) = sqlx::query(
+            "UPDATE attention_occurrences SET resolved_at = NOW() \
+             WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(&subject_id)
+        .execute(&mut *tx)
+        .await
+        {
+            warn!("failed to resolve open flake occurrences: {e:#}");
+            let _ = tx.rollback().await;
+            return;
+        }
+
+        let episode_id = Uuid::new_v4();
+        let source_key = attention::flake_occurrence_key(flake_id, episode_id);
+
+        if let Err(e) = sqlx::query(
+            r#"
+            INSERT INTO attention_occurrences (
+                category, subject_type, subject_id, source_occurrence_key,
+                opened_at, last_observed_at, metadata
+            )
+            VALUES ('flakes', 'flake_sync', $1, $2, $3, $3, $4)
+            "#,
+        )
+        .bind(&subject_id)
+        .bind(source_key)
+        .bind(opened_at)
+        .bind(&metadata)
+        .execute(&mut *tx)
+        .await
+        {
+            warn!("failed to insert flake attention occurrence: {e:#}");
+            let _ = tx.rollback().await;
+            return;
+        }
+    }
+
+    if let Err(e) = tx.commit().await {
+        warn!("failed to commit flake attention transition: {e:#}");
     }
 }
 
@@ -2159,5 +2386,191 @@ mod tests {
         assert!(!sanitized.contains("private_token"));
         assert!(!sanitized.contains("#frag"));
         assert!(!sanitized.contains("bearer token"));
+    }
+
+    // ── Live-database supersession-race regression tests ────────────────────
+    //
+    // Run against a repository-provided isolated database:
+    //   DATABASE_URL=postgres://crystal_forge:password@localhost:3042/crystal_forge \
+    //     cargo test -p cf-server --lib flake::commits -- --ignored
+
+    use super::{
+        resolve_flake_attention_if_current, transition_flake_attention_to_error_if_current,
+    };
+
+    async fn test_pool() -> sqlx::PgPool {
+        sqlx::PgPool::connect(
+            &std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"),
+        )
+        .await
+        .expect("failed to connect to test database")
+    }
+
+    async fn insert_throwaway_flake(pool: &sqlx::PgPool) -> i32 {
+        let short = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        sqlx::query_scalar::<_, i32>(
+            "INSERT INTO flakes (name, repo_url, branch, sync_status) \
+             VALUES ($1, $2, 'main', 'syncing') RETURNING id",
+        )
+        .bind(format!("att-flake-{short}"))
+        .bind(format!("https://git.example/att-flake-{short}.git"))
+        .fetch_one(pool)
+        .await
+        .expect("failed to insert throwaway test flake")
+    }
+
+    async fn open_flake_count(pool: &sqlx::PgPool, flake_id: i32) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(flake_id.to_string())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn resolve_flake_attention_if_current_skips_when_superseded_by_newer_error() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+
+        let stale_attempt_id = uuid::Uuid::new_v4();
+        let newer_attempt_id = uuid::Uuid::new_v4();
+
+        // Simulate: the newer attempt already recorded an error and opened
+        // its attention occurrence.
+        sqlx::query(
+            "UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2 WHERE id = $1",
+        )
+        .bind(flake_id)
+        .bind(newer_attempt_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        transition_flake_attention_to_error_if_current(
+            &pool,
+            flake_id,
+            newer_attempt_id,
+            serde_json::json!({"flake_id": flake_id}),
+        )
+        .await;
+        assert_eq!(
+            open_flake_count(&pool, flake_id).await,
+            1,
+            "the newer attempt's sync_error occurrence must be open"
+        );
+
+        // The stale (delayed) success handler from an OLDER attempt must
+        // not resolve the newer attempt's occurrence.
+        resolve_flake_attention_if_current(&pool, flake_id, stale_attempt_id).await;
+        assert_eq!(
+            open_flake_count(&pool, flake_id).await,
+            1,
+            "a stale success handler must not resolve a newer attempt's occurrence"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
+            .bind(flake_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn resolve_flake_attention_if_current_resolves_when_still_current() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let attempt_id = uuid::Uuid::new_v4();
+
+        // Open a sync_error occurrence for this exact attempt.
+        sqlx::query(
+            "UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2 WHERE id = $1",
+        )
+        .bind(flake_id)
+        .bind(attempt_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        transition_flake_attention_to_error_if_current(
+            &pool,
+            flake_id,
+            attempt_id,
+            serde_json::json!({"flake_id": flake_id}),
+        )
+        .await;
+        assert_eq!(open_flake_count(&pool, flake_id).await, 1);
+
+        // The same attempt later succeeds and resolves its own occurrence.
+        sqlx::query("UPDATE flakes SET sync_status = 'synced' WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        resolve_flake_attention_if_current(&pool, flake_id, attempt_id).await;
+        assert_eq!(
+            open_flake_count(&pool, flake_id).await,
+            0,
+            "the current attempt's own resolve must succeed"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
+            .bind(flake_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn transition_flake_attention_to_error_if_current_skips_when_superseded() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+
+        let stale_attempt_id = uuid::Uuid::new_v4();
+        let newer_attempt_id = uuid::Uuid::new_v4();
+
+        // Newer attempt has since succeeded.
+        sqlx::query(
+            "UPDATE flakes SET sync_status = 'synced', sync_attempt_id = $2 WHERE id = $1",
+        )
+        .bind(flake_id)
+        .bind(newer_attempt_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // A delayed error handler from a stale, superseded attempt must not
+        // open a sync_error occurrence.
+        transition_flake_attention_to_error_if_current(
+            &pool,
+            flake_id,
+            stale_attempt_id,
+            serde_json::json!({"flake_id": flake_id}),
+        )
+        .await;
+        assert_eq!(
+            open_flake_count(&pool, flake_id).await,
+            0,
+            "a stale error handler must not open an occurrence after a newer success"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
+            .bind(flake_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
     }
 }

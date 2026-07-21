@@ -581,56 +581,20 @@ where
     Ok(result.rows_affected() as usize)
 }
 
-/// Resolve any open environment occurrence tied to a specific underlying
-/// system, except one whose recorded `health_status` metadata matches
-/// `reason`. Used when a system's attention reason changes (e.g.
-/// critical -> offline): the derived environment incident for the *old*
-/// reason closes so it does not accumulate alongside the new one.
+/// Resolve every open environment occurrence tied to a specific underlying
+/// system, REGARDLESS of which environment (`subject_id`) it belongs to.
 ///
-/// Scoped to `environment_id` + `underlying_system_id` (via metadata) rather
-/// than just `environment_id`, because an environment can have several
-/// systems each contributing an independent, still-open derived occurrence —
-/// resolving by environment alone would incorrectly close incidents for
-/// other systems in the same environment.
-pub async fn resolve_environment_occurrences_for_system_except_reason<'e, E>(
+/// Used when a system recovers to healthy/warning: a system that was
+/// critical in environment A and has since moved to environment B (or been
+/// unassigned) must not leave A's derived occurrence open just because the
+/// resolution was scoped to the system's *current* environment. Scoped
+/// purely by `underlying_system_id` metadata — deliberately not filtered by
+/// `environment_id` — and resolves every matching row rather than an
+/// arbitrary single one, so a prior bug or race that left more than one
+/// open occurrence for the same system cannot leave a duplicate
+/// permanently unresolved.
+pub async fn resolve_environment_occurrences_for_system_any_environment<'e, E>(
     executor: E,
-    environment_id: Uuid,
-    system_id: Uuid,
-    reason: &str,
-) -> Result<usize>
-where
-    E: sqlx::Executor<'e, Database = Postgres>,
-{
-    let result = sqlx::query(
-        r#"
-        UPDATE attention_occurrences
-        SET resolved_at = NOW()
-        WHERE category = 'environments'
-          AND subject_id = $1
-          AND metadata @> $2::jsonb
-          AND NOT (metadata @> $3::jsonb)
-          AND resolved_at IS NULL
-        "#,
-    )
-    .bind(environment_id.to_string())
-    .bind(serde_json::json!({"underlying_system_id": system_id.to_string()}))
-    .bind(serde_json::json!({"health_status": reason}))
-    .execute(executor)
-    .await
-    .context("failed to resolve environment occurrences for system except reason")?;
-
-    Ok(result.rows_affected() as usize)
-}
-
-/// Resolve all open environment occurrences tied to a specific underlying
-/// system (used when the system recovers to healthy/warning). Scoped by
-/// `underlying_system_id` metadata for the same reason as above — and
-/// resolves every matching row rather than an arbitrary single one, so a
-/// prior bug or race that left more than one open occurrence for the same
-/// system cannot leave a duplicate permanently unresolved.
-pub async fn resolve_environment_occurrences_for_system<'e, E>(
-    executor: E,
-    environment_id: Uuid,
     system_id: Uuid,
 ) -> Result<usize>
 where
@@ -641,16 +605,14 @@ where
         UPDATE attention_occurrences
         SET resolved_at = NOW()
         WHERE category = 'environments'
-          AND subject_id = $1
-          AND metadata @> $2::jsonb
+          AND metadata @> $1::jsonb
           AND resolved_at IS NULL
         "#,
     )
-    .bind(environment_id.to_string())
     .bind(serde_json::json!({"underlying_system_id": system_id.to_string()}))
     .execute(executor)
     .await
-    .context("failed to resolve environment occurrences for system")?;
+    .context("failed to resolve environment occurrences for system across all environments")?;
 
     Ok(result.rows_affected() as usize)
 }
@@ -1124,6 +1086,128 @@ pub async fn cleanup(
     let deleted_occurrences: i64 = row.get("deleted_occurrences");
     let deleted_dismissals: i64 = row.get("deleted_dismissals");
     Ok((deleted_occurrences, deleted_dismissals))
+}
+
+/// Idempotent repair for duplicate OPEN occurrences that may have
+/// accumulated from an earlier reconciliation-logic bug (multiple attention
+/// producer/reconciler races have been found and fixed across MR !307's
+/// review history; this repairs any leftover duplicates regardless of which
+/// one caused them).
+///
+/// The system invariant is: at most one open (`resolved_at IS NULL`)
+/// occurrence per `(category, subject_id)`. For any group violating that
+/// invariant, this keeps the earliest-opened row as canonical (preserving
+/// the true incident start time), migrates any dismissals recorded against
+/// the other rows in the group to the canonical row (so a user who
+/// dismissed a duplicate does not have the badge reappear), and resolves
+/// the other rows.
+///
+/// Safe to call repeatedly and on every server startup — a no-op once at
+/// most one open occurrence remains per `(category, subject_id)`.
+///
+/// Callers investigating a suspected pre-existing duplication (e.g. an
+/// inflated navigation badge count) should first run:
+///
+/// ```sql
+/// SELECT category, subject_id, COUNT(*) AS occurrence_count,
+///        ARRAY_AGG(source_occurrence_key ORDER BY opened_at) AS keys
+/// FROM attention_occurrences
+/// WHERE resolved_at IS NULL
+/// GROUP BY category, subject_id
+/// HAVING COUNT(*) > 1
+/// ORDER BY occurrence_count DESC;
+/// ```
+///
+/// to confirm the shape of the duplication before/after this repair runs.
+pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin dedupe transaction")?;
+
+    let groups: Vec<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT category, subject_id
+        FROM attention_occurrences
+        WHERE resolved_at IS NULL
+        GROUP BY category, subject_id
+        HAVING COUNT(*) > 1
+        "#,
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .context("failed to find duplicate open occurrence groups")?;
+
+    let mut total_resolved = 0usize;
+
+    for (category, subject_id) in groups {
+        let canonical_id: Option<Uuid> = sqlx::query_scalar(
+            r#"
+            SELECT id FROM attention_occurrences
+            WHERE category = $1 AND subject_id = $2 AND resolved_at IS NULL
+            ORDER BY opened_at ASC, id ASC
+            LIMIT 1
+            FOR UPDATE
+            "#,
+        )
+        .bind(&category)
+        .bind(&subject_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("failed to find canonical occurrence")?;
+
+        let Some(canonical_id) = canonical_id else {
+            continue;
+        };
+
+        // Migrate dismissals from the duplicate rows to the canonical row so
+        // a user who dismissed a duplicate does not see the badge reappear.
+        sqlx::query(
+            r#"
+            INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at)
+            SELECT uad.user_id, $3, MIN(uad.dismissed_at)
+            FROM user_attention_dismissals uad
+            JOIN attention_occurrences ao ON ao.id = uad.occurrence_id
+            WHERE ao.category = $1
+              AND ao.subject_id = $2
+              AND ao.resolved_at IS NULL
+              AND ao.id <> $3
+            GROUP BY uad.user_id
+            ON CONFLICT (user_id, occurrence_id) DO NOTHING
+            "#,
+        )
+        .bind(&category)
+        .bind(&subject_id)
+        .bind(canonical_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to migrate dismissals during dedupe")?;
+
+        let result = sqlx::query(
+            r#"
+            UPDATE attention_occurrences
+            SET resolved_at = NOW()
+            WHERE category = $1
+              AND subject_id = $2
+              AND resolved_at IS NULL
+              AND id <> $3
+            "#,
+        )
+        .bind(&category)
+        .bind(&subject_id)
+        .bind(canonical_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to resolve duplicate occurrences during dedupe")?;
+
+        total_resolved += result.rows_affected() as usize;
+    }
+
+    tx.commit()
+        .await
+        .context("failed to commit dedupe transaction")?;
+
+    Ok(total_resolved)
 }
 
 #[cfg(test)]
@@ -1643,5 +1727,117 @@ mod tests {
             .bind(&recent_id)
             .execute(&pool)
             .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_dedupe_open_occurrences_keeps_earliest_and_migrates_dismissals() {
+        let pool = test_pool().await;
+        let user_id = insert_throwaway_user(&pool).await;
+        let subject_id = Uuid::new_v4().to_string();
+
+        // Two open occurrences for the same (category, subject_id) — the
+        // exact invariant violation this function repairs. Insert the
+        // "newer" one first so ordering in the table doesn't accidentally
+        // make the test pass regardless of the ORDER BY.
+        let newer_id = Uuid::new_v4();
+        let older_id = Uuid::new_v4();
+        let newer_key = format!("evals_dedupe_test:{subject_id}:newer");
+        let older_key = format!("evals_dedupe_test:{subject_id}:older");
+
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
+             VALUES ($1, 'evals', 'commit_eval', $2, $3, now(), now())",
+        )
+        .bind(newer_id)
+        .bind(&subject_id)
+        .bind(&newer_key)
+        .execute(&pool)
+        .await
+        .expect("insert newer duplicate should succeed");
+
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
+             VALUES ($1, 'evals', 'commit_eval', $2, $3, now() - interval '1 hour', now() - interval '1 hour')",
+        )
+        .bind(older_id)
+        .bind(&subject_id)
+        .bind(&older_key)
+        .execute(&pool)
+        .await
+        .expect("insert older duplicate should succeed");
+
+        // A user dismissed the newer (non-canonical) duplicate.
+        sqlx::query(
+            "INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at) VALUES ($1, $2, NOW())",
+        )
+        .bind(user_id)
+        .bind(newer_id)
+        .execute(&pool)
+        .await
+        .expect("dismiss newer duplicate should succeed");
+
+        let resolved = dedupe_open_occurrences(&pool)
+            .await
+            .expect("dedupe should succeed");
+        assert!(
+            resolved >= 1,
+            "dedupe must resolve at least the duplicate row"
+        );
+
+        // The older (canonical) row must remain open.
+        let older_resolved: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT resolved_at FROM attention_occurrences WHERE id = $1",
+        )
+        .bind(older_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            older_resolved.is_none(),
+            "the earliest-opened occurrence must remain the open canonical row"
+        );
+
+        // The newer row must now be resolved.
+        let newer_resolved: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT resolved_at FROM attention_occurrences WHERE id = $1",
+        )
+        .bind(newer_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            newer_resolved.is_some(),
+            "the duplicate occurrence must be resolved"
+        );
+
+        // The user's dismissal must have migrated to the canonical (older) row.
+        let migrated: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
+        )
+        .bind(user_id)
+        .bind(older_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            migrated, 1,
+            "dismissal must be migrated to the canonical occurrence"
+        );
+
+        // Running dedupe again must be a no-op (idempotent).
+        let resolved_again = dedupe_open_occurrences(&pool)
+            .await
+            .expect("second dedupe run should succeed");
+        assert_eq!(
+            resolved_again, 0,
+            "dedupe must be a no-op once at most one open occurrence remains"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&subject_id)
+            .execute(&pool)
+            .await;
+        cleanup_user(&pool, user_id).await;
     }
 }

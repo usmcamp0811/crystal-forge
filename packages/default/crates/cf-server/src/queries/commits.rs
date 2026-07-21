@@ -329,11 +329,81 @@ pub async fn mark_commit_evaluation_complete(pool: &PgPool, commit_id: i32) -> R
     .execute(pool)
     .await?;
 
-    let _ = attention::resolve(pool, "evals", "commit_eval", &commit_id.to_string())
-        .await
-        .map_err(|e| tracing::error!("failed to resolve evaluation attention occurrence: {e:#}"));
+    resolve_eval_attention_unless_failed(pool, commit_id).await;
 
     Ok(())
+}
+
+/// Resolve the evaluation-failure attention occurrence for a commit, but
+/// only if the commit's CURRENT `evaluation_status` is not `'failed'`.
+///
+/// The domain status update (complete/reset) and this attention action are
+/// two separate best-effort operations, so a delay between them can leave a
+/// window in which a NEWER failure is recorded. Without this recheck, a
+/// delayed completion or reset resolve could wipe out that newer failure's
+/// still-valid attention occurrence. Acquires the same per-subject advisory
+/// lock used by [`open_eval_attention_if_current`], so the recheck-then-act
+/// sequence is atomic with respect to any concurrent attention transition
+/// for this commit.
+async fn resolve_eval_attention_unless_failed(pool: &PgPool, commit_id: i32) {
+    let subject_id = commit_id.to_string();
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::warn!("failed to begin eval attention resolve transaction: {e:#}");
+            return;
+        }
+    };
+
+    let lock_key = format!("attention_occurrence:evals:{subject_id}");
+    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *tx)
+        .await
+    {
+        tracing::warn!("failed to acquire eval attention lock: {e:#}");
+        let _ = tx.rollback().await;
+        return;
+    }
+
+    let current_status: Option<String> =
+        match sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
+            .bind(commit_id)
+            .fetch_optional(&mut *tx)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("failed to recheck commit status before resolving attention: {e:#}");
+                let _ = tx.rollback().await;
+                return;
+            }
+        };
+
+    if current_status.as_deref() == Some("failed") {
+        // A newer failure has since been recorded on this commit; do not
+        // resolve its still-valid attention occurrence.
+        let _ = tx.commit().await;
+        return;
+    }
+
+    if let Err(e) = sqlx::query(
+        "UPDATE attention_occurrences SET resolved_at = NOW() \
+         WHERE category = 'evals' AND subject_id = $1 AND resolved_at IS NULL",
+    )
+    .bind(&subject_id)
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::warn!("failed to resolve evaluation attention occurrence: {e:#}");
+        let _ = tx.rollback().await;
+        return;
+    }
+
+    if let Err(e) = tx.commit().await {
+        tracing::warn!("failed to commit eval attention resolve: {e:#}");
+    }
 }
 
 /// Mark commit evaluation as failed (with retry logic)
@@ -377,22 +447,105 @@ pub async fn mark_commit_evaluation_failed(
         let completed_at: Option<chrono::DateTime<chrono::Utc>> =
             row.try_get("evaluation_completed_at")?;
         if let Some(completed_at) = completed_at {
-            let key = attention::eval_occurrence_key(commit_id, completed_at);
-            let _ = attention::open_or_observe(
-                pool,
-                "evals",
-                "commit_eval",
-                &commit_id.to_string(),
-                &key,
-                completed_at,
-                serde_json::json!({"commit_id": commit_id}),
-            )
-            .await
-            .map_err(|e| tracing::error!("failed to open evaluation attention occurrence: {e:#}"));
+            open_eval_attention_if_current(pool, commit_id, completed_at).await;
         }
     }
 
     Ok(())
+}
+
+/// Open (or observe) the evaluation-failure attention occurrence for a
+/// commit, but only if this failure is still the current evaluation
+/// outcome recorded on the commit (`evaluation_status = 'failed'` AND
+/// `evaluation_completed_at` matches `completed_at`).
+///
+/// The domain status update and this attention action are two separate
+/// best-effort operations, so a delay between them (e.g. this async call is
+/// scheduled late) leaves a window in which a manual reset or a
+/// re-evaluation can change the commit's state. Without this recheck, a
+/// delayed handler would open a stale failure occurrence for a commit that
+/// is no longer failed. Acquires the same per-subject advisory lock used by
+/// [`resolve_eval_attention_unless_failed`], so the recheck-then-act
+/// sequence is atomic with respect to any concurrent attention transition
+/// for this commit.
+async fn open_eval_attention_if_current(
+    pool: &PgPool,
+    commit_id: i32,
+    completed_at: chrono::DateTime<chrono::Utc>,
+) {
+    let subject_id = commit_id.to_string();
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::warn!("failed to begin eval attention open transaction: {e:#}");
+            return;
+        }
+    };
+
+    let lock_key = format!("attention_occurrence:evals:{subject_id}");
+    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *tx)
+        .await
+    {
+        tracing::warn!("failed to acquire eval attention lock: {e:#}");
+        let _ = tx.rollback().await;
+        return;
+    }
+
+    let still_current: bool = match sqlx::query_scalar(
+        "SELECT evaluation_status = 'failed' AND evaluation_completed_at = $2 FROM commits WHERE id = $1",
+    )
+    .bind(commit_id)
+    .bind(completed_at)
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(Some(v)) => v,
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!("failed to recheck commit status before opening attention: {e:#}");
+            let _ = tx.rollback().await;
+            return;
+        }
+    };
+
+    if !still_current {
+        // Superseded by a reset or re-evaluation — commit the (no-op)
+        // transaction to release the lock.
+        let _ = tx.commit().await;
+        return;
+    }
+
+    let key = attention::eval_occurrence_key(commit_id, completed_at);
+    if let Err(e) = sqlx::query(
+        r#"
+        INSERT INTO attention_occurrences (
+            category, subject_type, subject_id, source_occurrence_key,
+            opened_at, last_observed_at, metadata
+        )
+        VALUES ('evals', 'commit_eval', $1, $2, $3, $3, $4)
+        ON CONFLICT (category, source_occurrence_key) DO UPDATE
+        SET last_observed_at = GREATEST(attention_occurrences.last_observed_at, EXCLUDED.last_observed_at)
+        WHERE attention_occurrences.resolved_at IS NULL
+        "#,
+    )
+    .bind(&subject_id)
+    .bind(&key)
+    .bind(completed_at)
+    .bind(serde_json::json!({"commit_id": commit_id}))
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::warn!("failed to open evaluation attention occurrence: {e:#}");
+        let _ = tx.rollback().await;
+        return;
+    }
+
+    if let Err(e) = tx.commit().await {
+        tracing::warn!("failed to commit eval attention open: {e:#}");
+    }
 }
 
 /// Reset commit evaluation status to allow manual retry
@@ -432,11 +585,7 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
         result.id, result.git_commit_hash
     );
 
-    let _ = attention::resolve(pool, "evals", "commit_eval", &commit_id.to_string())
-        .await
-        .map_err(|e| {
-            tracing::error!("failed to resolve stale evaluation attention occurrence: {e:#}")
-        });
+    resolve_eval_attention_unless_failed(pool, commit_id).await;
 
     Ok(())
 }
@@ -1052,5 +1201,209 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(positions, vec![(13, 1), (10, 2), (12, 3), (11, 4)]);
+    }
+
+    // ── Live-database supersession-race regression tests ────────────────────
+    //
+    // Run against a repository-provided isolated database:
+    //   DATABASE_URL=postgres://crystal_forge:password@localhost:3042/crystal_forge \
+    //     cargo test -p cf-server --lib queries::commits -- --ignored
+
+    use super::{open_eval_attention_if_current, resolve_eval_attention_unless_failed};
+    use sqlx::PgPool;
+
+    async fn test_pool() -> PgPool {
+        PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"))
+            .await
+            .expect("failed to connect to test database")
+    }
+
+    async fn insert_throwaway_flake(pool: &PgPool) -> i32 {
+        let short = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        sqlx::query_scalar::<_, i32>(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("att-eval-flake-{short}"))
+        .bind(format!("https://git.example/att-eval-flake-{short}.git"))
+        .fetch_one(pool)
+        .await
+        .expect("failed to insert throwaway test flake")
+    }
+
+    async fn insert_throwaway_commit(pool: &PgPool, flake_id: i32) -> i32 {
+        let hash = uuid::Uuid::new_v4().simple().to_string();
+        sqlx::query_scalar::<_, i32>(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) \
+             VALUES ($1, $2, NOW()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(hash)
+        .fetch_one(pool)
+        .await
+        .expect("failed to insert throwaway test commit")
+    }
+
+    async fn open_eval_count(pool: &PgPool, commit_id: i32) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'evals' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(commit_id.to_string())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn open_eval_attention_if_current_skips_when_commit_was_reset() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let stale_completed_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+
+        // Simulate: the commit has since been manually reset to pending —
+        // it is no longer 'failed', and evaluation_completed_at no longer
+        // matches the stale value a delayed failure handler captured.
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = 'pending', evaluation_completed_at = NULL WHERE id = $1",
+        )
+        .bind(commit_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        open_eval_attention_if_current(&pool, commit_id, stale_completed_at).await;
+        assert_eq!(
+            open_eval_count(&pool, commit_id).await,
+            0,
+            "a delayed failure handler must not open an occurrence for a reset commit"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
+            .bind(commit_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn open_eval_attention_if_current_opens_when_still_current() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let completed_at = chrono::Utc::now();
+
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = 'failed', evaluation_completed_at = $2 WHERE id = $1",
+        )
+        .bind(commit_id)
+        .bind(completed_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        open_eval_attention_if_current(&pool, commit_id, completed_at).await;
+        assert_eq!(
+            open_eval_count(&pool, commit_id).await,
+            1,
+            "a still-current failure must open its attention occurrence"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
+            .bind(commit_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn resolve_eval_attention_unless_failed_preserves_newer_failure() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let completed_at = chrono::Utc::now();
+
+        // A newer failure has since been recorded on this commit.
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = 'failed', evaluation_completed_at = $2 WHERE id = $1",
+        )
+        .bind(commit_id)
+        .bind(completed_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        open_eval_attention_if_current(&pool, commit_id, completed_at).await;
+        assert_eq!(open_eval_count(&pool, commit_id).await, 1);
+
+        // A delayed completion/reset resolve action must not wipe out the
+        // newer failure's still-valid occurrence.
+        resolve_eval_attention_unless_failed(&pool, commit_id).await;
+        assert_eq!(
+            open_eval_count(&pool, commit_id).await,
+            1,
+            "resolve must not clear a newer failure's occurrence"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
+            .bind(commit_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn resolve_eval_attention_unless_failed_resolves_when_not_failed() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let completed_at = chrono::Utc::now();
+
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = 'failed', evaluation_completed_at = $2 WHERE id = $1",
+        )
+        .bind(commit_id)
+        .bind(completed_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        open_eval_attention_if_current(&pool, commit_id, completed_at).await;
+        assert_eq!(open_eval_count(&pool, commit_id).await, 1);
+
+        // Commit later completes successfully.
+        sqlx::query("UPDATE commits SET evaluation_status = 'complete' WHERE id = $1")
+            .bind(commit_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        resolve_eval_attention_unless_failed(&pool, commit_id).await;
+        assert_eq!(
+            open_eval_count(&pool, commit_id).await,
+            0,
+            "resolve must clear the occurrence once the commit is no longer failed"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
+            .bind(commit_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
     }
 }

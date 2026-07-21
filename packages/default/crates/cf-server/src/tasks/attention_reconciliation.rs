@@ -19,7 +19,7 @@
 
 use crate::queries::attention;
 use chrono::Utc;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use std::time::Duration;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
@@ -54,7 +54,6 @@ pub async fn reconcile_system_attention(
     _caller_environment_id: Option<Uuid>,
 ) {
     let subject_id = system_id.to_string();
-    let opened_at = Utc::now();
 
     // Single transaction for the entire system+environment transition.
     let mut tx = match pool.begin().await {
@@ -84,24 +83,35 @@ pub async fn reconcile_system_attention(
     // was acquired, so a stale snapshot could race with a newer transition
     // and re-open an already-resolved incident.  Re-read from the database
     // under the lock so we act on the latest committed state.
-    let (health, hostname, environment_id): (String, String, Option<Uuid>) =
-        match sqlx::query_as::<_, (String, String, Option<Uuid>)>(
-            "SELECT vsl.health_status, s.hostname, s.environment_id \
+    //
+    // `opened_at` is also captured here (via the database's own `NOW()`,
+    // inside the same transaction), rather than before the lock was
+    // acquired. Capturing it early would let a delayed caller — one that
+    // waited a long time for the lock — record an observation timestamp
+    // substantially earlier than the state it eventually acts on.
+    let (health, hostname, environment_id, opened_at): (
+        String,
+        String,
+        Option<Uuid>,
+        chrono::DateTime<chrono::Utc>,
+    ) = match sqlx::query_as::<_, (String, String, Option<Uuid>, chrono::DateTime<chrono::Utc>)>(
+        "SELECT vsl.health_status, s.hostname, s.environment_id, NOW() \
              FROM view_system_list vsl \
              JOIN systems s ON s.id = vsl.id \
              WHERE vsl.id = $1",
-        )
-        .bind(system_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| warn!("failed to re-read system state: {e:#}"))
-        .ok()
-        .flatten()
-        .unwrap_or_default()  // (empty, empty, None) if system gone
+    )
+    .bind(system_id)
+    .fetch_optional(&mut *tx)
+    .await
     {
-        (h, hn, eid) if !h.is_empty() => (h, hn, eid),
-        _ => {
+        Ok(Some((h, hn, eid, now))) if !h.is_empty() => (h, hn, eid, now),
+        Ok(_) => {
             debug!("system {system_id} not found during attention reconciliation");
+            let _ = tx.rollback().await;
+            return;
+        }
+        Err(e) => {
+            warn!("failed to re-read system state: {e:#}");
             let _ = tx.rollback().await;
             return;
         }
@@ -371,18 +381,16 @@ pub async fn reconcile_system_attention(
             .map_err(|e| warn!("failed to resolve system attention occurrence: {e:#}"));
 
             // Also resolve every open environment occurrence derived from
-            // this system now that its underlying occurrence is resolved.
-            if let Some(env_id) = environment_id {
-                let _ = attention::resolve_environment_occurrences_for_system(
-                    &mut *tx,
-                    env_id,
-                    system_id,
-                )
-                .await
-                .map_err(|e| {
-                    warn!("failed to resolve environment attention occurrence: {e:#}")
-                });
-            }
+            // this system now that its underlying occurrence is resolved —
+            // across ALL environments, not just the system's *current* one.
+            // A system that was critical in environment A and has since
+            // moved to B (or been unassigned) before recovering must not
+            // leave A's derived occurrence open.
+            let _ = attention::resolve_environment_occurrences_for_system_any_environment(
+                &mut *tx, system_id,
+            )
+            .await
+            .map_err(|e| warn!("failed to resolve environment attention occurrence: {e:#}"));
         }
         other => {
             debug!("unknown health status '{other}' for system {system_id}; skipping");
@@ -695,6 +703,18 @@ pub async fn run_attention_reconciliation_loop(pool: PgPool) {
         "🔁 Starting attention reconciliation loop (interval={:?})",
         RECONCILIATION_INTERVAL
     );
+
+    // One-time (idempotent) repair for duplicate open occurrences that may
+    // have accumulated from an earlier reconciliation-logic bug across
+    // MR !307's review history. Safe to run on every server startup.
+    match attention::dedupe_open_occurrences(&pool).await {
+        Ok(n) if n > 0 => {
+            tracing::warn!("🧹 Deduped {n} duplicate open attention occurrence(s) on startup")
+        }
+        Ok(_) => {}
+        Err(e) => error!("attention occurrence dedupe failed: {e:#}"),
+    }
+
     let mut ticker = tokio::time::interval(RECONCILIATION_INTERVAL);
     loop {
         ticker.tick().await;
@@ -812,6 +832,34 @@ async fn reconcile_terminal_events(pool: &PgPool) {
         )
         .await
         .map_err(|e| warn!("failed to reconcile eval attention occurrence: {e:#}"));
+    }
+
+    // Safety net: resolve any open eval occurrence whose commit is no
+    // longer in the exact (failed, completed_at) state that created it —
+    // e.g. it was reset, re-evaluated, or completed. The direct-call paths
+    // in queries::commits already do this under a per-commit lock with a
+    // recheck (open_eval_attention_if_current /
+    // resolve_eval_attention_unless_failed), but this sweep catches any
+    // occurrence left behind by a process crash or dropped connection
+    // between the domain commit and the attention action.
+    if let Err(e) = sqlx::query(
+        r#"
+        UPDATE attention_occurrences ao
+        SET resolved_at = NOW()
+        WHERE ao.category = 'evals'
+          AND ao.resolved_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM commits c
+              WHERE c.id::text = ao.subject_id
+                AND c.evaluation_status = 'failed'
+                AND c.evaluation_completed_at = ao.opened_at
+          )
+        "#,
+    )
+    .execute(pool)
+    .await
+    {
+        error!("failed to resolve stale eval attention occurrences: {e:#}");
     }
 }
 
