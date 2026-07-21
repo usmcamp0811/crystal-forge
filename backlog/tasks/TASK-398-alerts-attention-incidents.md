@@ -566,5 +566,17 @@ Keep this task in `Backlog` until a human selects it for a sprint. Once selected
   - `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server navigation` ✅
   - `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` ✅
   - `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml` ✅
-- Next: wire remaining category producers (flakes, systems, environments, CVEs).
+- Wired flake sync error/recovery producer in `flake/commits.rs::sync_flake_recorded`:
+  - Sync error → `attention::open_or_observe_by_subject` with reason `sync_error`
+  - Sync success → `attention::resolve` for the flake's open occurrence
+- Wired system health attention producer in `handlers/agent/heartbeat.rs::reconcile_system_health_attention`:
+  - After each heartbeat/state-change commit, queries `view_system_list` for health_status
+  - Critical/offline → `open_or_observe_by_subject` with reason matching health_status
+  - Healthy/warning → `resolve_open_occurrences_for_subject`
+- Not yet wired: environment attention (requires system→environment occurrence mapping), CVE occurrences.
+- Pushed commits:
+  - `9f9f8250` — badge/dismissal API rewrite
+  - `88f3d326` — web UI occurrence-id dismissal
+  - `8a6186b5` — flake sync producer
+  - `d4481b53` — system health producer
 <!-- SECTION:NOTES:END -->
