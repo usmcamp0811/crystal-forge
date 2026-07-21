@@ -163,9 +163,23 @@ def test_branch_specific_flake_initialization(
     print(f"Branch {branch_name} verification passed: {final_count} commits found")
 
 
+#: Git ancestry of the test-flake branches created by lib/test-flake/default.nix:
+#: main -> development -> feature/experimental (each branch is checked out from
+#: the previous one, then gets its own additional commits). `branch_test_data`
+#: only records each branch's OWN commits, but a `git log` sync of a
+#: descendant branch legitimately includes every ancestor commit too - that is
+#: correct, expected git behavior, not cross-branch contamination. Only
+#: commits from a branch that is NOT an ancestor would indicate a real leak.
+BRANCH_ANCESTORS = {
+    "main": set(),
+    "development": {"main"},
+    "feature/experimental": {"main", "development"},
+}
+
+
 @pytest.mark.commits
 def test_branch_isolation(cf_client, server, branch_test_data):
-    """Test that commits from different branches are properly isolated"""
+    """Test that commits from different (non-ancestor) branches are properly isolated"""
 
     # Get all flakes from the database
     flake_rows = cf_client.execute_sql("SELECT id, name, repo_url FROM flakes")
@@ -181,6 +195,7 @@ def test_branch_isolation(cf_client, server, branch_test_data):
                 branch_flakes["main"] = row["id"]
 
     # Verify each branch has its expected commits and no cross-contamination
+    # from branches that are NOT its ancestors.
     for branch_name, expected_data in branch_test_data.items():
         if branch_name in branch_flakes:
             flake_id = branch_flakes[branch_name]
@@ -192,22 +207,25 @@ def test_branch_isolation(cf_client, server, branch_test_data):
             actual_hashes = {row["git_commit_hash"] for row in commit_rows}
             expected_hashes = {h for h in expected_data["commits"] if h}
 
-            # Verify all expected commits are present
+            # Verify all expected (this branch's own) commits are present
             missing_commits = expected_hashes - actual_hashes
             assert (
                 not missing_commits
             ), f"Branch {branch_name} missing commits: {missing_commits}"
 
-            # Verify no unexpected commits (commits from other branches shouldn't leak in)
+            # Verify no unexpected commits from branches that are NOT ancestors
+            # of this branch. Ancestor commits are expected to appear (a
+            # descendant branch's git log naturally includes them).
+            ancestors = BRANCH_ANCESTORS.get(branch_name, set())
             all_other_expected = set()
             for other_branch, other_data in branch_test_data.items():
-                if other_branch != branch_name:
+                if other_branch != branch_name and other_branch not in ancestors:
                     all_other_expected.update(h for h in other_data["commits"] if h)
 
             leaked_commits = actual_hashes & all_other_expected
             assert (
                 not leaked_commits
-            ), f"Branch {branch_name} has commits from other branches: {leaked_commits}"
+            ), f"Branch {branch_name} has commits from unrelated (non-ancestor) branches: {leaked_commits}"
 
             print(
                 f"Branch isolation verified for {branch_name}: {len(actual_hashes)} unique commits"

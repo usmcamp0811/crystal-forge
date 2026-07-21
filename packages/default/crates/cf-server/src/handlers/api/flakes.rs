@@ -30,7 +30,6 @@ use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::handlers::api::systems::scan_ineligible_response;
 use crate::queries::admin::insert_admin_audit_event;
-use crate::queries::commits::SYNC_LOCK_BASE;
 use crate::queries::commits::insert_commit_with_metadata;
 use crate::queries::cve_scans::resolve_flake_config_cve_scan_target;
 use crate::queries::flake_credentials::{
@@ -38,10 +37,9 @@ use crate::queries::flake_credentials::{
 };
 use crate::queries::flakes::{
     accept_history_rewrite_reset, cascade_delete_flake, check_flake_dependencies,
-    count_systems_for_flake, delete_flake_by_id, fetch_dashboard_flake_timelines,
-    fetch_flake_timelines, find_flake_for_repo_url_any, get_flake_by_id, get_flake_by_name,
-    insert_flake, list_flake_registry, reset_flake_source, soft_delete_flake, update_flake,
-    update_flake_metadata,
+    count_systems_for_flake, create_or_mutate_flake, delete_flake_by_id,
+    fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
+    list_flake_registry, mutate_flake_locked, soft_delete_flake,
 };
 use crate::queries::users::get_by_email;
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
@@ -741,6 +739,39 @@ pub async fn get_commit_diff_handler(
     }
 }
 
+/// Build a `FlakeRegistryItem` DTO for a freshly created/mutated flake row.
+///
+/// Commit-derived fields (latest commit, build/evaluation status,
+/// environments, total commit count) are not known immediately after a
+/// create/update write — the registry list endpoint fills those in from the
+/// branch snapshot on the next read. `system_count` is passed in since the
+/// caller may or may not have a cheap way to compute it (a fresh create has
+/// none yet).
+fn flake_registry_item_stub(
+    flake: crate::models::flakes::Flake,
+    system_count: i64,
+) -> FlakeRegistryItem {
+    FlakeRegistryItem {
+        id: flake.id,
+        name: flake.name,
+        repo_url: flake.repo_url,
+        branch: flake.branch,
+        build_scope: flake.build_scope,
+        system_count,
+        sync_status: flake.sync_status.unwrap_or_else(|| "unknown".to_string()),
+        last_sync_at: flake.last_sync_at,
+        last_sync_error: flake.last_sync_error,
+        latest_commit_hash: None,
+        latest_commit_message: None,
+        latest_commit_author: None,
+        latest_commit_timestamp: None,
+        build_status: None,
+        evaluation_status: None,
+        environments: Vec::new(),
+        total_commit_count: 0,
+    }
+}
+
 /// Create a new flake in the registry.
 ///
 /// **Authorization**: Requires Operator or Admin role (write operation).
@@ -816,214 +847,33 @@ pub async fn create_flake(
         Err(response) => return response,
     };
 
-    // Look up any existing flake with this repo_url (active OR soft-deleted).
-    // If found we must serialise under the per-flake advisory lock so that a
-    // concurrent source-identity change does not silently overwrite the
-    // branch/repo_url while retaining stale history.
-    let existing_flake: Option<(i32, String, bool)> =
-        match find_flake_for_repo_url_any(&pool, repo_url).await {
-            Ok(found) => found,
-            Err(e) => {
-                error!("Database error checking repo_url {repo_url}: {e:#}");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiError {
-                        error: "database_error".to_string(),
-                        message: "Failed to check existing flake".to_string(),
-                        details: None,
-                    }),
-                )
-                    .into_response();
-            }
-        };
-
-    if let Some((existing_id, _existing_branch, _is_deleted)) = existing_flake {
-        // Acquire the lock, re-read current identity, then either
-        // reset_flake_source (if identity changed or row is deleted) or
-        // update_flake_metadata (if only name/build_scope changed).
-        let mut tx = match pool.begin().await {
-            Ok(tx) => tx,
-            Err(e) => {
-                error!("Failed to begin mutation tx for existing flake {existing_id}: {e:#}");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiError {
-                        error: "database_error".to_string(),
-                        message: "Failed to update flake".to_string(),
-                        details: None,
-                    }),
-                )
-                    .into_response();
-            }
-        };
-
-        if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(SYNC_LOCK_BASE + i64::from(existing_id))
-            .execute(&mut *tx)
-            .await
-        {
-            error!("Failed to acquire advisory lock for existing flake {existing_id}: {e:#}");
-            let _ = tx.rollback().await;
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError {
-                    error: "lock_failed".to_string(),
-                    message: "Failed to acquire lock for flake update".to_string(),
-                    details: None,
-                }),
-            )
-                .into_response();
-        }
-
-        let row_opt = match sqlx::query_as::<_, (String, bool)>(
-            "SELECT branch, (deleted_at IS NOT NULL) AS is_deleted \
-             FROM flakes WHERE id = $1",
-        )
-        .bind(existing_id)
-        .fetch_optional(&mut *tx)
-        .await
-        {
-            Ok(row) => row,
-            Err(e) => {
-                error!("Database error re-reading flake {existing_id} inside lock: {e:#}");
-                let _ = tx.rollback().await;
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiError {
-                        error: "database_error".to_string(),
-                        message: "Failed to read flake identity".to_string(),
-                        details: None,
-                    }),
-                )
-                    .into_response();
-            }
-        };
-
-        match row_opt {
-            Some((cur_branch, is_deleted)) => {
-                let flake = if cur_branch != branch || is_deleted {
-                    match reset_flake_source(
-                        &mut tx,
-                        existing_id,
-                        name,
-                        repo_url,
-                        &branch,
-                        build_scope,
-                    )
-                    .await
-                    {
-                        Ok(u) => u,
-                        Err(e) => {
-                            error!(
-                                "Failed to reset flake source for existing flake {existing_id}: {e:#}"
-                            );
-                            let _ = tx.rollback().await;
-                            return (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(ApiError {
-                                    error: "reset_failed".to_string(),
-                                    message: "Failed to reset flake source".to_string(),
-                                    details: None,
-                                }),
-                            )
-                                .into_response();
-                        }
-                    }
-                } else {
-                    match update_flake_metadata(&mut tx, existing_id, name, build_scope).await {
-                        Ok(u) => u,
-                        Err(e) => {
-                            error!(
-                                "Failed to update metadata for existing flake {existing_id}: {e:#}"
-                            );
-                            let _ = tx.rollback().await;
-                            return (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(ApiError {
-                                    error: "update_failed".to_string(),
-                                    message: "Failed to update flake".to_string(),
-                                    details: None,
-                                }),
-                            )
-                                .into_response();
-                        }
-                    }
-                };
-
-                if let Err(e) = tx.commit().await {
-                    error!("Failed to commit update for existing flake {existing_id}: {e:#}");
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ApiError {
-                            error: "commit_failed".to_string(),
-                            message: "Failed to commit flake update".to_string(),
-                            details: None,
-                        }),
-                    )
-                        .into_response();
-                }
-
-                return (
-                    StatusCode::CREATED,
-                    Json(FlakeRegistryItem {
-                        id: flake.id,
-                        name: flake.name,
-                        repo_url: flake.repo_url,
-                        branch: flake.branch,
-                        build_scope: flake.build_scope,
-                        system_count: 0,
-                        sync_status: flake.sync_status.unwrap_or_else(|| "unknown".to_string()),
-                        last_sync_at: flake.last_sync_at,
-                        last_sync_error: flake.last_sync_error,
-                        latest_commit_hash: None,
-                        latest_commit_message: None,
-                        latest_commit_author: None,
-                        latest_commit_timestamp: None,
-                        build_status: None,
-                        evaluation_status: None,
-                        environments: Vec::new(),
-                        total_commit_count: 0,
-                    }),
-                )
-                    .into_response();
-            }
-            None => {
-                // Row was hard-deleted between the unlocked lookup and the
-                // locked transaction.  Roll back and fall through.
-                let _ = tx.rollback().await;
-            }
-        }
-    }
-
-    // No existing row (or the row was hard-deleted between the unlocked lookup
-    // and the locked transaction).  Insert a genuinely new flake row.
-    // insert_flake's ON CONFLICT clause no longer touches branch/repo_url, so
-    // even in a race the upsert cannot silently overwrite source identity.
-    match insert_flake(&pool, name, repo_url, &branch, build_scope).await {
+    // create_or_mutate_flake is the single linearization point for the create
+    // path: it inserts with ON CONFLICT DO NOTHING (never silently overwrites
+    // an existing row's branch), and on conflict re-reads the existing row's
+    // identity under the per-flake advisory lock before deciding whether to
+    // reset the source (branch/repo_url changed, or row was soft-deleted) or
+    // just update metadata (name/build_scope only). See mutate_flake_locked.
+    match create_or_mutate_flake(&pool, name, repo_url, &branch, build_scope).await {
         Ok(flake) => (
             StatusCode::CREATED,
-            Json(FlakeRegistryItem {
-                id: flake.id,
-                name: flake.name,
-                repo_url: flake.repo_url,
-                branch: flake.branch,
-                build_scope: flake.build_scope,
-                system_count: 0,
-                sync_status: flake.sync_status.unwrap_or_else(|| "unknown".to_string()),
-                last_sync_at: flake.last_sync_at,
-                last_sync_error: flake.last_sync_error,
-                latest_commit_hash: None,
-                latest_commit_message: None,
-                latest_commit_author: None,
-                latest_commit_timestamp: None,
-                build_status: None,
-                evaluation_status: None,
-                environments: Vec::new(),
-                total_commit_count: 0,
-            }),
+            Json(flake_registry_item_stub(flake, 0)),
         )
             .into_response(),
         Err(e) => {
+            if matches!(
+                e.downcast_ref::<sqlx::Error>(),
+                Some(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23505")
+            ) {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ApiError {
+                        error: "conflict".to_string(),
+                        message: "Repository URL already exists in the registry".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
             error!("Failed to create flake: {e:#}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1082,159 +932,55 @@ pub async fn update_flake_handler(
         Err(response) => return response,
     };
 
-    // Serialise ALL writes that can touch repo_url or branch under the per-flake
-    // advisory lock.  Inside the lock we re-read the current identity; if it
-    // differs from the requested identity we use reset_flake_source() (which
-    // purges history, clears the snapshot, and invalidates any in-flight sync),
-    // otherwise we update only the non-source metadata (name, build_scope).
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
+    // mutate_flake_locked is the single linearization point for the update
+    // path: it re-reads repo_url/branch/deleted_at under the per-flake
+    // advisory lock before deciding whether to reset the source (identity
+    // changed) or just update metadata (name/build_scope only).
+    match mutate_flake_locked(&pool, flake_id, name, repo_url, &branch, build_scope).await {
+        Ok(Some(flake)) => {
+            let system_count = count_systems_for_flake(&pool, flake_id).await.unwrap_or(0);
+            (
+                StatusCode::OK,
+                Json(flake_registry_item_stub(flake, system_count)),
+            )
+                .into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "not_found".to_string(),
+                message: "Flake not found".to_string(),
+                details: None,
+            }),
+        )
+            .into_response(),
         Err(e) => {
-            error!("Failed to begin mutation tx (flake {flake_id}): {e:#}");
-            return (
+            if matches!(
+                e.downcast_ref::<sqlx::Error>(),
+                Some(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23505")
+            ) {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ApiError {
+                        error: "conflict".to_string(),
+                        message: "Repository URL already exists in the registry".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+            error!("Failed to update flake {flake_id}: {e:#}");
+            (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
-                    error: "database_error".to_string(),
+                    error: "internal_error".to_string(),
                     message: "Failed to update flake".to_string(),
                     details: None,
                 }),
             )
-                .into_response();
+                .into_response()
         }
-    };
-
-    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(SYNC_LOCK_BASE + i64::from(flake_id))
-        .execute(&mut *tx)
-        .await
-    {
-        error!("Failed to acquire advisory lock (flake {flake_id}): {e:#}");
-        let _ = tx.rollback().await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: "lock_failed".to_string(),
-                message: "Failed to acquire lock for flake update".to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
     }
-
-    let current = match sqlx::query_as::<_, (String, String)>(
-        "SELECT repo_url, branch FROM flakes WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(flake_id)
-    .fetch_optional(&mut *tx)
-    .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            let _ = tx.rollback().await;
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ApiError {
-                    error: "not_found".to_string(),
-                    message: "Flake not found".to_string(),
-                    details: None,
-                }),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            error!("Database error re-reading flake {flake_id} inside lock: {e:#}");
-            let _ = tx.rollback().await;
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError {
-                    error: "database_error".to_string(),
-                    message: "Failed to read flake identity".to_string(),
-                    details: None,
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    let (cur_repo_url, cur_branch) = current;
-
-    let flake = if cur_repo_url != repo_url || cur_branch != branch {
-        // Source identity changed — use reset_flake_source which purges
-        // history, clears the snapshot, and invalidates in-flight syncs.
-        // reset_flake_source acquires the same advisory lock internally
-        // (reentrant within this transaction, a no-op).
-        match reset_flake_source(&mut tx, flake_id, name, repo_url, &branch, build_scope).await {
-            Ok(u) => u,
-            Err(e) => {
-                error!("Failed to reset flake source (flake {flake_id}): {e:#}");
-                let _ = tx.rollback().await;
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiError {
-                        error: "reset_failed".to_string(),
-                        message: "Failed to reset flake source".to_string(),
-                        details: None,
-                    }),
-                )
-                    .into_response();
-            }
-        }
-    } else {
-        // Source identity unchanged — update only non-source metadata.
-        match update_flake_metadata(&mut tx, flake_id, name, build_scope).await {
-            Ok(u) => u,
-            Err(e) => {
-                error!("Failed to update flake metadata (flake {flake_id}): {e:#}");
-                let _ = tx.rollback().await;
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiError {
-                        error: "update_failed".to_string(),
-                        message: "Failed to update flake".to_string(),
-                        details: None,
-                    }),
-                )
-                    .into_response();
-            }
-        }
-    };
-
-    if let Err(e) = tx.commit().await {
-        error!("Failed to commit update tx (flake {flake_id}): {e:#}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: "commit_failed".to_string(),
-                message: "Failed to commit flake update".to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
-    }
-
-    (
-        StatusCode::OK,
-        Json(FlakeRegistryItem {
-            id: flake.id,
-            name: flake.name,
-            repo_url: flake.repo_url,
-            branch: flake.branch,
-            build_scope: flake.build_scope,
-            system_count: count_systems_for_flake(&pool, flake_id).await.unwrap_or(0),
-            sync_status: flake.sync_status.unwrap_or_else(|| "unknown".to_string()),
-            last_sync_at: flake.last_sync_at,
-            last_sync_error: flake.last_sync_error,
-            latest_commit_hash: None,
-            latest_commit_message: None,
-            latest_commit_author: None,
-            latest_commit_timestamp: None,
-            build_status: None,
-            evaluation_status: None,
-            environments: Vec::new(),
-            total_commit_count: 0,
-        }),
-    )
-        .into_response()
 }
 
 pub async fn get_flake_credentials(

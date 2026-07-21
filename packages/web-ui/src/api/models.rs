@@ -788,6 +788,7 @@ pub struct FlakeRegistryItem {
     pub evaluation_status: Option<String>,
     #[serde(default)]
     pub environments: Vec<String>,
+    #[serde(default)]
     pub total_commit_count: i64,
 }
 

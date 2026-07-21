@@ -55,42 +55,10 @@ pub async fn get_flake_by_id(pool: &PgPool, id: i32) -> Result<Flake> {
     Ok(commit)
 }
 
-pub async fn update_flake(
-    pool: &PgPool,
-    flake_id: i32,
-    name: &str,
-    repo_url: &str,
-    branch: &str,
-    build_scope: &str,
-) -> Result<Flake> {
-    let flake = sqlx::query_as::<_, Flake>(
-        r#"
-        UPDATE flakes
-        SET name = $1,
-            repo_url = $2,
-            branch = $3,
-            build_scope = $4
-        WHERE id = $5 AND deleted_at IS NULL
-        RETURNING *
-        "#,
-    )
-    .bind(name)
-    .bind(repo_url)
-    .bind(branch)
-    .bind(build_scope)
-    .bind(flake_id)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(flake)
-}
-
 /// Update only the non-source-identity fields of a flake (`name`, `build_scope`).
 ///
-/// This function panics if the flake does not exist (it is expected to be called
-/// only after the caller has verified the row exists).  Unlike `update_flake`,
-/// this does NOT touch `repo_url` or `branch` — source-identity changes must go
-/// through the locked `reset_flake_source()` path.
+/// This does NOT touch `repo_url` or `branch` — source-identity changes must go
+/// through the locked `reset_flake_source()` path (via `mutate_flake_locked`).
 ///
 /// Takes a transaction reference so the caller can serialise identity changes
 /// with the per-flake advisory lock.
@@ -128,28 +96,6 @@ pub async fn get_flake_id_by_repo_url(pool: &PgPool, repo_url: &str) -> Result<O
     .await?;
 
     Ok(flake_id)
-}
-
-/// Find any flake (active or soft-deleted) with this `repo_url`.
-///
-/// Used by the create-flake path to detect reactivation of a soft-deleted
-/// row so its stale commit history/snapshot can be reset instead of silently
-/// resurfacing under a possibly different branch.  Returns
-/// `(id, branch, is_deleted)`.
-pub async fn find_flake_for_repo_url_any(
-    pool: &PgPool,
-    repo_url: &str,
-) -> Result<Option<(i32, String, bool)>> {
-    let row = sqlx::query_as::<_, (i32, String, bool)>(
-        "SELECT id, branch, (deleted_at IS NOT NULL) AS is_deleted \
-         FROM flakes WHERE repo_url = $1",
-    )
-    .bind(repo_url)
-    .fetch_optional(pool)
-    .await
-    .context("Failed to look up flake by repo_url (including deleted)")?;
-
-    Ok(row)
 }
 
 pub async fn get_all_flakes_from_db(
@@ -529,6 +475,135 @@ pub async fn reset_flake_source(
     .context("Failed to update flake identity and reset state during source reset")?;
 
     Ok(flake)
+}
+
+/// Mutate an existing flake's identity/metadata under the per-flake advisory
+/// lock, re-reading the CURRENT row inside the lock before deciding what to
+/// write. This is the single linearization point for both the create and
+/// update HTTP handlers: any write that could touch `repo_url` or `branch`
+/// must go through this function (or `create_or_mutate_flake` below) so a
+/// concurrent identity change is never silently clobbered or silently
+/// inherited.
+///
+/// Returns `Ok(None)` if the row no longer exists (e.g. hard-deleted by a
+/// concurrent request after the caller resolved `flake_id` but before this
+/// function acquired the lock). Callers decide how to interpret that: the
+/// update handler maps it to 404, `create_or_mutate_flake` retries.
+///
+/// If the locked row's `repo_url`, `branch`, or deletion state differs from
+/// the requested identity, the source is reset via `reset_flake_source`
+/// (purges history, clears the snapshot, invalidates in-flight syncs).
+/// Otherwise only non-source metadata (`name`, `build_scope`) is updated.
+pub async fn mutate_flake_locked(
+    pool: &PgPool,
+    flake_id: i32,
+    name: &str,
+    repo_url: &str,
+    branch: &str,
+    build_scope: &str,
+) -> Result<Option<Flake>> {
+    use crate::queries::commits::SYNC_LOCK_BASE;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin flake mutation tx")?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_LOCK_BASE + i64::from(flake_id))
+        .execute(&mut *tx)
+        .await
+        .context("Failed to acquire advisory lock for flake mutation")?;
+
+    let current = sqlx::query_as::<_, (String, String, bool)>(
+        "SELECT repo_url, branch, (deleted_at IS NOT NULL) AS is_deleted \
+         FROM flakes WHERE id = $1",
+    )
+    .bind(flake_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to re-read flake identity under lock")?;
+
+    let Some((cur_repo_url, cur_branch, is_deleted)) = current else {
+        let _ = tx.rollback().await;
+        return Ok(None);
+    };
+
+    let flake = if cur_repo_url != repo_url || cur_branch != branch || is_deleted {
+        reset_flake_source(&mut tx, flake_id, name, repo_url, branch, build_scope).await?
+    } else {
+        update_flake_metadata(&mut tx, flake_id, name, build_scope).await?
+    };
+
+    tx.commit()
+        .await
+        .context("Failed to commit flake mutation")?;
+
+    Ok(Some(flake))
+}
+
+/// Atomically create a flake for `repo_url`, or — if a row already exists for
+/// it (active or soft-deleted) — mutate that row under the per-flake
+/// advisory lock instead of silently upserting a stale branch.
+///
+/// The initial insert uses `ON CONFLICT DO NOTHING`, so a genuine conflict
+/// never overwrites another row's `branch`/`repo_url`. On conflict, the
+/// existing row's id is resolved and the mutation is delegated to
+/// `mutate_flake_locked`, which re-reads identity under the lock before
+/// deciding between a full source reset and a metadata-only update. This
+/// keeps the create path linearizable with concurrent creates, updates, and
+/// syncs for the same `repo_url`.
+///
+/// Bounded retry (5 attempts) handles the rare race where the conflicting
+/// row is hard-deleted between the insert conflict and the locked mutation.
+pub async fn create_or_mutate_flake(
+    pool: &PgPool,
+    name: &str,
+    repo_url: &str,
+    branch: &str,
+    build_scope: &str,
+) -> Result<Flake> {
+    for _ in 0..5 {
+        let inserted = sqlx::query_as::<_, Flake>(
+            "INSERT INTO flakes (name, repo_url, branch, build_scope) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (repo_url) DO NOTHING \
+             RETURNING *",
+        )
+        .bind(name)
+        .bind(repo_url)
+        .bind(branch)
+        .bind(build_scope)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to insert flake")?;
+
+        if let Some(flake) = inserted {
+            return Ok(flake);
+        }
+
+        // Conflict: an existing row (active or soft-deleted) owns this
+        // repo_url. Resolve its id and mutate it under the per-flake lock.
+        let existing_id = sqlx::query_scalar::<_, i32>("SELECT id FROM flakes WHERE repo_url = $1")
+            .bind(repo_url)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to look up existing flake after insert conflict")?;
+
+        let Some(existing_id) = existing_id else {
+            // Row vanished between the conflict and this lookup — retry.
+            continue;
+        };
+
+        match mutate_flake_locked(pool, existing_id, name, repo_url, branch, build_scope).await? {
+            Some(flake) => return Ok(flake),
+            None => continue, // row vanished mid-lock; retry
+        }
+    }
+
+    anyhow::bail!(
+        "Failed to create or update flake for repo_url {repo_url} after repeated conflicts"
+    )
 }
 
 /// Purge a flake's commit history and reset its sync/snapshot state when an
