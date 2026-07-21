@@ -254,12 +254,11 @@ pub async fn count_systems_for_all_policies(pool: &PgPool) -> Result<Vec<PolicyS
 
 /// Count total NixOS derivations (systems) in the fleet.
 pub async fn count_nixos_derivations(pool: &PgPool) -> Result<i64> {
-    let count: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM derivations WHERE derivation_type = 'nixos'"#,
-    )
-    .fetch_one(pool)
-    .await
-    .context("Failed to count NixOS derivations")?;
+    let count: i64 =
+        sqlx::query_scalar(r#"SELECT COUNT(*) FROM derivations WHERE derivation_type = 'nixos'"#)
+            .fetch_one(pool)
+            .await
+            .context("Failed to count NixOS derivations")?;
     Ok(count)
 }
 

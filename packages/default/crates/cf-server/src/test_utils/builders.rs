@@ -290,6 +290,7 @@ impl FlakeBuilder {
             sync_status: Some("unknown".to_string()),
             last_sync_at: None,
             last_sync_error: None,
+            snapshot_ready_at: None,
         }
     }
 }

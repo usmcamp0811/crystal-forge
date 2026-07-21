@@ -9,7 +9,7 @@ pub mod topbar;
 pub use app_shell::AppShell;
 pub use card::Card;
 pub use dev_banner::{
-    use_dev_mode_enabled, BannerPlacement, DevModeBanner, DEV_MODE_BANNER_HEIGHT_PX,
+    BannerPlacement, DEV_MODE_BANNER_HEIGHT_PX, DevModeBanner, use_dev_mode_enabled,
 };
 pub use sidebar::{MobileDrawer, SidebarContext, SidebarEdgeToggle, SidebarNav};
 pub use topbar::TopBar;

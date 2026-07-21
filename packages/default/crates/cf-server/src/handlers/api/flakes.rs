@@ -36,9 +36,10 @@ use crate::queries::flake_credentials::{
     delete_flake_credential, get_flake_credential, update_flake_credential, upsert_flake_credential,
 };
 use crate::queries::flakes::{
-    cascade_delete_flake, check_flake_dependencies, count_systems_for_flake, delete_flake_by_id,
+    accept_history_rewrite_reset, cascade_delete_flake, check_flake_dependencies,
+    count_systems_for_flake, create_or_mutate_flake, delete_flake_by_id,
     fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
-    insert_flake, list_flake_registry, purge_flake_commit_history, soft_delete_flake, update_flake,
+    list_flake_registry, mutate_flake_locked, soft_delete_flake,
 };
 use crate::queries::users::get_by_email;
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
@@ -86,8 +87,16 @@ pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl
         return forbidden_viewer();
     }
 
+    let t = std::time::Instant::now();
     match list_flake_registry(&pool).await {
-        Ok(flakes) => (StatusCode::OK, Json(flakes)).into_response(),
+        Ok(flakes) => {
+            info!(
+                flake_count = flakes.len(),
+                elapsed_ms = t.elapsed().as_millis(),
+                "flake_registry_served"
+            );
+            (StatusCode::OK, Json(flakes)).into_response()
+        }
         Err(e) => {
             error!("Failed to list flakes: {e:#}");
             (
@@ -153,137 +162,58 @@ pub async fn get_flake_timelines(
     // Parse optional limit parameter (default 10, max 500 for tray view)
     let max_commits = parse_timeline_limit(&params);
 
+    let t = std::time::Instant::now();
+    let view_mode = if use_dashboard_view {
+        "dashboard"
+    } else {
+        "flakes"
+    };
     let fetch_result = if use_dashboard_view {
         fetch_dashboard_flake_timelines(&pool, max_commits, flake_ids.as_deref()).await
     } else {
+        // Database-only read path (TASK-397): no Git operations.
+        // Ordering and visibility use the branch-commit snapshot when available,
+        // falling back to deterministic timestamp ordering for unsynchronized flakes.
         fetch_flake_timelines(&pool, max_commits, flake_ids.as_deref()).await
     };
 
     match fetch_result {
         Ok(mut timelines) => {
-            // Dashboard view doesn't need git metadata (message/author), skip hydration
+            // Dashboard view doesn't need config path details, return immediately.
             if use_dashboard_view {
+                let total_commits: usize = timelines.iter().map(|t| t.commits.len()).sum();
+                info!(
+                    view = view_mode,
+                    flake_count = timelines.len(),
+                    commit_count = total_commits,
+                    limit = max_commits,
+                    elapsed_ms = t.elapsed().as_millis(),
+                    "flake_timelines_served"
+                );
                 return (StatusCode::OK, Json(timelines)).into_response();
             }
 
-            // For flakes view, treat remote branch history as source of truth for commit order/visibility.
-            // This prevents stale DB rows from showing after force-push/rewrite while keeping audit history intact.
-            for timeline in &mut timelines {
-                let flake = match get_flake_by_id(&pool, timeline.flake_id).await {
-                    Ok(flake) => flake,
-                    Err(err) => {
-                        warn!(
-                            "Failed to load flake {} for remote-order timeline filter: {err:#}",
-                            timeline.flake_id
-                        );
-                        continue;
-                    }
-                };
-
-                let creds = FlakeCredentialEnv::load(&pool, timeline.flake_id)
-                    .await
-                    .unwrap_or_else(|e| {
-                        warn!(
-                            "Failed to load credentials for flake {} during timeline reorder: {e:#}",
-                            timeline.flake_id
-                        );
-                        None
-                    });
-
-                let remote_hashes = match get_recent_branch_commit_hashes_with_creds(
-                    &flake.repo_url,
-                    &flake.branch,
-                    max_commits as usize,
-                    creds.as_ref(),
-                )
+            // Fetch configuration/path details for every returned commit in one
+            // bounded set-based query. The previous implementation issued one
+            // serialized query per flake after the timeline query completed.
+            let commit_ids: Vec<i32> = timelines
+                .iter()
+                .flat_map(|timeline| timeline.commits.iter().map(|commit| commit.id))
+                .collect();
+            let commit_path_lookup = fetch_commit_config_paths(&pool, &commit_ids)
                 .await
-                {
-                    Ok(hashes) => hashes,
-                    Err(err) => {
-                        warn!(
-                            "Failed to fetch remote commit order for flake {} ({} @ {}): {err:#}",
-                            flake.id, flake.repo_url, flake.branch
-                        );
-                        // Keep DB-backed timeline when remote ordering is unavailable.
-                        // This preserves cached visibility while avoiding destructive empty states.
-                        continue;
-                    }
-                };
+                .unwrap_or_else(|err| {
+                    error!("Failed to fetch commit config paths: {err:#}");
+                    HashMap::new()
+                });
 
-                apply_remote_commit_order_if_available(timeline, Some(&remote_hashes));
-            }
-
-            let mut remaining_hydration_budget = MAX_HYDRATION_COMMITS_PER_REQUEST;
-
+            // Database-only enrichment: config paths, empty metadata defaults.
+            // No Git operations — message/author are cached in the commits table
+            // by the sync path. Very old pre-cache commits use fallback text.
             for timeline in &mut timelines {
-                let hashes: Vec<String> = timeline
-                    .commits
-                    .iter()
-                    .filter(|commit| {
-                        commit.message.trim().is_empty() || commit.author.trim().is_empty()
-                    })
-                    .take(remaining_hydration_budget)
-                    .map(|commit| commit.hash.clone())
-                    .collect();
-                let metadata = if hashes.is_empty() {
-                    HashMap::new()
-                } else {
-                    // This fallback should rarely run now that metadata is cached in commits table
-                    warn!(
-                        "Falling back to git metadata hydration for {} commits in flake {} (likely old commits from before metadata caching)",
-                        hashes.len(),
-                        timeline.flake_name
-                    );
-                    remaining_hydration_budget =
-                        remaining_hydration_budget.saturating_sub(hashes.len());
-                    match get_commit_metadata(&timeline.repo_url, &hashes).await {
-                        Ok(data) => data,
-                        Err(err) => {
-                            error!(
-                                "Failed to hydrate commit metadata for flake {}: {:#}",
-                                timeline.flake_name, err
-                            );
-                            HashMap::new()
-                        }
-                    }
-                };
-
-                let mut user_lookup_cache: HashMap<String, Option<String>> = HashMap::new();
-                let commit_hashes: Vec<String> = timeline
-                    .commits
-                    .iter()
-                    .map(|commit| commit.hash.clone())
-                    .collect();
-
-                // Skip inline hydration for now - too slow for API requests
-                // TODO: Background job to populate commit_artifacts_cache
-                let hydrated_configs: HashMap<String, Vec<String>> = HashMap::new();
-                let hydrated_changed_files: HashMap<String, Vec<String>> = HashMap::new();
-
-                let commit_path_lookup = if commit_hashes.is_empty() {
-                    HashMap::new()
-                } else {
-                    fetch_commit_config_paths(&pool, timeline.flake_id, &commit_hashes)
-                        .await
-                        .unwrap_or_else(|err| {
-                            error!(
-                                "Failed to fetch commit config paths for {}: {:#}",
-                                timeline.flake_name, err
-                            );
-                            HashMap::new()
-                        })
-                };
-
                 for commit in &mut timeline.commits {
-                    if let Some(detail) = metadata.get(&commit.hash) {
-                        if commit.message.trim().is_empty() {
-                            commit.message = detail.message.trim().to_string();
-                        }
-
-                        commit.author =
-                            resolve_timeline_author(&pool, detail, &mut user_lookup_cache).await;
-                    }
-
+                    // Use cached message/author; fall back to defaults when empty.
+                    // The sync path populates these fields (migration 0085).
                     if commit.message.trim().is_empty() {
                         let short = commit.hash.chars().take(7).collect::<String>();
                         commit.message = format!("Commit {short}");
@@ -292,39 +222,15 @@ pub async fn get_flake_timelines(
                         commit.author = "Unknown author".to_string();
                     }
 
+                    // Mark CF system matches and build system path details.
+                    // Uses the commit_artifacts_cache path details queried above.
                     if commit.systems.is_empty() {
-                        if let Some(configs) = hydrated_configs.get(&commit.hash) {
-                            let changed_files = hydrated_changed_files
-                                .get(&commit.hash)
-                                .cloned()
-                                .unwrap_or_default();
-
-                            if let Err(err) = upsert_commit_artifacts_cache(
-                                &pool,
-                                timeline.flake_id,
-                                &commit.hash,
-                                configs,
-                                &changed_files,
-                            )
-                            .await
-                            {
-                                error!(
-                                    "Failed to persist commit artifacts for {}@{}: {:#}",
-                                    timeline.flake_name, commit.hash, err
-                                );
-                            }
-
-                            let marked = mark_cf_system_matches(
-                                configs,
-                                commit_path_lookup.get(&commit.hash),
-                            );
-                            commit.system_count = marked.len() as i64;
-                            commit.systems = marked;
-                        }
+                        // No systems found in cache or derivations — leave empty.
+                        // This happens for commits before the first nixosConfiguration.
                     } else {
                         let marked = mark_cf_system_matches(
                             &commit.systems,
-                            commit_path_lookup.get(&commit.hash),
+                            commit_path_lookup.get(&commit.id),
                         );
                         commit.system_count = marked.len() as i64;
                         commit.systems = marked;
@@ -332,11 +238,21 @@ pub async fn get_flake_timelines(
 
                     commit.system_paths = build_commit_system_paths(
                         &commit.systems,
-                        commit_path_lookup.get(&commit.hash),
+                        commit_path_lookup.get(&commit.id),
                     );
                 }
             }
 
+            let total_commits: usize = timelines.iter().map(|t| t.commits.len()).sum();
+            info!(
+                view = view_mode,
+                flake_count = timelines.len(),
+                commit_count = total_commits,
+                limit = max_commits,
+                requested_ids = ?flake_ids.as_deref().map(|ids| ids.len()),
+                elapsed_ms = t.elapsed().as_millis(),
+                "flake_timelines_served"
+            );
             (StatusCode::OK, Json(timelines)).into_response()
         }
         Err(e) => {
@@ -396,76 +312,106 @@ struct CommitConfigPathRow {
 
 async fn fetch_commit_config_paths(
     pool: &PgPool,
-    flake_id: i32,
-    commit_hashes: &[String],
-) -> anyhow::Result<HashMap<String, HashMap<String, CommitConfigPathRow>>> {
-    if commit_hashes.is_empty() {
+    commit_ids: &[i32],
+) -> anyhow::Result<HashMap<i32, HashMap<String, CommitConfigPathRow>>> {
+    if commit_ids.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let rows = sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>, Option<String>, Option<String>)>(
+    let rows = sqlx::query_as::<_, (i32, String, i64, Option<String>, Option<String>, Option<String>, Option<String>)>(
         r#"
+        WITH selected_derivations AS (
+            SELECT
+                c.id AS commit_id,
+                c.flake_id,
+                d.id AS derivation_id,
+                d.derivation_name,
+                d.expected_store_path,
+                d.store_path
+            FROM commits c
+            JOIN derivations d
+              ON d.commit_id = c.id
+             AND d.derivation_type = 'nixos'
+            WHERE c.id = ANY($1)
+        ),
+        relevant_systems AS (
+            SELECT
+                s.flake_id,
+                COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) AS config_name,
+                s.hostname
+            FROM systems s
+            WHERE s.is_active = TRUE
+              AND s.flake_id IN (SELECT DISTINCT flake_id FROM selected_derivations)
+        ),
+        mapped_hosts AS (
+            SELECT flake_id, config_name, COUNT(*)::bigint AS mapped_host_count
+            FROM relevant_systems
+            GROUP BY flake_id, config_name
+        ),
+        latest_states AS (
+            SELECT DISTINCT ON (ss.hostname)
+                ss.hostname,
+                ss.store_path,
+                ss.timestamp,
+                ss.id
+            FROM system_states ss
+            WHERE ss.hostname IN (SELECT hostname FROM relevant_systems)
+            ORDER BY ss.hostname, ss.timestamp DESC, ss.id DESC
+        ),
+        selected_states AS (
+            SELECT DISTINCT ON (rs.flake_id, rs.config_name)
+                rs.flake_id,
+                rs.config_name,
+                rs.hostname,
+                ls.store_path
+            FROM relevant_systems rs
+            LEFT JOIN latest_states ls ON ls.hostname = rs.hostname
+            ORDER BY
+                rs.flake_id,
+                rs.config_name,
+                ls.timestamp DESC NULLS LAST,
+                ls.id DESC NULLS LAST,
+                rs.hostname ASC
+        ),
+        completed_cache_pushes AS (
+            SELECT DISTINCT cpj.derivation_id
+            FROM cache_push_jobs cpj
+            WHERE cpj.status = 'completed'
+              AND cpj.derivation_id IN (
+                  SELECT derivation_id FROM selected_derivations
+              )
+        )
         SELECT
-            c.git_commit_hash,
-            d.derivation_name,
-            COALESCE(mapped_hosts.mapped_host_count, 0)::bigint,
-            selected_state.hostname,
-            d.expected_store_path,
-            selected_state.store_path,
+            sd.commit_id,
+            sd.derivation_name,
+            COALESCE(mh.mapped_host_count, 0)::bigint,
+            ss.hostname,
+            sd.expected_store_path,
+            ss.store_path,
             CASE
-                WHEN d.store_path IS NULL THEN 'Build output is unavailable for this configuration.'
-                WHEN NOT EXISTS (
-                    SELECT 1
-                    FROM cache_push_jobs cpj
-                    WHERE cpj.derivation_id = d.id
-                      AND cpj.status = 'completed'
-                ) THEN 'CVE scan requires a completed cache push for this configuration.'
+                WHEN sd.store_path IS NULL THEN 'Build output is unavailable for this configuration.'
+                WHEN ccp.derivation_id IS NULL THEN 'CVE scan requires a completed cache push for this configuration.'
                 ELSE NULL
             END AS cve_scan_blocked_reason
-        FROM commits c
-        JOIN derivations d
-            ON d.commit_id = c.id
-           AND d.derivation_type = 'nixos'
-        LEFT JOIN LATERAL (
-            SELECT COUNT(*)::bigint AS mapped_host_count
-            FROM systems s
-            WHERE s.flake_id = c.flake_id
-              AND s.is_active = TRUE
-              AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = d.derivation_name
-        ) mapped_hosts ON TRUE
-        LEFT JOIN LATERAL (
-            SELECT
-                s.hostname,
-                latest_ss.store_path,
-                latest_ss.timestamp,
-                latest_ss.id
-            FROM systems s
-            LEFT JOIN LATERAL (
-                SELECT ss.store_path, ss.timestamp, ss.id
-                FROM system_states ss
-                WHERE ss.hostname = s.hostname
-                ORDER BY ss.timestamp DESC, ss.id DESC
-                LIMIT 1
-            ) latest_ss ON TRUE
-            WHERE s.flake_id = c.flake_id
-              AND s.is_active = TRUE
-              AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = d.derivation_name
-            ORDER BY latest_ss.timestamp DESC NULLS LAST, latest_ss.id DESC NULLS LAST, s.hostname ASC
-            LIMIT 1
-        ) selected_state ON TRUE
-        WHERE c.flake_id = $1
-          AND c.git_commit_hash = ANY($2)
-        ORDER BY c.git_commit_hash, d.derivation_name, d.id DESC
+        FROM selected_derivations sd
+        LEFT JOIN mapped_hosts mh
+          ON mh.flake_id = sd.flake_id
+         AND mh.config_name = sd.derivation_name
+        LEFT JOIN selected_states ss
+          ON ss.flake_id = sd.flake_id
+         AND ss.config_name = sd.derivation_name
+        LEFT JOIN completed_cache_pushes ccp
+          ON ccp.derivation_id = sd.derivation_id
+        ORDER BY sd.commit_id, sd.derivation_name, sd.derivation_id DESC
         "#,
     )
-    .bind(flake_id)
-    .bind(commit_hashes)
+    .bind(commit_ids)
     .fetch_all(pool)
     .await?;
 
-    let mut out: HashMap<String, HashMap<String, CommitConfigPathRow>> = HashMap::new();
+    let mut out: HashMap<i32, HashMap<String, CommitConfigPathRow>> = HashMap::new();
     for (
-        hash,
+        commit_id,
         config_name,
         mapped_host_count,
         cf_hostname,
@@ -474,7 +420,7 @@ async fn fetch_commit_config_paths(
         cve_scan_blocked_reason,
     ) in rows
     {
-        out.entry(hash)
+        out.entry(commit_id)
             .or_default()
             .entry(config_name.clone())
             .or_insert(CommitConfigPathRow {
@@ -793,6 +739,39 @@ pub async fn get_commit_diff_handler(
     }
 }
 
+/// Build a `FlakeRegistryItem` DTO for a freshly created/mutated flake row.
+///
+/// Commit-derived fields (latest commit, build/evaluation status,
+/// environments, total commit count) are not known immediately after a
+/// create/update write — the registry list endpoint fills those in from the
+/// branch snapshot on the next read. `system_count` is passed in since the
+/// caller may or may not have a cheap way to compute it (a fresh create has
+/// none yet).
+fn flake_registry_item_stub(
+    flake: crate::models::flakes::Flake,
+    system_count: i64,
+) -> FlakeRegistryItem {
+    FlakeRegistryItem {
+        id: flake.id,
+        name: flake.name,
+        repo_url: flake.repo_url,
+        branch: flake.branch,
+        build_scope: flake.build_scope,
+        system_count,
+        sync_status: flake.sync_status.unwrap_or_else(|| "unknown".to_string()),
+        last_sync_at: flake.last_sync_at,
+        last_sync_error: flake.last_sync_error,
+        latest_commit_hash: None,
+        latest_commit_message: None,
+        latest_commit_author: None,
+        latest_commit_timestamp: None,
+        build_status: None,
+        evaluation_status: None,
+        environments: Vec::new(),
+        total_commit_count: 0,
+    }
+}
+
 /// Create a new flake in the registry.
 ///
 /// **Authorization**: Requires Operator or Admin role (write operation).
@@ -868,23 +847,33 @@ pub async fn create_flake(
         Err(response) => return response,
     };
 
-    match insert_flake(&pool, name, repo_url, &branch, build_scope).await {
+    // create_or_mutate_flake is the single linearization point for the create
+    // path: it inserts with ON CONFLICT DO NOTHING (never silently overwrites
+    // an existing row's branch), and on conflict re-reads the existing row's
+    // identity under the per-flake advisory lock before deciding whether to
+    // reset the source (branch/repo_url changed, or row was soft-deleted) or
+    // just update metadata (name/build_scope only). See mutate_flake_locked.
+    match create_or_mutate_flake(&pool, name, repo_url, &branch, build_scope).await {
         Ok(flake) => (
             StatusCode::CREATED,
-            Json(FlakeRegistryItem {
-                id: flake.id,
-                name: flake.name,
-                repo_url: flake.repo_url,
-                branch: flake.branch,
-                build_scope: flake.build_scope,
-                system_count: 0,
-                sync_status: flake.sync_status.unwrap_or_else(|| "unknown".to_string()),
-                last_sync_at: flake.last_sync_at,
-                last_sync_error: flake.last_sync_error,
-            }),
+            Json(flake_registry_item_stub(flake, 0)),
         )
             .into_response(),
         Err(e) => {
+            if matches!(
+                e.downcast_ref::<sqlx::Error>(),
+                Some(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23505")
+            ) {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ApiError {
+                        error: "conflict".to_string(),
+                        message: "Repository URL already exists in the registry".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
             error!("Failed to create flake: {e:#}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -943,38 +932,29 @@ pub async fn update_flake_handler(
         Err(response) => return response,
     };
 
-    match update_flake(&pool, flake_id, name, repo_url, &branch, build_scope).await {
-        Ok(flake) => (
-            StatusCode::OK,
-            Json(FlakeRegistryItem {
-                id: flake.id,
-                name: flake.name,
-                repo_url: flake.repo_url,
-                branch: flake.branch,
-                build_scope: flake.build_scope,
-                system_count: count_systems_for_flake(&pool, flake_id).await.unwrap_or(0),
-                sync_status: flake.sync_status.unwrap_or_else(|| "unknown".to_string()),
-                last_sync_at: flake.last_sync_at,
-                last_sync_error: flake.last_sync_error,
+    // mutate_flake_locked is the single linearization point for the update
+    // path: it re-reads repo_url/branch/deleted_at under the per-flake
+    // advisory lock before deciding whether to reset the source (identity
+    // changed) or just update metadata (name/build_scope only).
+    match mutate_flake_locked(&pool, flake_id, name, repo_url, &branch, build_scope).await {
+        Ok(Some(flake)) => {
+            let system_count = count_systems_for_flake(&pool, flake_id).await.unwrap_or(0);
+            (
+                StatusCode::OK,
+                Json(flake_registry_item_stub(flake, system_count)),
+            )
+                .into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "not_found".to_string(),
+                message: "Flake not found".to_string(),
+                details: None,
             }),
         )
             .into_response(),
         Err(e) => {
-            if matches!(
-                e.downcast_ref::<sqlx::Error>(),
-                Some(sqlx::Error::RowNotFound)
-            ) {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(ApiError {
-                        error: "not_found".to_string(),
-                        message: "Flake not found".to_string(),
-                        details: None,
-                    }),
-                )
-                    .into_response();
-            }
-
             if matches!(
                 e.downcast_ref::<sqlx::Error>(),
                 Some(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23505")
@@ -989,8 +969,7 @@ pub async fn update_flake_handler(
                 )
                     .into_response();
             }
-
-            error!("Failed to update flake: {e:#}");
+            error!("Failed to update flake {flake_id}: {e:#}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
@@ -1720,22 +1699,32 @@ pub async fn accept_flake_history_rewrite(
         flake.id, flake.name, flake.repo_url, flake.branch, user.user_id
     );
 
-    let previous_head = sqlx::query_scalar::<_, Option<String>>(
+    // Capture the previous HEAD from the branch snapshot (position 0) for
+    // audit metadata.  Database errors are logged but do not block the reset.
+    let previous_head: Option<String> = match sqlx::query_scalar(
         r#"
-        SELECT git_commit_hash
-        FROM commits
-        WHERE flake_id = $1
-        ORDER BY commit_timestamp DESC
-        LIMIT 1
+        SELECT c.git_commit_hash
+        FROM flake_branch_commit_snapshot fbcs
+        JOIN commits c ON c.id = fbcs.commit_id
+        WHERE fbcs.flake_id = $1
+          AND fbcs.position = 0
         "#,
     )
     .bind(flake.id)
     .fetch_optional(&pool)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(row) => row,
+        Err(e) => {
+            error!(
+                "Failed to read previous snapshot HEAD for flake {}: {e:#}",
+                flake.id
+            );
+            None
+        }
+    };
 
-    let deleted_commits = match purge_flake_commit_history(&pool, flake.id).await {
+    let deleted_commits = match accept_history_rewrite_reset(&pool, flake.id).await {
         Ok(count) => count,
         Err(e) => {
             error!(
@@ -1861,7 +1850,7 @@ pub async fn sync_all_flakes_handler(
 
     let attempted = flakes.len();
     let mut synced = 0usize;
-    let mut inserted = 0usize;
+    let mut inserted = 0u64;
     let mut failed = Vec::new();
     for flake in flakes {
         match sync_flake_recorded(&pool, flake.id, &flake.repo_url, &flake.branch).await {

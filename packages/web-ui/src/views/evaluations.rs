@@ -5,20 +5,20 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::alerts::{
-    acknowledge_with_cursor_and_ids_async, attention_row_class, dismiss_attention_item,
-    should_flash, NAV_BADGES,
+    NAV_BADGES, acknowledge_with_cursor_and_ids_async, attention_row_class, dismiss_attention_item,
+    should_flash,
 };
 
 use crate::api::{
     client::{
-        cancel_commit_evaluation, fetch_eval_dependency_graph, fetch_eval_history,
+        ApiClientError, cancel_commit_evaluation, fetch_eval_dependency_graph, fetch_eval_history,
         fetch_eval_policy_matrix, fetch_eval_queue, force_cancel_commit_evaluation,
-        re_evaluate_commit, reorder_eval_queue, ApiClientError,
+        re_evaluate_commit, reorder_eval_queue,
     },
     models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem},
 };
 use crate::components::{Icon, IconName};
-use crate::hooks::{use_infinite_scroll, InfiniteScroll};
+use crate::hooks::{InfiniteScroll, use_infinite_scroll};
 use crate::routes::Route;
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 

@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 
 use crate::api::client::fetch_eval_logs;
-use crate::hooks::websocket::{use_websocket_eval_stream, ConnectionState};
+use crate::hooks::websocket::{ConnectionState, use_websocket_eval_stream};
 use crate::theme;
 
 #[component]

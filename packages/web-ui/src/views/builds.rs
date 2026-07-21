@@ -3,7 +3,7 @@
 use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
-use crate::alerts::{acknowledge_with_cursor_and_ids_async, NAV_BADGES};
+use crate::alerts::{NAV_BADGES, acknowledge_with_cursor_and_ids_async};
 
 use crate::api::{
     self,
@@ -14,9 +14,9 @@ use crate::api::{
     models::{BuildQueueParams, BuildStatus as ApiBuildStatus, BuilderStatus},
 };
 use crate::components::builds::{
-    extract_system_name, selected_build_data, BuildAction, BuildDetailPane, BuildItem,
-    BuildQueuePane, BuildStatus, ConfirmActionModal, DetailTab, MetricsRow, PendingAction,
-    QueueAction, QueueActionButton, WorkerAction, WorkerItem, WorkerStatus, WorkerStrip,
+    BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
+    DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
+    WorkerStatus, WorkerStrip, extract_system_name, selected_build_data,
 };
 use crate::hooks::use_infinite_scroll;
 use crate::state::app_state::AppState;
@@ -501,7 +501,7 @@ pub fn BuildsView() -> Element {
             CompletedStatusFilter::Failed => item.status == BuildStatus::Failed,
             CompletedStatusFilter::Cancelled => item.status == BuildStatus::Cancelled,
         } && (nav_commit.is_empty() || item.commit == nav_commit)
-        && (nav_flake.is_empty() || item.flake == nav_flake)
+            && (nav_flake.is_empty() || item.flake == nav_flake)
     });
     let completed_failed_count = build_history
         .read()

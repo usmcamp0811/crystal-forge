@@ -3,8 +3,8 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::{CloseEvent, ErrorEvent, MessageEvent, WebSocket};
 
 fn websocket_base() -> (String, String) {

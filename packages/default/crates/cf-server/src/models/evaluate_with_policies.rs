@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -23,7 +23,7 @@ use crate::derivations::utils::{build_flake_reference, count_closure_packages};
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
-    build_nix_eval_expression, DeploymentPolicy, PolicyCheckResult,
+    DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
 };
 use crate::models::flakes::Flake;
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
@@ -1592,9 +1592,10 @@ mod tests {
         let systems = vec!["alpha".to_string(), "beta".to_string()];
         let err = resolve_mock_systems("demo", "gamma", &systems)
             .expect_err("missing target should return error");
-        assert!(err
-            .to_string()
-            .contains("mock evaluation has no matching systems to evaluate"));
+        assert!(
+            err.to_string()
+                .contains("mock evaluation has no matching systems to evaluate")
+        );
     }
 
     #[test]

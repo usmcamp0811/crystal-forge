@@ -49,9 +49,7 @@ pub fn gather_system_state(
         });
 
     debug!("reading network identity");
-    let network_interfaces = get_network_interfaces()
-        .ok()
-        .map(serde_json::Value::String);
+    let network_interfaces = get_network_interfaces().ok().map(serde_json::Value::String);
     let primary_mac_address = get_primary_mac().ok();
     let primary_ip_address = get_primary_ip().ok();
     let gateway_ip = get_gateway_ip().ok();

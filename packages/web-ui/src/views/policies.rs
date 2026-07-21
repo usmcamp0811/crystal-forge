@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::api::client::delete_deployment_policy;
 use crate::components::layout::Card;
 use crate::components::policy::{
-    is_core_policy, normalized_policy_type, policy_category, PolicyCard, PolicyCategory,
-    PolicyDefinition, PolicyEditorModal, PolicyFormat, POLICY_CATEGORIES,
+    POLICY_CATEGORIES, PolicyCard, PolicyCategory, PolicyDefinition, PolicyEditorModal,
+    PolicyFormat, is_core_policy, normalized_policy_type, policy_category,
 };
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::theme;
