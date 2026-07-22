@@ -706,14 +706,19 @@ async fn resolve_flake_attention_if_current(pool: &PgPool, flake_id: i32, attemp
 /// succeeded and resolved attention. Acquires the same per-subject
 /// advisory lock, so this recheck-then-act sequence is atomic with respect
 /// to any concurrent attention transition for this flake.
-async fn transition_flake_attention_to_error_if_current(
+///
+/// `pub(crate)` so the periodic reconciliation sweep
+/// (`tasks::attention_reconciliation::reconcile_errored_flakes`) can invoke
+/// it as a safety net for flakes whose `sync_status = 'error'` commit
+/// succeeded but whose attention transition was lost to a process crash or
+/// transient failure between the two (separate, best-effort) operations.
+pub(crate) async fn transition_flake_attention_to_error_if_current(
     pool: &PgPool,
     flake_id: i32,
     attempt_id: Uuid,
     mut metadata: serde_json::Value,
 ) {
     let subject_id = flake_id.to_string();
-    let opened_at = Utc::now();
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -737,21 +742,33 @@ async fn transition_flake_attention_to_error_if_current(
     // Recheck under the lock: is this attempt still the current, errored
     // result? If a newer attempt has since started or succeeded, do
     // nothing — that newer attempt owns the flake's attention state now.
-    let still_current: bool = match sqlx::query_scalar(
-        "SELECT sync_attempt_id = $2 AND sync_status = 'error' FROM flakes WHERE id = $1",
+    //
+    // `opened_at` is captured here too, via `statement_timestamp()` rather
+    // than `NOW()`/`transaction_timestamp()` (both of which are fixed at
+    // transaction start, before the advisory lock wait) or a
+    // pre-transaction `Utc::now()`. `statement_timestamp()` reflects the
+    // time this specific statement runs — i.e. after the lock has been
+    // acquired — so a caller delayed waiting for the lock does not record
+    // an observation timestamp earlier than the state it is acting on.
+    let recheck: Option<(bool, DateTime<Utc>)> = match sqlx::query_as(
+        "SELECT sync_attempt_id = $2 AND sync_status = 'error', statement_timestamp() FROM flakes WHERE id = $1",
     )
     .bind(flake_id)
     .bind(attempt_id)
     .fetch_optional(&mut *tx)
     .await
     {
-        Ok(Some(v)) => v,
-        Ok(None) => false,
+        Ok(v) => v,
         Err(e) => {
             warn!("failed to recheck flake state before opening attention: {e:#}");
             let _ = tx.rollback().await;
             return;
         }
+    };
+
+    let (still_current, opened_at) = match recheck {
+        Some((current, ts)) => (current, ts),
+        None => (false, Utc::now()),
     };
 
     if !still_current {

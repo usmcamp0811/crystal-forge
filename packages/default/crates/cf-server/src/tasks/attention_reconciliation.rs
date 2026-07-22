@@ -84,18 +84,21 @@ pub async fn reconcile_system_attention(
     // and re-open an already-resolved incident.  Re-read from the database
     // under the lock so we act on the latest committed state.
     //
-    // `opened_at` is also captured here (via the database's own `NOW()`,
-    // inside the same transaction), rather than before the lock was
-    // acquired. Capturing it early would let a delayed caller — one that
-    // waited a long time for the lock — record an observation timestamp
-    // substantially earlier than the state it eventually acts on.
+    // `opened_at` is also captured here, via `statement_timestamp()` rather
+    // than `NOW()`/`transaction_timestamp()` (both fixed at transaction
+    // start, i.e. before the advisory lock wait above) or a
+    // pre-transaction `Utc::now()`. `statement_timestamp()` reflects the
+    // time this specific statement runs — i.e. after the lock has been
+    // acquired — so a caller delayed waiting for the lock does not record
+    // an observation timestamp earlier than the state it eventually acts
+    // on.
     let (health, hostname, environment_id, opened_at): (
         String,
         String,
         Option<Uuid>,
         chrono::DateTime<chrono::Utc>,
     ) = match sqlx::query_as::<_, (String, String, Option<Uuid>, chrono::DateTime<chrono::Utc>)>(
-        "SELECT vsl.health_status, s.hostname, s.environment_id, NOW() \
+        "SELECT vsl.health_status, s.hostname, s.environment_id, statement_timestamp() \
              FROM view_system_list vsl \
              JOIN systems s ON s.id = vsl.id \
              WHERE vsl.id = $1",
@@ -521,6 +524,62 @@ async fn reconcile_stale_flakes(pool: &PgPool) {
     }
 }
 
+/// Reconcile flakes currently in `error` status that are missing an open
+/// `sync_error` attention occurrence.
+///
+/// `record_sync_error` commits the flake's `sync_status = 'error'` first,
+/// then performs the attention transition as a separate, best-effort
+/// operation whose errors are only logged. A process crash or transient
+/// failure between those two steps leaves an errored flake with no
+/// canonical occurrence — and unlike a flake stuck in `syncing`, an
+/// already-`error` flake is never picked up by
+/// [`reconcile_stale_flakes`], so nothing would otherwise recover it.
+///
+/// This sweep is bounded to flakes currently in `error` with a recorded
+/// `sync_attempt_id` and no matching open occurrence, and delegates the
+/// actual (locked, attempt-verified) transition to
+/// [`crate::flake::commits::transition_flake_attention_to_error_if_current`]
+/// — the same function the direct call site uses — so the recheck-then-act
+/// safety this sweep exists to backstop is still honored even here.
+async fn reconcile_errored_flakes(pool: &PgPool) {
+    let rows: Vec<(i32, uuid::Uuid, Option<String>)> = match sqlx::query_as(
+        r#"
+        SELECT f.id, f.sync_attempt_id, f.last_sync_error
+        FROM flakes f
+        WHERE f.deleted_at IS NULL
+          AND f.sync_status = 'error'
+          AND f.sync_attempt_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM attention_occurrences ao
+              WHERE ao.category = 'flakes'
+                AND ao.subject_id = f.id::text
+                AND ao.resolved_at IS NULL
+          )
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("failed to load errored flakes for attention reconciliation: {e:#}");
+            return;
+        }
+    };
+
+    for (flake_id, attempt_id, last_sync_error) in rows {
+        let metadata = serde_json::json!({
+            "flake_id": flake_id,
+            "last_sync_error": last_sync_error,
+        });
+        crate::flake::commits::transition_flake_attention_to_error_if_current(
+            pool, flake_id, attempt_id, metadata,
+        )
+        .await;
+    }
+}
+
 /// Reconcile a single stale flake, with recheck inside the attention lock.
 ///
 /// The flake ID was selected before the lock was acquired, so the flake
@@ -720,6 +779,7 @@ pub async fn run_attention_reconciliation_loop(pool: PgPool) {
         ticker.tick().await;
         reconcile_all_systems(&pool).await;
         reconcile_stale_flakes(&pool).await;
+        reconcile_errored_flakes(&pool).await;
         reconcile_terminal_events(&pool).await;
         reconcile_stale_occurrences(&pool).await;
         debug!("Attention reconciliation sweep complete");
@@ -898,5 +958,154 @@ pub async fn run_attention_cleanup_loop(pool: PgPool) {
             }
             Err(e) => error!("attention cleanup failed: {e:#}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconcile_errored_flakes;
+
+    // Run against a repository-provided isolated database:
+    //   DATABASE_URL=postgres://crystal_forge:password@localhost:3042/crystal_forge \
+    //     cargo test -p cf-server --lib tasks::attention_reconciliation -- --ignored
+
+    async fn test_pool() -> sqlx::PgPool {
+        sqlx::PgPool::connect(
+            &std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"),
+        )
+        .await
+        .expect("failed to connect to test database")
+    }
+
+    async fn insert_throwaway_flake(pool: &sqlx::PgPool) -> i32 {
+        let short = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        sqlx::query_scalar::<_, i32>(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("att-recon-flake-{short}"))
+        .bind(format!("https://git.example/att-recon-flake-{short}.git"))
+        .fetch_one(pool)
+        .await
+        .expect("failed to insert throwaway test flake")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reconcile_errored_flakes_recovers_missing_occurrence() {
+        // Regression test for round 7: record_sync_error commits
+        // sync_status = 'error' and performs the attention transition as a
+        // separate best-effort operation. If the latter is lost (process
+        // crash, transient failure), the flake is left errored with no
+        // canonical occurrence, and reconcile_stale_flakes never looks at
+        // it (it only examines flakes stuck in 'syncing'). This sweep must
+        // recover it.
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let attempt_id = uuid::Uuid::new_v4();
+
+        // Simulate: the status commit succeeded, but the attention
+        // transition was never performed (e.g. process crashed right
+        // after the UPDATE below).
+        sqlx::query(
+            "UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2, last_sync_error = $3 WHERE id = $1",
+        )
+        .bind(flake_id)
+        .bind(attempt_id)
+        .bind("simulated crash before attention transition")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let open_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(flake_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(open_before, 0, "no occurrence should exist yet");
+
+        reconcile_errored_flakes(&pool).await;
+
+        let open_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(flake_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            open_after, 1,
+            "the reconciliation sweep must recover the missing occurrence"
+        );
+
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1",
+        )
+        .bind(flake_id.to_string())
+        .execute(&pool)
+        .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reconcile_errored_flakes_skips_flake_with_existing_occurrence() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let attempt_id = uuid::Uuid::new_v4();
+
+        sqlx::query(
+            "UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2 WHERE id = $1",
+        )
+        .bind(flake_id)
+        .bind(attempt_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // An occurrence already exists (the normal, non-crashed path).
+        let existing_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
+             VALUES ($1, 'flakes', 'flake_sync', $2, $3, now(), now())",
+        )
+        .bind(existing_id)
+        .bind(flake_id.to_string())
+        .bind(format!("flake:{flake_id}:{}", uuid::Uuid::new_v4()))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        reconcile_errored_flakes(&pool).await;
+
+        let open_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(flake_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            open_count, 1,
+            "a flake that already has an open occurrence must not get a second one"
+        );
+
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1",
+        )
+        .bind(flake_id.to_string())
+        .execute(&pool)
+        .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
     }
 }
