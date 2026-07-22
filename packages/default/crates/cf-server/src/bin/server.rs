@@ -179,12 +179,16 @@ async fn main() -> anyhow::Result<()> {
     // (round 12: previously this ran inside the spawned reconciliation loop,
     // racing with concurrent flake/eval/CVE producers that could immediately
     // recreate duplicates the repair had just resolved).
-    match dedupe_open_occurrences(&background_pool).await {
-        Ok(n) if n > 0 => {
-            tracing::warn!("🧹 Deduped {n} duplicate open attention occurrence(s) on startup")
-        }
-        Ok(_) => {}
-        Err(e) => error!("attention occurrence dedupe failed: {e:#}"),
+    //
+    // Round 13: failure is fatal — the repair has been removed from the
+    // periodic sweep and there is no retry path. A transient database error
+    // would leave malformed attention state in place indefinitely.
+    let repaired = dedupe_open_occurrences(&background_pool)
+        .await
+        .context("failed to repair attention occurrences at startup — required before producers start")?;
+
+    if repaired > 0 {
+        tracing::warn!("🧹 Deduped {repaired} duplicate open attention occurrence(s) on startup");
     }
 
     spawn_background_tasks(

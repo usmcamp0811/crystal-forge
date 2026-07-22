@@ -19,8 +19,11 @@
 
 use crate::queries::attention;
 use chrono::Utc;
+use futures::stream::{self, StreamExt};
 use sqlx::PgPool;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
@@ -395,7 +398,9 @@ pub async fn reconcile_system_attention(
 }
 
 /// Reconcile attention for every active system by re-deriving current health
-/// from `view_system_list`. Bounded to the active fleet, not growing history.
+/// from `view_system_list`. Bounded concurrency via semaphore so a large
+/// fleet or blocked subject locks cannot starve later sweep passes (round 13
+/// review, P2).
 async fn reconcile_all_systems(pool: &PgPool) {
     let rows: Vec<(Uuid, String, String, Option<Uuid>)> = match sqlx::query_as(
         "SELECT s.id, s.hostname, vsl.health_status, s.environment_id \
@@ -413,9 +418,32 @@ async fn reconcile_all_systems(pool: &PgPool) {
         }
     };
 
-    for (system_id, hostname, health, environment_id) in rows {
-        reconcile_system_attention(pool, system_id, &hostname, &health, environment_id).await;
-    }
+    const MAX_CONCURRENT: usize = 16;
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT));
+
+    stream::iter(rows)
+        .map(|(system_id, hostname, health, environment_id)| {
+            // Owned clones for the async block.
+            let pool = pool.clone();
+            let sem = semaphore.clone();
+            async move {
+                let _permit = match sem.acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => return, // semaphore closed — should not happen
+                };
+                reconcile_system_attention(
+                    &pool,
+                    system_id,
+                    &hostname,
+                    &health,
+                    environment_id,
+                )
+                .await;
+            }
+        })
+        .buffer_unordered(MAX_CONCURRENT)
+        .for_each(|()| async {})
+        .await;
 }
 
 /// Resolve open occurrences that are stale due to lifecycle changes:
@@ -482,6 +510,28 @@ async fn reconcile_stale_occurrences(pool: &PgPool) {
     .execute(pool)
     .await
     .map_err(|e| error!("failed to resolve occurrences for deleted flakes: {e:#}"));
+
+    // Resolve build occurrences whose build job no longer exists or is no
+    // longer in a failed state.  Build attention is normally resolved
+    // directly by retry/success hooks, but stale occurrences can remain
+    // after a crash or if the build_job was deleted via flake-history
+    // operations before this safety net was deployed (round 13).
+    let _ = sqlx::query(
+        r#"
+        UPDATE attention_occurrences ao
+        SET resolved_at = statement_timestamp()
+        WHERE ao.category = 'builds'
+          AND ao.resolved_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM build_jobs bj
+              WHERE bj.id::text = ao.subject_id
+                AND bj.status = 'failed'
+          )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| error!("failed to resolve occurrences for non-failed/missing builds: {e:#}"));
 
     // Resolve environment occurrences where no active system with the
     // matching underlying_system_id currently belongs to the occurrence's
@@ -911,6 +961,188 @@ pub async fn run_attention_reconciliation_loop(pool: PgPool) {
     }
 }
 
+/// Reconcile a single CVE's attention state under its per-CVE advisory lock.
+///
+/// Uses the same lock key as `open_or_observe_by_subject` (the scan-save
+/// producer), so this reconciler and the producer are serialized per CVE:
+///
+/// ```text
+/// lock_key = "attention_occurrence:cves:{cve_id}:critical"
+/// ```
+///
+/// Inside the lock the function rechecks fleet relevance against the
+/// authoritative view and either opens exactly one episode (using the
+/// earliest scan that detected this CVE as `opened_at`, not the
+/// reconciliation time) or resolves every open occurrence.
+async fn reconcile_single_cve(pool: &PgPool, cve_id: &str) {
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            warn!("failed to begin CVE reconciliation transaction for {cve_id}: {e:#}");
+            return;
+        }
+    };
+
+    let lock_key = format!("attention_occurrence:cves:{cve_id}:critical");
+    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *tx)
+        .await
+    {
+        warn!("failed to acquire CVE attention lock for {cve_id}: {e:#}");
+        let _ = tx.rollback().await;
+        return;
+    }
+
+    // Recheck fleet relevance inside the lock.
+    let relevant: bool = match sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM view_cve_list_with_metadata
+            WHERE cve_id = $1
+              AND severity = 'CRITICAL'
+              AND affected_count > 0
+        )
+        "#,
+    )
+    .bind(cve_id)
+    .fetch_one(&mut *tx)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("failed to recheck fleet relevance for CVE {cve_id}: {e:#}");
+            let _ = tx.rollback().await;
+            return;
+        }
+    };
+
+    if relevant {
+        // Derive a conservative event timestamp from the earliest scan that
+        // detected this CVE, so a crash-lost occurrence recovered by the
+        // reconciler uses the real transition time, not the sweep time.
+        let fleet_relevant_since: Option<chrono::DateTime<chrono::Utc>> = match sqlx::query_scalar(
+            r#"
+            SELECT MIN(cs.completed_at)
+            FROM cve_scans cs
+            JOIN scan_packages sp ON sp.scan_id = cs.id
+            JOIN package_vulnerabilities pv ON pv.cve_id = $1
+              AND pv.derivation_id = sp.derivation_id
+            WHERE cs.status = 'completed'
+            "#,
+        )
+        .bind(cve_id)
+        .fetch_one(&mut *tx)
+        .await
+        {
+            Ok(ts) => ts,
+            Err(e) => {
+                warn!("failed to derive fleet_relevant_since for CVE {cve_id}: {e:#}");
+                let _ = tx.rollback().await;
+                return;
+            }
+        };
+
+        // If we have an existing open occurrence, observe it; otherwise
+        // open a new one using the conservative event timestamp.
+        let existing: Option<uuid::Uuid> = match sqlx::query_scalar(
+            r#"
+            SELECT id FROM attention_occurrences
+            WHERE category = 'cves'
+              AND subject_id = $1
+              AND resolved_at IS NULL
+            LIMIT 1
+            FOR UPDATE
+            "#,
+        )
+        .bind(cve_id)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("failed to find existing CVE occurrence for {cve_id}: {e:#}");
+                let _ = tx.rollback().await;
+                return;
+            }
+        };
+
+        let now = chrono::Utc::now();
+        let opened_at = fleet_relevant_since.unwrap_or(now);
+
+        if let Some(occ_id) = existing {
+            // Update last_observed_at (and conditionally metadata)
+            // without altering opened_at — the event timestamp is
+            // authoritative and must survive re-observation.
+            let metadata = serde_json::json!({
+                "reason": "critical",
+                "cve_id": cve_id,
+            });
+            if let Err(e) = sqlx::query(
+                "UPDATE attention_occurrences \
+                 SET last_observed_at = GREATEST(last_observed_at, $1), \
+                     metadata = CASE WHEN $1 >= last_observed_at THEN $2 ELSE metadata END \
+                 WHERE id = $3",
+            )
+            .bind(now)
+            .bind(&metadata)
+            .bind(occ_id)
+            .execute(&mut *tx)
+            .await
+            {
+                warn!("failed to update CVE occurrence for {cve_id}: {e:#}");
+                let _ = tx.rollback().await;
+                return;
+            }
+        } else if let Err(e) = sqlx::query(
+            r#"
+            INSERT INTO attention_occurrences (
+                category, subject_type, subject_id, source_occurrence_key,
+                opened_at, last_observed_at, metadata
+            )
+            VALUES ('cves', 'cve', $1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(cve_id)
+        .bind(attention::cve_occurrence_key(
+            cve_id,
+            uuid::Uuid::new_v4(),
+        ))
+        .bind(opened_at)
+        .bind(now)
+        .bind(serde_json::json!({
+            "reason": "critical",
+            "cve_id": cve_id,
+        }))
+        .execute(&mut *tx)
+        .await
+        {
+            warn!("failed to open CVE attention occurrence for {cve_id}: {e:#}");
+            let _ = tx.rollback().await;
+            return;
+        }
+    } else {
+        // No longer fleet-relevant: resolve every open occurrence.
+        if let Err(e) = sqlx::query(
+            "UPDATE attention_occurrences \
+             SET resolved_at = statement_timestamp() \
+             WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(cve_id)
+        .execute(&mut *tx)
+        .await
+        {
+            warn!("failed to resolve stale CVE occurrence for {cve_id}: {e:#}");
+            let _ = tx.rollback().await;
+            return;
+        }
+    }
+
+    if let Err(e) = tx.commit().await {
+        warn!("failed to commit CVE reconciliation for {cve_id}: {e:#}");
+    }
+}
+
 /// Reconcile CVE attention against authoritative fleet relevance.
 ///
 /// CVEs have no hook-based attention lifecycle (unlike builds, evals, and
@@ -925,33 +1157,45 @@ pub async fn run_attention_reconciliation_loop(pool: PgPool) {
 /// future scan to eventually recreate a lost occurrence is not a bounded
 /// repair strategy — see the Round 11 review for MR !307.
 ///
-/// This safety net closes that gap by running on every periodic sweep:
+/// This safety net closes that gap by running on every periodic sweep.
+/// Each CVE is processed under its per-CVE advisory lock (matching the
+/// scan-save producer's lock), serializing the reconciler with any
+/// concurrent producer and eliminating the duplicate-open and stale-resolution
+/// races described in the Round 13 review.
 ///
-/// 1. Find critical CVEs with `affected_count > 0` (fleet-relevant) that
-///    have no open occurrence — open a new occurrence for each.
-/// 2. Find open CVE occurrences whose CVE is no longer critical or
-///    fleet-relevant — resolve those occurrences.
-///
-/// Uses the exact same fleet-relevance predicate as the scan-save path:
-/// `severity = 'CRITICAL' AND affected_count > 0` against
-/// `view_cve_list_with_metadata`. Occurrences are opened with episode-based
-/// keys so previously resolved (or dismissed) episodes are never reused.
-///
-/// Bounded to 500 rows per direction per sweep (matching the other sweeps).
+/// Bounded to 500 CVEs per sweep (matching the other sweeps).
 async fn reconcile_cve_attention(pool: &PgPool) {
-    // 1. Eligible CVEs with no open occurrence — open one.
-    let missing: Vec<String> = match sqlx::query_scalar(
+    // Find all CVEs whose attention state may be out of sync with fleet
+    // relevance. We select both missing and stale candidates in one pass
+    // to avoid missing a CVE that transitions between the two queries
+    // without needing a snapshot.
+    let candidates: Vec<String> = match sqlx::query_scalar(
         r#"
-        SELECT v.cve_id
-        FROM view_cve_list_with_metadata v
-        WHERE v.severity = 'CRITICAL'
-          AND v.affected_count > 0
-          AND NOT EXISTS (
-              SELECT 1 FROM attention_occurrences ao
-              WHERE ao.category = 'cves'
-                AND ao.subject_id = v.cve_id
-                AND ao.resolved_at IS NULL
-          )
+        SELECT DISTINCT candidate FROM (
+            -- Fleet-relevant CVEs with no open occurrence
+            SELECT v.cve_id AS candidate
+            FROM view_cve_list_with_metadata v
+            WHERE v.severity = 'CRITICAL'
+              AND v.affected_count > 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM attention_occurrences ao
+                  WHERE ao.category = 'cves'
+                    AND ao.subject_id = v.cve_id
+                    AND ao.resolved_at IS NULL
+              )
+            UNION
+            -- Open occurrences whose CVE is no longer fleet-relevant
+            SELECT ao.subject_id
+            FROM attention_occurrences ao
+            WHERE ao.category = 'cves'
+              AND ao.resolved_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM view_cve_list_with_metadata v
+                  WHERE v.cve_id = ao.subject_id
+                    AND v.severity = 'CRITICAL'
+                    AND v.affected_count > 0
+              )
+        ) candidates
         LIMIT 500
         "#,
     )
@@ -960,76 +1204,13 @@ async fn reconcile_cve_attention(pool: &PgPool) {
     {
         Ok(rows) => rows,
         Err(e) => {
-            error!("failed to load critical CVEs missing attention occurrence: {e:#}");
+            error!("failed to load CVE candidates for attention reconciliation: {e:#}");
             return;
         }
     };
 
-    for cve_id in missing {
-        let episode_id = uuid::Uuid::new_v4();
-        let source_key = attention::cve_occurrence_key(&cve_id, episode_id);
-        let now = chrono::Utc::now();
-        let metadata = serde_json::json!({
-            "reason": "critical",
-            "cve_id": &cve_id,
-        });
-        if let Err(e) = sqlx::query(
-            r#"
-            INSERT INTO attention_occurrences (
-                category, subject_type, subject_id, source_occurrence_key,
-                opened_at, last_observed_at, metadata
-            )
-            VALUES ('cves', 'cve', $1, $2, $3, $4, $5)
-            "#,
-        )
-        .bind(&cve_id)
-        .bind(source_key)
-        .bind(now)
-        .bind(now)
-        .bind(&metadata)
-        .execute(pool)
-        .await
-        {
-            warn!("failed to open CVE attention occurrence for {cve_id}: {e:#}");
-        }
-    }
-
-    // 2. Open occurrences whose CVE is no longer critical/fleet-relevant.
-    let stale: Vec<String> = match sqlx::query_scalar(
-        r#"
-        SELECT ao.subject_id
-        FROM attention_occurrences ao
-        WHERE ao.category = 'cves'
-          AND ao.resolved_at IS NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM view_cve_list_with_metadata v
-              WHERE v.cve_id = ao.subject_id
-                AND v.severity = 'CRITICAL'
-                AND v.affected_count > 0
-          )
-        LIMIT 500
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            error!("failed to load stale CVE occurrences for resolution: {e:#}");
-            return;
-        }
-    };
-
-    for cve_id in stale {
-        let _ = sqlx::query(
-            "UPDATE attention_occurrences \
-             SET resolved_at = NOW() \
-             WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
-        )
-        .bind(&cve_id)
-        .execute(pool)
-        .await
-        .map_err(|e| warn!("failed to resolve stale CVE occurrence for {cve_id}: {e:#}"));
+    for cve_id in candidates {
+        reconcile_single_cve(pool, &cve_id).await;
     }
 }
 
@@ -1600,7 +1781,7 @@ mod tests {
     /// Seed a critical CVE visible in `view_cve_list_with_metadata` with no
     /// open occurrence. Returns the CVE id and a cleanup token.
     async fn seed_critical_cve(pool: &sqlx::PgPool) -> (String, uuid::Uuid, uuid::Uuid) {
-        let short = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        let short = uuid::Uuid::new_v4().simple().to_string()[..11].to_string();
         let cve_id = format!("CVE-2026-{short}");
 
         // Environment (required by system).
@@ -1613,21 +1794,28 @@ mod tests {
             .unwrap();
 
         // System (use explicit id since we need it back).
+        let system_hostname = format!("cve-host-{short}");
         let system_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO systems (id, hostname, environment_id, flake_id) VALUES ($1, $2, $3, NULL)")
-            .bind(system_id)
-            .bind(format!("cve-test-{short}"))
-            .bind(env_id)
-            .execute(pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO systems (id, hostname, environment_id, flake_id, is_active, public_key, derivation) \
+             VALUES ($1, $2, $3, NULL, TRUE, $4, $5)",
+        )
+        .bind(system_id)
+        .bind(&system_hostname)
+        .bind(env_id)
+        .bind(format!("ssh-ed25519 AAAA-cve-test-{short}"))
+        .bind("/nix/store/cve-test-derivation")
+        .execute(pool)
+        .await
+        .unwrap();
 
-        // NixOS derivation for the system.
+        // NixOS derivation for the system (derivation_name must match system hostname
+        // for view_cve_list_with_metadata's affected_count computation).
         let nixos_derivation_id: i32 = sqlx::query_scalar(
             "INSERT INTO derivations (commit_id, derivation_type, derivation_name, status_id, attempt_count) \
              VALUES (NULL, 'nixos', $1, 10, 0) RETURNING id",
         )
-        .bind(format!("cve-test-host-{short}"))
+        .bind(&system_hostname)
         .fetch_one(pool)
         .await
         .unwrap();

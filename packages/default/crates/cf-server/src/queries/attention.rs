@@ -1343,7 +1343,7 @@ async fn canonicalize_build_occurrence(
             // build's `completed_at` as the event timestamp.
             sqlx::query(
                 "UPDATE attention_occurrences \
-                 SET resolved_at = NULL, last_observed_at = GREATEST(last_observed_at, $1) \
+                 SET resolved_at = NULL, opened_at = $1, last_observed_at = GREATEST(last_observed_at, $1) \
                  WHERE id = $2",
             )
             .bind(completed_at)
@@ -2630,13 +2630,24 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
+        let bj_completed_at = chrono::Utc::now();
         sqlx::query(
             "INSERT INTO build_jobs (id, derivation_id, status, completed_at) \
-             VALUES ($1, $2, 'failed', now())",
+             VALUES ($1, $2, 'failed', $3)",
         )
         .bind(job_id)
         .bind(derivation_id)
+        .bind(bj_completed_at)
         .execute(&pool)
+        .await
+        .unwrap();
+        // Read back completed_at at database precision (microseconds) for
+        // exact assertion against the canonical occurrence's opened_at.
+        let bj_completed_at: chrono::DateTime<Utc> = sqlx::query_scalar(
+            "SELECT completed_at FROM build_jobs WHERE id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
         .await
         .unwrap();
 
@@ -2681,6 +2692,20 @@ mod tests {
         assert!(
             canonical_resolved.is_none(),
             "the canonical row must be reopened, not left resolved"
+        );
+
+        // Round 13: the reopened canonical row's opened_at must equal
+        // build_jobs.completed_at (not the old 3-hours-ago timestamp).
+        let canonical_opened_at: chrono::DateTime<Utc> = sqlx::query_scalar(
+            "SELECT opened_at FROM attention_occurrences WHERE id = $1",
+        )
+        .bind(canonical_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            canonical_opened_at, bj_completed_at,
+            "the reopened canonical row's opened_at must equal build_jobs.completed_at"
         );
 
         let malformed_resolved: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(

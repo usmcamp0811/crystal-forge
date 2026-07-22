@@ -383,6 +383,47 @@ pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
     .await
     .context("Failed to resolve flake attention occurrences during hard delete")?;
 
+    // ── Resolve build/eval occurrences before cascade deletes domain rows ──
+    let build_ids: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT bj.id::text
+        FROM build_jobs bj
+        JOIN derivations d ON d.id = bj.derivation_id
+        JOIN commits c ON c.id = d.commit_id
+        WHERE c.flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_all(&mut *tx)
+    .await
+    .context("Failed to collect build IDs for attention resolution during hard delete")?;
+
+    let commit_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id::text FROM commits WHERE flake_id = $1",
+    )
+    .bind(flake_id)
+    .fetch_all(&mut *tx)
+    .await
+    .context("Failed to collect commit IDs for attention resolution during hard delete")?;
+
+    sqlx::query(
+        r#"
+        UPDATE attention_occurrences
+        SET resolved_at = statement_timestamp()
+        WHERE resolved_at IS NULL
+          AND (
+              (category = 'builds' AND subject_id = ANY($1::text[]))
+              OR
+              (category = 'evals' AND subject_id = ANY($2::text[]))
+          )
+        "#,
+    )
+    .bind(&build_ids)
+    .bind(&commit_ids)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to resolve build/eval attention occurrences during hard delete")?;
+
     let result = sqlx::query("DELETE FROM flakes WHERE id = $1")
         .bind(flake_id)
         .execute(&mut *tx)
@@ -486,6 +527,50 @@ pub async fn reset_flake_source(
     .execute(&mut **tx)
     .await
     .context("Failed to clear commit metadata cache during source reset")?;
+
+    // ── Resolve build/eval occurrences before domain rows are deleted ─────
+    // Round 13: deleting derivations and commits below cascades through
+    // build_jobs, leaving orphaned build/eval attention occurrences.  Collect
+    // the affected IDs first and resolve them.
+    let build_ids: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT bj.id::text
+        FROM build_jobs bj
+        JOIN derivations d ON d.id = bj.derivation_id
+        JOIN commits c ON c.id = d.commit_id
+        WHERE c.flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_all(&mut **tx)
+    .await
+    .context("Failed to collect build IDs for attention resolution during source reset")?;
+
+    let commit_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id::text FROM commits WHERE flake_id = $1",
+    )
+    .bind(flake_id)
+    .fetch_all(&mut **tx)
+    .await
+    .context("Failed to collect commit IDs for attention resolution during source reset")?;
+
+    sqlx::query(
+        r#"
+        UPDATE attention_occurrences
+        SET resolved_at = statement_timestamp()
+        WHERE resolved_at IS NULL
+          AND (
+              (category = 'builds' AND subject_id = ANY($1::text[]))
+              OR
+              (category = 'evals' AND subject_id = ANY($2::text[]))
+          )
+        "#,
+    )
+    .bind(&build_ids)
+    .bind(&commit_ids)
+    .execute(&mut **tx)
+    .await
+    .context("Failed to resolve build/eval attention occurrences during source reset")?;
 
     // Remove derivations linked to this flake's commits
     sqlx::query(
@@ -869,6 +954,48 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
     .await
     .context("Failed to clear commit metadata cache during rewrite acceptance")?;
 
+    // ── Resolve build/eval occurrences before domain rows are deleted ─────
+    // Round 13: same rationale as reset_flake_source.
+    let build_ids: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT bj.id::text
+        FROM build_jobs bj
+        JOIN derivations d ON d.id = bj.derivation_id
+        JOIN commits c ON c.id = d.commit_id
+        WHERE c.flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_all(&mut *tx)
+    .await
+    .context("Failed to collect build IDs for attention resolution during rewrite acceptance")?;
+
+    let commit_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id::text FROM commits WHERE flake_id = $1",
+    )
+    .bind(flake_id)
+    .fetch_all(&mut *tx)
+    .await
+    .context("Failed to collect commit IDs for attention resolution during rewrite acceptance")?;
+
+    sqlx::query(
+        r#"
+        UPDATE attention_occurrences
+        SET resolved_at = statement_timestamp()
+        WHERE resolved_at IS NULL
+          AND (
+              (category = 'builds' AND subject_id = ANY($1::text[]))
+              OR
+              (category = 'evals' AND subject_id = ANY($2::text[]))
+          )
+        "#,
+    )
+    .bind(&build_ids)
+    .bind(&commit_ids)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to resolve build/eval attention occurrences during rewrite acceptance")?;
+
     // Remove derivations linked to this flake's commits.
     sqlx::query(
         r#"
@@ -1099,6 +1226,48 @@ pub async fn cascade_delete_flake(
         .await
         .context("Failed to resolve environment attention occurrences during cascade delete")?;
     }
+
+    // ── Resolve build/eval occurrences before cascade deletes domain rows ──
+    // Round 13: same rationale as reset_flake_source.
+    let build_ids: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT bj.id::text
+        FROM build_jobs bj
+        JOIN derivations d ON d.id = bj.derivation_id
+        JOIN commits c ON c.id = d.commit_id
+        WHERE c.flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_all(&mut **tx)
+    .await
+    .context("Failed to collect build IDs for attention resolution during cascade delete")?;
+
+    let commit_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id::text FROM commits WHERE flake_id = $1",
+    )
+    .bind(flake_id)
+    .fetch_all(&mut **tx)
+    .await
+    .context("Failed to collect commit IDs for attention resolution during cascade delete")?;
+
+    sqlx::query(
+        r#"
+        UPDATE attention_occurrences
+        SET resolved_at = statement_timestamp()
+        WHERE resolved_at IS NULL
+          AND (
+              (category = 'builds' AND subject_id = ANY($1::text[]))
+              OR
+              (category = 'evals' AND subject_id = ANY($2::text[]))
+          )
+        "#,
+    )
+    .bind(&build_ids)
+    .bind(&commit_ids)
+    .execute(&mut **tx)
+    .await
+    .context("Failed to resolve build/eval attention occurrences during cascade delete")?;
 
     // Note: ON DELETE CASCADE on commits FK will handle most cleanup
     // But we explicitly delete systems first to be safe
@@ -2049,14 +2218,19 @@ mod attention_lifecycle_tests {
 
         // System belonging to the flake.
         let system_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO systems (id, hostname, environment_id, flake_id) VALUES ($1, $2, $3, $4)")
-            .bind(system_id)
-            .bind(format!("cascade-test-{flake_id}"))
-            .bind(env_id)
-            .bind(flake_id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO systems (id, hostname, environment_id, flake_id, is_active, public_key, derivation) \
+             VALUES ($1, $2, $3, $4, TRUE, $5, $6)",
+        )
+        .bind(system_id)
+        .bind(format!("cascade-test-{flake_id}"))
+        .bind(env_id)
+        .bind(flake_id)
+        .bind(format!("ssh-ed25519 AAAA-cascade-{flake_id}"))
+        .bind("/nix/store/cascade-test-derivation")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Open system occurrence.
         sqlx::query(
