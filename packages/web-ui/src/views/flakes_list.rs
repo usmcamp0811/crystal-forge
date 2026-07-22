@@ -3050,35 +3050,20 @@ pub fn FlakesListViewNew() -> Element {
         let _nonce = *reload_nonce.read();
         async move { fetch_flakes().await }
     });
-    // Environments are loaded lazily — only when the add/edit dialog opens.
-    // This avoids an unconditional second request on page mount.
-    let mut show_env_loader = use_signal(|| false);
-    let environments_resource = use_resource(move || {
-        let enabled = *show_env_loader.read();
-        async move {
-            if enabled {
-                fetch_environments().await
-            } else {
-                Ok(Vec::new())
-            }
-        }
-    });
+    // Environments are loaded eagerly on mount so the table/cards
+    // "Environments" column can render each pill with its real configured
+    // color (Environment.color_hex) from first paint, matching the pattern
+    // used by the Systems view (`environment_colors_resource` in
+    // systems_list.rs). Previously this was gated behind the add/edit
+    // dialog opening, so on a normal page load `db_environments` was empty
+    // and every pill silently fell back to a hardcoded 4-name palette that
+    // ignores the environment's actual color for any name outside that
+    // fixed set.
+    let environments_resource = use_resource(move || async move { fetch_environments().await });
     let db_environments: Vec<EnvironmentSummary> = match environments_resource.read().as_ref() {
         Some(Ok(envs)) => envs.clone(),
         _ => Vec::new(),
     };
-
-    // Trigger lazy environment load when add/edit dialog opens.
-    {
-        let mut show_env_loader = show_env_loader.clone();
-        let editing_flake_clone = editing_flake.clone();
-        let show_add_form_clone = show_add_form.clone();
-        use_effect(move || {
-            if editing_flake_clone.read().is_some() || *show_add_form_clone.read() {
-                show_env_loader.set(true);
-            }
-        });
-    }
 
     let (raw_flakes, load_error, loading) = match flakes_resource.read().as_ref() {
         Some(Ok(items)) => (items.clone(), None, false),
