@@ -460,7 +460,8 @@ pub async fn reset_flake_source(
             sync_attempt_id  = NULL,
             sync_status      = 'unknown',
             last_sync_at     = NULL,
-            last_sync_error  = NULL
+            last_sync_error  = NULL,
+            last_synced_at   = NULL
         WHERE id = $5
         RETURNING *
         "#,
@@ -473,6 +474,34 @@ pub async fn reset_flake_source(
     .fetch_one(&mut **tx)
     .await
     .context("Failed to update flake identity and reset state during source reset")?;
+
+    // 5. Create a clean attention-episode boundary.  The source identity
+    //    (repo_url/branch) has been replaced — an incident from the old
+    //    source must not be silently inherited by the new one.
+    //
+    //    Acquire the attention subject lock and resolve all open flake
+    //    attention occurrences for this flake.  This is serialized with
+    //    any concurrent reconciler (which holds the same lock key).  The
+    //    `last_synced_at` column was already cleared above, so after this
+    //    resolve, any future sync failure on the new source identity
+    //    starts with a clean lineage slate — a success on the old source
+    //    cannot make a new-source failure appear continuous with the old
+    //    source's incident.
+    let attention_lock_key = format!("attention_occurrence:flakes:{flake_id}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&attention_lock_key)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to acquire flake attention lock for source reset")?;
+
+    sqlx::query(
+        "UPDATE attention_occurrences SET resolved_at = NOW() \
+         WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+    )
+    .bind(flake_id.to_string())
+    .execute(&mut **tx)
+    .await
+    .context("Failed to resolve flake attention occurrences during source reset")?;
 
     Ok(flake)
 }
@@ -830,12 +859,44 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
 
 /// Soft delete a flake by setting deleted_at timestamp.
 /// The flake will be excluded from normal queries but retained for audit.
+///
+/// Resolves any open flake attention occurrences under the attention lock,
+/// so a deleted flake cannot silently contribute a sidebar badge for the
+/// remainder of its 24-hour attention window.
 pub async fn soft_delete_flake(pool: &PgPool, flake_id: i32) -> Result<u64> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin soft-delete transaction")?;
+
+    // Acquire the flake attention lock so this resolve is serialized with
+    // any concurrent reconciler (which holds the same lock key).
+    let attention_lock_key = format!("attention_occurrence:flakes:{flake_id}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&attention_lock_key)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to acquire flake attention lock for soft delete")?;
+
+    // Resolve all open occurrences first, then soft-delete.
+    sqlx::query(
+        "UPDATE attention_occurrences SET resolved_at = NOW() \
+         WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+    )
+    .bind(flake_id.to_string())
+    .execute(&mut *tx)
+    .await
+    .context("Failed to resolve flake attention occurrences during soft delete")?;
+
     let result =
         sqlx::query("UPDATE flakes SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL")
             .bind(flake_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
+
+    tx.commit()
+        .await
+        .context("Failed to commit soft-delete transaction")?;
 
     Ok(result.rows_affected())
 }
@@ -870,10 +931,33 @@ pub async fn check_flake_dependencies(pool: &PgPool, flake_id: i32) -> Result<i6
 /// Cascade delete a flake and all related data (evaluations, builds, deployments).
 /// This is a hard delete that permanently removes all traces.
 /// MUST be run in a transaction for safety - pass a transaction reference.
+///
+/// Resolves any open flake attention occurrences under the attention lock,
+/// so a deleted flake cannot silently contribute a sidebar badge for the
+/// remainder of its 24-hour attention window.
 pub async fn cascade_delete_flake(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     flake_id: i32,
 ) -> Result<u64> {
+    // Acquire the flake attention lock so this resolve is serialized with
+    // any concurrent reconciler.
+    let attention_lock_key = format!("attention_occurrence:flakes:{flake_id}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&attention_lock_key)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to acquire flake attention lock for cascade delete")?;
+
+    // Resolve all open occurrences for this flake before deleting the row.
+    sqlx::query(
+        "UPDATE attention_occurrences SET resolved_at = NOW() \
+         WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+    )
+    .bind(flake_id.to_string())
+    .execute(&mut **tx)
+    .await
+    .context("Failed to resolve flake attention occurrences during cascade delete")?;
+
     // Note: ON DELETE CASCADE on commits FK will handle most cleanup
     // But we explicitly delete systems first to be safe
     sqlx::query("DELETE FROM systems WHERE flake_id = $1")

@@ -22,6 +22,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{PgPool, Postgres, Row};
+use tracing::warn;
 use uuid::Uuid;
 
 /// Attention window: occurrences are eligible for 24 hours from `opened_at`.
@@ -1096,7 +1097,7 @@ pub async fn cleanup(
 ///
 /// The base invariant is: at most one open (`resolved_at IS NULL`)
 /// occurrence per `(category, subject_id)`. Repair strategy is split into
-/// two families, chosen per category:
+/// three families, chosen per category:
 ///
 /// **Merge-with-dismissal-migration** (only `evals` and `builds`): safe
 /// *only* when two rows sharing an identity are PROVABLY the same
@@ -1125,18 +1126,29 @@ pub async fn cleanup(
 ///   subject id; two open rows for one `subject_id` can only be an
 ///   artifact of a key-encoding bug, i.e. provably the same event.
 ///
-/// **Keep-freshest, never migrate dismissals** (everything else, including
-/// `systems`, `flakes`, `cves`, `environments`, and any category not
-/// explicitly listed above): these are episode-based — `transition_by_subject`
-/// mints a fresh episode UUID on every reason change, `environments` mints
-/// one on every derived transition — so two open rows sharing an identity
-/// are NOT provably the same episode; they may be two genuinely distinct
-/// incidents left open by an unrelated historical bug (e.g. a dismissed,
-/// unresolved critical episode followed by a later, distinct critical
-/// episode that a naive merge would silently inherit the old dismissal).
-/// For these, the row with the most recently advanced `last_observed_at`
-/// is kept open as-is (its own dismissal state, if any, is untouched), and
-/// every other row is resolved WITHOUT moving any dismissal between rows.
+/// **Resolve all, reconstruct from authoritative state** (everything else,
+/// including `systems`, `flakes`, `cves`, `environments`, and any category
+/// not explicitly listed above): these are episode-based —
+/// `transition_by_subject` mints a fresh episode UUID on every reason
+/// change, `environments` mints one on every derived transition — so two
+/// open rows sharing an identity are NOT provably the same episode; they
+/// may be two genuinely distinct incidents left open by an unrelated
+/// historical bug (e.g. a dismissed, unresolved critical episode followed
+/// by a later, distinct critical episode that a naive merge would silently
+/// inherit the old dismissal). Timestamp-only heuristics (keep-freshest by
+/// `last_observed_at`) cannot distinguish these cases — a historical
+/// buggy reconciler could have observed the older row after a newer
+/// episode opened, making the older row appear "freshest" and causing the
+/// repair to preserve a stale dismissed row over a current undismissed one.
+///
+/// Instead, ALL duplicate rows for the identity group are resolved, and
+/// for categories that support it (`flakes`), a single current occurrence
+/// is reconstructed from authoritative domain state (flake `sync_status`,
+/// `last_sync_at`). Categories without domain-level reconstruction
+/// (`systems`, `cves`, `environments`) rely on the periodic reconciler
+/// (2-minute cycle) to recreate the current occurrence — a brief gap in
+/// the badge count after a one-time startup repair is acceptable.
+///
 /// `environments` additionally narrows grouping to
 /// `(subject_id, underlying_system_id)` — not also
 /// `underlying_system_occurrence_key` — so distinct systems contributing
@@ -1264,11 +1276,20 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
             .context("failed to resolve duplicate eval occurrences during dedupe")?;
             total_resolved += result.rows_affected() as usize;
         } else if category == "builds" {
+            // Prefer the row whose source_occurrence_key matches the canonical
+            // `build:<job_id>` pattern (where subject_id = job_id::text).
+            // The previous sort by opened_at ASC could keep a malformed key
+            // from an old encoding bug (e.g. `build:<job_id>:<suffix>`)
+            // and resolve the one the UI actually recognizes, breaking row
+            // highlight and dismissal.  If no canonical-key row exists
+            // (all are malformed), fall back to earliest opened_at.
             let canonical_id: Option<Uuid> = sqlx::query_scalar(
                 r#"
                 SELECT id FROM attention_occurrences
                 WHERE category = 'builds' AND subject_id = $1 AND resolved_at IS NULL
-                ORDER BY opened_at ASC, id ASC
+                ORDER BY
+                    CASE WHEN source_occurrence_key = 'build:' || $1 THEN 0 ELSE 1 END,
+                    opened_at ASC, id ASC
                 LIMIT 1
                 FOR UPDATE
                 "#,
@@ -1315,83 +1336,136 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
             .context("failed to resolve duplicate build occurrences during dedupe")?;
             total_resolved += result.rows_affected() as usize;
         } else if category == "environments" {
-            // Keep-freshest, never migrate dismissals (see doc comment).
-            let canonical_id: Option<Uuid> = sqlx::query_scalar(
-                r#"
-                SELECT id FROM attention_occurrences
-                WHERE category = 'environments' AND subject_id = $1 AND resolved_at IS NULL
-                  AND (metadata->>'underlying_system_id') IS NOT DISTINCT FROM $2
-                ORDER BY last_observed_at DESC, id DESC
-                LIMIT 1
-                FOR UPDATE
-                "#,
-            )
-            .bind(&subject_id)
-            .bind(&extra)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("failed to find canonical environment occurrence")?;
-
-            let Some(canonical_id) = canonical_id else {
-                continue;
-            };
-
+            // Resolve ALL duplicates — do not use timestamp heuristics to
+            // pick a "canonical" one, as last_observed_at can be misleading
+            // (a historical reconciler may have observed the older row after
+            // a newer episode opened, causing the repair to keep the older,
+            // possibly dismissed row and resolve the current undismissed row).
+            // Environment occurrences are reconstructed by the next periodic
+            // system-reconciliation sweep (within 2 minutes).
             let result = sqlx::query(
                 r#"
                 UPDATE attention_occurrences
                 SET resolved_at = NOW()
                 WHERE category = 'environments' AND subject_id = $1 AND resolved_at IS NULL
                   AND (metadata->>'underlying_system_id') IS NOT DISTINCT FROM $2
-                  AND id <> $3
                 "#,
             )
             .bind(&subject_id)
             .bind(&extra)
-            .bind(canonical_id)
             .execute(&mut *tx)
             .await
             .context("failed to resolve duplicate environment occurrences during dedupe")?;
             total_resolved += result.rows_affected() as usize;
         } else {
-            // Keep-freshest, never migrate dismissals (see doc comment).
+            // Resolve ALL duplicates — do not use timestamp heuristics to
+            // pick a "canonical" one (see environment branch for reasoning).
             // Covers systems, flakes, cves, and any future/unlisted
-            // category by default -- the safe behavior, not the merging
-            // one, is what a category gets unless explicitly allowlisted
-            // above as provably safe to merge.
-            let canonical_id: Option<Uuid> = sqlx::query_scalar(
-                r#"
-                SELECT id FROM attention_occurrences
-                WHERE category = $1 AND subject_id = $2 AND resolved_at IS NULL
-                ORDER BY last_observed_at DESC, id DESC
-                LIMIT 1
-                FOR UPDATE
-                "#,
-            )
-            .bind(&category)
-            .bind(&subject_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("failed to find canonical occurrence")?;
-
-            let Some(canonical_id) = canonical_id else {
-                continue;
-            };
-
-            let result = sqlx::query(
+            // category by default.
+            //
+            // For flakes specifically, also reconstruct the current
+            // occurrence from authoritative sync status, since the
+            // periodic reconciler's error/stale-sync sweeps run on a
+            // 2-minute cycle and this is a one-time startup repair.
+            let resolved = sqlx::query(
                 r#"
                 UPDATE attention_occurrences
                 SET resolved_at = NOW()
                 WHERE category = $1 AND subject_id = $2 AND resolved_at IS NULL
-                  AND id <> $3
                 "#,
             )
             .bind(&category)
             .bind(&subject_id)
-            .bind(canonical_id)
             .execute(&mut *tx)
             .await
             .context("failed to resolve duplicate occurrences during dedupe")?;
-            total_resolved += result.rows_affected() as usize;
+            total_resolved += resolved.rows_affected() as usize;
+
+            // Reconstruct flake attention from authoritative state.
+            if category == "flakes" {
+                let flake_id: i32 = match subject_id.parse() {
+                    Ok(id) => id,
+                    Err(_) => continue,
+                };
+                let state: Option<(String, Option<DateTime<Utc>>, Option<String>)> =
+                    match sqlx::query_as(
+                        "SELECT sync_status, last_sync_at, last_sync_error \
+                         FROM flakes WHERE id = $1 AND deleted_at IS NULL",
+                    )
+                    .bind(flake_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!("failed to query flake state for dedupe reconstruction: {e:#}");
+                            continue;
+                        }
+                    };
+
+                if let Some((sync_status, last_sync_at, last_sync_error)) = state {
+                    let now = Utc::now();
+                    if sync_status == "error" {
+                        let episode_id = Uuid::new_v4();
+                        let source_key = flake_occurrence_key(flake_id, episode_id);
+                        let metadata = serde_json::json!({
+                            "reason": "sync_error",
+                            "flake_id": flake_id,
+                            "last_sync_error": last_sync_error,
+                        });
+                        if let Err(e) = sqlx::query(
+                            r#"
+                            INSERT INTO attention_occurrences (
+                                category, subject_type, subject_id, source_occurrence_key,
+                                opened_at, last_observed_at, metadata
+                            )
+                            VALUES ('flakes', 'flake_sync', $1, $2, $3, $4, $5)
+                            "#,
+                        )
+                        .bind(&subject_id)
+                        .bind(source_key)
+                        .bind(last_sync_at.unwrap_or(now))
+                        .bind(now)
+                        .bind(&metadata)
+                        .execute(&mut *tx)
+                        .await
+                        {
+                            warn!("failed to reconstruct error occurrence for flake {flake_id}: {e:#}");
+                        }
+                    } else if sync_status == "syncing" {
+                        if let Some(sync_at) = last_sync_at {
+                            if sync_at < now - Duration::minutes(30) {
+                                let episode_id = Uuid::new_v4();
+                                let source_key = flake_occurrence_key(flake_id, episode_id);
+                                let opened_at = sync_at + Duration::minutes(30);
+                                let metadata = serde_json::json!({
+                                    "reason": "stale_sync",
+                                    "flake_id": flake_id,
+                                });
+                                if let Err(e) = sqlx::query(
+                                    r#"
+                                    INSERT INTO attention_occurrences (
+                                        category, subject_type, subject_id, source_occurrence_key,
+                                        opened_at, last_observed_at, metadata
+                                    )
+                                    VALUES ('flakes', 'flake_sync', $1, $2, $3, $4, $5)
+                                    "#,
+                                )
+                                .bind(&subject_id)
+                                .bind(source_key)
+                                .bind(opened_at)
+                                .bind(now)
+                                .bind(&metadata)
+                                .execute(&mut *tx)
+                                .await
+                                {
+                                    warn!("failed to reconstruct stale-sync occurrence for flake {flake_id}: {e:#}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -2343,20 +2417,21 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn test_dedupe_environments_keeps_freshest_episode_without_migrating_dismissal() {
-        // Regression test for round 9: two rows for the SAME environment
+    async fn test_dedupe_environments_resolves_all_duplicates_same_system() {
+        // Regression test for round 9+: two rows for the SAME environment
         // and the SAME underlying system, from two distinct system-health
         // episodes (e.g. an old, dismissed critical episode left open by a
         // historical bug, and a later, separate offline episode), must
-        // resolve to keeping only the freshest (most recently observed) row
-        // open -- and the surviving row must NEVER inherit the older row's
-        // dismissal. A system can also move environments and back (A -> B
-        // -> A) without its own episode key changing, so
-        // underlying_system_occurrence_key cannot be used as a reliable
-        // "same episode" distinguisher for environments; grouping is by
-        // (environment, underlying_system_id) only, and any resulting
-        // "duplicate" is resolved via keep-freshest with no dismissal
-        // migration, never a blind merge.
+        // resolve BOTH rows — timestamp-only heuristics (keep-freshest by
+        // last_observed_at) cannot distinguish these cases and may preserve
+        // a stale dismissed row over a current undismissed one. A system
+        // can also move environments and back (A -> B -> A) without its own
+        // episode key changing, so underlying_system_occurrence_key cannot
+        // be used as a reliable "same episode" distinguisher for
+        // environments; grouping is by (environment, underlying_system_id)
+        // only, and all rows in the resulting "duplicate" group are
+        // resolved (never merge, never migrate dismissal). Environment
+        // occurrences are reconstructed by the periodic system reconciler.
         let pool = test_pool().await;
         let env_id = insert_throwaway_environment(&pool, "dedupe-episodes").await;
         let system_id = insert_throwaway_system(&pool, env_id).await;
@@ -2411,8 +2486,8 @@ mod tests {
             .await
             .expect("dedupe should succeed");
         assert_eq!(
-            resolved, 1,
-            "the stale, older episode must be resolved, keeping only the freshest open"
+            resolved, 2,
+            "both duplicate episodes must be resolved (not keep-freshest)"
         );
 
         let old_resolved: Option<DateTime<Utc>> =
@@ -2429,7 +2504,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert!(new_resolved.is_none(), "the freshest episode must remain open");
+        assert!(new_resolved.is_some(), "both episodes are duplicates and must be resolved");
 
         let new_dismissed: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
@@ -2525,16 +2600,18 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn test_dedupe_systems_keeps_freshest_without_migrating_dismissal() {
-        // Regression test for round 9: systems are episode-based
+    async fn test_dedupe_systems_resolves_all_duplicates_without_migrating_dismissal() {
+        // Regression test for round 9+: systems are episode-based
         // (transition_by_subject mints a fresh episode UUID on every
         // reason change), so two open rows for one system are NOT provably
         // the same episode -- e.g. a dismissed, unresolved critical episode
         // S1 followed by a genuinely new, later critical episode S2 (a
         // historical bug could leave S1 open across a recovery). Blindly
         // merging and migrating S1's dismissal onto S2 would silently hide
-        // the new incident. The repair must keep only the freshest
-        // (most-recently-observed) row open and never transfer a dismissal.
+        // the new incident. BOTH rows must be resolved (not keep-freshest),
+        // since a historical buggy reconciler could have observed S1 after
+        // S2 opened, making the stale S1 appear "freshest". The periodic
+        // system reconciler recreates the current occurrence.
         let pool = test_pool().await;
         let env_id = insert_throwaway_environment(&pool, "dedupe-sys").await;
         let system_id = insert_throwaway_system(&pool, env_id).await;
@@ -2578,7 +2655,10 @@ mod tests {
         let resolved = dedupe_open_occurrences(&pool)
             .await
             .expect("dedupe should succeed");
-        assert_eq!(resolved, 1, "the stale episode must be resolved");
+        assert_eq!(
+            resolved, 2,
+            "both duplicate episodes must be resolved (not keep-freshest)"
+        );
 
         let s1_resolved: Option<DateTime<Utc>> =
             sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
@@ -2594,7 +2674,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert!(s2_resolved.is_none(), "the freshest episode must remain open");
+        assert!(s2_resolved.is_some(), "both episodes are duplicates and must be resolved");
 
         let s2_dismissed: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
@@ -2619,16 +2699,15 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn test_dedupe_cves_defaults_to_safe_no_migration_behavior() {
+    async fn test_dedupe_cves_defaults_to_resolve_all_no_migration_behavior() {
         // Defense-in-depth: `cves` is not explicitly allowlisted as safe to
         // merge (only `evals` and `builds` are; `environments` has its own
-        // dedicated keep-freshest branch) so it falls through to the
+        // dedicated resolve-all branch) so it falls through to the
         // generic default branch. Like systems/flakes, cve occurrences are
-        // episode-based (a fresh episode UUID per fleet-relevance episode),
-        // so this exercises the same "default to safe, never migrate"
-        // behavior via the actual fallback path a genuinely new category
-        // would also hit, without requiring a schema change to fabricate a
-        // fictional category (the category column has a CHECK constraint).
+        // episode-based (a fresh episode UUID per fleet-relevance episode).
+        // The default is no longer keep-freshest — all duplicates are
+        // resolved, and no dismissal is ever migrated. CVE occurrences
+        // are reconstructed by the next CVE vulnerability scan.
         let pool = test_pool().await;
         let user_id = insert_throwaway_user(&pool).await;
         let subject_id = "CVE-2024-TEST-0001".to_string();
@@ -2667,7 +2746,10 @@ mod tests {
         let resolved = dedupe_open_occurrences(&pool)
             .await
             .expect("dedupe should succeed");
-        assert_eq!(resolved, 1, "the older episode must be resolved");
+        assert_eq!(
+            resolved, 2,
+            "both duplicate episodes must be resolved (not keep-freshest)"
+        );
 
         let newer_dismissed: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",

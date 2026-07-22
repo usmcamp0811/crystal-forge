@@ -436,6 +436,12 @@ async fn reconcile_all_systems(pool: &PgPool) {
 ///   belongs to that environment (e.g. a system that moved environments
 ///   while its occurrence was still open for the old environment, or a
 ///   system that was deactivated or deleted).
+/// * Flake attention occurrences for deleted or missing flakes — a flake
+///   that was soft-deleted or hard-deleted before its open occurrence was
+///   explicitly resolved (either by this safety net or by the
+///   delete-path resolve calls in `queries::flakes`) leaves an invisible
+///   occurrence that still counts toward sidebar badges since the badge
+///   query does not join against active flakes.
 ///
 /// The environment predicate resolves an occurrence whenever no active
 /// system exists that both matches `underlying_system_id` and currently
@@ -465,6 +471,28 @@ async fn reconcile_stale_occurrences(pool: &PgPool) {
     .execute(pool)
     .await
     .map_err(|e| error!("failed to resolve occurrences for inactive systems: {e:#}"));
+
+    // Resolve flake occurrences for deleted or missing flakes.  Both the
+    // soft-delete and cascade-delete paths now resolve occurrences directly,
+    // but this safety net catches any that were missed (e.g. a hard-delete
+    // that predates this fix, or a delete that bypassed the resolve path
+    // via `delete_flake_by_id`).
+    let _ = sqlx::query(
+        r#"
+        UPDATE attention_occurrences ao
+        SET resolved_at = NOW()
+        WHERE ao.category = 'flakes'
+          AND ao.resolved_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM flakes f
+              WHERE f.id::text = ao.subject_id
+                AND f.deleted_at IS NULL
+          )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| error!("failed to resolve occurrences for deleted flakes: {e:#}"));
 
     // Resolve environment occurrences where no active system with the
     // matching underlying_system_id currently belongs to the occurrence's
@@ -532,7 +560,7 @@ async fn reconcile_stale_flakes(pool: &PgPool) {
     }
 }
 
-/// Reconcile flakes currently in `error` status that are missing an open
+/// Reconcile flakes currently in `error` status that are missing an authoritative
 /// `sync_error` attention occurrence.
 ///
 /// `record_sync_error` commits the flake's `sync_status = 'error'` first,
@@ -544,16 +572,26 @@ async fn reconcile_stale_flakes(pool: &PgPool) {
 /// [`reconcile_stale_flakes`], so nothing would otherwise recover it.
 ///
 /// This sweep is bounded to flakes currently in `error` with a recorded
-/// `sync_attempt_id` and no *matching-reason* open occurrence, and
+/// `sync_attempt_id` and no *current* open `sync_error` occurrence, and
 /// delegates the actual (locked, attempt-verified) transition to
 /// [`crate::flake::commits::transition_flake_attention_to_error_if_current`]
 /// — the same function the direct call site uses — so the recheck-then-act
 /// safety this sweep exists to backstop is still honored even here.
 ///
-/// The exclusion checks specifically for an open occurrence whose reason is
-/// `sync_error`, not "any open occurrence" — a flake can be `error` while
-/// still carrying an open `stale_sync` occurrence from before it finished
-/// erroring (e.g. a long sync opens `stale_sync`, then finally records
+/// An open `sync_error` occurrence is treated as "current" (and thus
+/// excluding the flake from this sweep) only if no successful sync has
+/// completed since it was last observed — checked via
+/// `f.last_synced_at <= ao.last_observed_at`. When a success DID occur
+/// after the occurrence was last observed (`last_synced_at > last_observed_at`),
+/// the occurrence belongs to an earlier, superseded incident and must not
+/// prevent the lineage-aware transition helper from running (and replacing it).
+/// This is the same staleness check used inside the transition helper itself
+/// (see `transition_flake_attention_to_error_if_current`).
+///
+/// The exclusion checks specifically for a *current*`sync_error` occurrence,
+/// not "any open occurrence at all" — a flake can be `error` while still
+/// carrying an open `stale_sync` occurrence from before it finished erroring
+/// (e.g. a long sync opens `stale_sync`, then finally records
 /// `sync_status = 'error'`, then the process crashes before transitioning
 /// attention). Excluding on "any occurrence exists" would skip that flake
 /// forever, leaving the user with a stale-sync incident instead of the
@@ -574,6 +612,7 @@ async fn reconcile_errored_flakes(pool: &PgPool) {
                 AND ao.subject_id = f.id::text
                 AND ao.resolved_at IS NULL
                 AND ao.metadata @> '{"reason": "sync_error"}'::jsonb
+                AND (f.last_synced_at IS NULL OR f.last_synced_at <= ao.last_observed_at)
           )
         LIMIT 500
         "#,
