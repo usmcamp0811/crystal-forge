@@ -497,6 +497,13 @@ async fn reconcile_stale_occurrences(pool: &PgPool) {
 /// the occurrence for a flake that has gone stale without an explicit sync
 /// completing, since there is no other event to hook for that case.
 async fn reconcile_stale_flakes(pool: &PgPool) {
+    // Bounded (LIMIT 500, like every other sweep in this module) and
+    // deterministically ordered (oldest-stale-first) so a large backlog
+    // cannot delay the errored-flake, terminal-event, and stale-occurrence
+    // sweeps that run after this one in the same loop iteration
+    // indefinitely — each iteration makes bounded, fair progress on the
+    // oldest incidents first, and any remainder is picked up by the next
+    // sweep 2 minutes later.
     let rows: Vec<(i32,)> = match sqlx::query_as(
         r#"
         SELECT id
@@ -505,6 +512,8 @@ async fn reconcile_stale_flakes(pool: &PgPool) {
           AND sync_status = 'syncing'
           AND last_sync_at IS NOT NULL
           AND last_sync_at < now() - interval '30 minutes'
+        ORDER BY last_sync_at ASC
+        LIMIT 500
         "#,
     )
     .fetch_all(pool)
@@ -591,6 +600,57 @@ async fn reconcile_errored_flakes(pool: &PgPool) {
     }
 }
 
+/// Reconcile flakes currently in `synced` status that still have an open
+/// flake attention occurrence.
+///
+/// `sync_flake_recorded`'s success path commits `sync_status = 'synced'`
+/// first, then calls `resolve_flake_attention_if_current` as a separate,
+/// best-effort operation. A process crash between the two leaves a
+/// successfully-synced flake with a stale `sync_error`/`stale_sync`
+/// occurrence still open — a false alert that would otherwise remain
+/// visible for the rest of its 24-hour attention window. No other sweep in
+/// this loop examines `synced` flakes (`reconcile_stale_flakes` only looks
+/// at `syncing`, `reconcile_errored_flakes` only at `error`), so nothing
+/// else would recover it.
+///
+/// Delegates to [`crate::flake::commits::resolve_flake_attention_if_current`]
+/// — the same locked, attempt-verified function the direct call site uses —
+/// so a flake that has since moved on to a NEWER attempt (syncing again, or
+/// already failed) is safely skipped by that function's own recheck rather
+/// than incorrectly resolved here.
+async fn reconcile_synced_flakes_missing_resolution(pool: &PgPool) {
+    let rows: Vec<(i32, uuid::Uuid)> = match sqlx::query_as(
+        r#"
+        SELECT f.id, f.sync_attempt_id
+        FROM flakes f
+        WHERE f.deleted_at IS NULL
+          AND f.sync_status = 'synced'
+          AND f.sync_attempt_id IS NOT NULL
+          AND EXISTS (
+              SELECT 1 FROM attention_occurrences ao
+              WHERE ao.category = 'flakes'
+                AND ao.subject_id = f.id::text
+                AND ao.resolved_at IS NULL
+          )
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("failed to load synced flakes for attention reconciliation: {e:#}");
+            return;
+        }
+    };
+
+    for (flake_id, attempt_id) in rows {
+        crate::flake::commits::resolve_flake_attention_if_current(pool, flake_id, attempt_id)
+            .await;
+    }
+}
+
 /// Reconcile a single stale flake, with recheck inside the attention lock.
 ///
 /// The flake ID was selected before the lock was acquired, so the flake
@@ -598,6 +658,13 @@ async fn reconcile_errored_flakes(pool: &PgPool) {
 /// the subject-level attention lock, rechecks the stale predicate against
 /// the current database state, and only transitions when the flake is still
 /// `syncing` and past the staleness threshold.
+///
+/// As with [`crate::flake::commits::transition_flake_attention_to_error_if_current`],
+/// an existing `stale_sync` occurrence is only reused (observed) if no
+/// successful sync has completed since it was last observed (checked via
+/// `flakes.last_synced_at`) — otherwise a stale occurrence from an earlier,
+/// already-resolved stuck-sync episode could be silently reused (and its
+/// dismissal inherited) for an unrelated, later one.
 async fn reconcile_single_stale_flake(pool: &PgPool, flake_id: i32, subject_id: &str) {
     use anyhow::Context;
 
@@ -621,19 +688,30 @@ async fn reconcile_single_stale_flake(pool: &PgPool, flake_id: i32, subject_id: 
         return;
     }
 
-    // Recheck: is the flake still stale? Also fetch `last_sync_at` so the
-    // occurrence's `opened_at` can be derived from when the sync actually
-    // crossed the staleness threshold (`last_sync_at + 30 minutes`), not
-    // from when this periodic sweep happened to notice it. A single
-    // `Utc::now()` captured before iterating the whole batch (the previous
-    // approach) would assign the same timestamp to every flake in the
-    // sweep and could backdate a flake that waited behind a contended
-    // subject lock to a time before its own recheck ran.
-    let recheck: Option<(bool, chrono::DateTime<chrono::Utc>)> = match sqlx::query_as(
+    // Recheck: is the flake still stale? Two DISTINCT timestamps are
+    // derived, not one:
+    //   - `opened_at` (`last_sync_at + 30 minutes`): the actual moment the
+    //     sync crossed the staleness threshold — used for the occurrence's
+    //     `opened_at`, so it reflects the incident's real start rather than
+    //     whenever this periodic sweep happened to notice it.
+    //   - `observed_at` (`statement_timestamp()`, i.e. after the lock wait):
+    //     used to bump `last_observed_at` on repeated sweeps against a
+    //     still-ongoing incident, so it keeps advancing instead of being
+    //     pinned to the original threshold-crossing time forever.
+    // `last_synced_at` is also fetched for the same-incident staleness
+    // check described in the doc comment above.
+    let recheck: Option<(
+        bool,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = match sqlx::query_as(
         r#"
         SELECT
             last_sync_at < now() - interval '30 minutes',
-            last_sync_at
+            last_sync_at,
+            statement_timestamp(),
+            last_synced_at
         FROM flakes
         WHERE id = $1
           AND deleted_at IS NULL
@@ -653,9 +731,9 @@ async fn reconcile_single_stale_flake(pool: &PgPool, flake_id: i32, subject_id: 
         }
     };
 
-    let (still_stale, last_sync_at) = match recheck {
-        Some((stale, ts)) => (stale, ts),
-        None => (false, chrono::Utc::now()),
+    let (still_stale, last_sync_at, observed_at, last_synced_at) = match recheck {
+        Some((stale, sync_at, observed, synced)) => (stale, sync_at, observed, synced),
+        None => (false, chrono::Utc::now(), chrono::Utc::now(), None),
     };
 
     if !still_stale {
@@ -667,10 +745,11 @@ async fn reconcile_single_stale_flake(pool: &PgPool, flake_id: i32, subject_id: 
     let opened_at = last_sync_at + chrono::Duration::minutes(30);
 
     // Still stale — use transition_by_subject logic inline.
-    // Check if there's already an open occurrence with reason = stale_sync.
-    let existing: Option<uuid::Uuid> = match sqlx::query_scalar(
+    // Check if there's already an open occurrence with reason = stale_sync,
+    // also fetching its last_observed_at for the staleness check below.
+    let existing: Option<(uuid::Uuid, chrono::DateTime<chrono::Utc>)> = match sqlx::query_as(
         r#"
-        SELECT id FROM attention_occurrences
+        SELECT id, last_observed_at FROM attention_occurrences
         WHERE category = 'flakes'
           AND subject_id = $1
           AND resolved_at IS NULL
@@ -692,7 +771,13 @@ async fn reconcile_single_stale_flake(pool: &PgPool, flake_id: i32, subject_id: 
         }
     };
 
-    if let Some(existing_id) = existing {
+    // Only reusable if no successful sync has completed since it was last
+    // observed; otherwise it belongs to an earlier, superseded incident.
+    let existing = existing.filter(|(_, last_observed_at)| {
+        !matches!(last_synced_at, Some(synced) if synced > *last_observed_at)
+    });
+
+    if let Some((existing_id, _)) = existing {
         // Already open for this reason — just update last_observed_at.
         let metadata = serde_json::json!({
             "reason": "stale_sync",
@@ -701,7 +786,7 @@ async fn reconcile_single_stale_flake(pool: &PgPool, flake_id: i32, subject_id: 
         if let Err(e) = sqlx::query(
             "UPDATE attention_occurrences SET last_observed_at = GREATEST(last_observed_at, $1), metadata = $2 WHERE id = $3",
         )
-        .bind(opened_at)
+        .bind(observed_at)
         .bind(metadata)
         .bind(existing_id)
         .execute(&mut *tx)
@@ -717,8 +802,9 @@ async fn reconcile_single_stale_flake(pool: &PgPool, flake_id: i32, subject_id: 
         return;
     }
 
-    // Resolve any other open occurrence (e.g. sync_error) and insert
-    // a new stale_sync occurrence.
+    // Resolve any other open occurrence (e.g. sync_error, or a stale
+    // stale_sync from an earlier superseded incident) and insert a new
+    // stale_sync occurrence.
     if let Err(e) = sqlx::query(
         r#"
         UPDATE attention_occurrences
@@ -756,7 +842,7 @@ async fn reconcile_single_stale_flake(pool: &PgPool, flake_id: i32, subject_id: 
     .bind(subject_id)
     .bind(source_key)
     .bind(opened_at)
-    .bind(opened_at)
+    .bind(observed_at)
     .bind(metadata)
     .execute(&mut *tx)
     .await
@@ -800,6 +886,7 @@ pub async fn run_attention_reconciliation_loop(pool: PgPool) {
         reconcile_all_systems(&pool).await;
         reconcile_stale_flakes(&pool).await;
         reconcile_errored_flakes(&pool).await;
+        reconcile_synced_flakes_missing_resolution(&pool).await;
         reconcile_terminal_events(&pool).await;
         reconcile_stale_occurrences(&pool).await;
         debug!("Attention reconciliation sweep complete");
@@ -983,7 +1070,7 @@ pub async fn run_attention_cleanup_loop(pool: PgPool) {
 
 #[cfg(test)]
 mod tests {
-    use super::reconcile_errored_flakes;
+    use super::{reconcile_errored_flakes, reconcile_synced_flakes_missing_resolution};
 
     // Run against a repository-provided isolated database:
     //   DATABASE_URL=postgres://crystal_forge:password@localhost:3042/crystal_forge \
@@ -1260,6 +1347,109 @@ mod tests {
         .bind(flake_id.to_string())
         .execute(&pool)
         .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reconcile_synced_flakes_missing_resolution_recovers_lingering_alert() {
+        // Regression test for round 9: sync_flake_recorded commits
+        // sync_status = 'synced' and only afterward calls
+        // resolve_flake_attention_if_current as a separate best-effort
+        // operation. If a crash happens between those two steps, a
+        // successfully-synced flake is left with a stale open occurrence
+        // that would otherwise remain a false alert for the rest of its
+        // 24-hour attention window -- no other sweep examines `synced`
+        // flakes.
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let attempt_id = uuid::Uuid::new_v4();
+
+        // Simulate: an earlier attempt opened a sync_error occurrence, then
+        // THIS attempt succeeded (status committed) but its attention
+        // resolution was lost to a simulated crash (never called).
+        sqlx::query(
+            "UPDATE flakes SET sync_status = 'synced', sync_attempt_id = $2, last_synced_at = now() WHERE id = $1",
+        )
+        .bind(flake_id)
+        .bind(attempt_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let stale_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at, metadata) \
+             VALUES ($1, 'flakes', 'flake_sync', $2, $3, now(), now(), $4::jsonb)",
+        )
+        .bind(stale_id)
+        .bind(flake_id.to_string())
+        .bind(format!("flake:{flake_id}:{}", uuid::Uuid::new_v4()))
+        .bind(serde_json::json!({"reason": "sync_error"}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        reconcile_synced_flakes_missing_resolution(&pool).await;
+
+        let open_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(flake_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            open_count, 0,
+            "the lingering occurrence for a now-synced flake must be resolved"
+        );
+
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1",
+        )
+        .bind(flake_id.to_string())
+        .execute(&pool)
+        .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reconcile_synced_flakes_missing_resolution_skips_flake_with_no_open_occurrence() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let attempt_id = uuid::Uuid::new_v4();
+
+        sqlx::query(
+            "UPDATE flakes SET sync_status = 'synced', sync_attempt_id = $2, last_synced_at = now() WHERE id = $1",
+        )
+        .bind(flake_id)
+        .bind(attempt_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // No open occurrence exists -- the SELECT's EXISTS filter should
+        // exclude this flake, so this call should be a cheap no-op.
+        reconcile_synced_flakes_missing_resolution(&pool).await;
+
+        let open_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'flakes' AND subject_id = $1",
+        )
+        .bind(flake_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(open_count, 0, "no occurrence should have been created");
+
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)

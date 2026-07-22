@@ -1095,44 +1095,61 @@ pub async fn cleanup(
 /// one caused them).
 ///
 /// The base invariant is: at most one open (`resolved_at IS NULL`)
-/// occurrence per `(category, subject_id)`. Two categories need a narrower
-/// identity than plain `(category, subject_id)`, because for them
-/// `subject_id` alone does not uniquely identify one *episode*:
+/// occurrence per `(category, subject_id)`. Repair strategy is split into
+/// two families, chosen per category:
 ///
-/// * `environments` — `subject_id` is the environment id, but (a) each
-///   contributing underlying system gets its own, independently valid,
-///   simultaneous occurrence, and (b) two rows for the *same* system can
-///   still represent two distinct system-health episodes. Grouping is
-///   narrowed to `(underlying_system_id, underlying_system_occurrence_key)`
-///   — both, not just the system id — so dismissals are never migrated
-///   between one episode and a later, unrelated one for the same system.
-/// * `evals` — duplicate rows can carry *different*, non-interchangeable
-///   `opened_at` values (each represents a distinct failure event at a
-///   distinct `evaluation_completed_at`). Grouping is narrowed to also
-///   include `opened_at`, so only rows that are exact duplicates of the
-///   *same* failure event (e.g. from the historical float-key-encoding bug,
-///   which produced two rows for one event with the same `opened_at` but
-///   different `source_occurrence_key`s) are ever merged. A row for an
-///   older, distinct failure episode is left untouched here — the eval
-///   reconciliation safety net (`reconcile_terminal_events`'s
-///   stale-occurrence pass) resolves it once it no longer matches the
-///   commit's current `(failed, evaluation_completed_at)` state, without
-///   this function ever touching (or migrating dismissals from) it.
+/// **Merge-with-dismissal-migration** (only `evals` and `builds`): safe
+/// *only* when two rows sharing an identity are PROVABLY the same
+/// real-world event, so transferring a dismissal from one to the other
+/// cannot hide or falsely-dismiss an unrelated incident.
 ///
-/// Both narrowed identities use `IS NOT DISTINCT FROM` (NULL-safe equality)
-/// rather than treating a NULL extra value as a wildcard — a NULL
+/// * `evals` — grouping additionally requires an exact `opened_at` match.
+///   `opened_at` is the evaluation's own `evaluation_completed_at`, an
+///   external timestamp that can only coincide for two rows if they are
+///   the same real completion event — regardless of *which* historical bug
+///   produced two rows with matching `opened_at` but different
+///   `source_occurrence_key`s (an earlier hypothesis attributing this to
+///   `EXTRACT(EPOCH ...)` float imprecision was reviewed and rejected —
+///   PostgreSQL 16's `EXTRACT` returns exact `numeric`, not `float8` — and
+///   the true cause of any specific observed inflation, e.g. a previously
+///   reported count of duplicate eval rows on a deployed instance, has not
+///   been independently confirmed against that instance's actual data; see
+///   the diagnostic query below). A row for a genuinely different, older
+///   failure episode has a different `opened_at` and is never grouped with
+///   a newer one here — the eval reconciliation safety net
+///   (`reconcile_terminal_events`'s stale-occurrence pass) resolves it
+///   independently once it no longer matches the commit's current state.
+/// * `builds` — the occurrence key has no episode/timestamp component at
+///   all (`build:<job_id>`, and a re-queued job always gets a brand-new
+///   `job_id`), so a build job can never legitimately recur under the same
+///   subject id; two open rows for one `subject_id` can only be an
+///   artifact of a key-encoding bug, i.e. provably the same event.
+///
+/// **Keep-freshest, never migrate dismissals** (everything else, including
+/// `systems`, `flakes`, `cves`, `environments`, and any category not
+/// explicitly listed above): these are episode-based — `transition_by_subject`
+/// mints a fresh episode UUID on every reason change, `environments` mints
+/// one on every derived transition — so two open rows sharing an identity
+/// are NOT provably the same episode; they may be two genuinely distinct
+/// incidents left open by an unrelated historical bug (e.g. a dismissed,
+/// unresolved critical episode followed by a later, distinct critical
+/// episode that a naive merge would silently inherit the old dismissal).
+/// For these, the row with the most recently advanced `last_observed_at`
+/// is kept open as-is (its own dismissal state, if any, is untouched), and
+/// every other row is resolved WITHOUT moving any dismissal between rows.
+/// `environments` additionally narrows grouping to
+/// `(subject_id, underlying_system_id)` — not also
+/// `underlying_system_occurrence_key` — so distinct systems contributing
+/// independent, simultaneous incidents to the same environment are never
+/// treated as duplicates of each other, while still tolerating a system
+/// whose environment membership changed and changed back (A → B → A)
+/// without a stable episode-key distinction being required.
+///
+/// NULL-safe equality (`IS NOT DISTINCT FROM`) is used for the
+/// `underlying_system_id` predicate rather than a generic
+/// "`$n` IS NULL means match anything" pattern — a NULL
 /// `underlying_system_id` on some malformed legacy row must only match
 /// *other* rows that are equally NULL, not every row for that environment.
-///
-/// For every other category, the canonical row is simply the
-/// earliest-opened one — those categories are episode/lock-protected
-/// (see `transition_by_subject`, `open_or_observe_by_subject`) so any
-/// duplicates represent the *same* ongoing incident observed twice, not
-/// distinct incidents, and there is no "wrong" choice between them.
-///
-/// In all cases, dismissals recorded against the other rows in the group
-/// are migrated to the canonical row (so a user who dismissed a duplicate
-/// does not have the badge reappear), and the other rows are resolved.
 ///
 /// Safe to call repeatedly and on every server startup — a no-op once at
 /// most one open occurrence remains per identity group.
@@ -1150,38 +1167,35 @@ pub async fn cleanup(
 /// ORDER BY occurrence_count DESC;
 /// ```
 ///
-/// to confirm the shape of the duplication before/after this repair runs.
+/// Also group by `subject_id` alone and count distinct `opened_at` values
+/// to distinguish true key-encoding duplicates from legitimately distinct
+/// episodes before drawing conclusions about the shape of any observed
+/// duplication.
 pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
     let mut tx = pool
         .begin()
         .await
         .context("failed to begin dedupe transaction")?;
 
-    // `extra1`/`extra2` narrow identity beyond (category, subject_id):
-    //   evals        -> extra1 = opened_at (as text), extra2 = NULL
-    //   environments -> extra1 = underlying_system_id,
-    //                   extra2 = underlying_system_occurrence_key
-    //   everything else -> both NULL (grouping is (category, subject_id) only)
-    // Standard SQL GROUP BY treats NULL as a single group value here, which
-    // is what we want for the "everything else" case — the NULL-as-wildcard
-    // hazard only applies to the WHERE-clause lookups below, not to GROUP BY.
-    let groups: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+    // `extra` narrows identity beyond (category, subject_id):
+    //   evals        -> opened_at (as text) -- exact-event identity
+    //   environments -> underlying_system_id -- keeps distinct systems'
+    //                   incidents in the same environment from ever being
+    //                   considered duplicates of each other
+    //   everything else -> NULL (grouping is (category, subject_id) only)
+    let groups: Vec<(String, String, Option<String>)> = sqlx::query_as(
         r#"
-        SELECT category, subject_id, extra1, extra2 FROM (
+        SELECT category, subject_id, extra FROM (
             SELECT category, subject_id,
                    CASE
                        WHEN category = 'evals' THEN opened_at::text
                        WHEN category = 'environments' THEN metadata->>'underlying_system_id'
                        ELSE NULL
-                   END AS extra1,
-                   CASE
-                       WHEN category = 'environments' THEN metadata->>'underlying_system_occurrence_key'
-                       ELSE NULL
-                   END AS extra2
+                   END AS extra
             FROM attention_occurrences
             WHERE resolved_at IS NULL
         ) grouped
-        GROUP BY category, subject_id, extra1, extra2
+        GROUP BY category, subject_id, extra
         HAVING COUNT(*) > 1
         "#,
     )
@@ -1191,14 +1205,9 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
 
     let mut total_resolved = 0usize;
 
-    for (category, subject_id, extra1, extra2) in groups {
-        // Each branch below uses an explicit, category-specific predicate
-        // (never a generic "$n IS NULL means match anything" pattern) for
-        // the canonical lookup, the dismissal migration, and the
-        // resolve-others step, so NULL extras can never widen a match
-        // beyond the intended episode.
-        let canonical_id: Option<Uuid> = if category == "evals" {
-            sqlx::query_scalar(
+    for (category, subject_id, extra) in groups {
+        if category == "evals" {
+            let canonical_id: Option<Uuid> = sqlx::query_scalar(
                 r#"
                 SELECT id FROM attention_occurrences
                 WHERE category = 'evals' AND subject_id = $1 AND resolved_at IS NULL
@@ -1209,53 +1218,15 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
                 "#,
             )
             .bind(&subject_id)
-            .bind(&extra1)
+            .bind(&extra)
             .fetch_optional(&mut *tx)
             .await
-            .context("failed to find canonical eval occurrence")?
-        } else if category == "environments" {
-            sqlx::query_scalar(
-                r#"
-                SELECT id FROM attention_occurrences
-                WHERE category = 'environments' AND subject_id = $1 AND resolved_at IS NULL
-                  AND (metadata->>'underlying_system_id') IS NOT DISTINCT FROM $2
-                  AND (metadata->>'underlying_system_occurrence_key') IS NOT DISTINCT FROM $3
-                ORDER BY opened_at ASC, id ASC
-                LIMIT 1
-                FOR UPDATE
-                "#,
-            )
-            .bind(&subject_id)
-            .bind(&extra1)
-            .bind(&extra2)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("failed to find canonical environment occurrence")?
-        } else {
-            sqlx::query_scalar(
-                r#"
-                SELECT id FROM attention_occurrences
-                WHERE category = $1 AND subject_id = $2 AND resolved_at IS NULL
-                ORDER BY opened_at ASC, id ASC
-                LIMIT 1
-                FOR UPDATE
-                "#,
-            )
-            .bind(&category)
-            .bind(&subject_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("failed to find canonical occurrence")?
-        };
+            .context("failed to find canonical eval occurrence")?;
 
-        let Some(canonical_id) = canonical_id else {
-            continue;
-        };
+            let Some(canonical_id) = canonical_id else {
+                continue;
+            };
 
-        // Migrate dismissals from the duplicate rows to the canonical row so
-        // a user who dismissed a duplicate does not see the badge reappear.
-        // Scoped identically to the canonical lookup above in every branch.
-        if category == "evals" {
             sqlx::query(
                 r#"
                 INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at)
@@ -1270,7 +1241,7 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
                 "#,
             )
             .bind(&subject_id)
-            .bind(&extra1)
+            .bind(&extra)
             .bind(canonical_id)
             .execute(&mut *tx)
             .await
@@ -1286,34 +1257,84 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
                 "#,
             )
             .bind(&subject_id)
-            .bind(&extra1)
+            .bind(&extra)
             .bind(canonical_id)
             .execute(&mut *tx)
             .await
             .context("failed to resolve duplicate eval occurrences during dedupe")?;
             total_resolved += result.rows_affected() as usize;
-        } else if category == "environments" {
+        } else if category == "builds" {
+            let canonical_id: Option<Uuid> = sqlx::query_scalar(
+                r#"
+                SELECT id FROM attention_occurrences
+                WHERE category = 'builds' AND subject_id = $1 AND resolved_at IS NULL
+                ORDER BY opened_at ASC, id ASC
+                LIMIT 1
+                FOR UPDATE
+                "#,
+            )
+            .bind(&subject_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("failed to find canonical build occurrence")?;
+
+            let Some(canonical_id) = canonical_id else {
+                continue;
+            };
+
             sqlx::query(
                 r#"
                 INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at)
-                SELECT uad.user_id, $4, MIN(uad.dismissed_at)
+                SELECT uad.user_id, $2, MIN(uad.dismissed_at)
                 FROM user_attention_dismissals uad
                 JOIN attention_occurrences ao ON ao.id = uad.occurrence_id
-                WHERE ao.category = 'environments' AND ao.subject_id = $1 AND ao.resolved_at IS NULL
-                  AND (ao.metadata->>'underlying_system_id') IS NOT DISTINCT FROM $2
-                  AND (ao.metadata->>'underlying_system_occurrence_key') IS NOT DISTINCT FROM $3
-                  AND ao.id <> $4
+                WHERE ao.category = 'builds' AND ao.subject_id = $1 AND ao.resolved_at IS NULL
+                  AND ao.id <> $2
                 GROUP BY uad.user_id
                 ON CONFLICT (user_id, occurrence_id) DO NOTHING
                 "#,
             )
             .bind(&subject_id)
-            .bind(&extra1)
-            .bind(&extra2)
             .bind(canonical_id)
             .execute(&mut *tx)
             .await
-            .context("failed to migrate environment dismissals during dedupe")?;
+            .context("failed to migrate build dismissals during dedupe")?;
+
+            let result = sqlx::query(
+                r#"
+                UPDATE attention_occurrences
+                SET resolved_at = NOW()
+                WHERE category = 'builds' AND subject_id = $1 AND resolved_at IS NULL
+                  AND id <> $2
+                "#,
+            )
+            .bind(&subject_id)
+            .bind(canonical_id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to resolve duplicate build occurrences during dedupe")?;
+            total_resolved += result.rows_affected() as usize;
+        } else if category == "environments" {
+            // Keep-freshest, never migrate dismissals (see doc comment).
+            let canonical_id: Option<Uuid> = sqlx::query_scalar(
+                r#"
+                SELECT id FROM attention_occurrences
+                WHERE category = 'environments' AND subject_id = $1 AND resolved_at IS NULL
+                  AND (metadata->>'underlying_system_id') IS NOT DISTINCT FROM $2
+                ORDER BY last_observed_at DESC, id DESC
+                LIMIT 1
+                FOR UPDATE
+                "#,
+            )
+            .bind(&subject_id)
+            .bind(&extra)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("failed to find canonical environment occurrence")?;
+
+            let Some(canonical_id) = canonical_id else {
+                continue;
+            };
 
             let result = sqlx::query(
                 r#"
@@ -1321,37 +1342,40 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
                 SET resolved_at = NOW()
                 WHERE category = 'environments' AND subject_id = $1 AND resolved_at IS NULL
                   AND (metadata->>'underlying_system_id') IS NOT DISTINCT FROM $2
-                  AND (metadata->>'underlying_system_occurrence_key') IS NOT DISTINCT FROM $3
-                  AND id <> $4
+                  AND id <> $3
                 "#,
             )
             .bind(&subject_id)
-            .bind(&extra1)
-            .bind(&extra2)
+            .bind(&extra)
             .bind(canonical_id)
             .execute(&mut *tx)
             .await
             .context("failed to resolve duplicate environment occurrences during dedupe")?;
             total_resolved += result.rows_affected() as usize;
         } else {
-            sqlx::query(
+            // Keep-freshest, never migrate dismissals (see doc comment).
+            // Covers systems, flakes, cves, and any future/unlisted
+            // category by default -- the safe behavior, not the merging
+            // one, is what a category gets unless explicitly allowlisted
+            // above as provably safe to merge.
+            let canonical_id: Option<Uuid> = sqlx::query_scalar(
                 r#"
-                INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at)
-                SELECT uad.user_id, $3, MIN(uad.dismissed_at)
-                FROM user_attention_dismissals uad
-                JOIN attention_occurrences ao ON ao.id = uad.occurrence_id
-                WHERE ao.category = $1 AND ao.subject_id = $2 AND ao.resolved_at IS NULL
-                  AND ao.id <> $3
-                GROUP BY uad.user_id
-                ON CONFLICT (user_id, occurrence_id) DO NOTHING
+                SELECT id FROM attention_occurrences
+                WHERE category = $1 AND subject_id = $2 AND resolved_at IS NULL
+                ORDER BY last_observed_at DESC, id DESC
+                LIMIT 1
+                FOR UPDATE
                 "#,
             )
             .bind(&category)
             .bind(&subject_id)
-            .bind(canonical_id)
-            .execute(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await
-            .context("failed to migrate dismissals during dedupe")?;
+            .context("failed to find canonical occurrence")?;
+
+            let Some(canonical_id) = canonical_id else {
+                continue;
+            };
 
             let result = sqlx::query(
                 r#"
@@ -2052,10 +2076,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn test_dedupe_evals_merges_only_exact_timestamp_duplicates() {
-        // Two rows for the SAME failure event (identical opened_at, as the
-        // historical float-key-encoding bug could produce: one row keyed by
-        // the Rust encoding, one by a slightly different SQL encoding, both
-        // for the same evaluation_completed_at) are true duplicates and
+        // Two rows for the SAME failure event (identical opened_at, as any
+        // bug that computes two different source_occurrence_key values for
+        // one evaluation_completed_at would produce, regardless of the
+        // specific encoding mismatch involved) are true duplicates and
         // should be merged, including migrating the dismissal between them.
         let pool = test_pool().await;
         let flake_id = insert_throwaway_flake(&pool).await;
@@ -2319,15 +2343,20 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn test_dedupe_environments_preserves_distinct_system_health_episodes() {
-        // Regression test for round 8: two rows for the SAME environment
-        // and the SAME underlying system, but with different
-        // underlying_system_occurrence_key values, represent two distinct
-        // system-health episodes (e.g. an old critical episode and a later,
-        // separate offline episode for that same system). Grouping by
-        // underlying_system_id alone (round 7's fix) would still wrongly
-        // merge these and could transfer a dismissal from the old episode
-        // onto the new one, or vice versa.
+    async fn test_dedupe_environments_keeps_freshest_episode_without_migrating_dismissal() {
+        // Regression test for round 9: two rows for the SAME environment
+        // and the SAME underlying system, from two distinct system-health
+        // episodes (e.g. an old, dismissed critical episode left open by a
+        // historical bug, and a later, separate offline episode), must
+        // resolve to keeping only the freshest (most recently observed) row
+        // open -- and the surviving row must NEVER inherit the older row's
+        // dismissal. A system can also move environments and back (A -> B
+        // -> A) without its own episode key changing, so
+        // underlying_system_occurrence_key cannot be used as a reliable
+        // "same episode" distinguisher for environments; grouping is by
+        // (environment, underlying_system_id) only, and any resulting
+        // "duplicate" is resolved via keep-freshest with no dismissal
+        // migration, never a blind merge.
         let pool = test_pool().await;
         let env_id = insert_throwaway_environment(&pool, "dedupe-episodes").await;
         let system_id = insert_throwaway_system(&pool, env_id).await;
@@ -2382,9 +2411,25 @@ mod tests {
             .await
             .expect("dedupe should succeed");
         assert_eq!(
-            resolved, 0,
-            "distinct system-health episodes for the same system must not be treated as duplicates"
+            resolved, 1,
+            "the stale, older episode must be resolved, keeping only the freshest open"
         );
+
+        let old_resolved: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
+                .bind(occ_old)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(old_resolved.is_some(), "the older episode must be resolved");
+
+        let new_resolved: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
+                .bind(occ_new)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(new_resolved.is_none(), "the freshest episode must remain open");
 
         let new_dismissed: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
@@ -2396,7 +2441,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             new_dismissed, 0,
-            "the new episode must not inherit the old episode's dismissal"
+            "the new episode must NEVER inherit the old episode's dismissal"
         );
 
         let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
@@ -2476,5 +2521,171 @@ mod tests {
             .execute(&pool)
             .await;
         cleanup_environment(&pool, env_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_dedupe_systems_keeps_freshest_without_migrating_dismissal() {
+        // Regression test for round 9: systems are episode-based
+        // (transition_by_subject mints a fresh episode UUID on every
+        // reason change), so two open rows for one system are NOT provably
+        // the same episode -- e.g. a dismissed, unresolved critical episode
+        // S1 followed by a genuinely new, later critical episode S2 (a
+        // historical bug could leave S1 open across a recovery). Blindly
+        // merging and migrating S1's dismissal onto S2 would silently hide
+        // the new incident. The repair must keep only the freshest
+        // (most-recently-observed) row open and never transfer a dismissal.
+        let pool = test_pool().await;
+        let env_id = insert_throwaway_environment(&pool, "dedupe-sys").await;
+        let system_id = insert_throwaway_system(&pool, env_id).await;
+        let user_id = insert_throwaway_user(&pool).await;
+        let subject_id = system_id.to_string();
+
+        let s1 = Uuid::new_v4();
+        let s2 = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at, metadata) \
+             VALUES ($1, 'systems', 'system_health', $2, $3, now() - interval '2 hours', now() - interval '2 hours', $4::jsonb)",
+        )
+        .bind(s1)
+        .bind(&subject_id)
+        .bind(format!("system:{subject_id}:critical:{}", Uuid::new_v4()))
+        .bind(serde_json::json!({"reason": "critical"}))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at) VALUES ($1, $2, NOW())",
+        )
+        .bind(user_id)
+        .bind(s1)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at, metadata) \
+             VALUES ($1, 'systems', 'system_health', $2, $3, now(), now(), $4::jsonb)",
+        )
+        .bind(s2)
+        .bind(&subject_id)
+        .bind(format!("system:{subject_id}:critical:{}", Uuid::new_v4()))
+        .bind(serde_json::json!({"reason": "critical"}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let resolved = dedupe_open_occurrences(&pool)
+            .await
+            .expect("dedupe should succeed");
+        assert_eq!(resolved, 1, "the stale episode must be resolved");
+
+        let s1_resolved: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
+                .bind(s1)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(s1_resolved.is_some(), "the older episode must be resolved");
+
+        let s2_resolved: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
+                .bind(s2)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(s2_resolved.is_none(), "the freshest episode must remain open");
+
+        let s2_dismissed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
+        )
+        .bind(user_id)
+        .bind(s2)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            s2_dismissed, 0,
+            "the new episode must NEVER inherit the old episode's dismissal"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&subject_id)
+            .execute(&pool)
+            .await;
+        cleanup_environment(&pool, env_id).await;
+        cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_dedupe_cves_defaults_to_safe_no_migration_behavior() {
+        // Defense-in-depth: `cves` is not explicitly allowlisted as safe to
+        // merge (only `evals` and `builds` are; `environments` has its own
+        // dedicated keep-freshest branch) so it falls through to the
+        // generic default branch. Like systems/flakes, cve occurrences are
+        // episode-based (a fresh episode UUID per fleet-relevance episode),
+        // so this exercises the same "default to safe, never migrate"
+        // behavior via the actual fallback path a genuinely new category
+        // would also hit, without requiring a schema change to fabricate a
+        // fictional category (the category column has a CHECK constraint).
+        let pool = test_pool().await;
+        let user_id = insert_throwaway_user(&pool).await;
+        let subject_id = "CVE-2024-TEST-0001".to_string();
+
+        let older = Uuid::new_v4();
+        let newer = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
+             VALUES ($1, 'cves', 'cve', $2, $3, now() - interval '1 hour', now() - interval '1 hour')",
+        )
+        .bind(older)
+        .bind(&subject_id)
+        .bind(format!("cve:{subject_id}:{}", Uuid::new_v4()))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at) VALUES ($1, $2, NOW())",
+        )
+        .bind(user_id)
+        .bind(older)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
+             VALUES ($1, 'cves', 'cve', $2, $3, now(), now())",
+        )
+        .bind(newer)
+        .bind(&subject_id)
+        .bind(format!("cve:{subject_id}:{}", Uuid::new_v4()))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let resolved = dedupe_open_occurrences(&pool)
+            .await
+            .expect("dedupe should succeed");
+        assert_eq!(resolved, 1, "the older episode must be resolved");
+
+        let newer_dismissed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
+        )
+        .bind(user_id)
+        .bind(newer)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            newer_dismissed, 0,
+            "a category not explicitly allowlisted as mergeable must default to never migrating dismissals"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&subject_id)
+            .execute(&pool)
+            .await;
+        cleanup_user(&pool, user_id).await;
     }
 }

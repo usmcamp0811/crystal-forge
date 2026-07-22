@@ -502,10 +502,20 @@ pub async fn sync_flake_recorded(
         return Err(e);
     }
 
-    // Update final sync status inside the same transaction.
+    // Update final sync status inside the same transaction. `last_synced_at`
+    // is set unconditionally alongside `last_sync_at` -- unlike
+    // `last_sync_at` (overwritten on every attempt, success or failure),
+    // `last_synced_at` is ONLY ever written here, so it monotonically
+    // advances only on success and survives any later failure. This is
+    // what lets the attention lifecycle detect "a successful sync happened
+    // since this open occurrence was last observed" (see
+    // `transition_flake_attention_to_error_if_current` and
+    // `reconcile_single_stale_flake`), so a stale occurrence left behind by
+    // a crashed resolution is never silently reused for an unrelated,
+    // later incident.
     let status_update = sqlx::query(
         "UPDATE flakes \
-         SET sync_status = 'synced', last_sync_at = now(), last_sync_error = NULL \
+         SET sync_status = 'synced', last_sync_at = now(), last_sync_error = NULL, last_synced_at = now() \
          WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $2",
     )
     .bind(flake_id)
@@ -630,7 +640,17 @@ async fn record_sync_error(
 /// [`transition_flake_attention_to_error_if_current`] and the stale-flake
 /// reconciler, so the recheck-then-act sequence is atomic with respect to
 /// any concurrent attention transition for this flake.
-async fn resolve_flake_attention_if_current(pool: &PgPool, flake_id: i32, attempt_id: Uuid) {
+///
+/// `pub(crate)` so the periodic reconciliation sweep
+/// (`tasks::attention_reconciliation::reconcile_synced_flakes_missing_resolution`)
+/// can invoke it as a safety net for flakes whose successful sync commit
+/// succeeded but whose attention resolution was lost to a process crash or
+/// transient failure between the two (separate, best-effort) operations.
+pub(crate) async fn resolve_flake_attention_if_current(
+    pool: &PgPool,
+    flake_id: i32,
+    attempt_id: Uuid,
+) {
     let subject_id = flake_id.to_string();
 
     let mut tx = match pool.begin().await {
@@ -707,6 +727,19 @@ async fn resolve_flake_attention_if_current(pool: &PgPool, flake_id: i32, attemp
 /// advisory lock, so this recheck-then-act sequence is atomic with respect
 /// to any concurrent attention transition for this flake.
 ///
+/// Beyond that direct race, an existing `sync_error` occurrence found under
+/// the lock is only ever *observed* (reused) if no successful sync has
+/// completed since it was last observed — checked via `flakes.last_synced_at`,
+/// which (unlike `last_sync_at`) is never clobbered by a later failure. Without
+/// this check: attempt A fails and opens/observes occurrence O (user dismisses
+/// it); attempt B succeeds but its `resolve_flake_attention_if_current` call
+/// is lost to a crash, so O is never resolved; attempt C later fails and would
+/// find O still open with a matching reason and simply observe it — silently
+/// inheriting A's original `opened_at` and the user's dismissal for what is,
+/// from the user's point of view, a brand new failure they have never seen.
+/// When staleness is detected, O is resolved and a fresh occurrence is opened
+/// instead, exactly as if no prior occurrence existed.
+///
 /// `pub(crate)` so the periodic reconciliation sweep
 /// (`tasks::attention_reconciliation::reconcile_errored_flakes`) can invoke
 /// it as a safety net for flakes whose `sync_status = 'error'` commit
@@ -743,36 +776,43 @@ pub(crate) async fn transition_flake_attention_to_error_if_current(
     // result? If a newer attempt has since started or succeeded, do
     // nothing — that newer attempt owns the flake's attention state now.
     //
-    // `opened_at` is taken from the flake's own `last_sync_at` — the
-    // authoritative time `record_sync_error` recorded this failure — rather
-    // than `statement_timestamp()`/`NOW()`/a pre-transaction `Utc::now()`.
-    // This function is called both immediately after a failure (where
-    // `last_sync_at` is effectively "now" anyway) AND, via the periodic
-    // `reconcile_errored_flakes` safety net, potentially long after a lost
-    // attention transition is being recovered. Using "now" in the recovery
-    // case would open a fresh occurrence with a brand-new 24-hour attention
-    // window for a failure that may be days old, resurfacing it as a new
-    // sidebar alert. `COALESCE` guards the (should-not-happen) case where
-    // `last_sync_at` is NULL despite `sync_status = 'error'`.
-    let recheck: Option<(bool, DateTime<Utc>)> = match sqlx::query_as(
-        "SELECT sync_attempt_id = $2 AND sync_status = 'error', COALESCE(last_sync_at, statement_timestamp()) FROM flakes WHERE id = $1",
-    )
-    .bind(flake_id)
-    .bind(attempt_id)
-    .fetch_optional(&mut *tx)
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("failed to recheck flake state before opening attention: {e:#}");
-            let _ = tx.rollback().await;
-            return;
-        }
-    };
+    // Two DISTINCT timestamps are fetched, not one:
+    //   - `opened_at` (from `last_sync_at`): the authoritative time
+    //     `record_sync_error` recorded THIS failure. Used for the
+    //     occurrence's `opened_at` (and, on a fresh insert, its initial
+    //     `last_observed_at`) so a recovered historical failure does not
+    //     get a brand-new 24-hour attention window dated "now".
+    //   - `observed_at` (`statement_timestamp()`, i.e. after the lock wait,
+    //     not `NOW()`/`transaction_timestamp()` which are fixed at
+    //     transaction start): used to bump `last_observed_at` when
+    //     observing an EXISTING occurrence, so repeated reconciliation
+    //     sweeps against a still-ongoing historical incident keep
+    //     `last_observed_at` advancing instead of being pinned to the
+    //     original (possibly days-old) failure time forever.
+    // `last_synced_at` is also fetched for the staleness check described
+    // above.
+    let recheck: Option<(bool, DateTime<Utc>, DateTime<Utc>, Option<DateTime<Utc>>)> =
+        match sqlx::query_as(
+            "SELECT sync_attempt_id = $2 AND sync_status = 'error', \
+                    COALESCE(last_sync_at, statement_timestamp()), statement_timestamp(), last_synced_at \
+             FROM flakes WHERE id = $1",
+        )
+        .bind(flake_id)
+        .bind(attempt_id)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("failed to recheck flake state before opening attention: {e:#}");
+                let _ = tx.rollback().await;
+                return;
+            }
+        };
 
-    let (still_current, opened_at) = match recheck {
-        Some((current, ts)) => (current, ts),
-        None => (false, Utc::now()),
+    let (still_current, opened_at, observed_at, last_synced_at) = match recheck {
+        Some((current, opened, observed, synced)) => (current, opened, observed, synced),
+        None => (false, Utc::now(), Utc::now(), None),
     };
 
     if !still_current {
@@ -785,12 +825,17 @@ pub(crate) async fn transition_flake_attention_to_error_if_current(
             "reason".to_string(),
             serde_json::Value::String("sync_error".to_string()),
         );
+        map.insert(
+            "sync_attempt_id".to_string(),
+            serde_json::Value::String(attempt_id.to_string()),
+        );
     }
 
-    // Check for an already-open occurrence with the same reason.
-    let existing: Option<Uuid> = match sqlx::query_scalar(
+    // Check for an already-open occurrence with the same reason, also
+    // fetching its last_observed_at for the staleness check below.
+    let existing: Option<(Uuid, DateTime<Utc>)> = match sqlx::query_as(
         r#"
-        SELECT id FROM attention_occurrences
+        SELECT id, last_observed_at FROM attention_occurrences
         WHERE category = 'flakes'
           AND subject_id = $1
           AND resolved_at IS NULL
@@ -812,14 +857,21 @@ pub(crate) async fn transition_flake_attention_to_error_if_current(
         }
     };
 
-    if let Some(id) = existing {
+    // An existing occurrence is only reusable if no successful sync has
+    // completed since it was last observed. Otherwise it belongs to an
+    // earlier, now-superseded incident and must not be reused for this one.
+    let existing = existing.filter(|(_, last_observed_at)| {
+        !matches!(last_synced_at, Some(synced) if synced > *last_observed_at)
+    });
+
+    if let Some((id, _)) = existing {
         if let Err(e) = sqlx::query(
             "UPDATE attention_occurrences \
              SET metadata = CASE WHEN $1 >= last_observed_at THEN $2 ELSE metadata END, \
                  last_observed_at = GREATEST(last_observed_at, $1) \
              WHERE id = $3",
         )
-        .bind(opened_at)
+        .bind(observed_at)
         .bind(&metadata)
         .bind(id)
         .execute(&mut *tx)
@@ -830,9 +882,11 @@ pub(crate) async fn transition_flake_attention_to_error_if_current(
             return;
         }
     } else {
-        // Reason differs or no occurrence exists — resolve all open
-        // occurrences (e.g. a stale_sync from the reconciler) and insert a
-        // new sync_error occurrence.
+        // Reason differs, occurrence is stale (superseded by an intervening
+        // success), or none exists — resolve all open occurrences (e.g. a
+        // stale_sync from the reconciler, or a stale sync_error from a
+        // resolved-then-recurred incident) and insert a new sync_error
+        // occurrence.
         if let Err(e) = sqlx::query(
             "UPDATE attention_occurrences SET resolved_at = NOW() \
              WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
@@ -855,12 +909,13 @@ pub(crate) async fn transition_flake_attention_to_error_if_current(
                 category, subject_type, subject_id, source_occurrence_key,
                 opened_at, last_observed_at, metadata
             )
-            VALUES ('flakes', 'flake_sync', $1, $2, $3, $3, $4)
+            VALUES ('flakes', 'flake_sync', $1, $2, $3, $4, $5)
             "#,
         )
         .bind(&subject_id)
         .bind(source_key)
         .bind(opened_at)
+        .bind(observed_at)
         .bind(&metadata)
         .execute(&mut *tx)
         .await
@@ -2451,6 +2506,29 @@ mod tests {
         .unwrap()
     }
 
+    async fn insert_throwaway_user(pool: &sqlx::PgPool) -> uuid::Uuid {
+        let user_id = uuid::Uuid::new_v4();
+        let short = user_id.simple().to_string()[..12].to_string();
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email, user_type) \
+             VALUES ($1, $2, 'Test', 'User', $3, 'human')",
+        )
+        .bind(user_id)
+        .bind(format!("att-{short}"))
+        .bind(format!("att-{short}@example.com"))
+        .execute(pool)
+        .await
+        .expect("failed to insert throwaway test user");
+        user_id
+    }
+
+    async fn cleanup_user(pool: &sqlx::PgPool, user_id: uuid::Uuid) {
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(pool)
+            .await;
+    }
+
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn resolve_flake_attention_if_current_skips_when_superseded_by_newer_error() {
@@ -2583,6 +2661,195 @@ mod tests {
             open_flake_count(&pool, flake_id).await,
             0,
             "a stale error handler must not open an occurrence after a newer success"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
+            .bind(flake_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn transition_flake_attention_to_error_if_current_does_not_inherit_dismissal_across_intervening_success() {
+        // Regression test for round 9: attempt A fails and opens (then the
+        // user dismisses) occurrence O. Attempt B succeeds, but its
+        // resolve_flake_attention_if_current call is lost (simulated here
+        // by never calling it), so O is never resolved. Attempt C later
+        // fails. Without the last_synced_at staleness check, C would find
+        // O still open with a matching reason and simply observe/reuse it
+        // -- silently inheriting A's dismissal for what is, from the
+        // user's perspective, a brand new failure they have never seen.
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let user_id = insert_throwaway_user(&pool).await;
+
+        let attempt_a = uuid::Uuid::new_v4();
+        let attempt_b = uuid::Uuid::new_v4();
+        let attempt_c = uuid::Uuid::new_v4();
+
+        // Attempt A fails, opens occurrence O.
+        sqlx::query("UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2 WHERE id = $1")
+            .bind(flake_id)
+            .bind(attempt_a)
+            .execute(&pool)
+            .await
+            .unwrap();
+        transition_flake_attention_to_error_if_current(
+            &pool,
+            flake_id,
+            attempt_a,
+            serde_json::json!({"flake_id": flake_id}),
+        )
+        .await;
+        let o: uuid::Uuid = sqlx::query_scalar(
+            "SELECT id FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(flake_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // User dismisses O.
+        sqlx::query(
+            "INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at) VALUES ($1, $2, NOW())",
+        )
+        .bind(user_id)
+        .bind(o)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Attempt B succeeds -- sets last_synced_at, but its attention
+        // resolution is simulated as lost (never called).
+        sqlx::query(
+            "UPDATE flakes SET sync_status = 'synced', sync_attempt_id = $2, last_synced_at = now() WHERE id = $1",
+        )
+        .bind(flake_id)
+        .bind(attempt_b)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Attempt C fails.
+        sqlx::query("UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2 WHERE id = $1")
+            .bind(flake_id)
+            .bind(attempt_c)
+            .execute(&pool)
+            .await
+            .unwrap();
+        transition_flake_attention_to_error_if_current(
+            &pool,
+            flake_id,
+            attempt_c,
+            serde_json::json!({"flake_id": flake_id}),
+        )
+        .await;
+
+        // A NEW occurrence must exist, distinct from O, and NOT dismissed.
+        let current: (uuid::Uuid, bool) = sqlx::query_as(
+            "SELECT ao.id, EXISTS (SELECT 1 FROM user_attention_dismissals uad WHERE uad.user_id = $2 AND uad.occurrence_id = ao.id) \
+             FROM attention_occurrences ao \
+             WHERE ao.category = 'flakes' AND ao.subject_id = $1 AND ao.resolved_at IS NULL",
+        )
+        .bind(flake_id.to_string())
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_ne!(
+            current.0, o,
+            "attempt C must open a NEW occurrence, not reuse O from attempt A"
+        );
+        assert!(
+            !current.1,
+            "the new occurrence for attempt C must NOT inherit attempt A's dismissal"
+        );
+
+        // O itself must now be resolved (superseded).
+        let o_resolved: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
+                .bind(o)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(o_resolved.is_some(), "O must be resolved as superseded");
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
+            .bind(flake_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+        cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn transition_flake_attention_to_error_if_current_reuses_occurrence_without_intervening_success() {
+        // Sanity counterpart: when NO success has occurred since the
+        // existing occurrence was last observed, it IS safe to reuse
+        // (observe) it -- this is the normal, common case of a flake
+        // failing repeatedly without ever recovering in between.
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+
+        let attempt_a = uuid::Uuid::new_v4();
+        let attempt_b = uuid::Uuid::new_v4();
+
+        sqlx::query("UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2 WHERE id = $1")
+            .bind(flake_id)
+            .bind(attempt_a)
+            .execute(&pool)
+            .await
+            .unwrap();
+        transition_flake_attention_to_error_if_current(
+            &pool,
+            flake_id,
+            attempt_a,
+            serde_json::json!({"flake_id": flake_id}),
+        )
+        .await;
+        let o: uuid::Uuid = sqlx::query_scalar(
+            "SELECT id FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(flake_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Attempt B fails too, with no intervening success (last_synced_at
+        // remains NULL / unchanged).
+        sqlx::query("UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2 WHERE id = $1")
+            .bind(flake_id)
+            .bind(attempt_b)
+            .execute(&pool)
+            .await
+            .unwrap();
+        transition_flake_attention_to_error_if_current(
+            &pool,
+            flake_id,
+            attempt_b,
+            serde_json::json!({"flake_id": flake_id}),
+        )
+        .await;
+
+        let still_open: uuid::Uuid = sqlx::query_scalar(
+            "SELECT id FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(flake_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            still_open, o,
+            "with no intervening success, the SAME occurrence must be reused, not a new one opened"
         );
 
         let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
