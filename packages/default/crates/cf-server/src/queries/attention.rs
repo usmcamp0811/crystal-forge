@@ -1096,27 +1096,33 @@ pub async fn cleanup(
 ///
 /// The base invariant is: at most one open (`resolved_at IS NULL`)
 /// occurrence per `(category, subject_id)`. Two categories need a narrower
-/// identity than plain `(category, subject_id)` because `subject_id` alone
-/// does not uniquely identify one incident for them:
+/// identity than plain `(category, subject_id)`, because for them
+/// `subject_id` alone does not uniquely identify one *episode*:
 ///
-/// * `environments` — `subject_id` is the environment id, but each
+/// * `environments` — `subject_id` is the environment id, but (a) each
 ///   contributing underlying system gets its own, independently valid,
-///   simultaneous occurrence (see [`environment_occurrence_key`]). Two
-///   critical systems in the same environment are two real incidents, not
-///   duplicates of each other. Grouping is narrowed to also include
-///   `metadata->>'underlying_system_id'`.
+///   simultaneous occurrence, and (b) two rows for the *same* system can
+///   still represent two distinct system-health episodes. Grouping is
+///   narrowed to `(underlying_system_id, underlying_system_occurrence_key)`
+///   — both, not just the system id — so dismissals are never migrated
+///   between one episode and a later, unrelated one for the same system.
 /// * `evals` — duplicate rows can carry *different*, non-interchangeable
 ///   `opened_at` values (each represents a distinct failure event at a
-///   distinct `evaluation_completed_at`). Picking the wrong one as
-///   canonical does not just merge history — it can strand the row that
-///   matches the commit's *current* failed state, causing that alert to
-///   read as permanently resolved even though the commit is still failed.
-///   The canonical choice therefore prefers the row whose `opened_at`
-///   matches the commit's live `(evaluation_status = 'failed',
-///   evaluation_completed_at)` tuple, falling back to the earliest-opened
-///   row only when no duplicate matches current state (i.e. all of them
-///   are already stale, and will be swept by the eval reconciliation
-///   safety net regardless of which is kept temporarily).
+///   distinct `evaluation_completed_at`). Grouping is narrowed to also
+///   include `opened_at`, so only rows that are exact duplicates of the
+///   *same* failure event (e.g. from the historical float-key-encoding bug,
+///   which produced two rows for one event with the same `opened_at` but
+///   different `source_occurrence_key`s) are ever merged. A row for an
+///   older, distinct failure episode is left untouched here — the eval
+///   reconciliation safety net (`reconcile_terminal_events`'s
+///   stale-occurrence pass) resolves it once it no longer matches the
+///   commit's current `(failed, evaluation_completed_at)` state, without
+///   this function ever touching (or migrating dismissals from) it.
+///
+/// Both narrowed identities use `IS NOT DISTINCT FROM` (NULL-safe equality)
+/// rather than treating a NULL extra value as a wildcard — a NULL
+/// `underlying_system_id` on some malformed legacy row must only match
+/// *other* rows that are equally NULL, not every row for that environment.
 ///
 /// For every other category, the canonical row is simply the
 /// earliest-opened one — those categories are episode/lock-protected
@@ -1151,23 +1157,31 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
         .await
         .context("failed to begin dedupe transaction")?;
 
-    // `dedup_extra` narrows identity beyond (category, subject_id) for
-    // `environments` (see doc comment). It is NULL for every other
-    // category, including `evals` — evals are still grouped by plain
-    // subject_id; only the *canonical selection* differs for evals, not
-    // the grouping identity.
-    let groups: Vec<(String, String, Option<String>)> = sqlx::query_as(
+    // `extra1`/`extra2` narrow identity beyond (category, subject_id):
+    //   evals        -> extra1 = opened_at (as text), extra2 = NULL
+    //   environments -> extra1 = underlying_system_id,
+    //                   extra2 = underlying_system_occurrence_key
+    //   everything else -> both NULL (grouping is (category, subject_id) only)
+    // Standard SQL GROUP BY treats NULL as a single group value here, which
+    // is what we want for the "everything else" case — the NULL-as-wildcard
+    // hazard only applies to the WHERE-clause lookups below, not to GROUP BY.
+    let groups: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
         r#"
-        SELECT category, subject_id, dedup_extra FROM (
+        SELECT category, subject_id, extra1, extra2 FROM (
             SELECT category, subject_id,
-                   CASE WHEN category = 'environments'
-                        THEN metadata->>'underlying_system_id'
-                        ELSE NULL
-                   END AS dedup_extra
+                   CASE
+                       WHEN category = 'evals' THEN opened_at::text
+                       WHEN category = 'environments' THEN metadata->>'underlying_system_id'
+                       ELSE NULL
+                   END AS extra1,
+                   CASE
+                       WHEN category = 'environments' THEN metadata->>'underlying_system_occurrence_key'
+                       ELSE NULL
+                   END AS extra2
             FROM attention_occurrences
             WHERE resolved_at IS NULL
         ) grouped
-        GROUP BY category, subject_id, dedup_extra
+        GROUP BY category, subject_id, extra1, extra2
         HAVING COUNT(*) > 1
         "#,
     )
@@ -1177,44 +1191,51 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
 
     let mut total_resolved = 0usize;
 
-    for (category, subject_id, dedup_extra) in groups {
+    for (category, subject_id, extra1, extra2) in groups {
+        // Each branch below uses an explicit, category-specific predicate
+        // (never a generic "$n IS NULL means match anything" pattern) for
+        // the canonical lookup, the dismissal migration, and the
+        // resolve-others step, so NULL extras can never widen a match
+        // beyond the intended episode.
         let canonical_id: Option<Uuid> = if category == "evals" {
-            // Prefer the row whose opened_at matches the commit's CURRENT
-            // failed state; only fall back to earliest-opened when none of
-            // the duplicates are the live one (in which case all of them
-            // are stale and the eval reconciliation safety net will
-            // resolve whichever is kept shortly after).
             sqlx::query_scalar(
                 r#"
-                SELECT ao.id FROM attention_occurrences ao
-                WHERE ao.category = 'evals'
-                  AND ao.subject_id = $1
-                  AND ao.resolved_at IS NULL
-                ORDER BY
-                    EXISTS (
-                        SELECT 1 FROM commits c
-                        WHERE c.id::text = ao.subject_id
-                          AND c.evaluation_status = 'failed'
-                          AND c.evaluation_completed_at = ao.opened_at
-                    ) DESC,
-                    ao.opened_at ASC,
-                    ao.id ASC
+                SELECT id FROM attention_occurrences
+                WHERE category = 'evals' AND subject_id = $1 AND resolved_at IS NULL
+                  AND opened_at = $2::timestamptz
+                ORDER BY id ASC
                 LIMIT 1
                 FOR UPDATE
                 "#,
             )
             .bind(&subject_id)
+            .bind(&extra1)
             .fetch_optional(&mut *tx)
             .await
             .context("failed to find canonical eval occurrence")?
+        } else if category == "environments" {
+            sqlx::query_scalar(
+                r#"
+                SELECT id FROM attention_occurrences
+                WHERE category = 'environments' AND subject_id = $1 AND resolved_at IS NULL
+                  AND (metadata->>'underlying_system_id') IS NOT DISTINCT FROM $2
+                  AND (metadata->>'underlying_system_occurrence_key') IS NOT DISTINCT FROM $3
+                ORDER BY opened_at ASC, id ASC
+                LIMIT 1
+                FOR UPDATE
+                "#,
+            )
+            .bind(&subject_id)
+            .bind(&extra1)
+            .bind(&extra2)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("failed to find canonical environment occurrence")?
         } else {
             sqlx::query_scalar(
                 r#"
                 SELECT id FROM attention_occurrences
-                WHERE category = $1
-                  AND subject_id = $2
-                  AND resolved_at IS NULL
-                  AND ($3::text IS NULL OR metadata->>'underlying_system_id' = $3)
+                WHERE category = $1 AND subject_id = $2 AND resolved_at IS NULL
                 ORDER BY opened_at ASC, id ASC
                 LIMIT 1
                 FOR UPDATE
@@ -1222,7 +1243,6 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
             )
             .bind(&category)
             .bind(&subject_id)
-            .bind(&dedup_extra)
             .fetch_optional(&mut *tx)
             .await
             .context("failed to find canonical occurrence")?
@@ -1234,52 +1254,121 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
 
         // Migrate dismissals from the duplicate rows to the canonical row so
         // a user who dismissed a duplicate does not see the badge reappear.
-        // Scoped by dedup_extra the same way as the canonical lookup, so an
-        // environment's dismissal migration never crosses between distinct
-        // underlying systems' incidents.
-        sqlx::query(
-            r#"
-            INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at)
-            SELECT uad.user_id, $4, MIN(uad.dismissed_at)
-            FROM user_attention_dismissals uad
-            JOIN attention_occurrences ao ON ao.id = uad.occurrence_id
-            WHERE ao.category = $1
-              AND ao.subject_id = $2
-              AND ao.resolved_at IS NULL
-              AND ao.id <> $4
-              AND ($3::text IS NULL OR ao.metadata->>'underlying_system_id' = $3)
-            GROUP BY uad.user_id
-            ON CONFLICT (user_id, occurrence_id) DO NOTHING
-            "#,
-        )
-        .bind(&category)
-        .bind(&subject_id)
-        .bind(&dedup_extra)
-        .bind(canonical_id)
-        .execute(&mut *tx)
-        .await
-        .context("failed to migrate dismissals during dedupe")?;
+        // Scoped identically to the canonical lookup above in every branch.
+        if category == "evals" {
+            sqlx::query(
+                r#"
+                INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at)
+                SELECT uad.user_id, $3, MIN(uad.dismissed_at)
+                FROM user_attention_dismissals uad
+                JOIN attention_occurrences ao ON ao.id = uad.occurrence_id
+                WHERE ao.category = 'evals' AND ao.subject_id = $1 AND ao.resolved_at IS NULL
+                  AND ao.opened_at = $2::timestamptz
+                  AND ao.id <> $3
+                GROUP BY uad.user_id
+                ON CONFLICT (user_id, occurrence_id) DO NOTHING
+                "#,
+            )
+            .bind(&subject_id)
+            .bind(&extra1)
+            .bind(canonical_id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to migrate eval dismissals during dedupe")?;
 
-        let result = sqlx::query(
-            r#"
-            UPDATE attention_occurrences
-            SET resolved_at = NOW()
-            WHERE category = $1
-              AND subject_id = $2
-              AND resolved_at IS NULL
-              AND id <> $4
-              AND ($3::text IS NULL OR metadata->>'underlying_system_id' = $3)
-            "#,
-        )
-        .bind(&category)
-        .bind(&subject_id)
-        .bind(&dedup_extra)
-        .bind(canonical_id)
-        .execute(&mut *tx)
-        .await
-        .context("failed to resolve duplicate occurrences during dedupe")?;
+            let result = sqlx::query(
+                r#"
+                UPDATE attention_occurrences
+                SET resolved_at = NOW()
+                WHERE category = 'evals' AND subject_id = $1 AND resolved_at IS NULL
+                  AND opened_at = $2::timestamptz
+                  AND id <> $3
+                "#,
+            )
+            .bind(&subject_id)
+            .bind(&extra1)
+            .bind(canonical_id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to resolve duplicate eval occurrences during dedupe")?;
+            total_resolved += result.rows_affected() as usize;
+        } else if category == "environments" {
+            sqlx::query(
+                r#"
+                INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at)
+                SELECT uad.user_id, $4, MIN(uad.dismissed_at)
+                FROM user_attention_dismissals uad
+                JOIN attention_occurrences ao ON ao.id = uad.occurrence_id
+                WHERE ao.category = 'environments' AND ao.subject_id = $1 AND ao.resolved_at IS NULL
+                  AND (ao.metadata->>'underlying_system_id') IS NOT DISTINCT FROM $2
+                  AND (ao.metadata->>'underlying_system_occurrence_key') IS NOT DISTINCT FROM $3
+                  AND ao.id <> $4
+                GROUP BY uad.user_id
+                ON CONFLICT (user_id, occurrence_id) DO NOTHING
+                "#,
+            )
+            .bind(&subject_id)
+            .bind(&extra1)
+            .bind(&extra2)
+            .bind(canonical_id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to migrate environment dismissals during dedupe")?;
 
-        total_resolved += result.rows_affected() as usize;
+            let result = sqlx::query(
+                r#"
+                UPDATE attention_occurrences
+                SET resolved_at = NOW()
+                WHERE category = 'environments' AND subject_id = $1 AND resolved_at IS NULL
+                  AND (metadata->>'underlying_system_id') IS NOT DISTINCT FROM $2
+                  AND (metadata->>'underlying_system_occurrence_key') IS NOT DISTINCT FROM $3
+                  AND id <> $4
+                "#,
+            )
+            .bind(&subject_id)
+            .bind(&extra1)
+            .bind(&extra2)
+            .bind(canonical_id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to resolve duplicate environment occurrences during dedupe")?;
+            total_resolved += result.rows_affected() as usize;
+        } else {
+            sqlx::query(
+                r#"
+                INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at)
+                SELECT uad.user_id, $3, MIN(uad.dismissed_at)
+                FROM user_attention_dismissals uad
+                JOIN attention_occurrences ao ON ao.id = uad.occurrence_id
+                WHERE ao.category = $1 AND ao.subject_id = $2 AND ao.resolved_at IS NULL
+                  AND ao.id <> $3
+                GROUP BY uad.user_id
+                ON CONFLICT (user_id, occurrence_id) DO NOTHING
+                "#,
+            )
+            .bind(&category)
+            .bind(&subject_id)
+            .bind(canonical_id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to migrate dismissals during dedupe")?;
+
+            let result = sqlx::query(
+                r#"
+                UPDATE attention_occurrences
+                SET resolved_at = NOW()
+                WHERE category = $1 AND subject_id = $2 AND resolved_at IS NULL
+                  AND id <> $3
+                "#,
+            )
+            .bind(&category)
+            .bind(&subject_id)
+            .bind(canonical_id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to resolve duplicate occurrences during dedupe")?;
+            total_resolved += result.rows_affected() as usize;
+        }
     }
 
     tx.commit()
@@ -1818,6 +1907,14 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn test_dedupe_open_occurrences_keeps_earliest_and_migrates_dismissals() {
+        // Uses `builds` (not `evals` or `environments`) deliberately: this
+        // test exercises the GENERIC dedup path (grouping by plain
+        // (category, subject_id), earliest-wins canonical selection).
+        // `evals` and `environments` have category-specific identity
+        // narrowing (see the doc comment on dedupe_open_occurrences and
+        // the dedicated eval/environment episode tests), under which two
+        // rows an hour apart like these would legitimately be two distinct
+        // episodes rather than duplicates of each other.
         let pool = test_pool().await;
         let user_id = insert_throwaway_user(&pool).await;
         let subject_id = Uuid::new_v4().to_string();
@@ -1828,12 +1925,12 @@ mod tests {
         // make the test pass regardless of the ORDER BY.
         let newer_id = Uuid::new_v4();
         let older_id = Uuid::new_v4();
-        let newer_key = format!("evals_dedupe_test:{subject_id}:newer");
-        let older_key = format!("evals_dedupe_test:{subject_id}:older");
+        let newer_key = format!("builds_dedupe_test:{subject_id}:newer");
+        let older_key = format!("builds_dedupe_test:{subject_id}:older");
 
         sqlx::query(
             "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
-             VALUES ($1, 'evals', 'commit_eval', $2, $3, now(), now())",
+             VALUES ($1, 'builds', 'build_job', $2, $3, now(), now())",
         )
         .bind(newer_id)
         .bind(&subject_id)
@@ -1844,7 +1941,7 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
-             VALUES ($1, 'evals', 'commit_eval', $2, $3, now() - interval '1 hour', now() - interval '1 hour')",
+             VALUES ($1, 'builds', 'build_job', $2, $3, now() - interval '1 hour', now() - interval '1 hour')",
         )
         .bind(older_id)
         .bind(&subject_id)
@@ -1954,83 +2051,83 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn test_dedupe_evals_prefers_row_matching_current_commit_state_over_earliest() {
-        // Regression test for round 7: a naive "keep earliest" dedup can
-        // strand the row that matches the commit's CURRENT failed state,
-        // leaving a currently-failed commit with no open occurrence at all
-        // once terminal reconciliation and the stale-occurrence safety net
-        // run (see the doc comment on dedupe_open_occurrences).
+    async fn test_dedupe_evals_merges_only_exact_timestamp_duplicates() {
+        // Two rows for the SAME failure event (identical opened_at, as the
+        // historical float-key-encoding bug could produce: one row keyed by
+        // the Rust encoding, one by a slightly different SQL encoding, both
+        // for the same evaluation_completed_at) are true duplicates and
+        // should be merged, including migrating the dismissal between them.
         let pool = test_pool().await;
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let subject_id = commit_id.to_string();
+        let user_id = insert_throwaway_user(&pool).await;
 
-        let t1 = Utc::now() - Duration::hours(1);
-        let t2 = Utc::now();
-
-        // The commit is CURRENTLY failed at t2 — the later timestamp.
+        let t = Utc::now();
         sqlx::query(
             "UPDATE commits SET evaluation_status = 'failed', evaluation_completed_at = $2 WHERE id = $1",
         )
         .bind(commit_id)
-        .bind(t2)
+        .bind(t)
         .execute(&pool)
         .await
         .unwrap();
 
-        // Two stale open duplicate rows: an earlier one (t1, stale — does
-        // NOT match the commit's current state) and a later one (t2,
-        // matches the commit's current state exactly).
-        let earlier_id = Uuid::new_v4();
-        let current_id = Uuid::new_v4();
+        let dup_a = Uuid::new_v4();
+        let dup_b = Uuid::new_v4();
+        for (id, suffix) in [(dup_a, "a"), (dup_b, "b")] {
+            sqlx::query(
+                "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
+                 VALUES ($1, 'evals', 'commit_eval', $2, $3, $4, $4)",
+            )
+            .bind(id)
+            .bind(&subject_id)
+            .bind(format!("eval:{commit_id}:{suffix}"))
+            .bind(t)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
         sqlx::query(
-            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
-             VALUES ($1, 'evals', 'commit_eval', $2, $3, $4, $4)",
+            "INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at) VALUES ($1, $2, NOW())",
         )
-        .bind(earlier_id)
-        .bind(&subject_id)
-        .bind(format!("eval:{commit_id}:earlier"))
-        .bind(t1)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
-             VALUES ($1, 'evals', 'commit_eval', $2, $3, $4, $4)",
-        )
-        .bind(current_id)
-        .bind(&subject_id)
-        .bind(format!("eval:{commit_id}:current"))
-        .bind(t2)
+        .bind(user_id)
+        .bind(dup_b)
         .execute(&pool)
         .await
         .unwrap();
 
-        dedupe_open_occurrences(&pool)
+        let resolved = dedupe_open_occurrences(&pool)
             .await
             .expect("dedupe should succeed");
+        assert_eq!(resolved, 1, "exactly one of the two exact duplicates must be resolved");
 
-        let earlier_resolved: Option<DateTime<Utc>> =
-            sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
-                .bind(earlier_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(
-            earlier_resolved.is_some(),
-            "the stale (non-matching) earlier row must be resolved, even though it is earlier"
-        );
+        let open_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences WHERE subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(&subject_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(open_count, 1, "exactly one occurrence must remain open");
 
-        let current_resolved: Option<DateTime<Utc>> =
-            sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
-                .bind(current_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(
-            current_resolved.is_none(),
-            "the row matching the commit's CURRENT failed state must remain open, \
-             even though it is not the earliest"
+        // A dismissal record can be left behind on the now-resolved
+        // duplicate too (harmless — resolved rows never contribute to
+        // badge counts regardless of dismissal state). What matters is
+        // that the SURVIVING open occurrence carries the dismissal.
+        let open_and_dismissed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_attention_dismissals uad \
+             JOIN attention_occurrences ao ON ao.id = uad.occurrence_id \
+             WHERE ao.subject_id = $1 AND ao.resolved_at IS NULL AND uad.user_id = $2",
+        )
+        .bind(&subject_id)
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            open_and_dismissed, 1,
+            "the dismissal must have migrated onto the surviving (open) duplicate"
         );
 
         let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
@@ -2041,6 +2138,112 @@ mod tests {
             .bind(flake_id)
             .execute(&pool)
             .await;
+        cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_dedupe_evals_does_not_transfer_dismissals_across_distinct_episodes() {
+        // Regression test for round 8: a naive dedup that groups only by
+        // (category, subject_id) could migrate a dismissal from an OLDER,
+        // unrelated failure episode onto a NEWER, genuinely-undismissed one
+        // — silently hiding a real alert the user has never seen. Distinct
+        // `opened_at` values are distinct episodes and must never share a
+        // dedup group, so neither row here should be touched at all.
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let subject_id = commit_id.to_string();
+        let user_id = insert_throwaway_user(&pool).await;
+
+        let t1 = Utc::now() - Duration::hours(2);
+        let t2 = Utc::now();
+
+        // The commit is CURRENTLY failed at t2 — a distinct, later episode.
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = 'failed', evaluation_completed_at = $2 WHERE id = $1",
+        )
+        .bind(commit_id)
+        .bind(t2)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // O1: an older episode, left open by a historical lifecycle bug,
+        // and already dismissed by the user.
+        let o1 = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
+             VALUES ($1, 'evals', 'commit_eval', $2, $3, $4, $4)",
+        )
+        .bind(o1)
+        .bind(&subject_id)
+        .bind(format!("eval:{commit_id}:o1"))
+        .bind(t1)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at) VALUES ($1, $2, NOW())",
+        )
+        .bind(user_id)
+        .bind(o1)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // O2: the genuinely new, current failure — never dismissed.
+        let o2 = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
+             VALUES ($1, 'evals', 'commit_eval', $2, $3, $4, $4)",
+        )
+        .bind(o2)
+        .bind(&subject_id)
+        .bind(format!("eval:{commit_id}:o2"))
+        .bind(t2)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let resolved = dedupe_open_occurrences(&pool)
+            .await
+            .expect("dedupe should succeed");
+        assert_eq!(
+            resolved, 0,
+            "distinct-timestamp episodes must not be treated as duplicates of each other"
+        );
+
+        let o2_dismissed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
+        )
+        .bind(user_id)
+        .bind(o2)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            o2_dismissed, 0,
+            "the current, never-seen failure must NOT inherit the older episode's dismissal"
+        );
+
+        let o2_open: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
+                .bind(o2)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(o2_open.is_none(), "the current failure's occurrence must remain open");
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&subject_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+        cleanup_user(&pool, user_id).await;
     }
 
     #[tokio::test]
@@ -2106,6 +2309,167 @@ mod tests {
             both_open, 2,
             "both systems' independent occurrences must remain open"
         );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(env_id.to_string())
+            .execute(&pool)
+            .await;
+        cleanup_environment(&pool, env_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_dedupe_environments_preserves_distinct_system_health_episodes() {
+        // Regression test for round 8: two rows for the SAME environment
+        // and the SAME underlying system, but with different
+        // underlying_system_occurrence_key values, represent two distinct
+        // system-health episodes (e.g. an old critical episode and a later,
+        // separate offline episode for that same system). Grouping by
+        // underlying_system_id alone (round 7's fix) would still wrongly
+        // merge these and could transfer a dismissal from the old episode
+        // onto the new one, or vice versa.
+        let pool = test_pool().await;
+        let env_id = insert_throwaway_environment(&pool, "dedupe-episodes").await;
+        let system_id = insert_throwaway_system(&pool, env_id).await;
+        let user_id = insert_throwaway_user(&pool).await;
+
+        let old_episode = Uuid::new_v4();
+        let new_episode = Uuid::new_v4();
+        let occ_old = Uuid::new_v4();
+        let occ_new = Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at, metadata) \
+             VALUES ($1, 'environments', 'environment', $2, $3, now() - interval '1 hour', now() - interval '1 hour', $4::jsonb)",
+        )
+        .bind(occ_old)
+        .bind(env_id.to_string())
+        .bind(format!("environment:{env_id}:{old_episode}"))
+        .bind(serde_json::json!({
+            "reason": "critical",
+            "underlying_system_id": system_id.to_string(),
+            "underlying_system_occurrence_key": format!("system:{system_id}:critical:{old_episode}"),
+        }))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at) VALUES ($1, $2, NOW())",
+        )
+        .bind(user_id)
+        .bind(occ_old)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at, metadata) \
+             VALUES ($1, 'environments', 'environment', $2, $3, now(), now(), $4::jsonb)",
+        )
+        .bind(occ_new)
+        .bind(env_id.to_string())
+        .bind(format!("environment:{env_id}:{new_episode}"))
+        .bind(serde_json::json!({
+            "reason": "offline",
+            "underlying_system_id": system_id.to_string(),
+            "underlying_system_occurrence_key": format!("system:{system_id}:offline:{new_episode}"),
+        }))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let resolved = dedupe_open_occurrences(&pool)
+            .await
+            .expect("dedupe should succeed");
+        assert_eq!(
+            resolved, 0,
+            "distinct system-health episodes for the same system must not be treated as duplicates"
+        );
+
+        let new_dismissed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
+        )
+        .bind(user_id)
+        .bind(occ_new)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            new_dismissed, 0,
+            "the new episode must not inherit the old episode's dismissal"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(env_id.to_string())
+            .execute(&pool)
+            .await;
+        cleanup_environment(&pool, env_id).await;
+        cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_dedupe_environments_null_underlying_system_id_is_not_a_wildcard() {
+        // Regression test for round 8: a malformed legacy row with a NULL
+        // underlying_system_id must only be treated as a duplicate of
+        // OTHER equally-NULL rows, never as a wildcard that matches every
+        // occurrence for the environment regardless of their real
+        // underlying_system_id.
+        let pool = test_pool().await;
+        let env_id = insert_throwaway_environment(&pool, "dedupe-null").await;
+        let system_id = insert_throwaway_system(&pool, env_id).await;
+
+        let malformed = Uuid::new_v4();
+        let valid = Uuid::new_v4();
+
+        // Malformed row: metadata present but missing underlying_system_id
+        // entirely (so `metadata->>'underlying_system_id'` is SQL NULL).
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at, metadata) \
+             VALUES ($1, 'environments', 'environment', $2, $3, now() - interval '1 hour', now() - interval '1 hour', $4::jsonb)",
+        )
+        .bind(malformed)
+        .bind(env_id.to_string())
+        .bind(format!("environment:{env_id}:{}", Uuid::new_v4()))
+        .bind(serde_json::json!({"reason": "critical"}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Valid row: real underlying_system_id, different from the
+        // malformed row's (absent) value.
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at, metadata) \
+             VALUES ($1, 'environments', 'environment', $2, $3, now(), now(), $4::jsonb)",
+        )
+        .bind(valid)
+        .bind(env_id.to_string())
+        .bind(format!("environment:{env_id}:{}", Uuid::new_v4()))
+        .bind(serde_json::json!({
+            "reason": "critical",
+            "underlying_system_id": system_id.to_string(),
+        }))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let resolved = dedupe_open_occurrences(&pool)
+            .await
+            .expect("dedupe should succeed");
+        assert_eq!(
+            resolved, 0,
+            "a NULL underlying_system_id must not wildcard-match a row with a real one"
+        );
+
+        let both_open: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'environments' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(env_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(both_open, 2, "both rows must remain open and untouched");
 
         let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
             .bind(env_id.to_string())

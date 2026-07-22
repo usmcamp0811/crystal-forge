@@ -743,15 +743,19 @@ pub(crate) async fn transition_flake_attention_to_error_if_current(
     // result? If a newer attempt has since started or succeeded, do
     // nothing — that newer attempt owns the flake's attention state now.
     //
-    // `opened_at` is captured here too, via `statement_timestamp()` rather
-    // than `NOW()`/`transaction_timestamp()` (both of which are fixed at
-    // transaction start, before the advisory lock wait) or a
-    // pre-transaction `Utc::now()`. `statement_timestamp()` reflects the
-    // time this specific statement runs — i.e. after the lock has been
-    // acquired — so a caller delayed waiting for the lock does not record
-    // an observation timestamp earlier than the state it is acting on.
+    // `opened_at` is taken from the flake's own `last_sync_at` — the
+    // authoritative time `record_sync_error` recorded this failure — rather
+    // than `statement_timestamp()`/`NOW()`/a pre-transaction `Utc::now()`.
+    // This function is called both immediately after a failure (where
+    // `last_sync_at` is effectively "now" anyway) AND, via the periodic
+    // `reconcile_errored_flakes` safety net, potentially long after a lost
+    // attention transition is being recovered. Using "now" in the recovery
+    // case would open a fresh occurrence with a brand-new 24-hour attention
+    // window for a failure that may be days old, resurfacing it as a new
+    // sidebar alert. `COALESCE` guards the (should-not-happen) case where
+    // `last_sync_at` is NULL despite `sync_status = 'error'`.
     let recheck: Option<(bool, DateTime<Utc>)> = match sqlx::query_as(
-        "SELECT sync_attempt_id = $2 AND sync_status = 'error', statement_timestamp() FROM flakes WHERE id = $1",
+        "SELECT sync_attempt_id = $2 AND sync_status = 'error', COALESCE(last_sync_at, statement_timestamp()) FROM flakes WHERE id = $1",
     )
     .bind(flake_id)
     .bind(attempt_id)
