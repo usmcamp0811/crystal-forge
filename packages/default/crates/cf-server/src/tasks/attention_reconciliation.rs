@@ -46,37 +46,34 @@ const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(120);
 /// hostname, and environment from the database. If the health has changed since
 /// the caller's snapshot, the operation is skipped — the caller that wrote the
 /// newer health already handled the transition.
-pub async fn reconcile_system_attention(
-    pool: &PgPool,
+/// Inner implementation of [`reconcile_system_attention`] that returns
+/// `Result` so every required DB operation uses `?` instead of error-swallowing
+/// patterns (`.ok()`, `.map_err(warn)`, `let _ =`).
+///
+/// Round 12: the previous version's environment transition used `.ok().flatten()`
+/// and `.map_err(|e| warn!(...))` on required lookups and mutations.  A decode
+/// or client-side error could silently skip the environment transition while
+/// the system transition still committed — breaking the claimed atomicity that
+/// a system incident and its derived environment incident are always updated
+/// together.  Every required operation now returns `Result` and uses `?`;
+/// any error causes the entire transaction to be rolled back via the outer
+/// wrapper function.
+async fn reconcile_system_attention_inner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     system_id: Uuid,
-    _caller_health: &str,
-    _caller_hostname: &str,
-    _caller_environment_id: Option<Uuid>,
-) {
+) -> anyhow::Result<()> {
+    use anyhow::Context;
     let subject_id = system_id.to_string();
-
-    // Single transaction for the entire system+environment transition.
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            warn!("failed to begin system attention transaction: {e:#}");
-            return;
-        }
-    };
 
     // Acquire the reason-independent system subject lock (same key as
     // transition_by_subject), serializing this entire function with any
     // concurrent call for the same system.
     let lock_key = format!("attention_occurrence:systems:{subject_id}");
-    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(&lock_key)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
-    {
-        warn!("failed to acquire system attention lock: {e:#}");
-        let _ = tx.rollback().await;
-        return;
-    }
+        .context("failed to acquire system attention lock")?;
 
     // ── Re-read authoritative state inside the lock ──────────────────────
     // The caller's `health` and `environment_id` were read before the lock
@@ -97,28 +94,21 @@ pub async fn reconcile_system_attention(
         String,
         Option<Uuid>,
         chrono::DateTime<chrono::Utc>,
-    ) = match sqlx::query_as::<_, (String, String, Option<Uuid>, chrono::DateTime<chrono::Utc>)>(
+    ) = sqlx::query_as::<_, (String, String, Option<Uuid>, chrono::DateTime<chrono::Utc>)>(
         "SELECT vsl.health_status, s.hostname, s.environment_id, statement_timestamp() \
              FROM view_system_list vsl \
              JOIN systems s ON s.id = vsl.id \
              WHERE vsl.id = $1",
     )
     .bind(system_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await
-    {
-        Ok(Some((h, hn, eid, now))) if !h.is_empty() => (h, hn, eid, now),
-        Ok(_) => {
-            debug!("system {system_id} not found during attention reconciliation");
-            let _ = tx.rollback().await;
-            return;
-        }
-        Err(e) => {
-            warn!("failed to re-read system state: {e:#}");
-            let _ = tx.rollback().await;
-            return;
-        }
-    };
+    .context("failed to re-read system state")?
+    .ok_or_else(|| anyhow::anyhow!("system {system_id} not found during attention reconciliation"))?;
+
+    if health.is_empty() {
+        anyhow::bail!("system {system_id} has empty health status during attention reconciliation");
+    }
 
     match health.as_str() {
         "critical" | "offline" => {
@@ -144,7 +134,7 @@ pub async fn reconcile_system_attention(
 
             let system_occurrence_id = {
                 // Check if there is already an open occurrence with the same reason.
-                let existing: Option<uuid::Uuid> = match sqlx::query_scalar(
+                let existing: Option<uuid::Uuid> = sqlx::query_scalar(
                     r#"
                     SELECT id FROM attention_occurrences
                     WHERE category = 'systems'
@@ -157,23 +147,16 @@ pub async fn reconcile_system_attention(
                 )
                 .bind(&subject_id)
                 .bind(serde_json::json!({"reason": &health}))
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!("failed to find existing system occurrence: {e:#}");
-                        let _ = tx.rollback().await;
-                        return;
-                    }
-                };
+                .context("failed to find existing system occurrence")?;
 
                 match existing {
                     Some(existing_id) => {
                         // Condition metadata replacement on observation ordering
                         // so an older caller that acquires the lock later cannot
                         // overwrite newer diagnostic information with stale metadata.
-                        if let Err(e) = sqlx::query(
+                        sqlx::query(
                             "UPDATE attention_occurrences \
                              SET metadata = CASE WHEN $1 >= last_observed_at THEN $2 ELSE metadata END, \
                                  last_observed_at = GREATEST(last_observed_at, $1) \
@@ -182,19 +165,15 @@ pub async fn reconcile_system_attention(
                         .bind(opened_at)
                         .bind(&metadata)
                         .bind(existing_id)
-                        .execute(&mut *tx)
+                        .execute(&mut **tx)
                         .await
-                        {
-                            warn!("failed to update system occurrence: {e:#}");
-                            let _ = tx.rollback().await;
-                            return;
-                        }
+                        .context("failed to update system occurrence")?;
                         existing_id
                     }
                     None => {
                         // Reason differs or no occurrence exists — resolve all
                         // open occurrences and insert a new one.
-                        if let Err(e) = sqlx::query(
+                        sqlx::query(
                             r#"
                             UPDATE attention_occurrences
                             SET resolved_at = NOW()
@@ -204,19 +183,15 @@ pub async fn reconcile_system_attention(
                             "#,
                         )
                         .bind(&subject_id)
-                        .execute(&mut *tx)
+                        .execute(&mut **tx)
                         .await
-                        {
-                            warn!("failed to resolve open system occurrences: {e:#}");
-                            let _ = tx.rollback().await;
-                            return;
-                        }
+                        .context("failed to resolve open system occurrences")?;
 
                         let episode_id = uuid::Uuid::new_v4();
                         let source_key =
                             attention::system_occurrence_key(system_id, &health, episode_id);
 
-                        match sqlx::query_scalar::<_, uuid::Uuid>(
+                        sqlx::query_scalar::<_, uuid::Uuid>(
                             r#"
                             INSERT INTO attention_occurrences (
                                 category, subject_type, subject_id, source_occurrence_key,
@@ -231,142 +206,132 @@ pub async fn reconcile_system_attention(
                         .bind(opened_at)
                         .bind(opened_at)
                         .bind(&metadata)
-                        .fetch_optional(&mut *tx)
+                        .fetch_one(&mut **tx)
                         .await
-                        {
-                            Ok(Some(id)) => id,
-                            Ok(None) => {
-                                warn!("system occurrence insert returned no row");
-                                let _ = tx.rollback().await;
-                                return;
-                            }
-                            Err(e) => {
-                                warn!("failed to insert system occurrence: {e:#}");
-                                let _ = tx.rollback().await;
-                                return;
-                            }
-                        }
+                        .context("failed to insert system occurrence")?
                     }
                 }
             };
 
             // ── Environment transition (inside the same lock) ─────────────
             if let Some(env_id) = environment_id {
-                let source_key: Option<String> = sqlx::query_scalar(
+                let sys_source_key: String = sqlx::query_scalar(
                     "SELECT source_occurrence_key FROM attention_occurrences WHERE id = $1",
                 )
                 .bind(system_occurrence_id)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await
-                .ok()
-                .flatten();
+                .context("failed to read system occurrence key for environment transition")?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "system occurrence {system_occurrence_id} not found after insert"
+                    )
+                })?;
 
-                if let Some(sys_source_key) = source_key {
-                    // Resolve env occurrences for this system ACROSS EVERY
-                    // ENVIRONMENT, except the exact current tuple:
-                    //   current environment
-                    //   current underlying_system_occurrence_key
-                    //   current reason
-                    //
-                    // This prevents reusing an env occurrence from a prior
-                    // system episode (e.g. a system that moved away and back)
-                    // while keeping the one for the current episode open.
-                    let _ = sqlx::query(
+                // Resolve env occurrences for this system ACROSS EVERY
+                // ENVIRONMENT, except the exact current tuple:
+                //   current environment
+                //   current underlying_system_occurrence_key
+                //   current reason
+                //
+                // This prevents reusing an env occurrence from a prior
+                // system episode (e.g. a system that moved away and back)
+                // while keeping the one for the current episode open.
+                sqlx::query(
+                    r#"
+                    UPDATE attention_occurrences
+                    SET resolved_at = NOW()
+                    WHERE category = 'environments'
+                      AND resolved_at IS NULL
+                      AND metadata @> $1::jsonb
+                      AND NOT (
+                          subject_id = $2
+                          AND metadata @> $3::jsonb
+                          AND metadata @> $4::jsonb
+                      )
+                    "#,
+                )
+                .bind(serde_json::json!({"underlying_system_id": system_id.to_string()}))
+                .bind(env_id.to_string())
+                .bind(serde_json::json!({"underlying_system_occurrence_key": &sys_source_key}))
+                .bind(serde_json::json!({"reason": &health}))
+                .execute(&mut **tx)
+                .await
+                .context("failed to resolve stale environment occurrence")?;
+
+                // Open or observe the env occurrence inline (we are
+                // already inside a transaction holding the system subject
+                // lock, so we cannot use open_or_observe_by_subject which
+                // starts its own transaction). Use episode-based keys so
+                // each env incident gets a unique source_occurrence_key
+                // that cannot collide with a previously resolved row.
+                //
+                // The existing-row lookup includes
+                // `underlying_system_occurrence_key` so a resolved env
+                // occurrence from a prior system episode cannot be
+                // recycled for a different one.
+                let env_metadata = serde_json::json!({
+                    "reason": &health,
+                    "environment_id": env_id.to_string(),
+                    "underlying_system_id": system_id.to_string(),
+                    "underlying_system_occurrence_key": &sys_source_key,
+                    "health_status": &health,
+                });
+
+                let existing_env: Option<uuid::Uuid> = sqlx::query_scalar(
+                    r#"
+                    SELECT id FROM attention_occurrences
+                    WHERE category = 'environments'
+                      AND subject_id = $1
+                      AND resolved_at IS NULL
+                      AND metadata @> $2::jsonb
+                    LIMIT 1
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(env_id.to_string())
+                .bind(serde_json::json!({
+                    "underlying_system_id": system_id.to_string(),
+                    "underlying_system_occurrence_key": &sys_source_key,
+                    "reason": &health,
+                }))
+                .fetch_optional(&mut **tx)
+                .await
+                .context("failed to find existing env occurrence")?;
+
+                if let Some(existing_env_id) = existing_env {
+                    sqlx::query(
+                        "UPDATE attention_occurrences \
+                         SET last_observed_at = GREATEST(last_observed_at, $1), metadata = $2 \
+                         WHERE id = $3",
+                    )
+                    .bind(opened_at)
+                    .bind(&env_metadata)
+                    .bind(existing_env_id)
+                    .execute(&mut **tx)
+                    .await
+                    .context("failed to update env occurrence")?;
+                } else {
+                    let env_episode_id = uuid::Uuid::new_v4();
+                    let env_source_key =
+                        attention::environment_occurrence_key(env_id, env_episode_id);
+                    sqlx::query(
                         r#"
-                        UPDATE attention_occurrences
-                        SET resolved_at = NOW()
-                        WHERE category = 'environments'
-                          AND resolved_at IS NULL
-                          AND metadata @> $1::jsonb
-                          AND NOT (
-                              subject_id = $2
-                              AND metadata @> $3::jsonb
-                              AND metadata @> $4::jsonb
-                          )
+                        INSERT INTO attention_occurrences (
+                            category, subject_type, subject_id, source_occurrence_key,
+                            opened_at, last_observed_at, metadata
+                        )
+                        VALUES ('environments', 'environment', $1, $2, $3, $4, $5)
                         "#,
                     )
-                    .bind(serde_json::json!({"underlying_system_id": system_id.to_string()}))
                     .bind(env_id.to_string())
-                    .bind(serde_json::json!({"underlying_system_occurrence_key": &sys_source_key}))
-                    .bind(serde_json::json!({"reason": &health}))
-                    .execute(&mut *tx)
+                    .bind(env_source_key)
+                    .bind(opened_at)
+                    .bind(opened_at)
+                    .bind(&env_metadata)
+                    .execute(&mut **tx)
                     .await
-                    .map_err(|e| warn!("failed to resolve stale environment occurrence: {e:#}"));
-
-                    // Open or observe the env occurrence inline (we are
-                    // already inside a transaction holding the system subject
-                    // lock, so we cannot use open_or_observe_by_subject which
-                    // starts its own transaction). Use episode-based keys so
-                    // each env incident gets a unique source_occurrence_key
-                    // that cannot collide with a previously resolved row.
-                    //
-                    // The existing-row lookup includes
-                    // `underlying_system_occurrence_key` so a resolved env
-                    // occurrence from a prior system episode cannot be
-                    // recycled for a different one.
-                    let env_metadata = serde_json::json!({
-                        "reason": &health,
-                        "environment_id": env_id.to_string(),
-                        "underlying_system_id": system_id.to_string(),
-                        "underlying_system_occurrence_key": &sys_source_key,
-                        "health_status": &health,
-                    });
-
-                    let existing_env: Option<uuid::Uuid> = sqlx::query_scalar(
-                        r#"
-                        SELECT id FROM attention_occurrences
-                        WHERE category = 'environments'
-                          AND subject_id = $1
-                          AND resolved_at IS NULL
-                          AND metadata @> $2::jsonb
-                        LIMIT 1
-                        FOR UPDATE
-                        "#,
-                    )
-                    .bind(env_id.to_string())
-                    .bind(serde_json::json!({
-                        "underlying_system_id": system_id.to_string(),
-                        "underlying_system_occurrence_key": &sys_source_key,
-                        "reason": &health,
-                    }))
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(|e| warn!("failed to find existing env occurrence: {e:#}"))
-                    .ok()
-                    .flatten();
-
-                    if let Some(existing_env_id) = existing_env {
-                        let _ = sqlx::query(
-                            "UPDATE attention_occurrences SET last_observed_at = GREATEST(last_observed_at, $1), metadata = $2 WHERE id = $3",
-                        )
-                        .bind(opened_at)
-                        .bind(&env_metadata)
-                        .bind(existing_env_id)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(|e| warn!("failed to update env occurrence: {e:#}"));
-                    } else {
-                        let env_episode_id = uuid::Uuid::new_v4();
-                        let env_source_key =
-                            attention::environment_occurrence_key(env_id, env_episode_id);
-                        let _ = sqlx::query(
-                            r#"
-                            INSERT INTO attention_occurrences (
-                                category, subject_type, subject_id, source_occurrence_key,
-                                opened_at, last_observed_at, metadata
-                            )
-                            VALUES ('environments', 'environment', $1, $2, $3, $4, $5)
-                            "#,
-                        )
-                        .bind(env_id.to_string())
-                        .bind(env_source_key)
-                        .bind(opened_at)
-                        .bind(opened_at)
-                        .bind(&env_metadata)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(|e| warn!("failed to insert env occurrence: {e:#}"));
-                    }
+                    .context("failed to insert env occurrence")?;
                 }
             }
         }
@@ -375,13 +340,13 @@ pub async fn reconcile_system_attention(
             // System is healthy/warning — resolve all open occurrences for
             // this system, which prevents the stale reconciler from racing
             // with our resolution by holding the same subject lock.
-            let _ = attention::resolve_open_occurrences_for_subject(
-                &mut *tx,
+            attention::resolve_open_occurrences_for_subject(
+                &mut **tx,
                 "systems",
                 &subject_id,
             )
             .await
-            .map_err(|e| warn!("failed to resolve system attention occurrence: {e:#}"));
+            .context("failed to resolve system attention occurrence")?;
 
             // Also resolve every open environment occurrence derived from
             // this system now that its underlying occurrence is resolved —
@@ -389,15 +354,39 @@ pub async fn reconcile_system_attention(
             // A system that was critical in environment A and has since
             // moved to B (or been unassigned) before recovering must not
             // leave A's derived occurrence open.
-            let _ = attention::resolve_environment_occurrences_for_system_any_environment(
-                &mut *tx, system_id,
+            attention::resolve_environment_occurrences_for_system_any_environment(
+                &mut **tx, system_id,
             )
             .await
-            .map_err(|e| warn!("failed to resolve environment attention occurrence: {e:#}"));
+            .context("failed to resolve environment attention occurrence")?;
         }
         other => {
             debug!("unknown health status '{other}' for system {system_id}; skipping");
         }
+    }
+
+    Ok(())
+}
+
+pub async fn reconcile_system_attention(
+    pool: &PgPool,
+    system_id: Uuid,
+    _caller_health: &str,
+    _caller_hostname: &str,
+    _caller_environment_id: Option<Uuid>,
+) {
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            warn!("failed to begin system attention transaction: {e:#}");
+            return;
+        }
+    };
+
+    if let Err(e) = reconcile_system_attention_inner(&mut tx, system_id).await {
+        warn!("system {system_id} attention reconciliation failed: {e:#}");
+        let _ = tx.rollback().await;
+        return;
     }
 
     if let Err(e) = tx.commit().await {
@@ -908,17 +897,6 @@ pub async fn run_attention_reconciliation_loop(pool: PgPool) {
         RECONCILIATION_INTERVAL
     );
 
-    // One-time (idempotent) repair for duplicate open occurrences that may
-    // have accumulated from an earlier reconciliation-logic bug across
-    // MR !307's review history. Safe to run on every server startup.
-    match attention::dedupe_open_occurrences(&pool).await {
-        Ok(n) if n > 0 => {
-            tracing::warn!("🧹 Deduped {n} duplicate open attention occurrence(s) on startup")
-        }
-        Ok(_) => {}
-        Err(e) => error!("attention occurrence dedupe failed: {e:#}"),
-    }
-
     let mut ticker = tokio::time::interval(RECONCILIATION_INTERVAL);
     loop {
         ticker.tick().await;
@@ -927,16 +905,135 @@ pub async fn run_attention_reconciliation_loop(pool: PgPool) {
         reconcile_errored_flakes(&pool).await;
         reconcile_synced_flakes_missing_resolution(&pool).await;
         reconcile_terminal_events(&pool).await;
+        reconcile_cve_attention(&pool).await;
         reconcile_stale_occurrences(&pool).await;
         debug!("Attention reconciliation sweep complete");
     }
 }
 
+/// Reconcile CVE attention against authoritative fleet relevance.
+///
+/// CVEs have no hook-based attention lifecycle (unlike builds, evals, and
+/// flake syncs whose domain transitions directly produce or resolve attention
+/// occurrences) and no other periodic sweep recreates missing occurrences.
+/// The CVE scan save path opens attention during completed scan-result
+/// persistence, but that path writes the scan data first and performs the
+/// attention operation as a separate, best-effort step — a crash between the
+/// two can leave a currently critical, fleet-relevant CVE with no occurrence.
+/// Additionally, the scan worker is disabled by default and may run on an
+/// arbitrarily distant future schedule for a given target. Relying on a
+/// future scan to eventually recreate a lost occurrence is not a bounded
+/// repair strategy — see the Round 11 review for MR !307.
+///
+/// This safety net closes that gap by running on every periodic sweep:
+///
+/// 1. Find critical CVEs with `affected_count > 0` (fleet-relevant) that
+///    have no open occurrence — open a new occurrence for each.
+/// 2. Find open CVE occurrences whose CVE is no longer critical or
+///    fleet-relevant — resolve those occurrences.
+///
+/// Uses the exact same fleet-relevance predicate as the scan-save path:
+/// `severity = 'CRITICAL' AND affected_count > 0` against
+/// `view_cve_list_with_metadata`. Occurrences are opened with episode-based
+/// keys so previously resolved (or dismissed) episodes are never reused.
+///
+/// Bounded to 500 rows per direction per sweep (matching the other sweeps).
+async fn reconcile_cve_attention(pool: &PgPool) {
+    // 1. Eligible CVEs with no open occurrence — open one.
+    let missing: Vec<String> = match sqlx::query_scalar(
+        r#"
+        SELECT v.cve_id
+        FROM view_cve_list_with_metadata v
+        WHERE v.severity = 'CRITICAL'
+          AND v.affected_count > 0
+          AND NOT EXISTS (
+              SELECT 1 FROM attention_occurrences ao
+              WHERE ao.category = 'cves'
+                AND ao.subject_id = v.cve_id
+                AND ao.resolved_at IS NULL
+          )
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("failed to load critical CVEs missing attention occurrence: {e:#}");
+            return;
+        }
+    };
+
+    for cve_id in missing {
+        let episode_id = uuid::Uuid::new_v4();
+        let source_key = attention::cve_occurrence_key(&cve_id, episode_id);
+        let now = chrono::Utc::now();
+        let metadata = serde_json::json!({
+            "reason": "critical",
+            "cve_id": &cve_id,
+        });
+        if let Err(e) = sqlx::query(
+            r#"
+            INSERT INTO attention_occurrences (
+                category, subject_type, subject_id, source_occurrence_key,
+                opened_at, last_observed_at, metadata
+            )
+            VALUES ('cves', 'cve', $1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(&cve_id)
+        .bind(source_key)
+        .bind(now)
+        .bind(now)
+        .bind(&metadata)
+        .execute(pool)
+        .await
+        {
+            warn!("failed to open CVE attention occurrence for {cve_id}: {e:#}");
+        }
+    }
+
+    // 2. Open occurrences whose CVE is no longer critical/fleet-relevant.
+    let stale: Vec<String> = match sqlx::query_scalar(
+        r#"
+        SELECT ao.subject_id
+        FROM attention_occurrences ao
+        WHERE ao.category = 'cves'
+          AND ao.resolved_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM view_cve_list_with_metadata v
+              WHERE v.cve_id = ao.subject_id
+                AND v.severity = 'CRITICAL'
+                AND v.affected_count > 0
+          )
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("failed to load stale CVE occurrences for resolution: {e:#}");
+            return;
+        }
+    };
+
+    for cve_id in stale {
+        let _ = sqlx::query(
+            "UPDATE attention_occurrences \
+             SET resolved_at = NOW() \
+             WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(&cve_id)
+        .execute(pool)
+        .await
+        .map_err(|e| warn!("failed to resolve stale CVE occurrence for {cve_id}: {e:#}"));
+    }
+}
+
 /// Reconcile terminal build failures and evaluation failures that may have
-/// been lost due to a transient database error after the domain transaction
-/// committed — the build/eval status update commits first, then the attention
-/// occurrence insertion is best-effort (error logged and ignored). If that
-/// insertion failed, no reconciliation would otherwise recreate it.
 ///
 /// Only selects events whose deterministic occurrence key does not already
 /// exist in `attention_occurrences`, so events that already have their
@@ -1109,7 +1206,10 @@ pub async fn run_attention_cleanup_loop(pool: PgPool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{reconcile_errored_flakes, reconcile_synced_flakes_missing_resolution};
+    use super::{
+        reconcile_cve_attention, reconcile_errored_flakes,
+        reconcile_synced_flakes_missing_resolution,
+    };
 
     // Run against a repository-provided isolated database:
     //   DATABASE_URL=postgres://crystal_forge:password@localhost:3042/crystal_forge \
@@ -1493,5 +1593,188 @@ mod tests {
             .bind(flake_id)
             .execute(&pool)
             .await;
+    }
+
+    // ── Round 12: CVE reconciliation ─────────────────────────────────────
+
+    /// Seed a critical CVE visible in `view_cve_list_with_metadata` with no
+    /// open occurrence. Returns the CVE id and a cleanup token.
+    async fn seed_critical_cve(pool: &sqlx::PgPool) -> (String, uuid::Uuid, uuid::Uuid) {
+        let short = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        let cve_id = format!("CVE-2026-{short}");
+
+        // Environment (required by system).
+        let env_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(env_id)
+            .bind(format!("cve-test-env-{short}"))
+            .execute(pool)
+            .await
+            .unwrap();
+
+        // System (use explicit id since we need it back).
+        let system_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO systems (id, hostname, environment_id, flake_id) VALUES ($1, $2, $3, NULL)")
+            .bind(system_id)
+            .bind(format!("cve-test-{short}"))
+            .bind(env_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        // NixOS derivation for the system.
+        let nixos_derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, status_id, attempt_count) \
+             VALUES (NULL, 'nixos', $1, 10, 0) RETURNING id",
+        )
+        .bind(format!("cve-test-host-{short}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+
+        // Completed CVE scan.
+        let scan_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO cve_scans (id, derivation_id, scanner_name, status, completed_at, \
+                                     total_packages, total_vulnerabilities, critical_count) \
+             VALUES ($1, $2, 'vulnix', 'completed', NOW(), 1, 1, 1)",
+        )
+        .bind(scan_id)
+        .bind(nixos_derivation_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        // Package derivation.
+        let pkg_derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, pname, version, status_id, attempt_count) \
+             VALUES (NULL, 'package', $1, 'test-pkg', '1.0.0', 11, 0) RETURNING id",
+        )
+        .bind(format!("cve-test-pkg-{short}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+
+        sqlx::query("INSERT INTO scan_packages (scan_id, derivation_id) VALUES ($1, $2)")
+            .bind(scan_id)
+            .bind(pkg_derivation_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        // The CVE: cvss_v3_score >= 9.0 => severity 'CRITICAL'.
+        sqlx::query("INSERT INTO cves (id, cvss_v3_score) VALUES ($1, 9.8)")
+            .bind(&cve_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO package_vulnerabilities (derivation_id, cve_id, is_whitelisted) \
+             VALUES ($1, $2, FALSE)",
+        )
+        .bind(pkg_derivation_id)
+        .bind(&cve_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        // Sanity check.
+        let (severity, affected_count): (String, i64) = sqlx::query_as(
+            "SELECT severity, affected_count FROM view_cve_list_with_metadata WHERE cve_id = $1",
+        )
+        .bind(&cve_id)
+        .fetch_one(pool)
+        .await
+        .expect("view must return a row for the seeded CVE");
+        assert_eq!(severity, "CRITICAL");
+        assert!(affected_count > 0);
+
+        (cve_id, system_id, env_id)
+    }
+
+    async fn cleanup_critical_cve(
+        pool: &sqlx::PgPool,
+        cve_id: &str,
+        system_id: uuid::Uuid,
+        env_id: uuid::Uuid,
+    ) {
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(cve_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM package_vulnerabilities WHERE cve_id = $1")
+            .bind(cve_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM cves WHERE id = $1")
+            .bind(cve_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM cve_scans WHERE derivation_id IN (SELECT id FROM derivations WHERE derivation_name LIKE 'cve-test-%')")
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM derivations WHERE derivation_name LIKE 'cve-test-%'")
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM environments WHERE id = $1")
+            .bind(env_id)
+            .execute(pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reconcile_cve_attention_opens_missing_critical_occurrence() {
+        let pool = test_pool().await;
+        let (cve_id, system_id, env_id) = seed_critical_cve(&pool).await;
+
+        // Verify: no occurrence exists initially.
+        let before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(&cve_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(before, 0, "CVE must start with no open occurrence");
+
+        reconcile_cve_attention(&pool).await;
+
+        let after_first: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(&cve_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            after_first, 1,
+            "exactly one open CVE occurrence must be created by reconciler"
+        );
+
+        // Idempotency: running again must not create a second occurrence.
+        reconcile_cve_attention(&pool).await;
+
+        let after_second: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(&cve_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            after_second, 1,
+            "reconcile_cve_attention must be idempotent"
+        );
+
+        cleanup_critical_cve(&pool, &cve_id, system_id, env_id).await;
     }
 }

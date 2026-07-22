@@ -1027,9 +1027,9 @@ pub async fn cascade_delete_flake(
 
     // Acquire the flake attention lock so this resolve is serialized with
     // any concurrent reconciler.
-    let attention_lock_key = format!("attention_occurrence:flakes:{flake_id}");
+    let flake_attention_lock = format!("attention_occurrence:flakes:{flake_id}");
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(&attention_lock_key)
+        .bind(&flake_attention_lock)
         .execute(&mut **tx)
         .await
         .context("Failed to acquire flake attention lock for cascade delete")?;
@@ -1043,6 +1043,62 @@ pub async fn cascade_delete_flake(
     .execute(&mut **tx)
     .await
     .context("Failed to resolve flake attention occurrences during cascade delete")?;
+
+    // ── Resolve derived system and environment occurrences ────────────────
+    // Round 12: cascade deletion previously only resolved the flake's own
+    // occurrences. Systems belonging to this flake were deleted without
+    // resolving their `systems` or derived `environments` occurrences,
+    // leaving orphaned sidebar badges until the periodic stale-occurrence
+    // sweep ran (up to 2 minutes later).
+    //
+    // Now: read the system IDs, sort them deterministically to prevent
+    // deadlocks, acquire each system's attention lock, and resolve both
+    // `systems` and `environments` occurrences for them in the same
+    // transaction.
+    let system_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT id FROM systems WHERE flake_id = $1 ORDER BY id ASC",
+    )
+    .bind(flake_id)
+    .fetch_all(&mut **tx)
+    .await
+    .context("Failed to read associated system IDs for cascade delete")?;
+
+    for system_id in &system_ids {
+        let sys_lock = format!("attention_occurrence:systems:{system_id}");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&sys_lock)
+            .execute(&mut **tx)
+            .await
+            .context("Failed to acquire system attention lock during cascade delete")?;
+    }
+
+    if !system_ids.is_empty() {
+        let system_id_strs: Vec<String> = system_ids.iter().map(|id| id.to_string()).collect();
+        // Resolve open systems occurrences for the deleted systems.
+        sqlx::query(
+            "UPDATE attention_occurrences SET resolved_at = NOW() \
+             WHERE category = 'systems' AND subject_id = ANY($1) AND resolved_at IS NULL",
+        )
+        .bind(&system_id_strs)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to resolve system attention occurrences during cascade delete")?;
+
+        // Resolve open environment occurrences derived from any of these systems.
+        sqlx::query(
+            r#"
+            UPDATE attention_occurrences
+            SET resolved_at = NOW()
+            WHERE category = 'environments'
+              AND resolved_at IS NULL
+              AND metadata->>'underlying_system_id' = ANY($1)
+            "#,
+        )
+        .bind(&system_id_strs)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to resolve environment attention occurrences during cascade delete")?;
+    }
 
     // Note: ON DELETE CASCADE on commits FK will handle most cleanup
     // But we explicitly delete systems first to be safe
@@ -1967,6 +2023,132 @@ mod attention_lifecycle_tests {
 
         let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
             .bind(flake_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Round 12: cascade delete resolves derived system/environment occs ──
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cascade_delete_flake_resolves_system_and_environment_occurrences() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+
+        // Environment for the system.
+        let env_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(env_id)
+            .bind(format!("cascade-test-env-{}", &flake_id))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // System belonging to the flake.
+        let system_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO systems (id, hostname, environment_id, flake_id) VALUES ($1, $2, $3, $4)")
+            .bind(system_id)
+            .bind(format!("cascade-test-{flake_id}"))
+            .bind(env_id)
+            .bind(flake_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Open system occurrence.
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, \
+             source_occurrence_key, opened_at, last_observed_at, metadata) \
+             VALUES ($1, 'systems', 'system_health', $2, $3, now(), now(), $4::jsonb)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(system_id.to_string())
+        .bind(format!("system:{system_id}:offline:{}", uuid::Uuid::new_v4()))
+        .bind(serde_json::json!({"reason": "offline"}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Open environment occurrence derived from this system.
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, \
+             source_occurrence_key, opened_at, last_observed_at, metadata) \
+             VALUES ($1, 'environments', 'environment', $2, $3, now(), now(), $4::jsonb)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(env_id.to_string())
+        .bind(format!("environment:{env_id}:{}", uuid::Uuid::new_v4()))
+        .bind(serde_json::json!({
+            "underlying_system_id": system_id.to_string(),
+        }))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Cascade delete.
+        let mut tx = pool.begin().await.unwrap();
+        cascade_delete_flake(&mut tx, flake_id).await.unwrap();
+        tx.commit().await.unwrap();
+
+        // Verify: no open occurrences remain for flakes, systems, or environments.
+        let flake_open: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'flakes' AND resolved_at IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            flake_open, 0,
+            "cascade delete must resolve all flake occurrences"
+        );
+
+        let system_open: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'systems' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(system_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            system_open, 0,
+            "cascade delete must resolve all system occurrences for deleted systems"
+        );
+
+        let env_open: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM attention_occurrences ao
+            WHERE ao.category = 'environments'
+              AND ao.resolved_at IS NULL
+              AND ao.metadata->>'underlying_system_id' = $1
+            "#,
+        )
+        .bind(system_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            env_open, 0,
+            "cascade delete must resolve all environment occurrences for deleted systems"
+        );
+
+        // Cleanup.
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE subject_id = ANY($1)",
+        )
+        .bind::<Vec<String>>(vec![system_id.to_string(), env_id.to_string()])
+        .execute(&pool)
+        .await;
+        let _ = sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM environments WHERE id = $1")
+            .bind(env_id)
             .execute(&pool)
             .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
