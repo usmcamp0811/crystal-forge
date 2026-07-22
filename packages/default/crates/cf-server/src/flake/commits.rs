@@ -502,17 +502,57 @@ pub async fn sync_flake_recorded(
         return Err(e);
     }
 
-    // Update final sync status inside the same transaction. `last_synced_at`
-    // is set unconditionally alongside `last_sync_at` -- unlike
-    // `last_sync_at` (overwritten on every attempt, success or failure),
-    // `last_synced_at` is ONLY ever written here, so it monotonically
-    // advances only on success and survives any later failure. This is
-    // what lets the attention lifecycle detect "a successful sync happened
-    // since this open occurrence was last observed" (see
-    // `transition_flake_attention_to_error_if_current` and
-    // `reconcile_single_stale_flake`), so a stale occurrence left behind by
-    // a crashed resolution is never silently reused for an unrelated,
-    // later incident.
+    // Acquire the attention subject lock BEFORE the final status update,
+    // still inside this same transaction (which already holds the sync
+    // lock). This establishes the fixed lock order used by every flake
+    // lifecycle operation -- sync lock, then attention lock, then row
+    // mutations -- and, critically, means the status update AND the
+    // attention resolution below commit together as one atomic unit.
+    //
+    // Round 11 finding: `now()` (used for `last_synced_at`) is the
+    // transaction START time, not the commit time, so comparing it against
+    // a concurrent reconciler's `last_observed_at` cannot reliably prove
+    // "this success happened after that observation" -- a reconciler could
+    // observe the still-committed 'syncing' state and advance an old
+    // occurrence AFTER this transaction started but BEFORE it commits,
+    // producing a last_observed_at that is later than this transaction's
+    // last_synced_at despite this transaction's commit being the more
+    // recent durable fact. Timestamp comparison alone cannot substitute for
+    // an actual commit-order guarantee.
+    //
+    // Acquiring the attention lock here and holding it through commit
+    // closes that race structurally rather than via timestamps: any
+    // concurrent reconciler that also acquires this lock (all of
+    // `reconcile_single_stale_flake`, `transition_flake_attention_to_error_if_current`,
+    // and `resolve_flake_attention_if_current` do) must either complete
+    // and commit BEFORE this transaction acquires the lock (in which case
+    // the resolve below correctly supersedes it), or block until this
+    // transaction commits or rolls back (in which case it observes the
+    // final, consistent post-commit state -- `sync_status = 'synced'` and
+    // no open occurrence -- and its own recheck logic correctly no-ops).
+    let attention_lock_key = format!("attention_occurrence:flakes:{flake_id}");
+    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&attention_lock_key)
+        .execute(&mut *tx)
+        .await
+    {
+        error!("Failed to acquire attention lock (flake {flake_id}): {e:#}");
+        let _ = tx.rollback().await;
+        record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+        return Err(e.into());
+    }
+
+    // Update final sync status inside the same transaction, still holding
+    // both the sync lock and (now) the attention lock. `last_synced_at` is
+    // set unconditionally alongside `last_sync_at` -- unlike `last_sync_at`
+    // (overwritten on every attempt, success or failure), `last_synced_at`
+    // is ONLY ever written here, so it monotonically advances only on
+    // success and survives any later failure. It remains useful as a
+    // defense-in-depth signal for `reconcile_single_stale_flake` (whose
+    // occurrence reuse decision happens in a separate, later transaction
+    // than this one and so cannot rely on this transaction's lock), even
+    // though the atomic resolve below is what actually closes the race
+    // described above for THIS transaction's own attention resolution.
     let status_update = sqlx::query(
         "UPDATE flakes \
          SET sync_status = 'synced', last_sync_at = now(), last_sync_error = NULL, last_synced_at = now() \
@@ -539,21 +579,36 @@ pub async fn sync_flake_recorded(
         }
     }
 
-    // Commit everything: inserts + snapshot + status.
+    // Resolve all open flake attention occurrences in the SAME transaction,
+    // still holding the attention lock acquired above. No separate
+    // "is this attempt still current" recheck is needed here (unlike
+    // `resolve_flake_attention_if_current`, which runs in its OWN later
+    // transaction and therefore must recheck): the status update just
+    // above already proved, within this transaction, that no newer attempt
+    // has superseded us, and the attention lock held since before that
+    // update guarantees no concurrent transition can race between the
+    // update and this resolve.
+    if let Err(e) = sqlx::query(
+        "UPDATE attention_occurrences SET resolved_at = NOW() \
+         WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+    )
+    .bind(flake_id.to_string())
+    .execute(&mut *tx)
+    .await
+    {
+        error!("Failed to resolve flake attention occurrences (flake {flake_id}): {e:#}");
+        let _ = tx.rollback().await;
+        record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+        return Err(e.into());
+    }
+
+    // Commit everything: inserts + snapshot + status + attention resolve,
+    // all as one atomic unit.
     if let Err(e) = tx.commit().await {
         error!("Commit failed (flake {flake_id}): {e:#}");
         record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
         return Err(e.into());
     }
-
-    // Sync succeeded and committed durably — resolve any open attention
-    // occurrence for this flake, but only if this attempt is still the
-    // current, synced result recorded on the flake row. A delayed caller
-    // (e.g. this async call stalls after the tx.commit() above) could
-    // otherwise resolve an attention occurrence opened by a NEWER attempt
-    // that started and failed after this one committed — see
-    // resolve_flake_attention_if_current for the full race description.
-    resolve_flake_attention_if_current(pool, flake_id, attempt_id).await;
 
     if inserted_count > 0 {
         info!(
@@ -675,8 +730,19 @@ pub(crate) async fn resolve_flake_attention_if_current(
     // Recheck under the lock: is this attempt still the current, synced
     // result? If a newer attempt has since started or failed, do nothing —
     // that newer attempt owns the flake's attention state now.
+    //
+    // `deleted_at IS NULL` is required here (round 11): without it, a
+    // delayed call racing a soft/hard delete could find the DELETED row's
+    // stale `sync_attempt_id`/`sync_status` still matching (soft delete does
+    // not clear either) and resolve occurrences for a flake that the delete
+    // path already resolved and intentionally closed out — harmless on its
+    // own here since resolve is idempotent, but the same predicate is
+    // required in `transition_flake_attention_to_error_if_current` where the
+    // consequence is a newly INSERTED occurrence for a deleted flake, so
+    // both recheck queries use the identical guard for consistency.
     let still_current: bool = match sqlx::query_scalar(
-        "SELECT sync_attempt_id = $2 AND sync_status = 'synced' FROM flakes WHERE id = $1",
+        "SELECT sync_attempt_id = $2 AND sync_status = 'synced' FROM flakes \
+         WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(flake_id)
     .bind(attempt_id)
@@ -791,11 +857,20 @@ pub(crate) async fn transition_flake_attention_to_error_if_current(
     //     original (possibly days-old) failure time forever.
     // `last_synced_at` is also fetched for the staleness check described
     // above.
+    //
+    // `deleted_at IS NULL` is required here (round 11): without it, a
+    // delayed error transition (e.g. `record_sync_error` scheduled late
+    // relative to a concurrent soft/hard delete of the same flake) could
+    // find the deleted row's stale `sync_attempt_id = error` still matching
+    // and INSERT a brand new attention occurrence for a flake the user can
+    // no longer see or dismiss — resurrecting a badge for something already
+    // deleted. When the row is filtered out, this query returns `None`,
+    // which the match below already treats as "not current" (no-op).
     let recheck: Option<(bool, DateTime<Utc>, DateTime<Utc>, Option<DateTime<Utc>>)> =
         match sqlx::query_as(
             "SELECT sync_attempt_id = $2 AND sync_status = 'error', \
                     COALESCE(last_sync_at, statement_timestamp()), statement_timestamp(), last_synced_at \
-             FROM flakes WHERE id = $1",
+             FROM flakes WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(flake_id)
         .bind(attempt_id)
@@ -2850,6 +2925,116 @@ mod tests {
         assert_eq!(
             still_open, o,
             "with no intervening success, the SAME occurrence must be reused, not a new one opened"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
+            .bind(flake_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn transition_flake_attention_to_error_if_current_skips_deleted_flake() {
+        // Regression test for round 11: a delayed error transition (e.g.
+        // `record_sync_error` scheduled late relative to a concurrent
+        // soft/hard delete of the same flake) must not resurrect an
+        // attention occurrence for a flake that has since been deleted,
+        // even if `sync_attempt_id` and `sync_status` still match what the
+        // caller expects -- the recheck query now requires
+        // `deleted_at IS NULL`, so a deleted row is treated the same as a
+        // missing one (no-op).
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let attempt_id = uuid::Uuid::new_v4();
+
+        // Simulate: flake recorded an error, then was deleted directly
+        // (bypassing soft_delete_flake, to reproduce exactly the stale
+        // state a delayed caller could observe) WITHOUT its attention
+        // state changing.
+        sqlx::query(
+            "UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2, deleted_at = NOW() WHERE id = $1",
+        )
+        .bind(flake_id)
+        .bind(attempt_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        transition_flake_attention_to_error_if_current(
+            &pool,
+            flake_id,
+            attempt_id,
+            serde_json::json!({"flake_id": flake_id}),
+        )
+        .await;
+
+        assert_eq!(
+            open_flake_count(&pool, flake_id).await,
+            0,
+            "a delayed error transition must not create an occurrence for a deleted flake"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
+            .bind(flake_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn resolve_flake_attention_if_current_skips_deleted_flake() {
+        // Regression test for round 11: the deleted_at guard is applied
+        // consistently to both flake attention recheck helpers. Verifies
+        // the guard is actually wired up in resolve_flake_attention_if_current
+        // (the delete paths themselves are already responsible for
+        // resolving any open occurrence directly, under their own lock —
+        // this only confirms the recheck's `deleted_at IS NULL` predicate
+        // takes effect for a delayed caller racing a delete).
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let attempt_id = uuid::Uuid::new_v4();
+
+        sqlx::query("UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2 WHERE id = $1")
+            .bind(flake_id)
+            .bind(attempt_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        transition_flake_attention_to_error_if_current(
+            &pool,
+            flake_id,
+            attempt_id,
+            serde_json::json!({"flake_id": flake_id}),
+        )
+        .await;
+        assert_eq!(open_flake_count(&pool, flake_id).await, 1);
+
+        // Delete the flake directly (bypassing soft_delete_flake, which
+        // would itself resolve the occurrence) so the occurrence remains
+        // open, simulating a delayed caller racing a delete performed by
+        // some other path.
+        sqlx::query("UPDATE flakes SET sync_status = 'synced', deleted_at = NOW() WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        resolve_flake_attention_if_current(&pool, flake_id, attempt_id).await;
+
+        assert_eq!(
+            open_flake_count(&pool, flake_id).await,
+            1,
+            "resolve_flake_attention_if_current must not act on a deleted flake row \
+             (the deleted_at guard makes still_current false, so this is a no-op)"
         );
 
         let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")

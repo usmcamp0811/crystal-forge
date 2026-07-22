@@ -1142,12 +1142,27 @@ pub async fn cleanup(
 /// repair to preserve a stale dismissed row over a current undismissed one.
 ///
 /// Instead, ALL duplicate rows for the identity group are resolved, and
-/// for categories that support it (`flakes`), a single current occurrence
-/// is reconstructed from authoritative domain state (flake `sync_status`,
-/// `last_sync_at`). Categories without domain-level reconstruction
-/// (`systems`, `cves`, `environments`) rely on the periodic reconciler
-/// (2-minute cycle) to recreate the current occurrence — a brief gap in
-/// the badge count after a one-time startup repair is acceptable.
+/// for categories that support it, a single current occurrence is
+/// reconstructed immediately from authoritative domain state:
+///
+/// * `flakes` — from `sync_status`/`last_sync_at` (see below).
+/// * `cves` — from `view_cve_list_with_metadata` using the EXACT same
+///   `severity = 'CRITICAL' AND affected_count > 0` predicate the
+///   production scan-save path (`cve_scans::save_scan_results_with_store_path_override`)
+///   already uses to resolve stale occurrences. This reconstruction is
+///   NOT optional the way it is for `systems`/`environments`: unlike
+///   those, CVEs have no periodic reconciliation sweep at all — a fresh
+///   occurrence is otherwise only produced by the next vulnerability scan,
+///   which may run on an arbitrarily distant or effectively absent future
+///   schedule for a given target, so skipping reconstruction here could
+///   leave a genuinely fleet-relevant CRITICAL CVE's badge silently absent
+///   indefinitely rather than for a bounded gap.
+///
+/// `systems` and `environments` have no domain-level reconstruction here
+/// and instead rely on the periodic reconciler (2-minute cycle) to
+/// recreate the current occurrence — a brief gap in the badge count after
+/// a one-time startup repair is acceptable for those, since that
+/// reconciler is guaranteed to run shortly and will recreate them.
 ///
 /// `environments` additionally narrows grouping to
 /// `(subject_id, underlying_system_id)` — not also
@@ -1183,11 +1198,207 @@ pub async fn cleanup(
 /// to distinguish true key-encoding duplicates from legitimately distinct
 /// episodes before drawing conclusions about the shape of any observed
 /// duplication.
+///
+/// Canonicalize every attention occurrence for one build job to the single
+/// deterministic key `build:<job_id>`.
+///
+/// Builds are the SAFE-TO-MERGE category (see the module-level doc comment
+/// above): the key has no episode/timestamp component, so a build job can
+/// never legitimately recur under one `subject_id` — any row sharing that
+/// subject_id with a non-canonical key can only be an artifact of a
+/// historical key-encoding bug, i.e. provably the same real-world event.
+///
+/// Round 11 finding: the previous "pick a canonical row among open
+/// duplicates" repair only fired when MORE THAN ONE open row existed for a
+/// subject_id, so a single malformed open row with no open canonical
+/// counterpart was left completely untouched — and would then be JOINED by
+/// a second, canonical-keyed row from `reconcile_terminal_events` (which
+/// creates `build:<job_id>` whenever that exact key does not currently
+/// exist), producing exactly the duplicate this repair exists to prevent.
+/// This function instead unconditionally ensures a single open canonical
+/// row exists for the given job, handling three possible starting states:
+///
+/// * The canonical row is already open — nothing to create; only the
+///   malformed row(s)' dismissals need migrating and the rows resolving.
+/// * No canonical row exists at all — a fresh canonical row is inserted
+///   using the EARLIEST malformed row's `opened_at`/`metadata`, so the
+///   24-hour attention window reflects the real original failure time,
+///   not this repair's run time.
+/// * The canonical row exists but is RESOLVED while a malformed row for the
+///   SAME job is still open. Since a build job can never legitimately
+///   recur under one subject_id, this combination can only be the result
+///   of a prior reconciliation bug that incorrectly resolved the canonical
+///   row while leaving a duplicate open — inserting a second row with the
+///   same `source_occurrence_key` is not possible (the unique constraint
+///   on `(category, source_occurrence_key)` would reject it), so the
+///   canonical row is REOPENED (`resolved_at = NULL`) instead. This is the
+///   one case in the whole attention-lifecycle codebase where an already-
+///   resolved row is un-resolved; it is safe here specifically because
+///   the malformed companion row proves the underlying failure event was
+///   never actually superseded — repairing a mis-resolve is not the same
+///   as reopening a genuinely closed incident.
+///
+/// Returns the number of malformed rows resolved (does not count the
+/// canonical row's own insert/reopen as a "resolved" row).
+async fn canonicalize_build_occurrence(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    job_id: Uuid,
+) -> Result<usize> {
+    let subject_id = job_id.to_string();
+    let canonical_key = build_occurrence_key(job_id);
+
+    let malformed_open: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT id FROM attention_occurrences
+        WHERE category = 'builds' AND subject_id = $1 AND resolved_at IS NULL
+          AND source_occurrence_key <> $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(&subject_id)
+    .bind(&canonical_key)
+    .fetch_all(&mut **tx)
+    .await
+    .context("failed to find malformed open build occurrences")?;
+
+    if malformed_open.is_empty() {
+        return Ok(0);
+    }
+
+    let canonical_row: Option<(Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(
+        r#"
+        SELECT id, resolved_at FROM attention_occurrences
+        WHERE category = 'builds' AND subject_id = $1 AND source_occurrence_key = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(&subject_id)
+    .bind(&canonical_key)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("failed to find canonical build occurrence")?;
+
+    let canonical_id = match canonical_row {
+        Some((id, None)) => id,
+        Some((id, Some(_))) => {
+            // Resolved canonical row + open malformed row for the same job:
+            // see doc comment above for why reopening is safe here.
+            sqlx::query("UPDATE attention_occurrences SET resolved_at = NULL WHERE id = $1")
+                .bind(id)
+                .execute(&mut **tx)
+                .await
+                .context("failed to reopen canonical build occurrence")?;
+            id
+        }
+        None => {
+            let (opened_at, metadata): (DateTime<Utc>, serde_json::Value) = sqlx::query_as(
+                r#"
+                SELECT opened_at, metadata FROM attention_occurrences
+                WHERE id = ANY($1)
+                ORDER BY opened_at ASC
+                LIMIT 1
+                "#,
+            )
+            .bind(&malformed_open)
+            .fetch_one(&mut **tx)
+            .await
+            .context("failed to read malformed build occurrence for canonicalization")?;
+
+            sqlx::query_scalar::<_, Uuid>(
+                r#"
+                INSERT INTO attention_occurrences (
+                    category, subject_type, subject_id, source_occurrence_key,
+                    opened_at, last_observed_at, metadata
+                )
+                VALUES ('builds', 'build_job', $1, $2, $3, $3, $4)
+                RETURNING id
+                "#,
+            )
+            .bind(&subject_id)
+            .bind(&canonical_key)
+            .bind(opened_at)
+            .bind(&metadata)
+            .fetch_one(&mut **tx)
+            .await
+            .context("failed to insert canonical build occurrence")?
+        }
+    };
+
+    // Migrate dismissals from every malformed row onto the canonical row.
+    sqlx::query(
+        r#"
+        INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at)
+        SELECT uad.user_id, $1, MIN(uad.dismissed_at)
+        FROM user_attention_dismissals uad
+        WHERE uad.occurrence_id = ANY($2)
+        GROUP BY uad.user_id
+        ON CONFLICT (user_id, occurrence_id) DO NOTHING
+        "#,
+    )
+    .bind(canonical_id)
+    .bind(&malformed_open)
+    .execute(&mut **tx)
+    .await
+    .context("failed to migrate build dismissals during canonicalization")?;
+
+    // Resolve every malformed row.
+    let result = sqlx::query(
+        "UPDATE attention_occurrences SET resolved_at = NOW() \
+         WHERE id = ANY($1) AND resolved_at IS NULL",
+    )
+    .bind(&malformed_open)
+    .execute(&mut **tx)
+    .await
+    .context("failed to resolve malformed build occurrences during canonicalization")?;
+
+    Ok(result.rows_affected() as usize)
+}
+
+/// Find every build job with at least one OPEN, non-canonical-key attention
+/// occurrence and canonicalize it via [`canonicalize_build_occurrence`].
+///
+/// Unlike the generic duplicate-group repair in [`dedupe_open_occurrences`]
+/// (which only examines subject_ids with MORE THAN ONE open row), this also
+/// catches a single malformed open row with no open canonical counterpart —
+/// see [`canonicalize_build_occurrence`]'s doc comment for why that case
+/// matters. Run this BEFORE computing duplicate groups in
+/// `dedupe_open_occurrences`, so that by the time the group query runs,
+/// builds have already been reduced to at most one open row per subject_id.
+async fn canonicalize_malformed_build_occurrences(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+) -> Result<usize> {
+    let subjects: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT subject_id FROM attention_occurrences
+        WHERE category = 'builds'
+          AND resolved_at IS NULL
+          AND source_occurrence_key <> ('build:' || subject_id)
+        "#,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .context("failed to find malformed build subjects")?;
+
+    let mut total = 0usize;
+    for subject_id in subjects {
+        if let Ok(job_id) = subject_id.parse::<Uuid>() {
+            total += canonicalize_build_occurrence(tx, job_id).await?;
+        }
+    }
+    Ok(total)
+}
+
 pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
     let mut tx = pool
         .begin()
         .await
         .context("failed to begin dedupe transaction")?;
+
+    // Canonicalize malformed build occurrences FIRST, before computing
+    // duplicate groups below — see `canonicalize_malformed_build_occurrences`'s
+    // doc comment for why this must run as a separate, earlier pass rather
+    // than solely relying on the duplicate-group query.
+    let mut total_resolved = canonicalize_malformed_build_occurrences(&mut tx).await?;
 
     // `extra` narrows identity beyond (category, subject_id):
     //   evals        -> opened_at (as text) -- exact-event identity
@@ -1214,8 +1425,6 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
     .fetch_all(&mut *tx)
     .await
     .context("failed to find duplicate open occurrence groups")?;
-
-    let mut total_resolved = 0usize;
 
     for (category, subject_id, extra) in groups {
         if category == "evals" {
@@ -1276,65 +1485,19 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
             .context("failed to resolve duplicate eval occurrences during dedupe")?;
             total_resolved += result.rows_affected() as usize;
         } else if category == "builds" {
-            // Prefer the row whose source_occurrence_key matches the canonical
-            // `build:<job_id>` pattern (where subject_id = job_id::text).
-            // The previous sort by opened_at ASC could keep a malformed key
-            // from an old encoding bug (e.g. `build:<job_id>:<suffix>`)
-            // and resolve the one the UI actually recognizes, breaking row
-            // highlight and dismissal.  If no canonical-key row exists
-            // (all are malformed), fall back to earliest opened_at.
-            let canonical_id: Option<Uuid> = sqlx::query_scalar(
-                r#"
-                SELECT id FROM attention_occurrences
-                WHERE category = 'builds' AND subject_id = $1 AND resolved_at IS NULL
-                ORDER BY
-                    CASE WHEN source_occurrence_key = 'build:' || $1 THEN 0 ELSE 1 END,
-                    opened_at ASC, id ASC
-                LIMIT 1
-                FOR UPDATE
-                "#,
-            )
-            .bind(&subject_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("failed to find canonical build occurrence")?;
-
-            let Some(canonical_id) = canonical_id else {
+            // Defense-in-depth: `canonicalize_malformed_build_occurrences`
+            // already ran above, before this groups query, and should have
+            // reduced every build subject_id to at most one open row — so
+            // this branch should not normally fire (a "builds" group here
+            // implies more than one row is STILL open for this subject_id
+            // after that pass, which should not happen in practice). If it
+            // ever does, route it through the exact same canonicalization
+            // logic rather than a separate ad hoc merge, so the same
+            // canonical-key/reopen/dismissal-migration guarantees apply.
+            let Ok(job_id) = subject_id.parse::<Uuid>() else {
                 continue;
             };
-
-            sqlx::query(
-                r#"
-                INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at)
-                SELECT uad.user_id, $2, MIN(uad.dismissed_at)
-                FROM user_attention_dismissals uad
-                JOIN attention_occurrences ao ON ao.id = uad.occurrence_id
-                WHERE ao.category = 'builds' AND ao.subject_id = $1 AND ao.resolved_at IS NULL
-                  AND ao.id <> $2
-                GROUP BY uad.user_id
-                ON CONFLICT (user_id, occurrence_id) DO NOTHING
-                "#,
-            )
-            .bind(&subject_id)
-            .bind(canonical_id)
-            .execute(&mut *tx)
-            .await
-            .context("failed to migrate build dismissals during dedupe")?;
-
-            let result = sqlx::query(
-                r#"
-                UPDATE attention_occurrences
-                SET resolved_at = NOW()
-                WHERE category = 'builds' AND subject_id = $1 AND resolved_at IS NULL
-                  AND id <> $2
-                "#,
-            )
-            .bind(&subject_id)
-            .bind(canonical_id)
-            .execute(&mut *tx)
-            .await
-            .context("failed to resolve duplicate build occurrences during dedupe")?;
-            total_resolved += result.rows_affected() as usize;
+            total_resolved += canonicalize_build_occurrence(&mut tx, job_id).await?;
         } else if category == "environments" {
             // Resolve ALL duplicates — do not use timestamp heuristics to
             // pick a "canonical" one, as last_observed_at can be misleading
@@ -1463,6 +1626,68 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // Reconstruct CVE attention from authoritative state.
+            //
+            // Round 11 finding: unlike flakes/systems/environments, CVEs
+            // have NO periodic reconciliation sweep of their own — a fresh
+            // occurrence is only ever produced by the vulnerability-scan
+            // save path (`cve_scans::save_scan_results_with_store_path_override`),
+            // which may run on an arbitrarily distant (or, for a given
+            // target, effectively absent) future schedule. Relying on that
+            // to eventually recreate a resolved-but-still-relevant CVE's
+            // occurrence is not a bounded repair — it could leave a
+            // genuinely fleet-relevant CRITICAL CVE's badge silently
+            // absent indefinitely. So, immediately after resolving
+            // duplicates above, re-check the exact same eligibility
+            // predicate the production save path already uses
+            // (`severity = 'CRITICAL' AND affected_count > 0` against
+            // `view_cve_list_with_metadata`) and open a fresh occurrence
+            // (new episode, no dismissal carried over — CVEs are not in
+            // the safe-to-merge list) if the CVE is still relevant.
+            if category == "cves" {
+                let still_relevant: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1 FROM view_cve_list_with_metadata v
+                        WHERE v.cve_id = $1 AND v.severity = 'CRITICAL' AND v.affected_count > 0
+                    )
+                    "#,
+                )
+                .bind(&subject_id)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap_or(false);
+
+                if still_relevant {
+                    let episode_id = Uuid::new_v4();
+                    let source_key = cve_occurrence_key(&subject_id, episode_id);
+                    let now = Utc::now();
+                    let metadata = serde_json::json!({
+                        "reason": "critical",
+                        "cve_id": &subject_id,
+                    });
+                    if let Err(e) = sqlx::query(
+                        r#"
+                        INSERT INTO attention_occurrences (
+                            category, subject_type, subject_id, source_occurrence_key,
+                            opened_at, last_observed_at, metadata
+                        )
+                        VALUES ('cves', 'cve', $1, $2, $3, $4, $5)
+                        "#,
+                    )
+                    .bind(&subject_id)
+                    .bind(source_key)
+                    .bind(now)
+                    .bind(now)
+                    .bind(&metadata)
+                    .execute(&mut *tx)
+                    .await
+                    {
+                        warn!("failed to reconstruct CVE occurrence for {subject_id}: {e:#}");
                     }
                 }
             }
@@ -2005,20 +2230,22 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn test_dedupe_open_occurrences_keeps_earliest_and_migrates_dismissals() {
-        // Uses `builds` (not `evals` or `environments`) deliberately: this
-        // test exercises the GENERIC dedup path (grouping by plain
-        // (category, subject_id), earliest-wins canonical selection).
-        // `evals` and `environments` have category-specific identity
-        // narrowing (see the doc comment on dedupe_open_occurrences and
-        // the dedicated eval/environment episode tests), under which two
-        // rows an hour apart like these would legitimately be two distinct
-        // episodes rather than duplicates of each other.
+        // Uses `builds` deliberately: this test exercises build
+        // canonicalization when NEITHER duplicate row uses the canonical
+        // `build:<job_id>` key (both are malformed, e.g. from a historical
+        // key-encoding bug) and no canonical row exists at all. Round 11:
+        // canonicalize_build_occurrence no longer "keeps" either malformed
+        // row open — it creates a FRESH canonical-keyed row (using the
+        // earliest malformed row's opened_at/metadata) and resolves BOTH
+        // malformed rows, migrating dismissals from both onto the new row.
         let pool = test_pool().await;
         let user_id = insert_throwaway_user(&pool).await;
-        let subject_id = Uuid::new_v4().to_string();
+        let job_id = Uuid::new_v4();
+        let subject_id = job_id.to_string();
+        let canonical_key = format!("build:{subject_id}");
 
-        // Two open occurrences for the same (category, subject_id) — the
-        // exact invariant violation this function repairs. Insert the
+        // Two malformed open occurrences for the same (category, subject_id)
+        // — the exact invariant violation this function repairs. Insert the
         // "newer" one first so ordering in the table doesn't accidentally
         // make the test pass regardless of the ORDER BY.
         let newer_id = Uuid::new_v4();
@@ -2061,12 +2288,12 @@ mod tests {
         let resolved = dedupe_open_occurrences(&pool)
             .await
             .expect("dedupe should succeed");
-        assert!(
-            resolved >= 1,
-            "dedupe must resolve at least the duplicate row"
+        assert_eq!(
+            resolved, 2,
+            "both malformed rows must be resolved (neither is kept as canonical)"
         );
 
-        // The older (canonical) row must remain open.
+        // Both original malformed rows must now be resolved.
         let older_resolved: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
             "SELECT resolved_at FROM attention_occurrences WHERE id = $1",
         )
@@ -2074,12 +2301,8 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert!(
-            older_resolved.is_none(),
-            "the earliest-opened occurrence must remain the open canonical row"
-        );
+        assert!(older_resolved.is_some(), "the older malformed row must be resolved");
 
-        // The newer row must now be resolved.
         let newer_resolved: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
             "SELECT resolved_at FROM attention_occurrences WHERE id = $1",
         )
@@ -2087,23 +2310,50 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
+        assert!(newer_resolved.is_some(), "the newer malformed row must be resolved");
+
+        // A NEW canonical-keyed row must now exist, open, using the
+        // EARLIEST malformed row's opened_at.
+        let canonical_row: Option<(Uuid, Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>)> =
+            sqlx::query_as(
+                "SELECT id, resolved_at, opened_at FROM attention_occurrences \
+                 WHERE category = 'builds' AND subject_id = $1 AND source_occurrence_key = $2",
+            )
+            .bind(&subject_id)
+            .bind(&canonical_key)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+        let (canonical_id, canonical_resolved, canonical_opened_at) =
+            canonical_row.expect("a canonical build:<job_id> row must have been created");
         assert!(
-            newer_resolved.is_some(),
-            "the duplicate occurrence must be resolved"
+            canonical_resolved.is_none(),
+            "the newly created canonical row must be open"
+        );
+        let older_opened_at: chrono::DateTime<Utc> =
+            sqlx::query_scalar("SELECT opened_at FROM attention_occurrences WHERE id = $1")
+                .bind(older_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            canonical_opened_at, older_opened_at,
+            "the canonical row's opened_at must match the earliest malformed row's, \
+             not the repair's own run time"
         );
 
-        // The user's dismissal must have migrated to the canonical (older) row.
+        // The user's dismissal must have migrated to the NEW canonical row.
         let migrated: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
         )
         .bind(user_id)
-        .bind(older_id)
+        .bind(canonical_id)
         .fetch_one(&pool)
         .await
         .unwrap();
         assert_eq!(
             migrated, 1,
-            "dismissal must be migrated to the canonical occurrence"
+            "dismissal must be migrated to the new canonical occurrence"
         );
 
         // Running dedupe again must be a no-op (idempotent).
@@ -2120,6 +2370,161 @@ mod tests {
             .execute(&pool)
             .await;
         cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_canonicalize_build_single_malformed_row_no_canonical() {
+        // Regression test for round 11: a SINGLE malformed open row (no
+        // duplicate, no canonical row at all) was previously invisible to
+        // dedup entirely -- the duplicate-group query's `HAVING COUNT(*) > 1`
+        // filter excludes any subject_id with only one open row. This left
+        // the malformed row unrepaired, and terminal reconciliation would
+        // then create a SECOND, canonical-keyed row for the same job
+        // (since `build:<job_id>` does not exist), producing exactly the
+        // duplicate this repair exists to prevent.
+        let pool = test_pool().await;
+        let user_id = insert_throwaway_user(&pool).await;
+        let job_id = Uuid::new_v4();
+        let subject_id = job_id.to_string();
+        let canonical_key = format!("build:{subject_id}");
+        let malformed_id = Uuid::new_v4();
+        let malformed_key = format!("builds_malformed_test:{subject_id}");
+
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
+             VALUES ($1, 'builds', 'build_job', $2, $3, now() - interval '2 hours', now() - interval '2 hours')",
+        )
+        .bind(malformed_id)
+        .bind(&subject_id)
+        .bind(&malformed_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at) VALUES ($1, $2, NOW())",
+        )
+        .bind(user_id)
+        .bind(malformed_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let resolved = dedupe_open_occurrences(&pool)
+            .await
+            .expect("dedupe should succeed");
+        assert_eq!(resolved, 1, "the single malformed row must be resolved");
+
+        let malformed_resolved: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT resolved_at FROM attention_occurrences WHERE id = $1",
+        )
+        .bind(malformed_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(malformed_resolved.is_some());
+
+        let canonical_row: Option<(Uuid, Option<chrono::DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT id, resolved_at FROM attention_occurrences \
+             WHERE category = 'builds' AND subject_id = $1 AND source_occurrence_key = $2",
+        )
+        .bind(&subject_id)
+        .bind(&canonical_key)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        let (canonical_id, canonical_resolved) =
+            canonical_row.expect("a canonical row must have been created from the single malformed row");
+        assert!(canonical_resolved.is_none(), "the canonical row must be open");
+
+        let migrated: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
+        )
+        .bind(user_id)
+        .bind(canonical_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(migrated, 1, "dismissal must be migrated to the canonical row");
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&subject_id)
+            .execute(&pool)
+            .await;
+        cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_canonicalize_build_resolved_canonical_plus_open_malformed_reopens_canonical() {
+        // Regression test for round 11: a prior reconciliation bug could
+        // have incorrectly resolved the canonical `build:<job_id>` row
+        // while leaving a malformed duplicate open for the same job. Since
+        // a build job can never legitimately recur under one subject_id,
+        // this combination proves the canonical row's resolution was a
+        // mis-resolve artifact, not a genuine closure -- so it must be
+        // reopened rather than left resolved while a malformed row remains
+        // the only active representation of an unresolved failure.
+        let pool = test_pool().await;
+        let job_id = Uuid::new_v4();
+        let subject_id = job_id.to_string();
+        let canonical_key = format!("build:{subject_id}");
+        let malformed_key = format!("builds_malformed_test:{subject_id}");
+
+        let canonical_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at, resolved_at) \
+             VALUES ($1, 'builds', 'build_job', $2, $3, now() - interval '3 hours', now() - interval '3 hours', now() - interval '2 hours')",
+        )
+        .bind(canonical_id)
+        .bind(&subject_id)
+        .bind(&canonical_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let malformed_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
+             VALUES ($1, 'builds', 'build_job', $2, $3, now() - interval '3 hours', now() - interval '3 hours')",
+        )
+        .bind(malformed_id)
+        .bind(&subject_id)
+        .bind(&malformed_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let resolved = dedupe_open_occurrences(&pool)
+            .await
+            .expect("dedupe should succeed");
+        assert_eq!(resolved, 1, "the malformed row must be resolved");
+
+        let canonical_resolved: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT resolved_at FROM attention_occurrences WHERE id = $1",
+        )
+        .bind(canonical_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            canonical_resolved.is_none(),
+            "the canonical row must be reopened, not left resolved"
+        );
+
+        let malformed_resolved: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT resolved_at FROM attention_occurrences WHERE id = $1",
+        )
+        .bind(malformed_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(malformed_resolved.is_some(), "the malformed row must be resolved");
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&subject_id)
+            .execute(&pool)
+            .await;
     }
 
     async fn insert_throwaway_flake(pool: &PgPool) -> i32 {
@@ -2769,5 +3174,181 @@ mod tests {
             .execute(&pool)
             .await;
         cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_dedupe_cves_reconstructs_still_relevant_cve_after_resolving_duplicates() {
+        // Regression test for round 11: CVEs have no periodic reconciliation
+        // sweep (unlike systems/flakes/environments), so relying on a
+        // future vulnerability scan to recreate a resolved-but-still-
+        // relevant CVE's occurrence is unbounded. This seeds the FULL
+        // chain `view_cve_list_with_metadata` requires (system, nixos
+        // derivation, completed scan, package derivation, cve,
+        // package_vulnerabilities) so the CVE is genuinely CRITICAL and
+        // fleet-relevant (affected_count > 0), then verifies dedupe both
+        // resolves the duplicate rows AND immediately reconstructs a fresh
+        // occurrence — rather than leaving the badge silently empty.
+        let pool = test_pool().await;
+        let env_id = insert_throwaway_environment(&pool, "cve-reconstruct").await;
+        let system_id = insert_throwaway_system(&pool, env_id).await;
+        let short = system_id.simple().to_string()[..12].to_string();
+        let hostname: String =
+            sqlx::query_scalar("SELECT hostname FROM systems WHERE id = $1")
+                .bind(system_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        // cves.id is varchar(20) -- keep well under that limit.
+        let cve_id = format!("CVE24-{}", &short[..8]);
+
+        // nixos derivation matching the system's hostname, build-complete.
+        let nixos_derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, status_id, attempt_count) \
+             VALUES (NULL, 'nixos', $1, 10, 0) RETURNING id",
+        )
+        .bind(&hostname)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Completed CVE scan for that derivation.
+        let scan_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO cve_scans (id, derivation_id, scanner_name, status, completed_at, \
+                                     total_packages, total_vulnerabilities, critical_count) \
+             VALUES ($1, $2, 'vulnix', 'completed', NOW(), 1, 1, 1)",
+        )
+        .bind(scan_id)
+        .bind(nixos_derivation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Package derivation, scanned and complete.
+        let pkg_name = format!("test-pkg-{short}");
+        let pkg_derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, pname, version, status_id, attempt_count) \
+             VALUES (NULL, 'package', $1, 'test-pkg', '1.0.0', 11, 0) RETURNING id",
+        )
+        .bind(&pkg_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query("INSERT INTO scan_packages (scan_id, derivation_id) VALUES ($1, $2)")
+            .bind(scan_id)
+            .bind(pkg_derivation_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // The CVE itself: cvss_v3_score >= 9.0 => severity_from_cvss() = 'CRITICAL'.
+        sqlx::query("INSERT INTO cves (id, cvss_v3_score) VALUES ($1, 9.8)")
+            .bind(&cve_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO package_vulnerabilities (derivation_id, cve_id, is_whitelisted) \
+             VALUES ($1, $2, FALSE)",
+        )
+        .bind(pkg_derivation_id)
+        .bind(&cve_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Sanity: the view really does consider this CVE critical and
+        // fleet-relevant before exercising the repair.
+        let (severity, affected_count): (String, i64) = sqlx::query_as(
+            "SELECT severity, affected_count FROM view_cve_list_with_metadata WHERE cve_id = $1",
+        )
+        .bind(&cve_id)
+        .fetch_one(&pool)
+        .await
+        .expect("view_cve_list_with_metadata must return a row for the seeded CVE");
+        assert_eq!(severity, "CRITICAL");
+        assert!(affected_count > 0);
+
+        // Two duplicate open occurrences for this CVE — the invariant
+        // violation dedupe repairs.
+        let older = Uuid::new_v4();
+        let newer = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
+             VALUES ($1, 'cves', 'cve', $2, $3, now() - interval '1 hour', now() - interval '1 hour')",
+        )
+        .bind(older)
+        .bind(&cve_id)
+        .bind(format!("cve:{cve_id}:{}", Uuid::new_v4()))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
+             VALUES ($1, 'cves', 'cve', $2, $3, now(), now())",
+        )
+        .bind(newer)
+        .bind(&cve_id)
+        .bind(format!("cve:{cve_id}:{}", Uuid::new_v4()))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let resolved = dedupe_open_occurrences(&pool)
+            .await
+            .expect("dedupe should succeed");
+        assert_eq!(resolved, 2, "both duplicate CVE occurrences must be resolved");
+
+        let open_rows: Vec<(Uuid, chrono::DateTime<Utc>)> = sqlx::query_as(
+            "SELECT id, opened_at FROM attention_occurrences \
+             WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(&cve_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            open_rows.len(),
+            1,
+            "exactly one fresh occurrence must be reconstructed for a still-relevant CVE, \
+             rather than leaving the CVE with no open occurrence at all"
+        );
+        assert!(
+            open_rows[0].0 != older && open_rows[0].0 != newer,
+            "the reconstructed occurrence must be a NEW row (new episode), not one of the resolved duplicates"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&cve_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM package_vulnerabilities WHERE cve_id = $1")
+            .bind(&cve_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM scan_packages WHERE scan_id = $1")
+            .bind(scan_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM cve_scans WHERE id = $1")
+            .bind(scan_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM cves WHERE id = $1")
+            .bind(&cve_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM derivations WHERE id = ANY($1)")
+            .bind(vec![nixos_derivation_id, pkg_derivation_id])
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system_id)
+            .execute(&pool)
+            .await;
+        cleanup_environment(&pool, env_id).await;
     }
 }

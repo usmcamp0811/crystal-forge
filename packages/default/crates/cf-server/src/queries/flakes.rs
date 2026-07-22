@@ -339,11 +339,58 @@ pub async fn count_systems_for_flake(pool: &PgPool, flake_id: i32) -> Result<i64
     Ok(system_count)
 }
 
+/// Hard delete a flake by id (no cascade, relies on FK behavior for
+/// dependent rows).
+///
+/// Resolves any open flake attention occurrences under the attention lock
+/// before deleting the row, so a deleted flake cannot silently contribute a
+/// sidebar badge for the remainder of its 24-hour attention window — the
+/// periodic orphan-occurrence sweep in `attention_reconciliation.rs` would
+/// eventually catch this on its next 2-minute cycle, but deletion should be
+/// immediately authoritative, not merely eventually consistent.
+///
+/// Acquires the per-flake sync lock BEFORE the attention lock (round 11) —
+/// see `soft_delete_flake`'s doc comment for why this fixed order matters
+/// across every flake lifecycle operation (this function previously
+/// acquired neither lock at all, which is also fixed here).
 pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
+    use crate::queries::commits::SYNC_LOCK_BASE;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin hard-delete transaction")?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_LOCK_BASE + i64::from(flake_id))
+        .execute(&mut *tx)
+        .await
+        .context("Failed to acquire per-flake sync lock for hard delete")?;
+
+    let attention_lock_key = format!("attention_occurrence:flakes:{flake_id}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&attention_lock_key)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to acquire flake attention lock for hard delete")?;
+
+    sqlx::query(
+        "UPDATE attention_occurrences SET resolved_at = NOW() \
+         WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+    )
+    .bind(flake_id.to_string())
+    .execute(&mut *tx)
+    .await
+    .context("Failed to resolve flake attention occurrences during hard delete")?;
+
     let result = sqlx::query("DELETE FROM flakes WHERE id = $1")
         .bind(flake_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit()
+        .await
+        .context("Failed to commit hard-delete transaction")?;
 
     Ok(result.rows_affected())
 }
@@ -387,6 +434,24 @@ pub async fn reset_flake_source(
         .execute(&mut **tx)
         .await
         .context("Failed to acquire per-flake advisory lock for source reset")?;
+
+    // 0.5. Acquire the attention subject lock BEFORE any row mutations below
+    //      (round 11): every flake lifecycle operation that touches both the
+    //      sync lock and the attention lock (reset, soft delete, cascade
+    //      delete, hard delete) must acquire them in the SAME fixed order --
+    //      sync lock, then attention lock, then row mutations -- or two such
+    //      operations running concurrently could each hold one lock while
+    //      waiting for the other, deadlocking (Postgres would abort one).
+    //      Acquiring it here, immediately after the sync lock and before any
+    //      purge/update below, keeps this function consistent with that
+    //      order; the actual resolve of occurrences happens at the end
+    //      (step 5) but the lock itself is held from here onward.
+    let attention_lock_key = format!("attention_occurrence:flakes:{flake_id}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&attention_lock_key)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to acquire flake attention lock for source reset")?;
 
     // 1. Clear snapshot
     sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
@@ -479,21 +544,15 @@ pub async fn reset_flake_source(
     //    (repo_url/branch) has been replaced — an incident from the old
     //    source must not be silently inherited by the new one.
     //
-    //    Acquire the attention subject lock and resolve all open flake
-    //    attention occurrences for this flake.  This is serialized with
-    //    any concurrent reconciler (which holds the same lock key).  The
+    //    Resolve all open flake attention occurrences for this flake — the
+    //    attention lock was already acquired in step 0.5, before any of the
+    //    mutations above, so this resolve is still serialized with any
+    //    concurrent reconciler (which holds the same lock key). The
     //    `last_synced_at` column was already cleared above, so after this
     //    resolve, any future sync failure on the new source identity
     //    starts with a clean lineage slate — a success on the old source
     //    cannot make a new-source failure appear continuous with the old
     //    source's incident.
-    let attention_lock_key = format!("attention_occurrence:flakes:{flake_id}");
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(&attention_lock_key)
-        .execute(&mut **tx)
-        .await
-        .context("Failed to acquire flake attention lock for source reset")?;
-
     sqlx::query(
         "UPDATE attention_occurrences SET resolved_at = NOW() \
          WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
@@ -863,11 +922,26 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
 /// Resolves any open flake attention occurrences under the attention lock,
 /// so a deleted flake cannot silently contribute a sidebar badge for the
 /// remainder of its 24-hour attention window.
+///
+/// Acquires the per-flake sync lock BEFORE the attention lock (round 11):
+/// every flake lifecycle operation that touches both locks must use this
+/// same fixed order (sync lock, then attention lock, then row mutations),
+/// matching `reset_flake_source`/`cascade_delete_flake`/`delete_flake_by_id`
+/// — otherwise two such operations racing on the same flake could each hold
+/// one lock while waiting for the other, deadlocking.
 pub async fn soft_delete_flake(pool: &PgPool, flake_id: i32) -> Result<u64> {
+    use crate::queries::commits::SYNC_LOCK_BASE;
+
     let mut tx = pool
         .begin()
         .await
         .context("Failed to begin soft-delete transaction")?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_LOCK_BASE + i64::from(flake_id))
+        .execute(&mut *tx)
+        .await
+        .context("Failed to acquire per-flake sync lock for soft delete")?;
 
     // Acquire the flake attention lock so this resolve is serialized with
     // any concurrent reconciler (which holds the same lock key).
@@ -935,10 +1009,22 @@ pub async fn check_flake_dependencies(pool: &PgPool, flake_id: i32) -> Result<i6
 /// Resolves any open flake attention occurrences under the attention lock,
 /// so a deleted flake cannot silently contribute a sidebar badge for the
 /// remainder of its 24-hour attention window.
+///
+/// Acquires the per-flake sync lock BEFORE the attention lock (round 11) —
+/// see `soft_delete_flake`'s doc comment for why this fixed order matters
+/// across every flake lifecycle operation.
 pub async fn cascade_delete_flake(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     flake_id: i32,
 ) -> Result<u64> {
+    use crate::queries::commits::SYNC_LOCK_BASE;
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_LOCK_BASE + i64::from(flake_id))
+        .execute(&mut **tx)
+        .await
+        .context("Failed to acquire per-flake sync lock for cascade delete")?;
+
     // Acquire the flake attention lock so this resolve is serialized with
     // any concurrent reconciler.
     let attention_lock_key = format!("attention_occurrence:flakes:{flake_id}");
@@ -1697,5 +1783,195 @@ mod task_397_tests {
             original_after.repo_url, repo_b,
             "original row must remain on repo B, not be reclaimed for repo A"
         );
+    }
+}
+
+/// Round 11 regression tests for flake lifecycle attention-resolution and
+/// lock ordering. Uses the repository's isolated live database
+/// (`DATABASE_URL`), not `#[sqlx::test]`'s ephemeral-database mechanism
+/// (which requires a CREATE DATABASE-privileged role unavailable in this
+/// environment) — matching the pattern used in `queries::attention` and
+/// `flake::commits`'s own test modules.
+///
+/// Run with:
+///   DATABASE_URL=postgres://crystal_forge:password@localhost:3042/crystal_forge \
+///     cargo test -p cf-server --lib queries::flakes::attention_lifecycle_tests -- --ignored
+#[cfg(test)]
+mod attention_lifecycle_tests {
+    use super::*;
+
+    async fn test_pool() -> PgPool {
+        PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"))
+            .await
+            .expect("failed to connect to test database")
+    }
+
+    async fn insert_throwaway_flake(pool: &PgPool) -> i32 {
+        let short = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        sqlx::query_scalar::<_, i32>(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("att-lifecycle-flake-{short}"))
+        .bind(format!("https://git.example/att-lifecycle-flake-{short}.git"))
+        .fetch_one(pool)
+        .await
+        .expect("failed to insert throwaway test flake")
+    }
+
+    async fn insert_open_occurrence(pool: &PgPool, flake_id: i32) -> uuid::Uuid {
+        let occurrence_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at, metadata) \
+             VALUES ($1, 'flakes', 'flake_sync', $2, $3, now(), now(), $4::jsonb)",
+        )
+        .bind(occurrence_id)
+        .bind(flake_id.to_string())
+        .bind(format!("flake:{flake_id}:{}", uuid::Uuid::new_v4()))
+        .bind(serde_json::json!({"reason": "sync_error"}))
+        .execute(pool)
+        .await
+        .expect("failed to insert open attention occurrence");
+        occurrence_id
+    }
+
+    async fn occurrence_resolved_at(
+        pool: &PgPool,
+        occurrence_id: uuid::Uuid,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
+            .bind(occurrence_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn soft_delete_flake_resolves_open_attention_occurrences() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let occurrence_id = insert_open_occurrence(&pool, flake_id).await;
+
+        soft_delete_flake(&pool, flake_id)
+            .await
+            .expect("soft delete should succeed");
+
+        assert!(
+            occurrence_resolved_at(&pool, occurrence_id).await.is_some(),
+            "soft_delete_flake must resolve open flake attention occurrences"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(flake_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cascade_delete_flake_resolves_open_attention_occurrences() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let occurrence_id = insert_open_occurrence(&pool, flake_id).await;
+
+        let mut tx = pool.begin().await.expect("begin tx");
+        cascade_delete_flake(&mut tx, flake_id)
+            .await
+            .expect("cascade delete should succeed");
+        tx.commit().await.expect("commit cascade delete");
+
+        assert!(
+            occurrence_resolved_at(&pool, occurrence_id).await.is_some(),
+            "cascade_delete_flake must resolve open flake attention occurrences"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(flake_id.to_string())
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn delete_flake_by_id_resolves_open_attention_occurrences() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let occurrence_id = insert_open_occurrence(&pool, flake_id).await;
+
+        delete_flake_by_id(&pool, flake_id)
+            .await
+            .expect("hard delete should succeed");
+
+        assert!(
+            occurrence_resolved_at(&pool, occurrence_id).await.is_some(),
+            "delete_flake_by_id must resolve open flake attention occurrences \
+             before the row is deleted (round 11: this function previously \
+             acquired no locks and did not resolve attention at all)"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(flake_id.to_string())
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reset_flake_source_resolves_occurrences_and_clears_last_synced_at() {
+        // Regression test for round 10/11: changing repo_url/branch must
+        // unconditionally close the prior attention episode and clear
+        // last_synced_at, so an incident from the old source identity
+        // cannot be silently inherited by the new one.
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let occurrence_id = insert_open_occurrence(&pool, flake_id).await;
+
+        sqlx::query("UPDATE flakes SET last_synced_at = now() WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut tx = pool.begin().await.expect("begin tx");
+        reset_flake_source(
+            &mut tx,
+            flake_id,
+            "reset-test",
+            "https://git.example/reset-test-new.git",
+            "new-branch",
+            "cf_systems_only",
+        )
+        .await
+        .expect("reset_flake_source should succeed");
+        tx.commit().await.expect("commit reset");
+
+        assert!(
+            occurrence_resolved_at(&pool, occurrence_id).await.is_some(),
+            "reset_flake_source must resolve the prior source's open attention occurrence"
+        );
+
+        let last_synced_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT last_synced_at FROM flakes WHERE id = $1")
+                .bind(flake_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            last_synced_at.is_none(),
+            "reset_flake_source must clear last_synced_at for the new source identity"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(flake_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
     }
 }
