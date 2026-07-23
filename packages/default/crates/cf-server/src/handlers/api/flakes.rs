@@ -36,7 +36,7 @@ use crate::queries::flake_credentials::{
     delete_flake_credential, get_flake_credential, update_flake_credential, upsert_flake_credential,
 };
 use crate::queries::flakes::{
-    accept_history_rewrite_reset, cascade_delete_flake, check_flake_dependencies,
+    cascade_delete_flake, check_flake_dependencies,
     count_systems_for_flake, create_or_mutate_flake, delete_flake_by_id,
     fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
     list_flake_registry, mutate_flake_locked, soft_delete_flake,
@@ -1699,151 +1699,49 @@ pub async fn accept_flake_history_rewrite(
         flake.id, flake.name, flake.repo_url, flake.branch, user.user_id
     );
 
-    // ── Save evaluated commit hashes before purge ──────────────────────
-    // Round 13: after the reset + re-sync, the full git history up to 500
-    // commits is re-inserted — all with evaluation_status = 'pending'.
-    // Re-evaluating every one of them (including those already evaluated
-    // before the rewrite) would flood the eval queue with redundant work.
-    // Capture the hashes of already-evaluated commits so we can mark them
-    // as 'complete' after the re-sync, leaving only genuinely new (diverged)
-    // commits for evaluation.
-    let evaluated_hashes: Vec<String> = match sqlx::query_scalar(
-        "SELECT git_commit_hash FROM commits \
-         WHERE flake_id = $1 AND evaluation_status IN ('complete', 'failed')",
-    )
-    .bind(flake.id)
-    .fetch_all(&pool)
-    .await
-    {
-        Ok(hashes) => hashes,
-        Err(e) => {
-            error!(
-                "Failed to read evaluated hashes for flake {}: {e:#}",
-                flake.id
-            );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError {
-                    error: "history_save_hashes_failed".to_string(),
-                    message: "Failed to save evaluated commit hashes before reset".to_string(),
-                    details: Some(serde_json::json!({"error": e.to_string()})),
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    let previously_evaluated = evaluated_hashes.len();
-    info!(
-        "history_rewrite_preserving {} evaluated hashes for flake {}",
-        previously_evaluated, flake.id
-    );
-
-    // Capture the previous HEAD from the branch snapshot (position 0) for
-    // audit metadata.  Database errors are logged but do not block the reset.
-    let previous_head: Option<String> = match sqlx::query_scalar(
-        r#"
-        SELECT c.git_commit_hash
-        FROM flake_branch_commit_snapshot fbcs
-        JOIN commits c ON c.id = fbcs.commit_id
-        WHERE fbcs.flake_id = $1
-          AND fbcs.position = 0
-        "#,
-    )
-    .bind(flake.id)
-    .fetch_optional(&pool)
-    .await
-    {
-        Ok(row) => row,
-        Err(e) => {
-            error!(
-                "Failed to read previous snapshot HEAD for flake {}: {e:#}",
-                flake.id
-            );
-            None
-        }
-    };
-
-    let deleted_commits = match accept_history_rewrite_reset(&pool, flake.id).await {
-        Ok(count) => count,
-        Err(e) => {
-            error!(
-                "Failed purging commit history for flake {} ({}): {e:#}",
-                flake.name, flake.repo_url
-            );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError {
-                    error: "history_reset_failed".to_string(),
-                    message: "Failed to reset flake commit history".to_string(),
-                    details: Some(serde_json::json!({"error": e.to_string()})),
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    let inserted = match sync_flake_recorded(&pool, flake.id, &flake.repo_url, &flake.branch).await
-    {
-        Ok(inserted) => inserted,
-        Err(e) => {
-            error!(
-                "Failed re-syncing flake {} ({}) after rewrite acceptance: {e:#}",
-                flake.name, flake.repo_url
-            );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError {
-                    error: "history_resync_failed".to_string(),
-                    message: format!("History reset completed but re-sync failed: {}", e),
-                    details: Some(serde_json::json!({
-                        "error": e.to_string(),
-                        "deleted_commits": deleted_commits
-                    })),
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    // ── Mark previously-evaluated commits as complete ──────────────────
-    // After re-sync, the full git log was re-inserted.  Any commit whose
-    // git hash matches one we evaluated before the reset should skip
-    // re-evaluation — only truly divergent commits need a fresh eval.
-    if !evaluated_hashes.is_empty() {
-        let marked = sqlx::query(
-            "UPDATE commits \
-             SET evaluation_status = 'complete', eval_queue_position = NULL \
-             WHERE flake_id = $1 AND git_commit_hash = ANY($2) \
-               AND evaluation_status = 'pending'",
+    // ── Atomically reconcile history rewrite ────────────────────────────
+    // Round 15: accept_history_rewrite_and_sync handles the entire
+    // rewrite in a single locked transaction: it retains existing commit
+    // rows whose hashes remain reachable (preserving evaluation status,
+    // derivations, caches, and completion timestamps), deletes only
+    // obsolete commits, inserts only genuinely new hashes, replaces the
+    // snapshot, resolves attention, and updates sync status — all
+    // atomically with no intermediate pending-window visible to the eval
+    // worker.
+    let (deleted_commits, inserted_commits) =
+        match crate::flake::commits::accept_history_rewrite_and_sync(
+            &pool,
+            flake.id,
+            &flake.repo_url,
+            &flake.branch,
         )
-        .bind(flake.id)
-        .bind(&evaluated_hashes)
-        .execute(&pool)
         .await
-        .map_err(|e| {
-            error!(
-                "Failed to mark previously evaluated commits for flake {}: {e:#}",
-                flake.id
-            );
-        });
-        if let Ok(marked) = marked {
-            info!(
-                "history_rewrite_skipped_eval for {} previously evaluated commits on flake {} (of {} re-synced)",
-                marked.rows_affected(),
-                flake.id,
-                inserted
-            );
-        }
-    }
+        {
+            Ok(result) => result,
+            Err(e) => {
+                error!(
+                    "Failed to accept history rewrite for flake {} ({}): {e:#}",
+                    flake.name, flake.repo_url
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: "history_rewrite_failed".to_string(),
+                        message: format!("History rewrite acceptance failed: {}", e),
+                        details: Some(serde_json::json!({"error": e.to_string()})),
+                    }),
+                )
+                    .into_response();
+            }
+        };
 
     info!(
-        "history_rewrite_accepted flake_id={} flake_name={} deleted_commits={} inserted_commits={} previously_evaluated={} actor={}",
-        flake.id, flake.name, deleted_commits, inserted, previously_evaluated, user.user_id
+        "history_rewrite_accepted flake_id={} flake_name={} deleted_commits={} inserted_commits={} actor={}",
+        flake.id, flake.name, deleted_commits, inserted_commits, user.user_id
     );
 
-    // Only notify the eval queue if there are genuinely new commits
-    // (those NOT in the pre-delete evaluated set).
+    // Notify the eval queue if there are pending commits (only genuinely
+    // new hashes that were inserted).
     let remaining_pending: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM commits \
          WHERE flake_id = $1 AND evaluation_status = 'pending'",
@@ -1862,9 +1760,8 @@ pub async fn accept_flake_history_rewrite(
         "flake_name": flake.name,
         "repo_url": flake.repo_url,
         "branch": flake.branch,
-        "previous_head": previous_head,
         "deleted_commits": deleted_commits,
-        "inserted_commits": inserted,
+        "inserted_commits": inserted_commits,
         "accepted": true,
     });
 
@@ -1890,16 +1787,15 @@ pub async fn accept_flake_history_rewrite(
         Json(serde_json::json!({
             "status": "ok",
             "message": format!(
-                "Accepted history rewrite for {} on {}. Reset {} old commits and synced {} current commits.",
+                "Accepted history rewrite for {} on {}. Removed {} obsolete commits and inserted {} new commits.",
                 flake.name,
                 flake.branch,
                 deleted_commits,
-                inserted
+                inserted_commits
             ),
             "flake_id": flake.id,
             "deleted_commits": deleted_commits,
-            "inserted_commits": inserted,
-            "previous_head": previous_head,
+            "inserted_commits": inserted_commits,
         })),
     )
         .into_response()

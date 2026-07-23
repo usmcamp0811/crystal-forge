@@ -623,6 +623,290 @@ pub async fn sync_flake_recorded(
     Ok(inserted_count)
 }
 
+/// Accept a git history rewrite and re-sync, preserving commit rows whose
+/// hashes remain reachable in the accepted history (with their derivations,
+/// caches, evaluation status, and completion timestamps).
+///
+/// Unlike the general `sync_flake_recorded`, this function:
+///
+/// 1. Does NOT detect force-push rewrites (the caller has already confirmed).
+/// 2. DELETES commit rows whose hashes are no longer in the branch history
+///    (along with their cascaded artifacts) — these were part of the old
+///    rewritten history and have no counterpart in the new one.
+/// 3. Preserves existing commit rows whose hashes still appear in the new
+///    history — their `evaluation_status`, derivations, caches, and completion
+///    timestamps remain intact, avoiding redundant re-evaluation.
+/// 4. Inserts only genuinely new hashes as `evaluation_status = 'pending'`.
+///
+/// All mutations (delete, insert, snapshot replace, status update, attention
+/// resolve) happen inside a single sync-locked transaction, so the
+/// intermediate state where re-synced commits appear pending is never visible
+/// to the evaluation worker — see Round 15 review.
+///
+/// Returns `(deleted_commits, inserted_commits)`.
+pub async fn accept_history_rewrite_and_sync(
+    pool: &PgPool,
+    flake_id: i32,
+    repo_url: &str,
+    branch: &str,
+) -> Result<(u64, u64)> {
+    use crate::queries::commits::{SYNC_LOCK_BASE, insert_commit_by_flake_id_tx};
+
+    let attempt_id = Uuid::new_v4();
+
+    // Mark as syncing.  Same guard as sync_flake_recorded.
+    let start_result = sqlx::query(
+        "UPDATE flakes \
+         SET sync_status = 'syncing', last_sync_at = now(), last_sync_error = NULL, \
+             sync_attempt_id = $2 \
+         WHERE id = $1 AND deleted_at IS NULL \
+           AND repo_url = $3 AND branch = $4",
+    )
+    .bind(flake_id)
+    .bind(attempt_id)
+    .bind(repo_url)
+    .bind(branch)
+    .execute(pool)
+    .await?;
+    if start_result.rows_affected() != 1 {
+        bail!("flake {flake_id} not found or repo_url/branch changed before rewrite sync could start");
+    }
+
+    let creds = FlakeCredentialEnv::load(pool, flake_id)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Failed to load credentials for flake {flake_id}: {e:#}");
+            None
+        });
+
+    // Phase 1: Git work — clone and log.  No force-push detection needed
+    // (the caller has already confirmed they accept the rewrite).
+    let max = MAX_SNAPSHOT_COMMITS as usize;
+    let commits = match get_commits_with_full_metadata_and_dir(repo_url, branch, Some(max), None, creds.as_ref()).await {
+        Ok((commits, _dir)) => commits,
+        Err(e) => {
+            record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+            return Err(e);
+        }
+    };
+
+    let ordered_hashes: Vec<String> = commits.iter().map(|c| c.hash.clone()).collect();
+
+    // Phase 2: Single locked transaction — delete stale, insert new, preserve existing.
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            error!("Failed to begin rewrite mutation tx (flake {flake_id}): {e:#}");
+            record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+            return Err(e.into());
+        }
+    };
+
+    // Acquire the per-flake advisory lock (transaction-scoped).
+    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_LOCK_BASE + i64::from(flake_id))
+        .execute(&mut *tx)
+        .await
+    {
+        error!("Failed to acquire advisory lock for rewrite (flake {flake_id}): {e:#}");
+        let _ = tx.rollback().await;
+        record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+        return Err(e.into());
+    }
+
+    // Recheck inside the lock.
+    let current_state = sqlx::query_as::<_, (String, Option<uuid::Uuid>)>(
+        "SELECT branch, sync_attempt_id FROM flakes WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(flake_id)
+    .fetch_optional(&mut *tx)
+    .await;
+
+    match current_state {
+        Ok(Some((cur_branch, cur_attempt))) => {
+            if cur_branch != branch || cur_attempt != Some(attempt_id) {
+                info!("Flake {flake_id} was reset or superseded before rewrite lock; aborting");
+                let _ = tx.rollback().await;
+                return Ok((0, 0));
+            }
+        }
+        Ok(None) => {
+            let _ = tx.rollback().await;
+            bail!("Flake {flake_id} disappeared before rewrite mutation tx");
+        }
+        Err(e) => {
+            error!("Recheck failed for rewrite (flake {flake_id}): {e:#}");
+            let _ = tx.rollback().await;
+            record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+            return Err(e.into());
+        }
+    }
+
+    // ── Delete commits no longer in the accepted history ────────────────
+    // Before inserting new commits, prune rows whose git hash is absent from
+    // the new branch history (they were removed or replaced by the rewrite).
+    // This cascades through derivations, caches, and attention occurrences
+    // (which the handler above resolves in the same tx).
+    let mut deleted_count: u64 = 0;
+    if !ordered_hashes.is_empty() {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM commits
+            WHERE flake_id = $1
+              AND NOT (git_commit_hash = ANY($2))
+            "#,
+        )
+        .bind(flake_id)
+        .bind(&ordered_hashes)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to delete stale commits during history rewrite")?;
+        deleted_count = result.rows_affected();
+    }
+
+    // ── Pre-filter existing hashes ──────────────────────────────────────
+    let candidate_hashes: Vec<&str> = commits.iter().map(|c| c.hash.as_str()).collect();
+    let existing: std::collections::HashSet<String> = if candidate_hashes.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        match sqlx::query_scalar::<_, String>(
+            "SELECT git_commit_hash FROM commits WHERE flake_id = $1 AND git_commit_hash = ANY($2)",
+        )
+        .bind(flake_id)
+        .bind(&candidate_hashes)
+        .fetch_all(&mut *tx)
+        .await
+        {
+            Ok(rows) => rows.into_iter().collect(),
+            Err(e) => {
+                error!("Pre-filter query failed during rewrite (flake {flake_id}): {e:#}");
+                let _ = tx.rollback().await;
+                record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+                return Err(e.into());
+            }
+        }
+    };
+
+    // ── Insert only genuinely new hashes ────────────────────────────────
+    let mut inserted_count: u64 = 0;
+    for commit_data in &commits {
+        if existing.contains(&commit_data.hash) {
+            continue;
+        }
+        match insert_commit_by_flake_id_tx(
+            &mut tx,
+            flake_id,
+            &commit_data.hash,
+            commit_data.timestamp,
+            Some(&commit_data.message),
+            Some(&commit_data.author),
+        )
+        .await
+        {
+            Ok(n) => inserted_count += n,
+            Err(e) => {
+                error!(
+                    "Insert failed for {} during rewrite (flake {flake_id}): {e:#}",
+                    commit_data.hash
+                );
+                let _ = tx.rollback().await;
+                record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+                return Err(e);
+            }
+        }
+    }
+
+    // ── Resolve ordered IDs and replace snapshot ────────────────────────
+    let resolved = match resolve_ordered_ids_tx(&mut tx, flake_id, &ordered_hashes).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            error!("ID resolution failed during rewrite (flake {flake_id}): {e:#}");
+            let _ = tx.rollback().await;
+            record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+            return Err(e);
+        }
+    };
+
+    if let Err(e) =
+        crate::queries::flakes::replace_flake_branch_snapshot(&mut tx, flake_id, &resolved).await
+    {
+        error!("Snapshot publication failed during rewrite (flake {flake_id}): {e:#}");
+        let _ = tx.rollback().await;
+        record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+        return Err(e);
+    }
+
+    // ── Acquire attention lock and resolve ──────────────────────────────
+    let attention_lock_key = format!("attention_occurrence:flakes:{flake_id}");
+    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&attention_lock_key)
+        .execute(&mut *tx)
+        .await
+    {
+        error!("Failed to acquire attention lock during rewrite (flake {flake_id}): {e:#}");
+        let _ = tx.rollback().await;
+        record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+        return Err(e.into());
+    }
+
+    // Update sync status.
+    let status_update = sqlx::query(
+        "UPDATE flakes \
+         SET sync_status = 'synced', last_sync_at = now(), last_sync_error = NULL, last_synced_at = now() \
+         WHERE id = $1 AND deleted_at IS NULL AND sync_attempt_id = $2",
+    )
+    .bind(flake_id)
+    .bind(attempt_id)
+    .execute(&mut *tx)
+    .await;
+
+    match status_update {
+        Ok(upd) if upd.rows_affected() == 1 => {}
+        Ok(_) => {
+            info!("Flake {flake_id} rewrite sync was superseded; aborting");
+            let _ = tx.rollback().await;
+            return Ok((deleted_count, inserted_count));
+        }
+        Err(e) => {
+            error!("Status update failed during rewrite (flake {flake_id}): {e:#}");
+            let _ = tx.rollback().await;
+            record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+            return Err(e.into());
+        }
+    }
+
+    // Resolve flake attention.
+    if let Err(e) = sqlx::query(
+        "UPDATE attention_occurrences SET resolved_at = NOW() \
+         WHERE category = 'flakes' AND subject_id = $1 AND resolved_at IS NULL",
+    )
+    .bind(flake_id.to_string())
+    .execute(&mut *tx)
+    .await
+    {
+        error!("Failed to resolve flake attention during rewrite (flake {flake_id}): {e:#}");
+        let _ = tx.rollback().await;
+        record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+        return Err(e.into());
+    }
+
+    // Commit everything atomically.
+    if let Err(e) = tx.commit().await {
+        error!("Rewrite commit failed (flake {flake_id}): {e:#}");
+        record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+        return Err(e.into());
+    }
+
+    if inserted_count > 0 || deleted_count > 0 {
+        info!(
+            "✅ Rewrite accepted for flake {flake_id}: deleted {} stale, inserted {} new ({} in git log)",
+            deleted_count, inserted_count, ordered_hashes.len()
+        );
+    }
+
+    Ok((deleted_count, inserted_count))
+}
+
 /// Maximum number of commits to retain in the branch-commit snapshot.
 ///
 /// Must be at least the maximum timeline limit (500) so the snapshot can
