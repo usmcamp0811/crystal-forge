@@ -1018,18 +1018,13 @@ async fn reconcile_single_cve(pool: &PgPool, cve_id: &str) {
     };
 
     if relevant {
-        // Derive a conservative event timestamp from the earliest scan that
-        // detected this CVE, so a crash-lost occurrence recovered by the
-        // reconciler uses the real transition time, not the sweep time.
-        let fleet_relevant_since: Option<chrono::DateTime<chrono::Utc>> = match sqlx::query_scalar(
-            r#"
-            SELECT MIN(cs.completed_at)
-            FROM cve_scans cs
-            JOIN scan_packages sp ON sp.scan_id = cs.id
-            JOIN package_vulnerabilities pv ON pv.cve_id = $1
-              AND pv.derivation_id = sp.derivation_id
-            WHERE cs.status = 'completed'
-            "#,
+        // Read the persisted fleet_relevant_since from the cves row (locked
+        // via FOR UPDATE).  This marks the start of the current fleet-relevance
+        // episode and is set when the CVE last transitioned from not-relevant
+        // to relevant.  Using a persisted timestamp avoids backdating a
+        // recurrence to an old scan (round 16 review).
+        let persisted_since: Option<chrono::DateTime<chrono::Utc>> = match sqlx::query_scalar(
+            "SELECT fleet_relevant_since FROM cves WHERE id = $1 FOR UPDATE",
         )
         .bind(cve_id)
         .fetch_one(&mut *tx)
@@ -1037,14 +1032,39 @@ async fn reconcile_single_cve(pool: &PgPool, cve_id: &str) {
         {
             Ok(ts) => ts,
             Err(e) => {
-                warn!("failed to derive fleet_relevant_since for CVE {cve_id}: {e:#}");
+                warn!("failed to read fleet_relevant_since for CVE {cve_id}: {e:#}");
                 let _ = tx.rollback().await;
                 return;
             }
         };
 
+        let now = chrono::Utc::now();
+
+        // If fleet_relevant_since is NULL, this is a new episode — persist
+        // the transition timestamp before creating the occurrence.  Using
+        // NOW() is conservative but always correct; it never backdates a
+        // recurrence to the previous episode.
+        let opened_at = match persisted_since {
+            Some(ts) => ts,
+            None => {
+                if let Err(e) = sqlx::query(
+                    "UPDATE cves SET fleet_relevant_since = $1 WHERE id = $2",
+                )
+                .bind(now)
+                .bind(cve_id)
+                .execute(&mut *tx)
+                .await
+                {
+                    warn!("failed to persist fleet_relevant_since for CVE {cve_id}: {e:#}");
+                    let _ = tx.rollback().await;
+                    return;
+                }
+                now
+            }
+        };
+
         // If we have an existing open occurrence, observe it; otherwise
-        // open a new one using the conservative event timestamp.
+        // open a new one using the episode start timestamp.
         let existing: Option<uuid::Uuid> = match sqlx::query_scalar(
             r#"
             SELECT id FROM attention_occurrences
@@ -1066,9 +1086,6 @@ async fn reconcile_single_cve(pool: &PgPool, cve_id: &str) {
                 return;
             }
         };
-
-        let now = chrono::Utc::now();
-        let opened_at = fleet_relevant_since.unwrap_or(now);
 
         if let Some(occ_id) = existing {
             // Update last_observed_at (and conditionally metadata)
@@ -1122,7 +1139,8 @@ async fn reconcile_single_cve(pool: &PgPool, cve_id: &str) {
             return;
         }
     } else {
-        // No longer fleet-relevant: resolve every open occurrence.
+        // No longer fleet-relevant: resolve every open occurrence and clear
+        // the episode start so a future recurrence gets a fresh opened_at.
         if let Err(e) = sqlx::query(
             "UPDATE attention_occurrences \
              SET resolved_at = statement_timestamp() \
@@ -1133,6 +1151,17 @@ async fn reconcile_single_cve(pool: &PgPool, cve_id: &str) {
         .await
         {
             warn!("failed to resolve stale CVE occurrence for {cve_id}: {e:#}");
+            let _ = tx.rollback().await;
+            return;
+        }
+        if let Err(e) = sqlx::query(
+            "UPDATE cves SET fleet_relevant_since = NULL WHERE id = $1",
+        )
+        .bind(cve_id)
+        .execute(&mut *tx)
+        .await
+        {
+            warn!("failed to clear fleet_relevant_since for CVE {cve_id}: {e:#}");
             let _ = tx.rollback().await;
             return;
         }

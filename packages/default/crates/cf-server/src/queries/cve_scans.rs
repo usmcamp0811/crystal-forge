@@ -695,15 +695,15 @@ pub(crate) async fn save_scan_results_with_store_path_override(
         }
     }
 
-    // Resolve any open CVE occurrence whose CVE is no longer fleet-relevant
-    // (no longer CRITICAL severity, or no longer affecting any active
-    // system). This is a fleet-wide check independent of which derivation
-    // this particular scan covered, since a CVE can stop being fleet-relevant
-    // due to changes on a system unrelated to the one just scanned.
-    if let Err(e) = sqlx::query(
+    // Resolve any open CVE occurrence whose CVE is no longer fleet-relevant.
+    // Unlike the earlier open-or-observe calls (which run under per-CVE
+    // advisory locks), this block resolves each stale CVE under its
+    // individual lock so the operation serialises with the concurrent
+    // reconciler and producer — see round 16 review.
+    let stale_cve_ids: Vec<String> = match sqlx::query_scalar(
         r#"
-        UPDATE attention_occurrences ao
-        SET resolved_at = NOW()
+        SELECT DISTINCT ao.subject_id
+        FROM attention_occurrences ao
         WHERE ao.category = 'cves'
           AND ao.resolved_at IS NULL
           AND NOT EXISTS (
@@ -714,10 +714,20 @@ pub(crate) async fn save_scan_results_with_store_path_override(
           )
         "#,
     )
-    .execute(pool)
+    .fetch_all(pool)
     .await
     {
-        warn!("failed to resolve stale CVE attention occurrences: {e:#}");
+        Ok(ids) => ids,
+        Err(e) => {
+            warn!("failed to query stale CVE subject IDs: {e:#}");
+            Vec::new()
+        }
+    };
+
+    for cve_id in stale_cve_ids {
+        if let Err(e) = resolve_cve_occurrence_under_lock(pool, &cve_id).await {
+            warn!("failed to resolve stale occurrence for CVE {cve_id}: {e:#}");
+        }
     }
 
     Ok(())
@@ -1225,6 +1235,34 @@ pub async fn get_targets_needing_cve_rescan(
         .collect();
 
     Ok(derivations)
+}
+
+/// Resolve a single CVE's open attention occurrences under its per-CVE
+/// advisory lock, so this operation serialises with the reconciler and
+/// producer.  Called by `save_scan_results` for CVEs that are no longer
+/// fleet-relevant (round 16 review).
+async fn resolve_cve_occurrence_under_lock(pool: &PgPool, cve_id: &str) -> Result<()> {
+    let mut tx = pool.begin().await?;
+
+    let lock_key = format!("attention_occurrence:cves:{cve_id}:critical");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *tx)
+        .await?;
+
+    // Recheck inside the lock — another concurrent process may have already
+    // resolved or re-opened this occurrence.
+    sqlx::query(
+        "UPDATE attention_occurrences \
+         SET resolved_at = statement_timestamp() \
+         WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
+    )
+    .bind(cve_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
 }
 
 #[cfg(test)]

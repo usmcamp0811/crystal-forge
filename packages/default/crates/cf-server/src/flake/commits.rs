@@ -623,38 +623,59 @@ pub async fn sync_flake_recorded(
     Ok(inserted_count)
 }
 
+/// Outcome of an accepted history rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryRewriteOutcome {
+    /// The rewrite was applied: stale commits were removed and new ones inserted.
+    Applied {
+        /// Number of obsolete commit rows deleted.
+        deleted_commits: u64,
+        /// Number of genuinely new commit rows inserted.
+        inserted_commits: u64,
+    },
+    /// Another sync superseded the rewrite before it could commit.
+    Superseded,
+}
+
 /// Accept a git history rewrite and re-sync, preserving commit rows whose
-/// hashes remain reachable in the accepted history (with their derivations,
-/// caches, evaluation status, and completion timestamps).
+/// hashes remain reachable in the accepted snapshot history (with their
+/// derivations, caches, evaluation status, and completion timestamps).
 ///
 /// Unlike the general `sync_flake_recorded`, this function:
 ///
 /// 1. Does NOT detect force-push rewrites (the caller has already confirmed).
-/// 2. DELETES commit rows whose hashes are no longer in the branch history
-///    (along with their cascaded artifacts) — these were part of the old
-///    rewritten history and have no counterpart in the new one.
-/// 3. Preserves existing commit rows whose hashes still appear in the new
-///    history — their `evaluation_status`, derivations, caches, and completion
-///    timestamps remain intact, avoiding redundant re-evaluation.
-/// 4. Inserts only genuinely new hashes as `evaluation_status = 'pending'`.
+/// 2. Preserves existing commit rows whose hashes still appear in the
+///    snapshot (the newest 500) — their `evaluation_status`, derivations,
+///    caches, and completion timestamps remain intact, avoiding redundant
+///    re-evaluation.
+/// 3. Inserts only genuinely new hashes as `evaluation_status = 'pending'`.
+/// 4. Does NOT delete commit rows beyond the snapshot window (round 16
+///    review: the 500-entry git log is the snapshot display limit, not the
+///    full branch reachability set; historical rows outside this window
+///    remain as archived evaluation records until a separate retention
+///    policy removes them).
 ///
-/// All mutations (delete, insert, snapshot replace, status update, attention
+/// All mutations (insert, snapshot replace, status update, attention
 /// resolve) happen inside a single sync-locked transaction, so the
 /// intermediate state where re-synced commits appear pending is never visible
 /// to the evaluation worker — see Round 15 review.
 ///
-/// Returns `(deleted_commits, inserted_commits)`.
+/// Returns `HistoryRewriteOutcome` so the caller can distinguish an applied
+/// rewrite from a superseded one.
 pub async fn accept_history_rewrite_and_sync(
     pool: &PgPool,
     flake_id: i32,
     repo_url: &str,
     branch: &str,
-) -> Result<(u64, u64)> {
+) -> Result<HistoryRewriteOutcome> {
     use crate::queries::commits::{SYNC_LOCK_BASE, insert_commit_by_flake_id_tx};
 
     let attempt_id = Uuid::new_v4();
 
     // Mark as syncing.  Same guard as sync_flake_recorded.
+    // NOTE: every subsequent error path must call record_sync_error to
+    // transition from 'syncing' back to 'error'; a bare return without
+    // record_sync_error leaves the flake stuck in 'syncing' (round 16).
     let start_result = sqlx::query(
         "UPDATE flakes \
          SET sync_status = 'syncing', last_sync_at = now(), last_sync_error = NULL, \
@@ -667,7 +688,11 @@ pub async fn accept_history_rewrite_and_sync(
     .bind(repo_url)
     .bind(branch)
     .execute(pool)
-    .await?;
+    .await
+    .map_err(|e| {
+        error!("Failed to mark flake {flake_id} as syncing for rewrite: {e:#}");
+        e
+    })?;
     if start_result.rows_affected() != 1 {
         bail!("flake {flake_id} not found or repo_url/branch changed before rewrite sync could start");
     }
@@ -681,8 +706,21 @@ pub async fn accept_history_rewrite_and_sync(
 
     // Phase 1: Git work — clone and log.  No force-push detection needed
     // (the caller has already confirmed they accept the rewrite).
+    //
+    // The git log is limited to MAX_SNAPSHOT_COMMITS (500) because that is
+    // the snapshot display window.  We do NOT derive the delete-reachability
+    // set from this window — historical commits beyond the newest 500 are
+    // preserved as archived evaluation records (round 16 review).
     let max = MAX_SNAPSHOT_COMMITS as usize;
-    let commits = match get_commits_with_full_metadata_and_dir(repo_url, branch, Some(max), None, creds.as_ref()).await {
+    let commits = match get_commits_with_full_metadata_and_dir(
+        repo_url,
+        branch,
+        Some(max),
+        None,
+        creds.as_ref(),
+    )
+    .await
+    {
         Ok((commits, _dir)) => commits,
         Err(e) => {
             record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
@@ -692,7 +730,7 @@ pub async fn accept_history_rewrite_and_sync(
 
     let ordered_hashes: Vec<String> = commits.iter().map(|c| c.hash.clone()).collect();
 
-    // Phase 2: Single locked transaction — delete stale, insert new, preserve existing.
+    // Phase 2: Single locked transaction — insert new, preserve existing.
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
@@ -714,7 +752,7 @@ pub async fn accept_history_rewrite_and_sync(
         return Err(e.into());
     }
 
-    // Recheck inside the lock.
+    // Recheck inside the lock — another process may have superseded us.
     let current_state = sqlx::query_as::<_, (String, Option<uuid::Uuid>)>(
         "SELECT branch, sync_attempt_id FROM flakes WHERE id = $1 AND deleted_at IS NULL",
     )
@@ -727,11 +765,21 @@ pub async fn accept_history_rewrite_and_sync(
             if cur_branch != branch || cur_attempt != Some(attempt_id) {
                 info!("Flake {flake_id} was reset or superseded before rewrite lock; aborting");
                 let _ = tx.rollback().await;
-                return Ok((0, 0));
+                return Ok(HistoryRewriteOutcome::Superseded);
             }
         }
         Ok(None) => {
             let _ = tx.rollback().await;
+            // Flake was deleted; record sync error so the 'syncing' marker
+            // transitions to 'error' rather than being stuck (round 16).
+            record_sync_error(
+                pool,
+                flake_id,
+                attempt_id,
+                repo_url,
+                "Flake disappeared before rewrite mutation tx",
+            )
+            .await;
             bail!("Flake {flake_id} disappeared before rewrite mutation tx");
         }
         Err(e) => {
@@ -742,29 +790,9 @@ pub async fn accept_history_rewrite_and_sync(
         }
     }
 
-    // ── Delete commits no longer in the accepted history ────────────────
-    // Before inserting new commits, prune rows whose git hash is absent from
-    // the new branch history (they were removed or replaced by the rewrite).
-    // This cascades through derivations, caches, and attention occurrences
-    // (which the handler above resolves in the same tx).
-    let mut deleted_count: u64 = 0;
-    if !ordered_hashes.is_empty() {
-        let result = sqlx::query(
-            r#"
-            DELETE FROM commits
-            WHERE flake_id = $1
-              AND NOT (git_commit_hash = ANY($2))
-            "#,
-        )
-        .bind(flake_id)
-        .bind(&ordered_hashes)
-        .execute(&mut *tx)
-        .await
-        .context("Failed to delete stale commits during history rewrite")?;
-        deleted_count = result.rows_affected();
-    }
-
     // ── Pre-filter existing hashes ──────────────────────────────────────
+    // Query which of the snapshot hashes already exist in the commits table.
+    // Only genuinely new hashes are inserted below.
     let candidate_hashes: Vec<&str> = commits.iter().map(|c| c.hash.as_str()).collect();
     let existing: std::collections::HashSet<String> = if candidate_hashes.is_empty() {
         std::collections::HashSet::new()
@@ -836,7 +864,13 @@ pub async fn accept_history_rewrite_and_sync(
         return Err(e);
     }
 
-    // ── Acquire attention lock and resolve ──────────────────────────────
+    // ── Acquire attention lock and resolve flake-level attention ────────
+    // Per-commit and per-build attention is not resolved here because we do
+    // not delete commit rows (see docstring point 4). Obsolete commits
+    // outside the 500-entry snapshot are preserved as archived records; their
+    // attention occurrences remain valid because the underlying domain rows
+    // still exist.  The periodic stale sweep handles any rows whose
+    // referenced commits were genuinely removed by other means.
     let attention_lock_key = format!("attention_occurrence:flakes:{flake_id}");
     if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(&attention_lock_key)
@@ -863,9 +897,12 @@ pub async fn accept_history_rewrite_and_sync(
     match status_update {
         Ok(upd) if upd.rows_affected() == 1 => {}
         Ok(_) => {
-            info!("Flake {flake_id} rewrite sync was superseded; aborting");
+            info!("Flake {flake_id} rewrite sync was superseded before status update; aborting");
             let _ = tx.rollback().await;
-            return Ok((deleted_count, inserted_count));
+            // The initial syncing marker plus the git work are discarded by
+            // the rollback; record_sync_error is not called because the
+            // superseding sync will publish its own status.
+            return Ok(HistoryRewriteOutcome::Superseded);
         }
         Err(e) => {
             error!("Status update failed during rewrite (flake {flake_id}): {e:#}");
@@ -897,14 +934,18 @@ pub async fn accept_history_rewrite_and_sync(
         return Err(e.into());
     }
 
-    if inserted_count > 0 || deleted_count > 0 {
+    if inserted_count > 0 {
         info!(
-            "✅ Rewrite accepted for flake {flake_id}: deleted {} stale, inserted {} new ({} in git log)",
-            deleted_count, inserted_count, ordered_hashes.len()
+            "✅ Rewrite accepted for flake {flake_id}: inserted {} new commits ({} in snapshot)",
+            inserted_count,
+            ordered_hashes.len()
         );
     }
 
-    Ok((deleted_count, inserted_count))
+    Ok(HistoryRewriteOutcome::Applied {
+        deleted_commits: 0,
+        inserted_commits: inserted_count,
+    })
 }
 
 /// Maximum number of commits to retain in the branch-commit snapshot.

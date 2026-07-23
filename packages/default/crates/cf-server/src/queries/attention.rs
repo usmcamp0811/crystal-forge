@@ -1620,6 +1620,21 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
             .context("failed to determine CVE fleet relevance during dedupe")?;
 
             if still_relevant {
+                // Preserve the earliest opened_at from the duplicates so
+                // that a week-old continuous incident does not reappear as
+                // a new 24-hour alert after a crash/restart (round 16).
+                let earliest_opened: Option<DateTime<Utc>> = sqlx::query_scalar(
+                    r#"
+                    SELECT MIN(opened_at)
+                    FROM attention_occurrences
+                    WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL
+                    "#,
+                )
+                .bind(&subject_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .context("failed to read earliest opened_at for CVE dedupe")?;
+
                 let resolved = sqlx::query(
                     r#"
                     UPDATE attention_occurrences
@@ -1633,9 +1648,12 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
                 .context("failed to resolve duplicate CVE occurrences during dedupe")?;
                 total_resolved += resolved.rows_affected() as usize;
 
+                // Use the earliest duplicate's opened_at; fall back to now
+                // if no duplicates were found (defensive).
+                let now = Utc::now();
+                let opened_at = earliest_opened.unwrap_or(now);
                 let episode_id = Uuid::new_v4();
                 let source_key = cve_occurrence_key(&subject_id, episode_id);
-                let now = Utc::now();
                 let metadata = serde_json::json!({
                     "reason": "critical",
                     "cve_id": &subject_id,
@@ -1651,7 +1669,7 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
                 )
                 .bind(&subject_id)
                 .bind(source_key)
-                .bind(now)
+                .bind(opened_at)
                 .bind(now)
                 .bind(&metadata)
                 .execute(&mut *tx)
