@@ -654,11 +654,14 @@ pub enum HistoryRewriteOutcome {
 ///    full branch reachability set; historical rows outside this window
 ///    remain as archived evaluation records until a separate retention
 ///    policy removes them).
+/// 5. Resolves eval/build attention for commits that leave the active
+///    snapshot, so archived failures cannot keep or reacquire sidebar
+///    attention (round 16 review).
 ///
-/// All mutations (insert, snapshot replace, status update, attention
-/// resolve) happen inside a single sync-locked transaction, so the
-/// intermediate state where re-synced commits appear pending is never visible
-/// to the evaluation worker — see Round 15 review.
+/// All mutations (insert, snapshot replace, attention resolve, status update)
+/// happen inside a single sync-locked transaction, so the intermediate state
+/// where re-synced commits appear pending is never visible to the evaluation
+/// worker — see Round 15 review.
 ///
 /// Returns `HistoryRewriteOutcome` so the caller can distinguish an applied
 /// rewrite from a superseded one.
@@ -855,6 +858,26 @@ pub async fn accept_history_rewrite_and_sync(
         }
     };
 
+    // Capture the current snapshot IDs before replacement so we can tell
+    // which commits left the active snapshot.  The archived commit rows are
+    // preserved, but eval/build attention for commits no longer in the
+    // active snapshot should be resolved (round 16 review).
+    let previous_snapshot_ids: Vec<i32> = match sqlx::query_scalar(
+        "SELECT commit_id FROM flake_branch_commit_snapshot WHERE flake_id = $1",
+    )
+    .bind(flake_id)
+    .fetch_all(&mut *tx)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            error!("Failed to read previous snapshot IDs for flake {flake_id}: {e:#}");
+            let _ = tx.rollback().await;
+            record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+            return Err(e.into());
+        }
+    };
+
     if let Err(e) =
         crate::queries::flakes::replace_flake_branch_snapshot(&mut tx, flake_id, &resolved).await
     {
@@ -864,13 +887,67 @@ pub async fn accept_history_rewrite_and_sync(
         return Err(e);
     }
 
+    // Resolve eval/build attention for commits that left the active snapshot.
+    let current_snapshot_ids: std::collections::HashSet<i32> =
+        resolved.iter().copied().collect();
+    let removed_from_snapshot: Vec<i32> = previous_snapshot_ids
+        .into_iter()
+        .filter(|id| !current_snapshot_ids.contains(id))
+        .collect();
+
+    if !removed_from_snapshot.is_empty() {
+        let removed_commit_subjects: Vec<String> =
+            removed_from_snapshot.iter().map(ToString::to_string).collect();
+        let removed_build_subjects: Vec<String> = match sqlx::query_scalar(
+            r#"
+            SELECT bj.id::text
+            FROM build_jobs bj
+            JOIN derivations d ON d.id = bj.derivation_id
+            WHERE d.commit_id = ANY($1)
+            "#,
+        )
+        .bind(&removed_from_snapshot)
+        .fetch_all(&mut *tx)
+        .await
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                error!(
+                    "Failed to read removed build job IDs for flake {flake_id}: {e:#}"
+                );
+                let _ = tx.rollback().await;
+                record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+                return Err(e.into());
+            }
+        };
+
+        if let Err(e) = sqlx::query(
+            r#"
+            UPDATE attention_occurrences
+            SET resolved_at = statement_timestamp()
+            WHERE resolved_at IS NULL
+              AND (
+                  (category = 'evals' AND subject_id = ANY($1::text[]))
+                  OR
+                  (category = 'builds' AND subject_id = ANY($2::text[]))
+              )
+            "#,
+        )
+        .bind(&removed_commit_subjects)
+        .bind(&removed_build_subjects)
+        .execute(&mut *tx)
+        .await
+        {
+            error!(
+                "Failed to resolve attention for removed snapshot commits on flake {flake_id}: {e:#}"
+            );
+            let _ = tx.rollback().await;
+            record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+            return Err(e.into());
+        }
+    }
+
     // ── Acquire attention lock and resolve flake-level attention ────────
-    // Per-commit and per-build attention is not resolved here because we do
-    // not delete commit rows (see docstring point 4). Obsolete commits
-    // outside the 500-entry snapshot are preserved as archived records; their
-    // attention occurrences remain valid because the underlying domain rows
-    // still exist.  The periodic stale sweep handles any rows whose
-    // referenced commits were genuinely removed by other means.
     let attention_lock_key = format!("attention_occurrence:flakes:{flake_id}");
     if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(&attention_lock_key)

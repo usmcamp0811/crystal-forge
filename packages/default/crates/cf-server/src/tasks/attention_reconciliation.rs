@@ -975,200 +975,12 @@ pub async fn run_attention_reconciliation_loop(pool: PgPool) {
 /// earliest scan that detected this CVE as `opened_at`, not the
 /// reconciliation time) or resolves every open occurrence.
 async fn reconcile_single_cve(pool: &PgPool, cve_id: &str) {
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            warn!("failed to begin CVE reconciliation transaction for {cve_id}: {e:#}");
-            return;
-        }
-    };
-
-    let lock_key = format!("attention_occurrence:cves:{cve_id}:critical");
-    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(&lock_key)
-        .execute(&mut *tx)
-        .await
-    {
-        warn!("failed to acquire CVE attention lock for {cve_id}: {e:#}");
-        let _ = tx.rollback().await;
-        return;
-    }
-
-    // Recheck fleet relevance inside the lock.
-    let relevant: bool = match sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1 FROM view_cve_list_with_metadata
-            WHERE cve_id = $1
-              AND severity = 'CRITICAL'
-              AND affected_count > 0
-        )
-        "#,
-    )
-    .bind(cve_id)
-    .fetch_one(&mut *tx)
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("failed to recheck fleet relevance for CVE {cve_id}: {e:#}");
-            let _ = tx.rollback().await;
-            return;
-        }
-    };
-
-    if relevant {
-        // Read the persisted fleet_relevant_since from the cves row (locked
-        // via FOR UPDATE).  This marks the start of the current fleet-relevance
-        // episode and is set when the CVE last transitioned from not-relevant
-        // to relevant.  Using a persisted timestamp avoids backdating a
-        // recurrence to an old scan (round 16 review).
-        let persisted_since: Option<chrono::DateTime<chrono::Utc>> = match sqlx::query_scalar(
-            "SELECT fleet_relevant_since FROM cves WHERE id = $1 FOR UPDATE",
-        )
-        .bind(cve_id)
-        .fetch_one(&mut *tx)
-        .await
-        {
-            Ok(ts) => ts,
-            Err(e) => {
-                warn!("failed to read fleet_relevant_since for CVE {cve_id}: {e:#}");
-                let _ = tx.rollback().await;
-                return;
-            }
-        };
-
-        let now = chrono::Utc::now();
-
-        // If fleet_relevant_since is NULL, this is a new episode — persist
-        // the transition timestamp before creating the occurrence.  Using
-        // NOW() is conservative but always correct; it never backdates a
-        // recurrence to the previous episode.
-        let opened_at = match persisted_since {
-            Some(ts) => ts,
-            None => {
-                if let Err(e) = sqlx::query(
-                    "UPDATE cves SET fleet_relevant_since = $1 WHERE id = $2",
-                )
-                .bind(now)
-                .bind(cve_id)
-                .execute(&mut *tx)
-                .await
-                {
-                    warn!("failed to persist fleet_relevant_since for CVE {cve_id}: {e:#}");
-                    let _ = tx.rollback().await;
-                    return;
-                }
-                now
-            }
-        };
-
-        // If we have an existing open occurrence, observe it; otherwise
-        // open a new one using the episode start timestamp.
-        let existing: Option<uuid::Uuid> = match sqlx::query_scalar(
-            r#"
-            SELECT id FROM attention_occurrences
-            WHERE category = 'cves'
-              AND subject_id = $1
-              AND resolved_at IS NULL
-            LIMIT 1
-            FOR UPDATE
-            "#,
-        )
-        .bind(cve_id)
-        .fetch_optional(&mut *tx)
-        .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("failed to find existing CVE occurrence for {cve_id}: {e:#}");
-                let _ = tx.rollback().await;
-                return;
-            }
-        };
-
-        if let Some(occ_id) = existing {
-            // Update last_observed_at (and conditionally metadata)
-            // without altering opened_at — the event timestamp is
-            // authoritative and must survive re-observation.
-            let metadata = serde_json::json!({
-                "reason": "critical",
-                "cve_id": cve_id,
-            });
-            if let Err(e) = sqlx::query(
-                "UPDATE attention_occurrences \
-                 SET last_observed_at = GREATEST(last_observed_at, $1), \
-                     metadata = CASE WHEN $1 >= last_observed_at THEN $2 ELSE metadata END \
-                 WHERE id = $3",
-            )
-            .bind(now)
-            .bind(&metadata)
-            .bind(occ_id)
-            .execute(&mut *tx)
-            .await
-            {
-                warn!("failed to update CVE occurrence for {cve_id}: {e:#}");
-                let _ = tx.rollback().await;
-                return;
-            }
-        } else if let Err(e) = sqlx::query(
-            r#"
-            INSERT INTO attention_occurrences (
-                category, subject_type, subject_id, source_occurrence_key,
-                opened_at, last_observed_at, metadata
-            )
-            VALUES ('cves', 'cve', $1, $2, $3, $4, $5)
-            "#,
-        )
-        .bind(cve_id)
-        .bind(attention::cve_occurrence_key(
-            cve_id,
-            uuid::Uuid::new_v4(),
-        ))
-        .bind(opened_at)
-        .bind(now)
-        .bind(serde_json::json!({
-            "reason": "critical",
-            "cve_id": cve_id,
-        }))
-        .execute(&mut *tx)
-        .await
-        {
-            warn!("failed to open CVE attention occurrence for {cve_id}: {e:#}");
-            let _ = tx.rollback().await;
-            return;
-        }
-    } else {
-        // No longer fleet-relevant: resolve every open occurrence and clear
-        // the episode start so a future recurrence gets a fresh opened_at.
-        if let Err(e) = sqlx::query(
-            "UPDATE attention_occurrences \
-             SET resolved_at = statement_timestamp() \
-             WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
-        )
-        .bind(cve_id)
-        .execute(&mut *tx)
-        .await
-        {
-            warn!("failed to resolve stale CVE occurrence for {cve_id}: {e:#}");
-            let _ = tx.rollback().await;
-            return;
-        }
-        if let Err(e) = sqlx::query(
-            "UPDATE cves SET fleet_relevant_since = NULL WHERE id = $1",
-        )
-        .bind(cve_id)
-        .execute(&mut *tx)
-        .await
-        {
-            warn!("failed to clear fleet_relevant_since for CVE {cve_id}: {e:#}");
-            let _ = tx.rollback().await;
-            return;
-        }
-    }
-
-    if let Err(e) = tx.commit().await {
-        warn!("failed to commit CVE reconciliation for {cve_id}: {e:#}");
+    // Delegate to the canonical per-CVE helper.  The helper acquires the
+    // per-CVE lock, rechecks fleet relevance, and reconciles both the
+    // attention_occurrence and the persisted cves.fleet_relevant_since
+    // transition timestamp (round 16 review).
+    if let Err(e) = attention::reconcile_cve_attention_subject(pool, cve_id).await {
+        warn!("failed to reconcile CVE attention for {cve_id}: {e:#}");
     }
 }
 
@@ -1259,17 +1071,23 @@ async fn reconcile_terminal_events(pool: &PgPool) {
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
 
     // Recent build failures whose occurrence key does not exist yet.
+    // Only consider commits that are still in the active branch snapshot,
+    // so archived failures from a history rewrite cannot retain or reacquire
+    // attention (round 16 review).
     let builds: Vec<(uuid::Uuid, chrono::DateTime<chrono::Utc>)> = match sqlx::query_as(
         r#"
-        SELECT id, completed_at FROM build_jobs bj
-        WHERE status = 'failed'
-          AND completed_at >= $1
+        SELECT bj.id, bj.completed_at
+        FROM build_jobs bj
+        JOIN derivations d ON d.id = bj.derivation_id
+        JOIN flake_branch_commit_snapshot snapshot ON snapshot.commit_id = d.commit_id
+        WHERE bj.status = 'failed'
+          AND bj.completed_at >= $1
           AND NOT EXISTS (
               SELECT 1 FROM attention_occurrences ao
               WHERE ao.category = 'builds'
                 AND ao.source_occurrence_key = 'build:' || bj.id::text
           )
-        ORDER BY completed_at DESC
+        ORDER BY bj.completed_at DESC
         LIMIT 500
         "#,
     )
@@ -1304,9 +1122,14 @@ async fn reconcile_terminal_events(pool: &PgPool) {
     // fragile and can diverge from the Rust encoding.  The attention
     // producer stores opened_at = evaluation_completed_at, so the
     // equality is exact at microsecond precision.
+    //
+    // Restrict to commits in the active branch snapshot so archived failures
+    // from a history rewrite cannot retain or reacquire attention (round 16).
     let evals: Vec<(i32, chrono::DateTime<chrono::Utc>)> = match sqlx::query_as(
         r#"
-        SELECT c.id, c.evaluation_completed_at FROM commits c
+        SELECT c.id, c.evaluation_completed_at
+        FROM commits c
+        JOIN flake_branch_commit_snapshot snapshot ON snapshot.commit_id = c.id
         WHERE c.evaluation_status = 'failed'
           AND c.evaluation_completed_at IS NOT NULL
           AND c.evaluation_completed_at >= $1
@@ -1355,6 +1178,9 @@ async fn reconcile_terminal_events(pool: &PgPool) {
     // resolve_eval_attention_unless_failed), but this sweep catches any
     // occurrence left behind by a process crash or dropped connection
     // between the domain commit and the attention action.
+    //
+    // Also resolve eval attention for commits that are no longer in the
+    // active branch snapshot (round 16 review).
     if let Err(e) = sqlx::query(
         r#"
         UPDATE attention_occurrences ao
@@ -1366,6 +1192,10 @@ async fn reconcile_terminal_events(pool: &PgPool) {
               WHERE c.id::text = ao.subject_id
                 AND c.evaluation_status = 'failed'
                 AND c.evaluation_completed_at = ao.opened_at
+                AND EXISTS (
+                    SELECT 1 FROM flake_branch_commit_snapshot snapshot
+                    WHERE snapshot.commit_id = c.id
+                )
           )
         "#,
     )
@@ -1373,6 +1203,34 @@ async fn reconcile_terminal_events(pool: &PgPool) {
     .await
     {
         error!("failed to resolve stale eval attention occurrences: {e:#}");
+    }
+
+    // Safety net for builds: resolve any open build occurrence whose job is
+    // no longer a failed, recent, active-snapshot build.  This is the
+    // mirror of the eval safety net above.
+    if let Err(e) = sqlx::query(
+        r#"
+        UPDATE attention_occurrences ao
+        SET resolved_at = NOW()
+        WHERE ao.category = 'builds'
+          AND ao.resolved_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM build_jobs bj
+              JOIN derivations d ON d.id = bj.derivation_id
+              WHERE ('build:' || bj.id::text) = ao.source_occurrence_key
+                AND bj.status = 'failed'
+                AND bj.completed_at = ao.opened_at
+                AND EXISTS (
+                    SELECT 1 FROM flake_branch_commit_snapshot snapshot
+                    WHERE snapshot.commit_id = d.commit_id
+                )
+          )
+        "#,
+    )
+    .execute(pool)
+    .await
+    {
+        error!("failed to resolve stale build attention occurrences: {e:#}");
     }
 }
 

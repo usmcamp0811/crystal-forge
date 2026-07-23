@@ -668,38 +668,19 @@ pub(crate) async fn save_scan_results_with_store_path_override(
 
     tx.commit().await?;
 
-    // Open (or observe an already-open) fleet-relevance episode for every
-    // critical CVE found in this scan. Episode-based rather than a single
-    // deterministic key so a CVE that later stops being fleet-relevant
-    // (resolved below) and is subsequently reintroduced or rescored back to
-    // critical gets a new occurrence eligible for a fresh attention window,
-    // instead of colliding with a resolved historical row.
-    if !critical_cve_ids.is_empty() {
-        let opened_at = Utc::now();
-        for cve_id in &critical_cve_ids {
-            let cve_id = cve_id.clone();
-            if let Err(e) = attention::open_or_observe_by_subject(
-                pool,
-                "cves",
-                "cve",
-                &cve_id,
-                "critical",
-                opened_at,
-                serde_json::json!({"cve_id": &cve_id}),
-                |_reason, episode_id| attention::cve_occurrence_key(&cve_id, episode_id),
-            )
-            .await
-            {
-                warn!("failed to open attention occurrence for CVE {cve_id}: {e:#}");
-            }
+    // Reconcile CVE attention for every critical CVE found in this scan.
+    // The unified helper rechecks fleet relevance under the per-CVE lock,
+    // so it correctly handles both newly-relevant CVEs and stale ones.
+    for cve_id in &critical_cve_ids {
+        if let Err(e) = attention::reconcile_cve_attention_subject(pool, cve_id).await {
+            warn!("failed to reconcile CVE attention for {cve_id}: {e:#}");
         }
     }
 
-    // Resolve any open CVE occurrence whose CVE is no longer fleet-relevant.
-    // Unlike the earlier open-or-observe calls (which run under per-CVE
-    // advisory locks), this block resolves each stale CVE under its
-    // individual lock so the operation serialises with the concurrent
-    // reconciler and producer — see round 16 review.
+    // Also reconcile any CVE that currently has an open occurrence but is no
+    // longer fleet-relevant.  The helper will recheck relevance and resolve
+    // under the lock.  We collect the candidate set here so that concurrent
+    // scans of the same CVE still converge on the same locked helper.
     let stale_cve_ids: Vec<String> = match sqlx::query_scalar(
         r#"
         SELECT DISTINCT ao.subject_id
@@ -725,8 +706,8 @@ pub(crate) async fn save_scan_results_with_store_path_override(
     };
 
     for cve_id in stale_cve_ids {
-        if let Err(e) = resolve_cve_occurrence_under_lock(pool, &cve_id).await {
-            warn!("failed to resolve stale occurrence for CVE {cve_id}: {e:#}");
+        if let Err(e) = attention::reconcile_cve_attention_subject(pool, &cve_id).await {
+            warn!("failed to reconcile stale CVE attention for {cve_id}: {e:#}");
         }
     }
 
@@ -1235,34 +1216,6 @@ pub async fn get_targets_needing_cve_rescan(
         .collect();
 
     Ok(derivations)
-}
-
-/// Resolve a single CVE's open attention occurrences under its per-CVE
-/// advisory lock, so this operation serialises with the reconciler and
-/// producer.  Called by `save_scan_results` for CVEs that are no longer
-/// fleet-relevant (round 16 review).
-async fn resolve_cve_occurrence_under_lock(pool: &PgPool, cve_id: &str) -> Result<()> {
-    let mut tx = pool.begin().await?;
-
-    let lock_key = format!("attention_occurrence:cves:{cve_id}:critical");
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(&lock_key)
-        .execute(&mut *tx)
-        .await?;
-
-    // Recheck inside the lock — another concurrent process may have already
-    // resolved or re-opened this occurrence.
-    sqlx::query(
-        "UPDATE attention_occurrences \
-         SET resolved_at = statement_timestamp() \
-         WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
-    )
-    .bind(cve_id)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-    Ok(())
 }
 
 #[cfg(test)]

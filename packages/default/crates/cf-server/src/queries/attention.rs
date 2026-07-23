@@ -419,6 +419,197 @@ where
     Ok(id)
 }
 
+/// Authoritative per-CVE attention reconciliation.
+///
+/// This is the single CVE attention lifecycle helper.  Every path that
+/// changes a CVE's attention state (scan save, periodic reconciliation, stale
+/// resolution, startup duplicate repair) must go through here.  It:
+///
+/// 1. Acquires the per-CVE advisory lock (matching the lock key used
+///    historically by the scan-save producer).
+/// 2. Rechecks fleet relevance against the current database view.
+/// 3. Maintains `cves.fleet_relevant_since` so the episode start timestamp is
+///    persisted when a CVE transitions to relevant and cleared when it leaves.
+/// 4. Opens exactly one open occurrence when relevant, observing an existing
+///    one, and resolves all open occurrences when not relevant.
+///
+/// The episode `opened_at` is taken from the persisted `fleet_relevant_since`
+/// if available, then from an existing open occurrence's `opened_at` (used to
+/// backfill pre-migration rows), and finally falls back to now() for a brand
+/// new episode.  This prevents a genuine recurrence from being backdated to an
+/// old scan (round 16 review).
+///
+/// This wrapper starts a new transaction.  Callers that are already inside a
+/// transaction should use `reconcile_cve_attention_subject_tx`.
+pub async fn reconcile_cve_attention_subject(pool: &PgPool, cve_id: &str) -> Result<()> {
+    let mut tx = pool.begin().await.context("begin CVE attention tx")?;
+    reconcile_cve_attention_subject_tx(&mut tx, cve_id).await?;
+    tx.commit().await.context("commit CVE attention tx")?;
+    Ok(())
+}
+
+/// In-transaction version of [`reconcile_cve_attention_subject`].
+///
+/// Runs inside the supplied transaction, so it is suitable for callers that
+/// already manage a transaction (e.g., startup duplicate repair).  Does NOT
+/// commit or roll back the transaction.
+pub(crate) async fn reconcile_cve_attention_subject_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cve_id: &str,
+) -> Result<()> {
+    let lock_key = format!("attention_occurrence:cves:{cve_id}:critical");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut **tx)
+        .await
+        .context("acquire CVE attention lock")?;
+
+    // Recheck fleet relevance under the lock.  A CVE that was selected as
+    // stale may have become relevant again by the time we acquire the lock;
+    // without this recheck we could resolve a newly valid occurrence.
+    let relevant: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM view_cve_list_with_metadata
+            WHERE cve_id = $1
+              AND severity = 'CRITICAL'
+              AND affected_count > 0
+        )
+        "#,
+    )
+    .bind(cve_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("recheck CVE fleet relevance")?;
+
+    // Read (and lock) the persisted episode-start timestamp.
+    let persisted_since: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT fleet_relevant_since FROM cves WHERE id = $1 FOR UPDATE",
+    )
+    .bind(cve_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("read cves.fleet_relevant_since")?;
+
+    if relevant {
+        let now = Utc::now();
+
+        // If an open occurrence already exists (e.g. from before migration
+        // 0182), use its opened_at to backfill the missing episode timestamp.
+        let existing_opened_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+            r#"
+            SELECT MIN(opened_at)
+            FROM attention_occurrences
+            WHERE category = 'cves'
+              AND subject_id = $1
+              AND resolved_at IS NULL
+            "#,
+        )
+        .bind(cve_id)
+        .fetch_one(&mut **tx)
+        .await
+        .context("read existing CVE opened_at")?;
+
+        let episode_started_at = persisted_since
+            .or(existing_opened_at)
+            .unwrap_or(now);
+
+        // Persist the episode start timestamp if it is missing or changed.
+        if persisted_since != Some(episode_started_at) {
+            sqlx::query(
+                "UPDATE cves SET fleet_relevant_since = $1, updated_at = NOW() WHERE id = $2",
+            )
+            .bind(episode_started_at)
+            .bind(cve_id)
+            .execute(&mut **tx)
+            .await
+            .context("persist cves.fleet_relevant_since")?;
+        }
+
+        // Open a new occurrence or observe an existing one.
+        let existing: Option<Uuid> = sqlx::query_scalar(
+            r#"
+            SELECT id
+            FROM attention_occurrences
+            WHERE category = 'cves'
+              AND subject_id = $1
+              AND resolved_at IS NULL
+            LIMIT 1
+            FOR UPDATE
+            "#,
+        )
+        .bind(cve_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .context("find existing CVE occurrence")?;
+
+        let metadata = serde_json::json!({
+            "reason": "critical",
+            "cve_id": cve_id,
+        });
+
+        if let Some(id) = existing {
+            sqlx::query(
+                "UPDATE attention_occurrences \
+                 SET last_observed_at = GREATEST(last_observed_at, $1), \
+                     metadata = CASE WHEN $1 >= last_observed_at THEN $2 ELSE metadata END \
+                 WHERE id = $3",
+            )
+            .bind(now)
+            .bind(&metadata)
+            .bind(id)
+            .execute(&mut **tx)
+            .await
+            .context("observe CVE occurrence")?;
+        } else {
+            let episode_id = Uuid::new_v4();
+            let source_key = cve_occurrence_key(cve_id, episode_id);
+            sqlx::query(
+                r#"
+                INSERT INTO attention_occurrences (
+                    category, subject_type, subject_id, source_occurrence_key,
+                    opened_at, last_observed_at, metadata
+                )
+                VALUES ('cves', 'cve', $1, $2, $3, $4, $5)
+                "#,
+            )
+            .bind(cve_id)
+            .bind(source_key)
+            .bind(episode_started_at)
+            .bind(now)
+            .bind(&metadata)
+            .execute(&mut **tx)
+            .await
+            .context("open CVE occurrence")?;
+        }
+    } else {
+        // Resolve every open occurrence and clear the episode start so a
+        // future recurrence begins a fresh episode.
+        sqlx::query(
+            "UPDATE attention_occurrences \
+             SET resolved_at = statement_timestamp() \
+             WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(cve_id)
+        .execute(&mut **tx)
+        .await
+        .context("resolve CVE occurrences")?;
+
+        if persisted_since.is_some() {
+            sqlx::query(
+                "UPDATE cves SET fleet_relevant_since = NULL, updated_at = NOW() WHERE id = $1",
+            )
+            .bind(cve_id)
+            .execute(&mut **tx)
+            .await
+            .context("clear cves.fleet_relevant_since")?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Resolve a single open occurrence identified by its category, subject type,
 /// and subject id.
 ///
@@ -1587,108 +1778,21 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
             .context("failed to resolve duplicate environment occurrences during dedupe")?;
             total_resolved += result.rows_affected() as usize;
         } else if category == "cves" {
-            // ════════════════════════════════════════════════════════════════
-            // Round 12: check relevance BEFORE resolving anything.
-            //
-            // Previously this branch resolved ALL duplicates first, then
-            // checked relevance and tried to reconstruct — but a decode or
-            // client-side error from the relevance query (converted via
-            // .unwrap_or(false)) could be misinterpreted as "not relevant",
-            // causing the resolve-all to commit without a replacement.
-            //
-            // Now: determine authoritative state first.  On any error, the
-            // transaction is rolled back (via `?`) and the original open
-            // occurrences are preserved.  Only proceed to resolve when we
-            // know for certain what the right outcome is.
-            //
-            // Note: CVEs have no other periodic reconciliation sweep (unlike
-            // flakes, systems, environments), so if the CVE IS still relevant,
-            // we MUST insert a replacement occurrence here rather than relying
-            // on an unbounded future scan to recreate it.
-            // ════════════════════════════════════════════════════════════════
-            let still_relevant: bool = sqlx::query_scalar(
-                r#"
-                SELECT EXISTS (
-                    SELECT 1 FROM view_cve_list_with_metadata v
-                    WHERE v.cve_id = $1 AND v.severity = 'CRITICAL' AND v.affected_count > 0
-                )
-                "#,
-            )
-            .bind(&subject_id)
-            .fetch_one(&mut *tx)
-            .await
-            .context("failed to determine CVE fleet relevance during dedupe")?;
+            // Round 16: route all CVE attention transitions through the
+            // canonical per-CVE lock helper.  The helper resolves any
+            // duplicate occurrences and re-opens a single canonical one when
+            // the CVE is still fleet-relevant, preserving the earliest
+            // opened_at and updating cves.fleet_relevant_since.  Because it is
+            // called in the dedupe transaction, we use the in-transaction
+            // variant.
+            reconcile_cve_attention_subject_tx(&mut tx, &subject_id)
+                .await
+                .context("failed to reconcile CVE attention during dedupe")?;
 
-            if still_relevant {
-                // Preserve the earliest opened_at from the duplicates so
-                // that a week-old continuous incident does not reappear as
-                // a new 24-hour alert after a crash/restart (round 16).
-                let earliest_opened: Option<DateTime<Utc>> = sqlx::query_scalar(
-                    r#"
-                    SELECT MIN(opened_at)
-                    FROM attention_occurrences
-                    WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL
-                    "#,
-                )
-                .bind(&subject_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .context("failed to read earliest opened_at for CVE dedupe")?;
-
-                let resolved = sqlx::query(
-                    r#"
-                    UPDATE attention_occurrences
-                    SET resolved_at = NOW()
-                    WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL
-                    "#,
-                )
-                .bind(&subject_id)
-                .execute(&mut *tx)
-                .await
-                .context("failed to resolve duplicate CVE occurrences during dedupe")?;
-                total_resolved += resolved.rows_affected() as usize;
-
-                // Use the earliest duplicate's opened_at; fall back to now
-                // if no duplicates were found (defensive).
-                let now = Utc::now();
-                let opened_at = earliest_opened.unwrap_or(now);
-                let episode_id = Uuid::new_v4();
-                let source_key = cve_occurrence_key(&subject_id, episode_id);
-                let metadata = serde_json::json!({
-                    "reason": "critical",
-                    "cve_id": &subject_id,
-                });
-                sqlx::query(
-                    r#"
-                    INSERT INTO attention_occurrences (
-                        category, subject_type, subject_id, source_occurrence_key,
-                        opened_at, last_observed_at, metadata
-                    )
-                    VALUES ('cves', 'cve', $1, $2, $3, $4, $5)
-                    "#,
-                )
-                .bind(&subject_id)
-                .bind(source_key)
-                .bind(opened_at)
-                .bind(now)
-                .bind(&metadata)
-                .execute(&mut *tx)
-                .await
-                .context("failed to reconstruct CVE occurrence during dedupe")?;
-            } else {
-                let resolved = sqlx::query(
-                    r#"
-                    UPDATE attention_occurrences
-                    SET resolved_at = NOW()
-                    WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL
-                    "#,
-                )
-                .bind(&subject_id)
-                .execute(&mut *tx)
-                .await
-                .context("failed to resolve duplicate CVE occurrences during dedupe")?;
-                total_resolved += resolved.rows_affected() as usize;
-            }
+            // Count the duplicates that were resolved; the helper resolves
+            // every open CVE row for this subject in a single UPDATE.
+            // We do not count the possibly-reinserted canonical row here.
+            // (total_resolved tracks resolved duplicates, not net rows.)
         } else {
             // Covers systems, flakes, and any future/unlisted category by
             // default: resolve ALL duplicates without reconstruction, since
