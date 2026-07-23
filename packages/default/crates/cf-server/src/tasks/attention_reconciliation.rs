@@ -18,6 +18,7 @@
 //!   flakes stuck in `syncing` past the staleness threshold.
 
 use crate::queries::attention;
+use crate::queries::commits::SYNC_LOCK_BASE;
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use sqlx::PgPool;
@@ -1036,6 +1037,17 @@ async fn reconcile_cve_attention(pool: &PgPool) {
                     AND v.severity = 'CRITICAL'
                     AND v.affected_count > 0
               )
+            UNION
+            -- Open occurrences whose cve row is missing fleet_relevant_since
+            -- (e.g. pre-migration state or a crash between opening the occurrence
+            -- and persisting the episode timestamp). The canonical helper will
+            -- backfill the timestamp.
+            SELECT ao.subject_id
+            FROM attention_occurrences ao
+            JOIN cves c ON c.id = ao.subject_id
+            WHERE ao.category = 'cves'
+              AND ao.resolved_at IS NULL
+              AND c.fleet_relevant_since IS NULL
         ) candidates
         LIMIT 500
         "#,
@@ -1055,7 +1067,142 @@ async fn reconcile_cve_attention(pool: &PgPool) {
     }
 }
 
+/// Open a build attention occurrence only if the build is still a failed
+/// member of the active branch snapshot.
+///
+/// The snapshot membership and failed-state check are performed inside the
+/// same transaction as the `open_or_observe` insert, while holding the
+/// flake's advisory sync lock. This serializes the reconciliation with the
+/// history-rewrite path in `accept_history_rewrite_and_sync`, preventing a
+/// race where a rewrite removes a commit from the snapshot and resolves its
+/// attention, only for a later `reconcile_terminal_events` pass to re-open
+/// attention for the removed commit (round 17 review).
+async fn open_build_attention_if_current(
+    pool: &PgPool,
+    job_id: Uuid,
+    expected_completed_at: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
+    let flake_id: Option<i32> = sqlx::query_scalar(
+        r#"
+        SELECT c.flake_id
+        FROM build_jobs bj
+        JOIN derivations d ON d.id = bj.derivation_id
+        JOIN commits c ON c.id = d.commit_id
+        WHERE bj.id = $1
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(flake_id) = flake_id else {
+        return Ok(());
+    };
+
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_LOCK_BASE + i64::from(flake_id))
+        .execute(&mut *tx)
+        .await?;
+
+    let still_current: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM build_jobs bj
+            JOIN derivations d ON d.id = bj.derivation_id
+            JOIN flake_branch_commit_snapshot snapshot ON snapshot.commit_id = d.commit_id
+            WHERE bj.id = $1
+              AND bj.status = 'failed'
+              AND bj.completed_at = $2
+        )
+        "#,
+    )
+    .bind(job_id)
+    .bind(expected_completed_at)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if still_current {
+        attention::open_or_observe(
+            &mut *tx,
+            "builds",
+            "build_job",
+            &job_id.to_string(),
+            &attention::build_occurrence_key(job_id),
+            expected_completed_at,
+            serde_json::json!({"job_id": job_id.to_string()}),
+        )
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Open an eval attention occurrence only if the commit is still a failed
+/// member of the active branch snapshot.
+///
+/// Same synchronization strategy as [`open_build_attention_if_current`].
+async fn open_eval_attention_if_current(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_completed_at: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
+    let flake_id: Option<i32> = sqlx::query_scalar(
+        "SELECT flake_id FROM commits WHERE id = $1",
+    )
+    .bind(commit_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(flake_id) = flake_id else {
+        return Ok(());
+    };
+
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_LOCK_BASE + i64::from(flake_id))
+        .execute(&mut *tx)
+        .await?;
+
+    let still_current: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM commits c
+            JOIN flake_branch_commit_snapshot snapshot ON snapshot.commit_id = c.id
+            WHERE c.id = $1
+              AND c.evaluation_status = 'failed'
+              AND c.evaluation_completed_at = $2
+        )
+        "#,
+    )
+    .bind(commit_id)
+    .bind(expected_completed_at)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if still_current {
+        let key = attention::eval_occurrence_key(commit_id, expected_completed_at);
+        attention::open_or_observe(
+            &mut *tx,
+            "evals",
+            "commit_eval",
+            &commit_id.to_string(),
+            &key,
+            expected_completed_at,
+            serde_json::json!({"commit_id": commit_id}),
+        )
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Reconcile terminal build failures and evaluation failures that may have
+/// lost their attention occurrence.
 ///
 /// Only selects events whose deterministic occurrence key does not already
 /// exist in `attention_occurrences`, so events that already have their
@@ -1103,17 +1250,9 @@ pub(crate) async fn reconcile_terminal_events(pool: &PgPool) {
     };
 
     for (job_id, completed_at) in &builds {
-        let _ = attention::open_or_observe(
-            pool,
-            "builds",
-            "build_job",
-            &job_id.to_string(),
-            &attention::build_occurrence_key(*job_id),
-            *completed_at,
-            serde_json::json!({"job_id": job_id.to_string()}),
-        )
-        .await
-        .map_err(|e| warn!("failed to reconcile build attention occurrence: {e:#}"));
+        let _ = open_build_attention_if_current(pool, *job_id, *completed_at)
+            .await
+            .map_err(|e| warn!("failed to reconcile build attention occurrence: {e:#}"));
     }
 
     // Recent evaluation failures whose occurrence does not exist yet.
@@ -1156,18 +1295,9 @@ pub(crate) async fn reconcile_terminal_events(pool: &PgPool) {
     };
 
     for (commit_id, completed_at) in &evals {
-        let key = attention::eval_occurrence_key(*commit_id, *completed_at);
-        let _ = attention::open_or_observe(
-            pool,
-            "evals",
-            "commit_eval",
-            &commit_id.to_string(),
-            &key,
-            *completed_at,
-            serde_json::json!({"commit_id": commit_id}),
-        )
-        .await
-        .map_err(|e| warn!("failed to reconcile eval attention occurrence: {e:#}"));
+        let _ = open_eval_attention_if_current(pool, *commit_id, *completed_at)
+            .await
+            .map_err(|e| warn!("failed to reconcile eval attention occurrence: {e:#}"));
     }
 
     // Safety net: resolve any open eval occurrence whose commit is no
@@ -2018,15 +2148,18 @@ mod tests {
 
         reconcile_cve_attention(&pool).await;
 
-        let persisted_since: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
-            "SELECT fleet_relevant_since FROM cves WHERE id = $1",
+        let (db_opened_at, persisted_since): (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+            "SELECT \
+                 (SELECT opened_at FROM attention_occurrences \
+                  WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL LIMIT 1), \
+                 (SELECT fleet_relevant_since FROM cves WHERE id = $1)",
         )
         .bind(&cve_id)
         .fetch_one(&pool)
         .await
         .unwrap();
         assert_eq!(
-            persisted_since, opened_at,
+            persisted_since, db_opened_at,
             "fleet_relevant_since must be backfilled from the existing occurrence"
         );
 

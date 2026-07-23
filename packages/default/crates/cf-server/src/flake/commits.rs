@@ -3455,7 +3455,7 @@ mod tests {
         let short = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
         let hash = format!("{short}{short}{short}{short}");
         sqlx::query_scalar::<_, i32>(
-            "INSERT INTO commits (flake_id, git_commit_hash, message, author, timestamp) \
+            "INSERT INTO commits (flake_id, git_commit_hash, message, author, commit_timestamp) \
              VALUES ($1, $2, $3, $4, NOW()) RETURNING id",
         )
         .bind(flake_id)
@@ -3465,6 +3465,67 @@ mod tests {
         .fetch_one(pool)
         .await
         .expect("failed to insert throwaway test commit")
+    }
+
+    async fn insert_throwaway_build_for_commit(
+        pool: &sqlx::PgPool,
+        commit_id: i32,
+    ) -> (uuid::Uuid, chrono::DateTime<chrono::Utc>) {
+        let short = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        let derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, status_id, attempt_count) \
+             VALUES ($1, 'package', $2, 11, 0) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(format!("test-drv-{short}"))
+        .fetch_one(pool)
+        .await
+        .expect("failed to insert throwaway test derivation");
+
+        let job_id = uuid::Uuid::new_v4();
+        let completed_at = chrono::Utc::now();
+        sqlx::query(
+            "INSERT INTO build_jobs (id, derivation_id, status, completed_at) \
+             VALUES ($1, $2, 'failed', $3)",
+        )
+        .bind(job_id)
+        .bind(derivation_id)
+        .bind(completed_at)
+        .execute(pool)
+        .await
+        .expect("failed to insert throwaway test build job");
+
+        (job_id, completed_at)
+    }
+
+    async fn insert_snapshot_entry(
+        pool: &sqlx::PgPool,
+        flake_id: i32,
+        commit_id: i32,
+        position: i32,
+    ) {
+        sqlx::query(
+            "INSERT INTO flake_branch_commit_snapshot (flake_id, commit_id, position, observed_at) \
+             VALUES ($1, $2, $3, NOW()) \
+             ON CONFLICT (flake_id, commit_id) DO UPDATE SET position = EXCLUDED.position",
+        )
+        .bind(flake_id)
+        .bind(commit_id)
+        .bind(position)
+        .execute(pool)
+        .await
+        .expect("failed to insert snapshot entry");
+    }
+
+    async fn remove_snapshot_entry(pool: &sqlx::PgPool, flake_id: i32, commit_id: i32) {
+        sqlx::query(
+            "DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1 AND commit_id = $2",
+        )
+        .bind(flake_id)
+        .bind(commit_id)
+        .execute(pool)
+        .await
+        .expect("failed to remove snapshot entry");
     }
 
     #[tokio::test]
@@ -3559,6 +3620,262 @@ mod tests {
         .bind(commit_id.to_string())
         .execute(&pool)
         .await;
+        let _ = sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM commits WHERE flake_id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reconcile_terminal_events_does_not_reopen_eval_for_removed_commit() {
+        // Regression test for round 17 issue 3: terminal reconciliation must
+        // not open a new eval occurrence for a commit that has left the
+        // active branch snapshot, even if the previous occurrence was lost.
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit_for_flake(&pool, flake_id).await;
+
+        let completed_at = chrono::Utc::now();
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = 'failed', evaluation_completed_at = $1 \
+             WHERE id = $2",
+        )
+        .bind(completed_at)
+        .bind(commit_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // First pass: commit is in the snapshot, so an occurrence is opened.
+        insert_snapshot_entry(&pool, flake_id, commit_id, 0).await;
+        reconcile_terminal_events(&pool).await;
+
+        let open_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'evals' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(commit_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(open_count, 1, "eval occurrence must be opened while commit is in snapshot");
+
+        // Simulate history rewrite: remove the commit from the snapshot and
+        // delete the occurrence (e.g. the producer/rewrite resolved it).
+        remove_snapshot_entry(&pool, flake_id, commit_id).await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1",
+        )
+        .bind(commit_id.to_string())
+        .execute(&pool)
+        .await;
+
+        // Second pass: the commit is no longer in the snapshot, so the atomic
+        // recheck in open_eval_attention_if_current must not reopen attention.
+        reconcile_terminal_events(&pool).await;
+
+        let open_count_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'evals' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(commit_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            open_count_after, 0,
+            "eval occurrence must NOT be reopened once commit leaves the active snapshot"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
+            .bind(commit_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM commits WHERE flake_id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reconcile_terminal_events_does_not_reopen_build_for_removed_commit() {
+        // Regression test for round 17 issue 3: terminal reconciliation must
+        // not open a new build occurrence for a build whose commit has left
+        // the active branch snapshot.
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit_for_flake(&pool, flake_id).await;
+        let (job_id, completed_at) = insert_throwaway_build_for_commit(&pool, commit_id).await;
+
+        // First pass: commit is in the snapshot, so an occurrence is opened.
+        insert_snapshot_entry(&pool, flake_id, commit_id, 0).await;
+        reconcile_terminal_events(&pool).await;
+
+        let open_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'builds' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(job_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(open_count, 1, "build occurrence must be opened while commit is in snapshot");
+
+        // Simulate history rewrite removing the commit.
+        remove_snapshot_entry(&pool, flake_id, commit_id).await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'builds' AND subject_id = $1",
+        )
+        .bind(job_id.to_string())
+        .execute(&pool)
+        .await;
+
+        // Second pass: the atomic recheck must not reopen the build occurrence.
+        reconcile_terminal_events(&pool).await;
+
+        let open_count_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'builds' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(job_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            open_count_after, 0,
+            "build occurrence must NOT be reopened once commit leaves the active snapshot"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'builds' AND subject_id = $1")
+            .bind(job_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM build_jobs WHERE id = $1")
+            .bind(job_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM derivations WHERE commit_id = $1")
+            .bind(commit_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM commits WHERE flake_id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reconcile_terminal_events_serializes_with_flake_sync_lock() {
+        // Race test for round 17 issue 3: while reconcile_terminal_events is
+        // opening attention for a failed commit, a concurrent history rewrite
+        // removes the commit from the snapshot. The per-flake advisory sync
+        // lock serializes the two operations so the recheck inside the open
+        // transaction observes the post-rewrite state and does not reopen
+        // attention.
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit_for_flake(&pool, flake_id).await;
+
+        let completed_at = chrono::Utc::now();
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = 'failed', evaluation_completed_at = $1 \
+             WHERE id = $2",
+        )
+        .bind(completed_at)
+        .bind(commit_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        insert_snapshot_entry(&pool, flake_id, commit_id, 0).await;
+
+        let lock_key = crate::queries::commits::SYNC_LOCK_BASE + i64::from(flake_id);
+
+        // Task A: acquire the flake sync lock, wait until the reconciler is
+        // known to be blocked, then remove the commit from the snapshot and
+        // release the lock.
+        let pool_a = pool.clone();
+        let rewrite = tokio::spawn(async move {
+            let mut tx = pool_a.begin().await.expect("begin rewrite tx");
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(lock_key)
+                .execute(&mut *tx)
+                .await
+                .expect("acquire flake sync lock in rewrite");
+
+            // Give reconcile_terminal_events enough time to start and reach
+            // the lock acquisition for the candidate.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+            remove_snapshot_entry(&pool_a, flake_id, commit_id).await;
+
+            tx.commit().await.expect("commit rewrite tx");
+        });
+
+        // Task B: start reconciliation. Its SELECT for candidates does not
+        // need the lock, so it will find the commit; the open transaction will
+        // block on the lock until the rewrite commits.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let reconcile = tokio::spawn({
+            let pool_b = pool.clone();
+            async move {
+                reconcile_terminal_events(&pool_b).await;
+            }
+        });
+
+        // Both must complete without error.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            rewrite.await.unwrap();
+            reconcile.await.unwrap();
+        })
+        .await
+        .expect("rewrite and reconcile must complete within timeout");
+
+        // The post-rewrite recheck must have prevented reopening attention.
+        let open_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'evals' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(commit_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            open_count, 0,
+            "eval occurrence must not be reopened when rewrite holds the sync lock and removes the commit"
+        );
+
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
+            .bind(commit_id.to_string())
+            .execute(&pool)
+            .await;
         let _ = sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
             .bind(flake_id)
             .execute(&pool)

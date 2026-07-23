@@ -483,14 +483,18 @@ pub(crate) async fn reconcile_cve_attention_subject_tx(
     .await
     .context("recheck CVE fleet relevance")?;
 
-    // Read (and lock) the persisted episode-start timestamp.
+    // Read (and lock) the persisted episode-start timestamp. The row may be
+    // missing when this helper is invoked during startup duplicate repair over
+    // legacy data, so use `fetch_optional`. The outer `Option` indicates row
+    // presence; the inner `Option` is the nullable column value.
     let persisted_since: Option<DateTime<Utc>> = sqlx::query_scalar(
         "SELECT fleet_relevant_since FROM cves WHERE id = $1 FOR UPDATE",
     )
     .bind(cve_id)
-    .fetch_one(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await
-    .context("read cves.fleet_relevant_since")?;
+    .context("read cves.fleet_relevant_since")?
+    .flatten();
 
     if relevant {
         let now = Utc::now();
@@ -515,8 +519,23 @@ pub(crate) async fn reconcile_cve_attention_subject_tx(
             .or(existing_opened_at)
             .unwrap_or(now);
 
-        // Persist the episode start timestamp if it is missing or changed.
-        if persisted_since != Some(episode_started_at) {
+        // Persist the episode start timestamp. If the cves row does not exist
+        // yet (e.g. legacy attention rows without a corresponding CVE record),
+        // insert it; otherwise update it.
+        if persisted_since.is_none() {
+            sqlx::query(
+                "INSERT INTO cves (id, fleet_relevant_since, updated_at) \
+                 VALUES ($1, $2, NOW()) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                     fleet_relevant_since = EXCLUDED.fleet_relevant_since, \
+                     updated_at = NOW()",
+            )
+            .bind(cve_id)
+            .bind(episode_started_at)
+            .execute(&mut **tx)
+            .await
+            .context("persist cves.fleet_relevant_since")?;
+        } else if persisted_since != Some(episode_started_at) {
             sqlx::query(
                 "UPDATE cves SET fleet_relevant_since = $1, updated_at = NOW() WHERE id = $2",
             )
@@ -527,61 +546,120 @@ pub(crate) async fn reconcile_cve_attention_subject_tx(
             .context("persist cves.fleet_relevant_since")?;
         }
 
-        // Open a new occurrence or observe an existing one.
-        let existing: Option<Uuid> = sqlx::query_scalar(
+        // Canonicalize: exactly one open occurrence must remain for the
+        // current episode.  Fetch all open rows, select the one whose
+        // opened_at matches the episode start, and resolve the others.
+        // Dismissals migrate only from rows that share the same opened_at
+        // (same episode); older-episode rows stay dismissed against the
+        // historical episode they represent (round 17 review).
+        let open_rows: Vec<(Uuid, DateTime<Utc>)> = sqlx::query_as(
             r#"
-            SELECT id
+            SELECT id, opened_at
             FROM attention_occurrences
             WHERE category = 'cves'
               AND subject_id = $1
               AND resolved_at IS NULL
-            LIMIT 1
+            ORDER BY opened_at, id
             FOR UPDATE
             "#,
         )
         .bind(cve_id)
-        .fetch_optional(&mut **tx)
+        .fetch_all(&mut **tx)
         .await
-        .context("find existing CVE occurrence")?;
+        .context("fetch open CVE occurrences")?;
 
         let metadata = serde_json::json!({
             "reason": "critical",
             "cve_id": cve_id,
         });
 
-        if let Some(id) = existing {
-            sqlx::query(
-                "UPDATE attention_occurrences \
-                 SET last_observed_at = GREATEST(last_observed_at, $1), \
-                     metadata = CASE WHEN $1 >= last_observed_at THEN $2 ELSE metadata END \
-                 WHERE id = $3",
-            )
-            .bind(now)
-            .bind(&metadata)
-            .bind(id)
-            .execute(&mut **tx)
-            .await
-            .context("observe CVE occurrence")?;
-        } else {
-            let episode_id = Uuid::new_v4();
-            let source_key = cve_occurrence_key(cve_id, episode_id);
+        let canonical_id = match open_rows
+            .iter()
+            .find(|(_, opened_at)| *opened_at == episode_started_at)
+            .map(|(id, _)| *id)
+        {
+            Some(id) => {
+                // Observe the canonical row.
+                sqlx::query(
+                    "UPDATE attention_occurrences \
+                     SET last_observed_at = GREATEST(last_observed_at, $1), \
+                         metadata = CASE WHEN $1 >= last_observed_at THEN $2 ELSE metadata END \
+                     WHERE id = $3",
+                )
+                .bind(now)
+                .bind(&metadata)
+                .bind(id)
+                .execute(&mut **tx)
+                .await
+                .context("observe canonical CVE occurrence")?;
+                id
+            }
+            None => {
+                // No matching row for this episode: insert a fresh canonical one.
+                let episode_id = Uuid::new_v4();
+                let source_key = cve_occurrence_key(cve_id, episode_id);
+                let row = sqlx::query(
+                    r#"
+                    INSERT INTO attention_occurrences (
+                        category, subject_type, subject_id, source_occurrence_key,
+                        opened_at, last_observed_at, metadata
+                    )
+                    VALUES ('cves', 'cve', $1, $2, $3, $4, $5)
+                    RETURNING id
+                    "#,
+                )
+                .bind(cve_id)
+                .bind(source_key)
+                .bind(episode_started_at)
+                .bind(now)
+                .bind(&metadata)
+                .fetch_one(&mut **tx)
+                .await
+                .context("open canonical CVE occurrence")?;
+                row.get::<Uuid, _>("id")
+            }
+        };
+
+        // Resolve any other open rows that are not the canonical one.
+        let other_ids: Vec<Uuid> = open_rows
+            .iter()
+            .filter(|(id, _)| *id != canonical_id)
+            .map(|(id, _)| *id)
+            .collect();
+
+        // Migrate dismissals from the duplicate rows being resolved before
+        // resolving them.  All open rows for this CVE at this point belong to
+        // the current fleet-relevance episode, so any dismissals attached to
+        // those duplicates should carry forward to the canonical occurrence.
+        // A future, genuinely separate episode (after the CVE becomes
+        // non-relevant and then relevant again) will start with no open rows,
+        // so its dismissals will never be in `other_ids` here.
+        if !other_ids.is_empty() {
             sqlx::query(
                 r#"
-                INSERT INTO attention_occurrences (
-                    category, subject_type, subject_id, source_occurrence_key,
-                    opened_at, last_observed_at, metadata
-                )
-                VALUES ('cves', 'cve', $1, $2, $3, $4, $5)
+                INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at)
+                SELECT uad.user_id, $2, MIN(uad.dismissed_at)
+                FROM user_attention_dismissals uad
+                WHERE uad.occurrence_id = ANY($1)
+                GROUP BY uad.user_id
+                ON CONFLICT (user_id, occurrence_id) DO NOTHING
                 "#,
             )
-            .bind(cve_id)
-            .bind(source_key)
-            .bind(episode_started_at)
-            .bind(now)
-            .bind(&metadata)
+            .bind(&other_ids)
+            .bind(canonical_id)
             .execute(&mut **tx)
             .await
-            .context("open CVE occurrence")?;
+            .context("migrate same-episode CVE dismissals")?;
+
+            sqlx::query(
+                "UPDATE attention_occurrences \
+                 SET resolved_at = statement_timestamp() \
+                 WHERE id = ANY($1)",
+            )
+            .bind(&other_ids)
+            .execute(&mut **tx)
+            .await
+            .context("resolve duplicate CVE occurrences")?;
         }
     } else {
         // Resolve every open occurrence and clear the episode start so a
@@ -1785,14 +1863,35 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
             // opened_at and updating cves.fleet_relevant_since.  Because it is
             // called in the dedupe transaction, we use the in-transaction
             // variant.
+            let before_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM attention_occurrences \
+                 WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
+            )
+            .bind(&subject_id)
+            .fetch_one(&mut *tx)
+            .await
+            .context("failed to count open CVE occurrences before dedupe")?;
+
             reconcile_cve_attention_subject_tx(&mut tx, &subject_id)
                 .await
                 .context("failed to reconcile CVE attention during dedupe")?;
 
-            // Count the duplicates that were resolved; the helper resolves
-            // every open CVE row for this subject in a single UPDATE.
-            // We do not count the possibly-reinserted canonical row here.
-            // (total_resolved tracks resolved duplicates, not net rows.)
+            // Count how many duplicates were resolved. If the CVE is still
+            // fleet-relevant, exactly one canonical row remains open, so the
+            // number of resolved duplicates is before_count - 1. If the CVE
+            // is no longer relevant, every open row is resolved, giving
+            // before_count. The open count should never increase inside the
+            // same transaction.
+            let after_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM attention_occurrences \
+                 WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
+            )
+            .bind(&subject_id)
+            .fetch_one(&mut *tx)
+            .await
+            .context("failed to count open CVE occurrences after dedupe")?;
+
+            total_resolved += (before_count - after_count).max(0) as usize;
         } else {
             // Covers systems, flakes, and any future/unlisted category by
             // default: resolve ALL duplicates without reconstruction, since
@@ -3602,31 +3701,35 @@ mod tests {
         // violation dedupe repairs.
         let older = Uuid::new_v4();
         let newer = Uuid::new_v4();
+        let newer_opened_at = chrono::Utc::now();
+        let older_opened_at = newer_opened_at - chrono::Duration::hours(1);
         sqlx::query(
             "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
-             VALUES ($1, 'cves', 'cve', $2, $3, now() - interval '1 hour', now() - interval '1 hour')",
+             VALUES ($1, 'cves', 'cve', $2, $3, $4, $4)",
         )
         .bind(older)
-        .bind(&cve_id)
-        .bind(format!("cve:{cve_id}:{}", Uuid::new_v4()))
-        .execute(&pool)
-        .await
-        .unwrap();
+            .bind(&cve_id)
+            .bind(format!("cve:{cve_id}:{}", Uuid::new_v4()))
+            .bind(older_opened_at)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
-             VALUES ($1, 'cves', 'cve', $2, $3, now(), now())",
+             VALUES ($1, 'cves', 'cve', $2, $3, $4, $4)",
         )
         .bind(newer)
-        .bind(&cve_id)
-        .bind(format!("cve:{cve_id}:{}", Uuid::new_v4()))
-        .execute(&pool)
-        .await
-        .unwrap();
+            .bind(&cve_id)
+            .bind(format!("cve:{cve_id}:{}", Uuid::new_v4()))
+            .bind(newer_opened_at)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let resolved = dedupe_open_occurrences(&pool)
             .await
             .expect("dedupe should succeed");
-        assert_eq!(resolved, 2, "both duplicate CVE occurrences must be resolved");
+        assert_eq!(resolved, 1, "the non-canonical duplicate CVE occurrence must be resolved");
 
         let open_rows: Vec<(Uuid, chrono::DateTime<Utc>)> = sqlx::query_as(
             "SELECT id, opened_at FROM attention_occurrences \
@@ -3639,12 +3742,15 @@ mod tests {
         assert_eq!(
             open_rows.len(),
             1,
-            "exactly one fresh occurrence must be reconstructed for a still-relevant CVE, \
-             rather than leaving the CVE with no open occurrence at all"
+            "exactly one canonical occurrence must remain open for a still-relevant CVE"
+        );
+        assert_eq!(
+            open_rows[0].0, older,
+            "the oldest duplicate (opened_at == fleet_relevant_since) must be kept as the canonical occurrence"
         );
         assert!(
-            open_rows[0].0 != older && open_rows[0].0 != newer,
-            "the reconstructed occurrence must be a NEW row (new episode), not one of the resolved duplicates"
+            open_rows[0].1 <= newer_opened_at,
+            "canonical occurrence must be the earliest opened_at"
         );
 
         let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
@@ -3782,5 +3888,251 @@ mod tests {
             .bind(derivation_id)
             .execute(&pool)
             .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reconcile_cve_attention_canonicalizes_duplicates_by_episode_and_migrates_dismissals() {
+        // Regression test for round 17 issue 1: when multiple open CVE
+        // occurrences exist for the same CVE, the helper must pick the one
+        // whose opened_at equals the persisted episode start
+        // (cves.fleet_relevant_since) as canonical, resolve the other
+        // same-episode duplicates, and migrate their dismissals. Dismissals
+        // attached to a different (older, resolved) episode must NOT migrate.
+        let pool = test_pool().await;
+        let env_id = insert_throwaway_environment(&pool, "cve-dedupe-episode").await;
+        let system_id = insert_throwaway_system(&pool, env_id).await;
+        let short = system_id.simple().to_string()[..12].to_string();
+        let hostname: String =
+            sqlx::query_scalar("SELECT hostname FROM systems WHERE id = $1")
+                .bind(system_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let cve_id = format!("CVE24-DEDUP-{}", &short[..8]);
+        let user_id = insert_throwaway_user(&pool).await;
+        let other_user_id = insert_throwaway_user(&pool).await;
+
+        let nixos_derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, status_id, attempt_count) \
+             VALUES (NULL, 'nixos', $1, 10, 0) RETURNING id",
+        )
+        .bind(&hostname)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let scan_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO cve_scans (id, derivation_id, scanner_name, status, completed_at, \
+                                     total_packages, total_vulnerabilities, critical_count) \
+             VALUES ($1, $2, 'vulnix', 'completed', NOW(), 1, 1, 1)",
+        )
+        .bind(scan_id)
+        .bind(nixos_derivation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let pkg_name = format!("test-pkg-{short}");
+        let pkg_derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, pname, version, status_id, attempt_count) \
+             VALUES (NULL, 'package', $1, 'test-pkg', '1.0.0', 11, 0) RETURNING id",
+        )
+        .bind(&pkg_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query("INSERT INTO scan_packages (scan_id, derivation_id) VALUES ($1, $2)")
+            .bind(scan_id)
+            .bind(pkg_derivation_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let episode_start = chrono::Utc::now() - chrono::Duration::hours(1);
+        let duplicate_opened_at = episode_start + chrono::Duration::minutes(5);
+        let old_episode_opened_at = episode_start - chrono::Duration::hours(2);
+
+        sqlx::query("INSERT INTO cves (id, cvss_v3_score, fleet_relevant_since) VALUES ($1, 9.8, $2)")
+            .bind(&cve_id)
+            .bind(episode_start)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO package_vulnerabilities (derivation_id, cve_id, is_whitelisted) \
+             VALUES ($1, $2, FALSE)",
+        )
+        .bind(pkg_derivation_id)
+        .bind(&cve_id)
+        .execute(&pool)
+        .await
+            .unwrap();
+
+        // Sanity: the CVE is critical and fleet-relevant.
+        let (severity, affected_count): (String, i64) = sqlx::query_as(
+            "SELECT severity, affected_count FROM view_cve_list_with_metadata WHERE cve_id = $1",
+        )
+        .bind(&cve_id)
+        .fetch_one(&pool)
+        .await
+        .expect("view_cve_list_with_metadata must return the seeded CVE");
+        assert_eq!(severity, "CRITICAL");
+        assert!(affected_count > 0);
+
+        // Canonical occurrence at the episode start.
+        let canonical_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
+             VALUES ($1, 'cves', 'cve', $2, $3, $4, $4)",
+        )
+        .bind(canonical_id)
+        .bind(&cve_id)
+        .bind(format!("cve:{cve_id}:canonical"))
+        .bind(episode_start)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Same-episode duplicate, dismissed by user_id.
+        let duplicate_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at) \
+             VALUES ($1, 'cves', 'cve', $2, $3, $4, $4)",
+        )
+        .bind(duplicate_id)
+        .bind(&cve_id)
+        .bind(format!("cve:{cve_id}:duplicate"))
+        .bind(duplicate_opened_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at) \
+             VALUES ($1, $2, NOW())",
+        )
+        .bind(user_id)
+        .bind(duplicate_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Older, resolved episode occurrence, dismissed by other_user_id.
+        let old_episode_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (id, category, subject_type, subject_id, source_occurrence_key, opened_at, last_observed_at, resolved_at) \
+             VALUES ($1, 'cves', 'cve', $2, $3, $4, $4, NOW())",
+        )
+        .bind(old_episode_id)
+        .bind(&cve_id)
+        .bind(format!("cve:{cve_id}:old-episode"))
+        .bind(old_episode_opened_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_attention_dismissals (user_id, occurrence_id, dismissed_at) \
+             VALUES ($1, $2, NOW())",
+        )
+        .bind(other_user_id)
+        .bind(old_episode_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        reconcile_cve_attention_subject(&pool, &cve_id)
+            .await
+            .expect("reconcile_cve_attention_subject should succeed");
+
+        // The canonical row must remain open.
+        let canonical_open: bool = sqlx::query_scalar(
+            "SELECT resolved_at IS NULL FROM attention_occurrences WHERE id = $1",
+        )
+        .bind(canonical_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(canonical_open, "canonical occurrence must remain open");
+
+        // The duplicate must be resolved.
+        let duplicate_resolved: bool = sqlx::query_scalar(
+            "SELECT resolved_at IS NOT NULL FROM attention_occurrences WHERE id = $1",
+        )
+        .bind(duplicate_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            duplicate_resolved,
+            "same-episode duplicate must be resolved"
+        );
+
+        // The same-episode dismissal must migrate to the canonical row.
+        let canonical_dismissed_by_user: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
+        )
+        .bind(user_id)
+        .bind(canonical_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            canonical_dismissed_by_user, 1,
+            "same-episode dismissal must migrate to the canonical occurrence"
+        );
+
+        // The old-episode dismissal must NOT migrate to the canonical row.
+        let canonical_dismissed_by_other: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
+        )
+        .bind(other_user_id)
+        .bind(canonical_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            canonical_dismissed_by_other, 0,
+            "different-episode dismissal must NOT migrate to the canonical occurrence"
+        );
+
+        // Cleanup.
+        let _ = sqlx::query("DELETE FROM user_attention_dismissals WHERE occurrence_id = ANY($1)")
+            .bind(vec![canonical_id, duplicate_id, old_episode_id])
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
+            .bind(&cve_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM package_vulnerabilities WHERE cve_id = $1")
+            .bind(&cve_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM scan_packages WHERE scan_id = $1")
+            .bind(scan_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM cve_scans WHERE id = $1")
+            .bind(scan_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM cves WHERE id = $1")
+            .bind(&cve_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM derivations WHERE id = ANY($1)")
+            .bind(vec![nixos_derivation_id, pkg_derivation_id])
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system_id)
+            .execute(&pool)
+            .await;
+        cleanup_user(&pool, user_id).await;
+        cleanup_user(&pool, other_user_id).await;
+        cleanup_environment(&pool, env_id).await;
     }
 }

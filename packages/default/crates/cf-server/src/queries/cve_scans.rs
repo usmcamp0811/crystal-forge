@@ -666,22 +666,16 @@ pub(crate) async fn save_scan_results_with_store_path_override(
         }
     }
 
-    tx.commit().await?;
-
-    // Reconcile CVE attention for every critical CVE found in this scan.
-    // The unified helper rechecks fleet relevance under the per-CVE lock,
-    // so it correctly handles both newly-relevant CVEs and stale ones.
-    for cve_id in &critical_cve_ids {
-        if let Err(e) = attention::reconcile_cve_attention_subject(pool, cve_id).await {
-            warn!("failed to reconcile CVE attention for {cve_id}: {e:#}");
-        }
-    }
-
-    // Also reconcile any CVE that currently has an open occurrence but is no
-    // longer fleet-relevant.  The helper will recheck relevance and resolve
-    // under the lock.  We collect the candidate set here so that concurrent
-    // scans of the same CVE still converge on the same locked helper.
-    let stale_cve_ids: Vec<String> = match sqlx::query_scalar(
+    // Reconcile CVE attention for every critical CVE found in this scan,
+    // AND any currently-open CVE that may have become stale due to this
+    // scan's changes.  Doing this inside the same transaction ensures that
+    // the cves.fleet_relevant_since episode timestamp is durably recorded
+    // atomically with the scan state transition that made the CVE relevant
+    // (round 17 review).
+    //
+    // Sort CVE IDs before acquiring multiple advisory locks so concurrent
+    // scan transactions use a deterministic lock order.
+    let stale_cve_ids: Vec<String> = sqlx::query_scalar(
         r#"
         SELECT DISTINCT ao.subject_id
         FROM attention_occurrences ao
@@ -695,21 +689,19 @@ pub(crate) async fn save_scan_results_with_store_path_override(
           )
         "#,
     )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(ids) => ids,
-        Err(e) => {
-            warn!("failed to query stale CVE subject IDs: {e:#}");
-            Vec::new()
-        }
-    };
+    .fetch_all(&mut *tx)
+    .await?;
 
-    for cve_id in stale_cve_ids {
-        if let Err(e) = attention::reconcile_cve_attention_subject(pool, &cve_id).await {
-            warn!("failed to reconcile stale CVE attention for {cve_id}: {e:#}");
-        }
+    let mut affected_cve_ids = critical_cve_ids.clone();
+    affected_cve_ids.extend(stale_cve_ids);
+    affected_cve_ids.sort();
+    affected_cve_ids.dedup();
+
+    for cve_id in &affected_cve_ids {
+        attention::reconcile_cve_attention_subject_tx(&mut tx, cve_id).await?;
     }
+
+    tx.commit().await?;
 
     Ok(())
 }
