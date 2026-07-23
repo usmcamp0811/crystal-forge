@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::alerts::{
     NAV_BADGES, acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item,
-    should_flash,
+    occurrence_id_for_subject, should_flash,
 };
 use crate::api::client::fetch_systems;
 use crate::api::models::{HealthStatus, SortOrder, SystemsListParams};
@@ -47,13 +47,6 @@ fn came_from_setup() -> bool {
     false
 }
 
-fn environment_alert_occurrence_id(env: &EnvironmentItem) -> String {
-    format!(
-        "{}:{}:{}:{}",
-        env.id, env.health.critical, env.health.offline, env.cve_critical_high
-    )
-}
-
 #[component]
 pub fn EnvironmentsListView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
@@ -88,16 +81,9 @@ pub fn EnvironmentsListView() -> Element {
                 .filter(|env| env.health.critical > 0 || env.health.offline > 0)
                 .collect::<Vec<_>>();
             let attention_count = attention_items.len() as i64;
-            let alert_ids = attention_items
-                .iter()
-                .map(|env| environment_alert_occurrence_id(env))
-                .collect::<Vec<_>>();
             let ack_snapshot = {
                 let badges = NAV_BADGES.read_unchecked();
-                (
-                    badges.observed_at.clone(),
-                    badges.environments_fingerprint.clone(),
-                )
+                badges.observed_at.clone()
             };
             let loaded_without_notice = result.notice.is_none() && policies_result.notice.is_none();
             environments.set(items);
@@ -111,14 +97,12 @@ pub fn EnvironmentsListView() -> Element {
             });
             loading.set(false);
             if loaded_without_notice {
-                if let (Some(cursor), fingerprint) = ack_snapshot {
-                    acknowledge_with_cursor_and_ids(
-                        "environments",
-                        attention_count,
-                        cursor,
-                        fingerprint,
-                        Some(alert_ids),
-                    );
+                if let Some(cursor) = ack_snapshot {
+                    let occurrence_ids = NAV_BADGES
+                        .read_unchecked()
+                        .environments_occurrence_ids
+                        .clone();
+                    acknowledge_with_cursor_and_ids("environments", cursor, occurrence_ids);
                 }
             }
         });
@@ -171,7 +155,16 @@ pub fn EnvironmentsListView() -> Element {
     let attention_classes: Vec<String> = filtered
         .iter()
         .map(|env| {
-            let env_key = environment_alert_occurrence_id(env);
+            // Resolve the same way dismiss_attention_item resolves its local
+            // key: prefer the canonical server occurrence key (so a
+            // recurrence after resolution is not permanently hidden by a
+            // stale local entry), falling back to the stable environment id.
+            // Never a composite of mutable critical/offline/CVE counts,
+            // which changes on every rollup poll and would never match after
+            // a dismiss.
+            let env_id_str = env.id.to_string();
+            let env_key =
+                occurrence_id_for_subject("environments", &env_id_str).unwrap_or(env_id_str);
             let is_attention = env_needs_attention(env);
             let flash_now = flash_global && is_attention;
             attention_row_class("", "environments", &env_key, is_attention, flash_now)
@@ -287,11 +280,19 @@ pub fn EnvironmentsListView() -> Element {
                             on_view: move |env: EnvironmentItem| {
                                 // Opening the detail panel counts as "visiting" the environment —
                                 // dismiss its persistent attention row (same as edit did in TASK-385).
-                                dismiss_attention_item("environments", &environment_alert_occurrence_id(&env));
+                                dismiss_attention_item(
+                                    "environments",
+                                    &env.id.to_string(),
+                                    occurrence_id_for_subject("environments", &env.id.to_string()).as_deref(),
+                                );
                                 view_env.set(Some(env));
                             },
                             on_edit: move |env: EnvironmentItem| {
-                                dismiss_attention_item("environments", &environment_alert_occurrence_id(&env));
+                                dismiss_attention_item(
+                                    "environments",
+                                    &env.id.to_string(),
+                                    occurrence_id_for_subject("environments", &env.id.to_string()).as_deref(),
+                                );
                                 form_error.set(None);
                                 form_draft.set(Some(form_draft_from_environment(&env)));
                             }
@@ -306,11 +307,19 @@ pub fn EnvironmentsListView() -> Element {
                     attention_classes: attention_classes.clone(),
                     on_view: move |env: EnvironmentItem| {
                         // Opening the detail panel counts as "visiting" the environment.
-                        dismiss_attention_item("environments", &environment_alert_occurrence_id(&env));
+                        dismiss_attention_item(
+                            "environments",
+                            &env.id.to_string(),
+                            occurrence_id_for_subject("environments", &env.id.to_string()).as_deref(),
+                        );
                         view_env.set(Some(env));
                     },
                     on_edit: move |env: EnvironmentItem| {
-                        dismiss_attention_item("environments", &environment_alert_occurrence_id(&env));
+                        dismiss_attention_item(
+                            "environments",
+                            &env.id.to_string(),
+                            occurrence_id_for_subject("environments", &env.id.to_string()).as_deref(),
+                        );
                         form_error.set(None);
                         form_draft.set(Some(form_draft_from_environment(&env)));
                     }
@@ -324,7 +333,11 @@ pub fn EnvironmentsListView() -> Element {
                     on_edit: move |env: EnvironmentItem| {
                         // dismiss from within panel too (in case user re-opens edit from panel
                         // without having clicked the card first).
-                        dismiss_attention_item("environments", &environment_alert_occurrence_id(&env));
+                        dismiss_attention_item(
+                            "environments",
+                            &env.id.to_string(),
+                            occurrence_id_for_subject("environments", &env.id.to_string()).as_deref(),
+                        );
                         view_env.set(None);
                         form_error.set(None);
                         form_draft.set(Some(form_draft_from_environment(&env)));

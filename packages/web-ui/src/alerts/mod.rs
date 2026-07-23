@@ -37,7 +37,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// LocalStorage key prefix for per-item dismissals.  The current user's ID
 /// is appended (e.g. `"cf.alert.dismissed.abc123"`) so dismissals are
 /// isolated per user when multiple accounts share the same browser profile.
-const DISMISSED_STORAGE_KEY_PREFIX: &str = "cf.alert.dismissed.";
+const DISMISSED_STORAGE_KEY_PREFIX: &str = "cf.attention.dismissed.v2.";
 
 /// Shared alert state.  Hold in a `GlobalSignal` initialised in `main.rs`.
 #[derive(Debug, Clone, Default)]
@@ -122,55 +122,119 @@ fn reset_for_storage_key(storage_key: String) {
 pub static NAV_BADGES: GlobalSignal<NavigationBadges> = Signal::global(NavigationBadges::default);
 
 /// Acknowledge a view — optimistically hides its attention badge immediately
-/// AND persists the acknowledgment server-side (per authenticated user) so it
+/// AND persists the dismissal server-side (per authenticated user) so it
 /// stays hidden across page refresh, browser restart, and re-login until a
 /// new failure appears for that category.
 ///
-/// `current_count` is the view's raw attention count at acknowledgment time.
-/// It is used server-side as the count-diff baseline for categories with no
-/// discrete per-item timestamp (systems, environments); it is ignored for
-/// timestamp-based categories (flakes, builds, evals, cves), which use the
-/// acknowledgment's `NOW()` as their cutoff instead — pass the best count you
-/// have available regardless.
+/// The server occurrence IDs used for dismissal are read from the latest
+/// `NavigationBadges` snapshot for the category. This makes the acknowledged
+/// set exactly the occurrences the sidebar was showing at the time of the
+/// user action.
 ///
 /// NOTE: [`NAV_BADGES`] (not `ALERT_STATE.acknowledged`) is the source of
 /// truth callers should read for badge visibility. This function zeroes the
 /// relevant `NAV_BADGES` field immediately for a snappy UI, then the async
-/// refetch below reconciles it with the server. A category must never be
+/// response reconciles it with the server. A category must never be
 /// masked indefinitely for the rest of the page load once acknowledged — if
 /// a genuinely new failure arrives afterwards, the next poll (or this
-/// function's own refetch) must be able to show it again.
+/// function's own response) must be able to show it again.
 ///
 /// Call this when entering the view (on mount). For Builds/Evals, call only
 /// when the failures tab is opened.
-pub fn acknowledge(view_key: &str, current_count: i64) {
-    // Capture the observation cursor and fingerprint from the badge snapshot
-    // the user was shown before we zero-out the field, so the server anchors
-    // last_seen_at to the rendered data (not POST receive time) and records
-    // the exact alerting-ID set for replacement-failure detection.
-    let (observed_at, fingerprint) = {
+fn occurrence_ids_for_category(badges: &NavigationBadges, view_key: &str) -> Vec<String> {
+    match view_key {
+        "systems" => badges.systems_occurrence_ids.clone(),
+        "flakes" => badges.flakes_occurrence_ids.clone(),
+        "environments" => badges.environments_occurrence_ids.clone(),
+        "builds" => badges.builds_occurrence_ids.clone(),
+        "evals" => badges.evals_occurrence_ids.clone(),
+        "cves" => badges.cves_occurrence_ids.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// The occurrence-key prefix that identifies all occurrences belonging to a
+/// given subject within a category, matching the canonical key formats
+/// produced server-side in `queries::attention`:
+/// * builds: `build:<subject_id>` (the whole key; the job id alone is the identity)
+/// * evals: `eval:<subject_id>:<microseconds>`
+/// * systems: `system:<subject_id>:<reason>:<episode_uuid>`
+/// * environments: `environment:<subject_id>:<underlying_system_source_key>`
+/// * flakes: `flake:<subject_id>:<episode_uuid>`
+/// * cves: `cve:<subject_id>:<episode_uuid>`
+fn occurrence_key_prefix(view_key: &str, subject_id: &str) -> Option<String> {
+    match view_key {
+        "builds" => Some(format!("build:{subject_id}")),
+        "evals" => Some(format!("eval:{subject_id}:")),
+        "systems" => Some(format!("system:{subject_id}:")),
+        "environments" => Some(format!("environment:{subject_id}:")),
+        "flakes" => Some(format!("flake:{subject_id}:")),
+        "cves" => Some(format!("cve:{subject_id}:")),
+        _ => None,
+    }
+}
+
+/// Look up the server canonical occurrence key for a subject within the latest
+/// badge response. This lets row/card dismissers use the same stable ID as the
+/// sidebar without recomputing the key from mutable fields.
+///
+/// `subject_id` is the stable subject identifier (job id, commit id, system id,
+/// environment id, flake id) as rendered by the view.
+pub fn occurrence_id_for_subject(view_key: &str, subject_id: &str) -> Option<String> {
+    let badges = NAV_BADGES.read_unchecked();
+    let keys = occurrence_ids_for_category(&badges, view_key);
+    let prefix = occurrence_key_prefix(view_key, subject_id)?;
+    keys.into_iter().find(|key| key.starts_with(&prefix))
+}
+
+/// Bound a category acknowledgment to only the occurrences whose subject was
+/// actually part of the caller's successfully rendered dataset.
+///
+/// The badge response's `*_occurrence_ids` array is scoped to the 24-hour
+/// attention window fleet/scope-wide, not to what a paginated view actually
+/// displayed — a view showing only the first page of a bounded history
+/// window (e.g. Builds `Completed`, Evaluations `History`) must not
+/// acknowledge occurrences for rows outside that page, or a genuinely new
+/// failure the user never saw could be silently consumed. Categories whose
+/// canonical key embeds a server-generated episode id that the client cannot
+/// reconstruct (flakes, systems, environments, cves) still resolve correctly
+/// here because matching is by subject-id prefix against the badge's already
+/// server-authoritative key list, not by reconstructing the key itself.
+pub fn occurrence_ids_for_rendered_subjects(
+    view_key: &str,
+    rendered_subject_ids: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let badges = NAV_BADGES.read_unchecked();
+    occurrence_ids_for_category(&badges, view_key)
+        .into_iter()
+        .filter(|key| {
+            rendered_subject_ids.iter().any(|subject_id| {
+                occurrence_key_prefix(view_key, subject_id)
+                    .is_some_and(|prefix| key.starts_with(&prefix))
+            })
+        })
+        .collect()
+}
+
+pub fn acknowledge(view_key: &str) {
+    let (observed_at, occurrence_ids) = {
         let badges = NAV_BADGES.read_unchecked();
-        let fp = match view_key {
-            "systems" => badges.systems_fingerprint.clone(),
-            "environments" => badges.environments_fingerprint.clone(),
-            _ => None,
-        };
-        (badges.observed_at.clone(), fp)
+        (badges.observed_at.clone(), occurrence_ids_for_category(&badges, view_key))
     };
     let Some(observed_at) = observed_at else {
-        // New clients must not acknowledge without a server cursor.  Otherwise
-        // the server would have to fall back to NOW(), which can consume
+        // New clients must not acknowledge without a server cursor. Otherwise
+        // the server would have to fall back to NOW(), which could consume
         // failures that arrived before the relevant view data was rendered.
         return;
     };
-    acknowledge_with_cursor_and_ids(view_key, current_count, observed_at, fingerprint, None);
+    acknowledge_with_cursor_and_ids(view_key, observed_at, occurrence_ids);
 }
 
 /// Acknowledge using a cursor captured from the relevant rendered dataset.
 /// Prefer this over [`acknowledge`] from views that have their own async data
 /// loading; this prevents a later sidebar poll cursor from acknowledging data
 /// that was not present in the rendered view.
-pub fn acknowledge_with_cursor(view_key: &str, current_count: i64, observed_at: Option<String>) {
+pub fn acknowledge_with_cursor(view_key: &str, observed_at: Option<String>) {
     {
         let mut state = ALERT_STATE.write();
         state.acknowledged.insert(view_key.to_string());
@@ -181,22 +245,19 @@ pub fn acknowledge_with_cursor(view_key: &str, current_count: i64, observed_at: 
     let Some(observed_at) = observed_at else {
         return;
     };
-    acknowledge_with_cursor_and_ids(view_key, current_count, observed_at, None, None);
+    let occurrence_ids = {
+        let badges = NAV_BADGES.read_unchecked();
+        occurrence_ids_for_category(&badges, view_key)
+    };
+    acknowledge_with_cursor_and_ids(view_key, observed_at, occurrence_ids);
 }
 
 pub async fn acknowledge_with_cursor_and_ids_async(
     view_key: &str,
-    current_count: i64,
     observed_at: String,
-    fingerprint: Option<String>,
-    alert_ids: Option<Vec<String>>,
+    occurrence_ids: Vec<String>,
 ) -> bool {
-    let payload_key = acknowledgement_payload_key(
-        current_count,
-        observed_at.as_str(),
-        fingerprint.as_deref(),
-        alert_ids.as_deref(),
-    );
+    let payload_key = acknowledgement_payload_key(observed_at.as_str(), &occurrence_ids);
     {
         let mut state = ALERT_STATE.write();
         if state
@@ -217,16 +278,9 @@ pub async fn acknowledge_with_cursor_and_ids_async(
     }
     zero_nav_badge_field(view_key);
 
-    let success = acknowledge_navigation_category(
-        view_key,
-        observed_at.as_str(),
-        current_count,
-        fingerprint.as_deref(),
-        alert_ids.as_deref(),
-    )
-    .await
-    .is_ok();
+    let result = acknowledge_navigation_category(view_key, observed_at.as_str(), &occurrence_ids).await;
 
+    let success = result.is_ok();
     {
         let mut state = ALERT_STATE.write();
         if state
@@ -243,35 +297,19 @@ pub async fn acknowledge_with_cursor_and_ids_async(
         }
     }
 
-    if success {
-        if let Ok(fresh) = get_navigation_badges().await {
-            *NAV_BADGES.write() = fresh;
-        }
+    if let Ok(fresh) = result {
+        *NAV_BADGES.write() = fresh;
     }
 
     success
 }
 
-/// Acknowledge using a view-owned cursor and optional alerting IDs.  The IDs
-/// are used by systems/environments so the server computes `current - seen`
-/// rather than re-surfacing old alerts on recovery-only set changes.
-pub fn acknowledge_with_cursor_and_ids(
-    view_key: &str,
-    current_count: i64,
-    observed_at: String,
-    fingerprint: Option<String>,
-    alert_ids: Option<Vec<String>>,
-) {
+/// Acknowledge using a view-owned cursor and a list of server occurrence IDs.
+/// The IDs are the exact canonical occurrences the rendered view can dismiss.
+pub fn acknowledge_with_cursor_and_ids(view_key: &str, observed_at: String, occurrence_ids: Vec<String>) {
     let view_key = view_key.to_string();
     spawn(async move {
-        let _ = acknowledge_with_cursor_and_ids_async(
-            &view_key,
-            current_count,
-            observed_at,
-            fingerprint,
-            alert_ids,
-        )
-        .await;
+        let _ = acknowledge_with_cursor_and_ids_async(&view_key, observed_at, occurrence_ids).await;
     });
 }
 
@@ -287,19 +325,10 @@ pub fn acknowledge_locally(view_key: &str) {
     zero_nav_badge_field(view_key);
 }
 
-fn acknowledgement_payload_key(
-    current_count: i64,
-    observed_at: &str,
-    fingerprint: Option<&str>,
-    alert_ids: Option<&[String]>,
-) -> String {
-    let mut ids = alert_ids.map(|ids| ids.to_vec()).unwrap_or_default();
+fn acknowledgement_payload_key(observed_at: &str, occurrence_ids: &[String]) -> String {
+    let mut ids = occurrence_ids.to_vec();
     ids.sort();
-    format!(
-        "count={current_count};cursor={observed_at};fingerprint={};ids={}",
-        fingerprint.unwrap_or(""),
-        ids.join(",")
-    )
+    format!("cursor={observed_at};ids={}", ids.join(","))
 }
 
 /// Returns the current unix-second timestamp, or 0 if unavailable (WASM
@@ -382,23 +411,72 @@ fn ensure_dismissed_loaded() {
 
 /// Dismiss a specific attention row/card after the user clicks or opens it.
 ///
-/// The dismissal is persisted to LocalStorage so it survives page refresh.
-/// The highlight will only reappear if the underlying cause resolves and
-/// returns (a genuinely new event).
-pub fn dismiss_attention_item(view_key: &str, item_key: &str) {
+/// `occurrence_id` is the server canonical source occurrence key for the item
+/// if available. When `None` is passed, the dismissal is local-only (the caller
+/// does not have the server key yet). The row is hidden immediately and the
+/// dismissal is persisted to LocalStorage. When a server key is supplied, the
+/// dismissal is also pushed to the server so it follows the user across devices.
+///
+/// The *local* optimistic-hide identity is the canonical occurrence key when
+/// available, not the bare subject id. Categories such as evaluations and
+/// systems reuse the same subject (commit id, system id) across distinct
+/// occurrences/episodes — keying the local dismissal on the subject alone
+/// would permanently suppress a genuinely new occurrence that recurs after a
+/// prior one resolved, since the stale local entry would still match. Callers
+/// must pass the same occurrence id (via `occurrence_id_for_subject`) to
+/// [`attention_row_class`]/[`attention_item_active`] so the two stay in sync.
+///
+/// If the server request fails, the optimistic LocalStorage and in-memory
+/// entry are removed so the row reappears on the next render. A previously
+/// dismissed item is not permanently hidden just because the server was
+/// briefly unreachable.
+pub fn dismiss_attention_item(view_key: &str, subject_id: &str, occurrence_id: Option<&str>) {
     ensure_dismissed_loaded();
-    let key = attention_item_key(view_key, item_key);
+    let storage_key = dismissed_storage_key();
+    let local_key = attention_item_key(view_key, occurrence_id.unwrap_or(subject_id));
     {
         let mut state = ALERT_STATE.write();
-        state.dismissed_items.insert(key.clone());
+        state.dismissed_items.insert(local_key.clone());
     }
     // Persist to LocalStorage — best-effort, ignore storage errors silently.
-    let storage_key = dismissed_storage_key();
     if let Ok(mut stored) = LocalStorage::get::<Vec<String>>(&storage_key) {
-        stored.push(key);
+        if !stored.contains(&local_key) {
+            stored.push(local_key.clone());
+        }
         let _ = LocalStorage::set(&storage_key, stored);
     } else {
-        let _ = LocalStorage::set(&storage_key, vec![key]);
+        let _ = LocalStorage::set(&storage_key, vec![local_key.clone()]);
+    }
+
+    // Persist the dismissal server-side when we have the canonical key.
+    if let (Some(occurrence_id), Some(observed_at)) = (
+        occurrence_id,
+        NAV_BADGES.read_unchecked().observed_at.clone(),
+    ) {
+        let occurrence_id = occurrence_id.to_string();
+        let view_key = view_key.to_string();
+        let local_key_for_revert = local_key.clone();
+        let storage_key_for_revert = storage_key.clone();
+        spawn(async move {
+            let result =
+                acknowledge_navigation_category(&view_key, &observed_at, &[occurrence_id]).await;
+            if result.is_ok() {
+                if let Ok(fresh_badges) = get_navigation_badges().await {
+                    *NAV_BADGES.write() = fresh_badges;
+                }
+            } else {
+                // Server request failed — revert the optimistic LocalStorage
+                // and in-memory entry so the row reappears on next render.
+                let mut state = ALERT_STATE.write();
+                state.dismissed_items.remove(&local_key_for_revert);
+                if let Ok(mut stored) =
+                    LocalStorage::get::<Vec<String>>(&storage_key_for_revert)
+                {
+                    stored.retain(|k| k != &local_key_for_revert);
+                    let _ = LocalStorage::set(&storage_key_for_revert, stored);
+                }
+            }
+        });
     }
 }
 
@@ -544,18 +622,14 @@ mod tests {
     }
 
     #[test]
-    fn acknowledgement_payload_key_sorts_alert_ids() {
+    fn acknowledgement_payload_key_sorts_occurrence_ids() {
         let first = acknowledgement_payload_key(
-            2,
             "2026-07-15T00:00:00Z",
-            None,
-            Some(&["b".to_string(), "a".to_string()]),
+            &["b".to_string(), "a".to_string()],
         );
         let second = acknowledgement_payload_key(
-            2,
             "2026-07-15T00:00:00Z",
-            None,
-            Some(&["a".to_string(), "b".to_string()]),
+            &["a".to_string(), "b".to_string()],
         );
 
         assert_eq!(first, second);
@@ -563,18 +637,14 @@ mod tests {
     }
 
     #[test]
-    fn acknowledgement_payload_key_includes_cursor_and_fingerprint() {
+    fn acknowledgement_payload_key_includes_cursor() {
         let key = acknowledgement_payload_key(
-            3,
             "2026-07-15T00:00:00Z",
-            Some("fingerprint-1"),
-            Some(&["alert-1".to_string()]),
+            &["eval:42:1234567890".to_string()],
         );
 
-        assert!(key.contains("count=3"));
         assert!(key.contains("cursor=2026-07-15T00:00:00Z"));
-        assert!(key.contains("fingerprint=fingerprint-1"));
-        assert!(key.contains("ids=alert-1"));
+        assert!(key.contains("ids=eval:42:1234567890"));
     }
 
     // Pure helpers for testing (take state explicitly, no GlobalSignal needed)

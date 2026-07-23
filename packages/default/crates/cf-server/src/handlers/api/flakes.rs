@@ -18,7 +18,7 @@ use crate::api::models::{
 };
 use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth, RequireOperator};
 use crate::config::CrystalForgeConfig;
-use crate::flake::commits::sync_flake_recorded;
+use crate::flake::commits::{sync_flake_recorded, HistoryRewriteOutcome};
 use crate::flake::commits::{
     GitCommitMetadata, branch_exists, branch_exists_with_creds, get_commit_changed_files,
     get_commit_diff_with_creds, get_commit_metadata, get_commit_nixos_configurations,
@@ -36,7 +36,7 @@ use crate::queries::flake_credentials::{
     delete_flake_credential, get_flake_credential, update_flake_credential, upsert_flake_credential,
 };
 use crate::queries::flakes::{
-    accept_history_rewrite_reset, cascade_delete_flake, check_flake_dependencies,
+    cascade_delete_flake, check_flake_dependencies,
     count_systems_for_flake, create_or_mutate_flake, delete_flake_by_id,
     fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
     list_flake_registry, mutate_flake_locked, soft_delete_flake,
@@ -1699,43 +1699,34 @@ pub async fn accept_flake_history_rewrite(
         flake.id, flake.name, flake.repo_url, flake.branch, user.user_id
     );
 
-    // Capture the previous HEAD from the branch snapshot (position 0) for
-    // audit metadata.  Database errors are logged but do not block the reset.
-    let previous_head: Option<String> = match sqlx::query_scalar(
-        r#"
-        SELECT c.git_commit_hash
-        FROM flake_branch_commit_snapshot fbcs
-        JOIN commits c ON c.id = fbcs.commit_id
-        WHERE fbcs.flake_id = $1
-          AND fbcs.position = 0
-        "#,
+    // ── Atomically reconcile history rewrite ────────────────────────────
+    // Round 15/16: accept_history_rewrite_and_sync handles the entire
+    // rewrite in a single locked transaction: it retains existing commit
+    // rows whose hashes remain reachable in the 500-entry snapshot
+    // (preserving evaluation status, derivations, caches, and completion
+    // timestamps), inserts only genuinely new hashes, replaces the
+    // snapshot, resolves flake-level attention, and updates sync status —
+    // all atomically with no intermediate pending-window visible to the
+    // eval worker.
+    let outcome = match crate::flake::commits::accept_history_rewrite_and_sync(
+        &pool,
+        flake.id,
+        &flake.repo_url,
+        &flake.branch,
     )
-    .bind(flake.id)
-    .fetch_optional(&pool)
     .await
     {
-        Ok(row) => row,
+        Ok(outcome) => outcome,
         Err(e) => {
             error!(
-                "Failed to read previous snapshot HEAD for flake {}: {e:#}",
-                flake.id
-            );
-            None
-        }
-    };
-
-    let deleted_commits = match accept_history_rewrite_reset(&pool, flake.id).await {
-        Ok(count) => count,
-        Err(e) => {
-            error!(
-                "Failed purging commit history for flake {} ({}): {e:#}",
+                "Failed to accept history rewrite for flake {} ({}): {e:#}",
                 flake.name, flake.repo_url
             );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
-                    error: "history_reset_failed".to_string(),
-                    message: "Failed to reset flake commit history".to_string(),
+                    error: "history_rewrite_failed".to_string(),
+                    message: format!("History rewrite acceptance failed: {}", e),
                     details: Some(serde_json::json!({"error": e.to_string()})),
                 }),
             )
@@ -1743,84 +1734,83 @@ pub async fn accept_flake_history_rewrite(
         }
     };
 
-    let inserted = match sync_flake_recorded(&pool, flake.id, &flake.repo_url, &flake.branch).await
-    {
-        Ok(inserted) => inserted,
-        Err(e) => {
-            error!(
-                "Failed re-syncing flake {} ({}) after rewrite acceptance: {e:#}",
-                flake.name, flake.repo_url
+    match outcome {
+        HistoryRewriteOutcome::Applied {
+            deleted_commits,
+            inserted_commits,
+        } => {
+            info!(
+                "history_rewrite_accepted flake_id={} flake_name={} deleted_commits={} inserted_commits={} actor={}",
+                flake.id, flake.name, deleted_commits, inserted_commits, user.user_id
             );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+
+            // Notify the eval queue when new pending commits were inserted.
+            // We use inserted_commits directly rather than a separate COUNT
+            // query, because every genuinely new hash was inserted as pending
+            // inside the locked transaction (round 16 review).
+            if inserted_commits > 0 {
+                state.queue_notifier.notify_eval_queue();
+            }
+
+            let metadata = serde_json::json!({
+                "flake_id": flake.id,
+                "flake_name": flake.name,
+                "repo_url": flake.repo_url,
+                "branch": flake.branch,
+                "deleted_commits": deleted_commits,
+                "inserted_commits": inserted_commits,
+                "accepted": true,
+            });
+
+            if let Err(e) = insert_admin_audit_event(
+                &pool,
+                user.user_id,
+                &user.user_id.to_string(),
+                "accept_flake_history_rewrite",
+                &format!("flake:{}", flake_id),
+                headers
+                    .get("x-forwarded-for")
+                    .and_then(|h| h.to_str().ok())
+                    .map(String::from),
+                metadata,
+            )
+            .await
+            {
+                warn!("Failed to log audit event for flake history rewrite acceptance: {e:#}");
+            }
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "message": format!(
+                        "Accepted history rewrite for {} on {}. Inserted {} new commits (retained existing evaluated ones).",
+                        flake.name,
+                        flake.branch,
+                        inserted_commits
+                    ),
+                    "flake_id": flake.id,
+                    "inserted_commits": inserted_commits,
+                })),
+            )
+                .into_response()
+        }
+        HistoryRewriteOutcome::Superseded => {
+            info!(
+                "history_rewrite_superseded flake_id={} flake_name={} actor={}",
+                flake.id, flake.name, user.user_id
+            );
+            (
+                StatusCode::CONFLICT,
                 Json(ApiError {
-                    error: "history_resync_failed".to_string(),
-                    message: format!("History reset completed but re-sync failed: {}", e),
-                    details: Some(serde_json::json!({
-                        "error": e.to_string(),
-                        "deleted_commits": deleted_commits
-                    })),
+                    error: "history_rewrite_superseded".to_string(),
+                    message: "Another flake sync superseded the rewrite acceptance. Retry the operation.".to_string(),
+                    details: None,
                 }),
             )
-                .into_response();
+                .into_response()
         }
-    };
-
-    info!(
-        "history_rewrite_accepted flake_id={} flake_name={} deleted_commits={} inserted_commits={} actor={}",
-        flake.id, flake.name, deleted_commits, inserted, user.user_id
-    );
-
-    if inserted > 0 {
-        state.queue_notifier.notify_eval_queue();
     }
-
-    let metadata = serde_json::json!({
-        "flake_id": flake.id,
-        "flake_name": flake.name,
-        "repo_url": flake.repo_url,
-        "branch": flake.branch,
-        "previous_head": previous_head,
-        "deleted_commits": deleted_commits,
-        "inserted_commits": inserted,
-        "accepted": true,
-    });
-
-    if let Err(e) = insert_admin_audit_event(
-        &pool,
-        user.user_id,
-        &user.user_id.to_string(),
-        "accept_flake_history_rewrite",
-        &format!("flake:{}", flake_id),
-        headers
-            .get("x-forwarded-for")
-            .and_then(|h| h.to_str().ok())
-            .map(String::from),
-        metadata,
-    )
-    .await
-    {
-        warn!("Failed to log audit event for flake history rewrite acceptance: {e:#}");
-    }
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "ok",
-            "message": format!(
-                "Accepted history rewrite for {} on {}. Reset {} old commits and synced {} current commits.",
-                flake.name,
-                flake.branch,
-                deleted_commits,
-                inserted
-            ),
-            "flake_id": flake.id,
-            "deleted_commits": deleted_commits,
-            "inserted_commits": inserted,
-            "previous_head": previous_head,
-        })),
-    )
-        .into_response()
 }
 
 /// Trigger a commit sync for all tracked flakes.

@@ -3,6 +3,7 @@
 //! This module handles creating and managing build jobs in the build_jobs table.
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use sqlx::PgPool;
 use tracing::{debug, info};
 use uuid::Uuid;
@@ -440,6 +441,22 @@ pub async fn mark_job_failed(
             "❌ Build job {} permanently failed after {} attempts",
             job_id, result.retry_count
         );
+
+        // Open a canonical attention occurrence for the terminal failure.
+        // A re-queued terminal job gets a new id, so job_id alone is a stable
+        // occurrence key.
+        let opened_at = Utc::now();
+        let _ = crate::queries::attention::open_or_observe(
+            pool,
+            "builds",
+            "build_job",
+            &job_id.to_string(),
+            &crate::queries::attention::build_occurrence_key(job_id),
+            opened_at,
+            serde_json::json!({"job_id": job_id.to_string()}),
+        )
+        .await
+        .map_err(|e| tracing::error!("failed to open build attention occurrence: {e:#}"));
     }
 
     Ok(())

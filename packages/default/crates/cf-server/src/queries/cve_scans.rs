@@ -1,13 +1,15 @@
 use crate::derivations::utils::get_store_path_from_drv;
 use crate::derivations::{Derivation, DerivationType};
 use crate::models::cve_scans::{CveScan, ScanStatus};
+use crate::queries::attention;
 use crate::vulnix::vulnix_parser::{VulnixParser, VulnixScanOutput};
 use anyhow::Result;
 use bigdecimal::BigDecimal;
 use bigdecimal::FromPrimitive;
+use chrono::Utc;
 use sqlx::PgPool;
 use sqlx::Row;
-use tracing::debug;
+use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -466,6 +468,19 @@ pub(crate) async fn save_scan_results_with_store_path_override(
         }
     }
 
+    // Collect critical CVE IDs before the transaction so we can open attention
+    // occurrences after the commit.  A CVE is considered critical when its CVSS
+    // v3 base score is >= 9.0.
+    let critical_cve_ids: Vec<String> = cve_map
+        .iter()
+        .filter(|(_, rec)| {
+            rec.cvss
+                .as_ref()
+                .is_some_and(|s| s >= &BigDecimal::from(9u64))
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+
     // --- Step 3: single transaction with ~5 bulk statements ---
     let mut tx = pool.begin().await?;
 
@@ -649,6 +664,41 @@ pub(crate) async fn save_scan_results_with_store_path_override(
             .execute(&mut *tx)
             .await?;
         }
+    }
+
+    // Reconcile CVE attention for every critical CVE found in this scan,
+    // AND any currently-open CVE that may have become stale due to this
+    // scan's changes.  Doing this inside the same transaction ensures that
+    // the cves.fleet_relevant_since episode timestamp is durably recorded
+    // atomically with the scan state transition that made the CVE relevant
+    // (round 17 review).
+    //
+    // Sort CVE IDs before acquiring multiple advisory locks so concurrent
+    // scan transactions use a deterministic lock order.
+    let stale_cve_ids: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT ao.subject_id
+        FROM attention_occurrences ao
+        WHERE ao.category = 'cves'
+          AND ao.resolved_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM view_cve_list_with_metadata v
+              WHERE v.cve_id = ao.subject_id
+                AND v.severity = 'CRITICAL'
+                AND v.affected_count > 0
+          )
+        "#,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let mut affected_cve_ids = critical_cve_ids.clone();
+    affected_cve_ids.extend(stale_cve_ids);
+    affected_cve_ids.sort();
+    affected_cve_ids.dedup();
+
+    for cve_id in &affected_cve_ids {
+        attention::reconcile_cve_attention_subject_tx(&mut tx, cve_id).await?;
     }
 
     tx.commit().await?;

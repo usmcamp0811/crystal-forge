@@ -6,7 +6,7 @@ use gloo_timers::future::TimeoutFuture;
 
 use crate::alerts::{
     NAV_BADGES, acknowledge_with_cursor_and_ids_async, attention_row_class, dismiss_attention_item,
-    should_flash,
+    occurrence_id_for_subject, occurrence_ids_for_rendered_subjects, should_flash,
 };
 
 use crate::api::{
@@ -339,43 +339,39 @@ fn EvaluationsPage() -> Element {
         .map(|page| page.total_count)
         .unwrap_or(0);
     use_effect(move || {
-        if active_tab() == EvaluationsTab::History && !evals_ack_sent() {
+        if active_tab() == EvaluationsTab::History {
             if let Some(Ok(page_data)) = history_resource.read().as_ref() {
                 let unfiltered_first_page =
                     history_status_filter() == "all" && history_flake_filter() == "all";
-                // Acknowledge when the page is complete OR when we've reached the
-                // frontend fetch limit (10,000 rows). Beyond that cap, the UI cannot
-                // load more history, so acknowledge what we have rather than blocking
-                // acknowledgement permanently (review finding #2).
-                let complete_page = page_data.total_count <= page_data.items.len() as i64
-                    || page_data.items.len() as i64 >= FETCH_LIMIT_MAX;
-                if unfiltered_first_page && complete_page {
-                    let history_failed_count = page_data
-                        .items
-                        .iter()
-                        .filter(|item| item.evaluation_status == "failed")
-                        .count() as i64;
+                // Acknowledge occurrences for whatever is currently rendered,
+                // without waiting for the full history to load. Each rendered
+                // window acknowledges only the occurrences whose subjects are
+                // present in `history_items_acc`, so failures beyond the visible
+                // page are not silently consumed. The async acknowledgment has
+                // built-in payload deduplication, so redundant calls when the
+                // history resource refreshes with the same data are no-ops.
+                // As the user scrolls, new rendered subjects produce a different
+                // payload key, triggering a new POST for the additional items.
+                if unfiltered_first_page && !page_data.items.is_empty() {
                     let Some(cursor) = history_ack_cursor.read().clone() else {
                         return;
                     };
-                    let alert_ids = page_data
-                        .items
+                    // Bound acknowledgment to occurrences for commits actually
+                    // present in the loaded/accumulated history, not every
+                    // eligible occurrence fleet-wide — a failure beyond the
+                    // 10,000-row fetch cap must not be silently consumed.
+                    let rendered_commit_ids: std::collections::HashSet<String> = history_items_acc
+                        .read()
                         .iter()
-                        .filter(|item| item.evaluation_status == "failed")
-                        .map(|item| item.alert_occurrence_id.clone())
-                        .collect::<Vec<_>>();
+                        .map(|item| item.commit_id.to_string())
+                        .collect();
+                    let occurrence_ids =
+                        occurrence_ids_for_rendered_subjects("evals", &rendered_commit_ids);
                     spawn(async move {
-                        if acknowledge_with_cursor_and_ids_async(
-                            "evals",
-                            history_failed_count,
-                            cursor,
-                            None,
-                            Some(alert_ids),
+                        let _ = acknowledge_with_cursor_and_ids_async(
+                            "evals", cursor, occurrence_ids,
                         )
-                        .await
-                        {
-                            evals_ack_sent.set(true);
-                        }
+                        .await;
                     });
                 }
             }
@@ -1242,16 +1238,21 @@ fn EvalHistory(
                                     let is_focused = focused_index() == Some(row_i);
 
                                     let is_failed = ev.evaluation_status == "failed";
-                                    // Include evaluation_completed_at epoch so
-                                    // a commit that is re-evaluated and fails
-                                    // again generates a new dismissal key.
-                                    let eval_key = format!(
-                                        "{}:{}",
-                                        commit_id,
-                                        ev.evaluation_completed_at
-                                            .map(|t| t.timestamp().to_string())
-                                            .unwrap_or_default()
-                                    );
+                                    // Resolve the same way dismiss_attention_item
+                                    // resolves its local key: prefer the
+                                    // canonical server occurrence key (keyed by
+                                    // commit_id + evaluation_completed_at
+                                    // microseconds server-side), falling back
+                                    // to the commit id. This must stay in sync
+                                    // with the identity dismiss_attention_item
+                                    // stores, or a re-evaluation that fails
+                                    // again would either fail to clear on
+                                    // click (mismatched key) or stay
+                                    // permanently hidden (stale local entry
+                                    // from a resolved prior occurrence).
+                                    let commit_id_str = commit_id.to_string();
+                                    let eval_key = occurrence_id_for_subject("evals", &commit_id_str)
+                                        .unwrap_or(commit_id_str);
                                     let row_class = attention_row_class(
                                         if is_focused { "kbd-focused" } else { "" },
                                         "evals",
@@ -1267,7 +1268,11 @@ fn EvalHistory(
                                             style: "cursor: pointer;",
                                             onclick: move |_| {
                                                 if is_failed {
-                                                    dismiss_attention_item("evals", &eval_key);
+                                                    dismiss_attention_item(
+                                                        "evals",
+                                                        &commit_id.to_string(),
+                                                        occurrence_id_for_subject("evals", &commit_id.to_string()).as_deref(),
+                                                    );
                                                 }
                                                 drawer_target.set(Some(EvalDrawerTarget::History(ev_for_row.clone())));
                                             },

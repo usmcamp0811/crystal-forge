@@ -24,6 +24,7 @@ use axum::{
 };
 use sqlx::PgPool;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 // Re-export protocol types so agent binary imports remain backward-compatible:
 //   use crystal_forge::handlers::agent::heartbeat::{LogResponse, RuntimeCacheConfig};
@@ -265,6 +266,14 @@ pub async fn log(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
+    // Reconcile system health attention after the heartbeat/state change.
+    let _ = reconcile_system_health_attention(
+        &pool,
+        agent_request.system.id,
+        &agent_request.system.hostname,
+    )
+    .await;
+
     // Log only after the commit so we never report events that rolled back.
     match boot_id_change {
         Some(BootIdChange::Changed) => {
@@ -430,6 +439,44 @@ fn classify_restart_type(
         // Periodic heartbeat with stable boot_id — keep the last classification.
         _ => None,
     }
+}
+
+/// Reconcile system health attention after a heartbeat or state change.
+///
+/// Queries the current health status from `view_system_list` and delegates
+/// to the shared [`crate::tasks::attention_reconciliation::reconcile_system_attention`],
+/// which also drives the periodic reconciliation sweep for systems that stop
+/// heartbeating entirely (see that module for why a single request-triggered
+/// hook cannot be the only producer for a continuously-recomputed health
+/// status).
+async fn reconcile_system_health_attention(pool: &PgPool, system_id: Uuid, hostname: &str) {
+    let row: Option<(String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT vsl.health_status, s.environment_id \
+         FROM view_system_list vsl \
+         JOIN systems s ON s.id = vsl.id \
+         WHERE vsl.id = $1",
+    )
+    .bind(system_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    let Some((health, environment_id)) = row else {
+        debug!(
+            "Could not determine health status for system {hostname}; skipping attention reconciliation"
+        );
+        return;
+    };
+
+    crate::tasks::attention_reconciliation::reconcile_system_attention(
+        pool,
+        system_id,
+        hostname,
+        &health,
+        environment_id,
+    )
+    .await;
 }
 
 #[cfg(test)]
