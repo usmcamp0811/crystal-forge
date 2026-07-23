@@ -1067,7 +1067,7 @@ async fn reconcile_cve_attention(pool: &PgPool) {
 /// The build occurrence's `opened_at` uses the build's own `completed_at`
 /// rather than the current time, so the 24-hour attention window reflects
 /// the actual failure time, not the reconciliation time.
-async fn reconcile_terminal_events(pool: &PgPool) {
+pub(crate) async fn reconcile_terminal_events(pool: &PgPool) {
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
 
     // Recent build failures whose occurrence key does not exist yet.
@@ -1278,6 +1278,7 @@ mod tests {
         reconcile_cve_attention, reconcile_errored_flakes,
         reconcile_synced_flakes_missing_resolution,
     };
+    use crate::queries::attention;
 
     // Run against a repository-provided isolated database:
     //   DATABASE_URL=postgres://crystal_forge:password@localhost:3042/crystal_forge \
@@ -1848,6 +1849,185 @@ mod tests {
         assert_eq!(
             after_second, 1,
             "reconcile_cve_attention must be idempotent"
+        );
+
+        cleanup_critical_cve(&pool, &cve_id, system_id, env_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reconcile_cve_attention_persists_fleet_relevant_since() {
+        let pool = test_pool().await;
+        let (cve_id, system_id, env_id) = seed_critical_cve(&pool).await;
+
+        reconcile_cve_attention(&pool).await;
+
+        let (occurrence_opened, persisted_since): (Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+            "SELECT \
+                 (SELECT opened_at FROM attention_occurrences \
+                  WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL LIMIT 1), \
+                 (SELECT fleet_relevant_since FROM cves WHERE id = $1)",
+        )
+        .bind(&cve_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            occurrence_opened.is_some(),
+            "occurrence must have opened_at"
+        );
+        assert!(
+            persisted_since.is_some(),
+            "cves.fleet_relevant_since must be persisted"
+        );
+        assert_eq!(
+            occurrence_opened.unwrap(),
+            persisted_since.unwrap(),
+            "fleet_relevant_since must equal the occurrence opened_at"
+        );
+
+        cleanup_critical_cve(&pool, &cve_id, system_id, env_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reconcile_cve_attention_new_episode_after_resolution() {
+        let pool = test_pool().await;
+        let (cve_id, system_id, env_id) = seed_critical_cve(&pool).await;
+
+        // First episode: CVE becomes fleet-relevant.
+        reconcile_cve_attention(&pool).await;
+        let first_opened: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT opened_at FROM attention_occurrences \
+             WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(&cve_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let first_fleet_relevant_since: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT fleet_relevant_since FROM cves WHERE id = $1",
+        )
+        .bind(&cve_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Make the CVE no longer relevant by whitelisting the vulnerability.
+        sqlx::query(
+            "UPDATE package_vulnerabilities SET is_whitelisted = TRUE, whitelist_reason = 'test' \
+             WHERE cve_id = $1",
+        )
+        .bind(&cve_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        reconcile_cve_attention(&pool).await;
+
+        let resolved_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(&cve_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(resolved_count, 0, "CVE must be resolved after whitelisting");
+
+        let cleared_since: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT fleet_relevant_since FROM cves WHERE id = $1",
+        )
+        .bind(&cve_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(cleared_since.is_none(), "fleet_relevant_since must be cleared when resolved");
+
+        // Second episode: remove whitelist and reconcile again.
+        sqlx::query(
+            "UPDATE package_vulnerabilities SET is_whitelisted = FALSE, whitelist_reason = NULL \
+             WHERE cve_id = $1",
+        )
+        .bind(&cve_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        reconcile_cve_attention(&pool).await;
+
+        let second_opened: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT opened_at FROM attention_occurrences \
+             WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(&cve_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let second_fleet_relevant_since: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT fleet_relevant_since FROM cves WHERE id = $1",
+        )
+        .bind(&cve_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            second_opened > first_opened,
+            "new episode opened_at must be after the first"
+        );
+        assert!(
+            second_fleet_relevant_since > first_fleet_relevant_since,
+            "new episode fleet_relevant_since must be after the first"
+        );
+        assert_eq!(
+            second_opened, second_fleet_relevant_since,
+            "second episode opened_at must equal fleet_relevant_since"
+        );
+
+        cleanup_critical_cve(&pool, &cve_id, system_id, env_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reconcile_cve_attention_backfills_fleet_relevant_since_from_existing_occurrence() {
+        let pool = test_pool().await;
+        let (cve_id, system_id, env_id) = seed_critical_cve(&pool).await;
+
+        // Pre-create an open occurrence as if it existed before migration 0182.
+        let opened_at = chrono::Utc::now() - chrono::Duration::hours(2);
+        let episode_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences (category, subject_type, subject_id, \
+             source_occurrence_key, opened_at, last_observed_at, metadata) \
+             VALUES ('cves', 'cve', $1, $2, $3, $3, $4)",
+        )
+        .bind(&cve_id)
+        .bind(attention::cve_occurrence_key(&cve_id, episode_id))
+        .bind(opened_at)
+        .bind(serde_json::json!({"reason": "critical", "cve_id": &cve_id}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Simulate the pre-migration state where fleet_relevant_since is NULL.
+        sqlx::query("UPDATE cves SET fleet_relevant_since = NULL WHERE id = $1")
+            .bind(&cve_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        reconcile_cve_attention(&pool).await;
+
+        let persisted_since: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT fleet_relevant_since FROM cves WHERE id = $1",
+        )
+        .bind(&cve_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            persisted_since, opened_at,
+            "fleet_relevant_since must be backfilled from the existing occurrence"
         );
 
         cleanup_critical_cve(&pool, &cve_id, system_id, env_id).await;

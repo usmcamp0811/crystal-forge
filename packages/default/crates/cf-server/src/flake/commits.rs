@@ -2950,6 +2950,8 @@ mod tests {
     use super::{
         resolve_flake_attention_if_current, transition_flake_attention_to_error_if_current,
     };
+    use crate::queries::attention;
+    use crate::tasks::attention_reconciliation::reconcile_terminal_events;
 
     async fn test_pool() -> sqlx::PgPool {
         sqlx::PgPool::connect(
@@ -3441,6 +3443,128 @@ mod tests {
 
         let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
             .bind(flake_id.to_string())
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    async fn insert_throwaway_commit_for_flake(pool: &sqlx::PgPool, flake_id: i32) -> i32 {
+        let short = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        let hash = format!("{short}{short}{short}{short}");
+        sqlx::query_scalar::<_, i32>(
+            "INSERT INTO commits (flake_id, git_commit_hash, message, author, timestamp) \
+             VALUES ($1, $2, $3, $4, NOW()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(&hash)
+        .bind(format!("test commit {short}"))
+        .bind("test author")
+        .fetch_one(pool)
+        .await
+        .expect("failed to insert throwaway test commit")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn reconcile_terminal_events_resolves_eval_for_commit_removed_from_snapshot() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit_for_flake(&pool, flake_id).await;
+
+        let completed_at = chrono::Utc::now();
+        let key = attention::eval_occurrence_key(commit_id, completed_at);
+        sqlx::query(
+            "INSERT INTO attention_occurrences (category, subject_type, subject_id, \
+             source_occurrence_key, opened_at, last_observed_at, metadata) \
+             VALUES ('evals', 'commit_eval', $1, $2, $3, $3, $4)",
+        )
+        .bind(commit_id.to_string())
+        .bind(&key)
+        .bind(completed_at)
+        .bind(serde_json::json!({"commit_id": commit_id}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = 'failed', evaluation_completed_at = $1 \
+             WHERE id = $2",
+        )
+        .bind(completed_at)
+        .bind(commit_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Commit is in the active snapshot: terminal reconciliation should
+        // keep the occurrence.
+        sqlx::query(
+            "INSERT INTO flake_branch_commit_snapshot (flake_id, commit_id, position, observed_at) \
+             VALUES ($1, $2, 0, NOW())",
+        )
+        .bind(flake_id)
+        .bind(commit_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        reconcile_terminal_events(&pool).await;
+
+        let open_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'evals' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(commit_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            open_count, 1,
+            "eval occurrence must remain while commit is in the active snapshot"
+        );
+
+        // Simulate a history rewrite removing the commit from the snapshot.
+        sqlx::query(
+            "DELETE FROM flake_branch_commit_snapshot \
+             WHERE flake_id = $1 AND commit_id = $2",
+        )
+        .bind(flake_id)
+        .bind(commit_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Terminal reconciliation should now resolve the archived occurrence.
+        reconcile_terminal_events(&pool).await;
+
+        let open_count_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention_occurrences \
+             WHERE category = 'evals' AND subject_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(commit_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            open_count_after, 0,
+            "eval occurrence must be resolved once commit leaves the active snapshot"
+        );
+
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1",
+        )
+        .bind(commit_id.to_string())
+        .execute(&pool)
+        .await;
+        let _ = sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM commits WHERE flake_id = $1")
+            .bind(flake_id)
             .execute(&pool)
             .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
