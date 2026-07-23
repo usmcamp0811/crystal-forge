@@ -3,7 +3,9 @@
 use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
-use crate::alerts::{NAV_BADGES, acknowledge_with_cursor_and_ids_async};
+use crate::alerts::{
+    NAV_BADGES, acknowledge_with_cursor_and_ids_async, occurrence_ids_for_rendered_subjects,
+};
 
 use crate::api::{
     self,
@@ -503,11 +505,6 @@ pub fn BuildsView() -> Element {
         } && (nav_commit.is_empty() || item.commit == nav_commit)
             && (nav_flake.is_empty() || item.flake == nav_flake)
     });
-    let completed_failed_count = build_history
-        .read()
-        .iter()
-        .filter(|item| item.status == BuildStatus::Failed)
-        .count();
     use_effect(move || {
         if active_view() == BuildsTab::Completed
             && !builds_ack_sent()
@@ -516,22 +513,20 @@ pub fn BuildsView() -> Element {
             let Some(cursor) = build_history_ack_cursor.read().clone() else {
                 return;
             };
-            let alert_ids = build_history
+            // Bound acknowledgment to occurrences for jobs actually present in
+            // the loaded history window, not every eligible occurrence
+            // fleet-wide — otherwise a failure outside this bounded window
+            // (loaded via build_history_fetch_limit) would be silently
+            // consumed without ever being shown.
+            let rendered_job_ids: std::collections::HashSet<String> = build_history
                 .read()
                 .iter()
-                .filter(|item| item.status == BuildStatus::Failed)
-                .filter_map(|item| item.job_id.map(|id| id.to_string()))
-                .collect::<Vec<_>>();
+                .filter_map(|item| item.job_id)
+                .map(|id| id.to_string())
+                .collect();
+            let occurrence_ids = occurrence_ids_for_rendered_subjects("builds", &rendered_job_ids);
             spawn(async move {
-                if acknowledge_with_cursor_and_ids_async(
-                    "builds",
-                    completed_failed_count as i64,
-                    cursor,
-                    None,
-                    Some(alert_ids),
-                )
-                .await
-                {
+                if acknowledge_with_cursor_and_ids_async("builds", cursor, occurrence_ids).await {
                     builds_ack_sent.set(true);
                 }
             });

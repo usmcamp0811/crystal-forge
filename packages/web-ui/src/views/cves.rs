@@ -227,30 +227,12 @@ pub fn CvesView() -> Element {
     });
 
     use_effect(move || {
-        if let (Some(Ok(s)), Some(Ok(items))) = (stats.read().as_ref(), cve_list.read().as_ref()) {
+        if let (Some(Ok(_s)), Some(Ok(_items))) = (stats.read().as_ref(), cve_list.read().as_ref()) {
             let Some(cursor) = NAV_BADGES.read_unchecked().observed_at.clone() else {
                 return;
             };
-            let alert_ids = items
-                .iter()
-                .filter(|item| item.severity.eq_ignore_ascii_case("critical"))
-                .map(|item| {
-                    format!(
-                        "{}:{}",
-                        item.cve_id,
-                        item.first_seen
-                            .map(|at| at.timestamp().to_string())
-                            .unwrap_or_else(|| "unknown".to_string())
-                    )
-                })
-                .collect::<Vec<_>>();
-            acknowledge_with_cursor_and_ids(
-                "cves",
-                s.critical as i64,
-                cursor,
-                None,
-                Some(alert_ids),
-            );
+            let occurrence_ids = NAV_BADGES.read_unchecked().cves_occurrence_ids.clone();
+            acknowledge_with_cursor_and_ids("cves", cursor, occurrence_ids);
         }
     });
 

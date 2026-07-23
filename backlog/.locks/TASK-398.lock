@@ -1,0 +1,6 @@
+locked_by: agent
+branch: TASK-398-alerts-attention-incidents
+worktree: /home/mcamp/code/crystal-forge/TASK-398-alerts-attention-incidents
+locked_at: '2026-07-20 14:40'
+state: awaiting_review
+mr_url: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/307

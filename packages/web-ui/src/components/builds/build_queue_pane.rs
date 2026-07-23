@@ -5,7 +5,7 @@
 
 use dioxus::prelude::*;
 
-use crate::alerts::{attention_row_class, dismiss_attention_item};
+use crate::alerts::{attention_row_class, dismiss_attention_item, occurrence_id_for_subject};
 
 use super::helpers::{BuildAction, BuildItem, BuildStatus, extract_system_name, short_commit};
 
@@ -130,21 +130,29 @@ pub fn BuildQueuePane(
                             if is_checked  { row_class.push_str(" row-checked"); }
                             if can_cancel  { row_class.push_str(" selectable"); }
                             let is_failed = build.status == BuildStatus::Failed;
-                            // Include completed_at epoch so a build that is
-                            // re-queued and fails again gets a fresh key. Use
-                            // the stable job_id instead of the synthetic row
-                            // index because completed-history rows are
-                            // re-indexed whenever ordering changes.
-                            let build_key = format!(
-                                "{}:{}",
-                                build
-                                    .job_id
-                                    .map(|id| id.to_string())
-                                    .unwrap_or_else(|| "missing-job-id".to_string()),
-                                build.completed_at
-                                    .map(|t| t.timestamp().to_string())
-                                    .unwrap_or_default()
-                            );
+                            // Use the stable job_id (not the synthetic row
+                            // index, since completed-history rows are
+                            // re-indexed whenever ordering changes) as the
+                            // subject id, and resolve the SAME canonical
+                            // occurrence key that dismiss_attention_item
+                            // below stores into (occurrence_id_for_subject,
+                            // e.g. "build:<job_id>"). A re-queued build gets
+                            // a brand-new job_id (see requeue_build_job_as_
+                            // new_attempt / mark_job_failed), so job_id
+                            // alone is already a stable, non-recurring
+                            // occurrence identity — no extra suffix needed.
+                            // Using a DIFFERENT key here than the dismiss
+                            // key (as a previous version of this file did,
+                            // appending a completed_at epoch) means a
+                            // dismissal is recorded under one key while this
+                            // highlight check looks up a different one, so
+                            // the row's attention highlight never clears.
+                            let build_subject_id = build
+                                .job_id
+                                .map(|id| id.to_string())
+                                .unwrap_or_else(|| "missing-job-id".to_string());
+                            let build_key = occurrence_id_for_subject("builds", &build_subject_id)
+                                .unwrap_or_else(|| build_subject_id.clone());
                             let mut row_class = attention_row_class(
                                 &row_class,
                                 "builds",
@@ -258,7 +266,11 @@ pub fn BuildQueuePane(
                                             selected_ids.set(Vec::new());
                                         }
                                         if is_failed {
-                                            dismiss_attention_item("builds", &build_key);
+                                            dismiss_attention_item(
+                                                "builds",
+                                                &build_subject_id,
+                                                occurrence_id_for_subject("builds", &build_subject_id).as_deref(),
+                                            );
                                         }
                                         if let Some(job_id) = build.job_id {
                                             selected_id.set(Some(job_id));

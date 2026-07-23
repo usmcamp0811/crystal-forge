@@ -833,6 +833,19 @@ pub struct NavigationBadges {
     pub evals_failed_new: i64,
     #[serde(default)]
     pub cves_critical_new: i64,
+    /// Server canonical occurrence IDs the user can dismiss per category.
+    #[serde(default)]
+    pub builds_occurrence_ids: Vec<String>,
+    #[serde(default)]
+    pub evals_occurrence_ids: Vec<String>,
+    #[serde(default)]
+    pub flakes_occurrence_ids: Vec<String>,
+    #[serde(default)]
+    pub systems_occurrence_ids: Vec<String>,
+    #[serde(default)]
+    pub environments_occurrence_ids: Vec<String>,
+    #[serde(default)]
+    pub cves_occurrence_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -16,6 +16,7 @@ pub struct Cve {
     pub metadata: Option<serde_json::Value>, // Additional CVE details
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub fleet_relevant_since: Option<DateTime<Utc>>, // When the current fleet-relevance episode began (NULL = not currently relevant)
 }
 
 impl Cve {

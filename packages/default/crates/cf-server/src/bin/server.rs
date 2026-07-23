@@ -28,6 +28,7 @@ use crystal_forge::{
         status,
         webhook::webhook_handler,
     },
+    queries::attention::dedupe_open_occurrences,
     queries::cache_destinations::encrypt_plaintext_cache_secrets,
     queries::derivations::reset_non_terminal_derivations,
     queue::QueueNotifier,
@@ -42,7 +43,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[cfg(feature = "embedded-ui")]
@@ -172,6 +173,23 @@ async fn main() -> anyhow::Result<()> {
         job_registry.clone(),
     );
     let state_arc = Arc::new(state.clone());
+
+    // One-time (idempotent) repair for duplicate open occurrences — runs
+    // SYNCHRONOUSLY before any background producer or the HTTP server starts
+    // (round 12: previously this ran inside the spawned reconciliation loop,
+    // racing with concurrent flake/eval/CVE producers that could immediately
+    // recreate duplicates the repair had just resolved).
+    //
+    // Round 13: failure is fatal — the repair has been removed from the
+    // periodic sweep and there is no retry path. A transient database error
+    // would leave malformed attention state in place indefinitely.
+    let repaired = dedupe_open_occurrences(&background_pool)
+        .await
+        .context("failed to repair attention occurrences at startup — required before producers start")?;
+
+    if repaired > 0 {
+        tracing::warn!("🧹 Deduped {repaired} duplicate open attention occurrence(s) on startup");
+    }
 
     spawn_background_tasks(
         cfg.clone(),

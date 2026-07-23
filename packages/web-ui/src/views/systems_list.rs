@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::alerts::{
     NAV_BADGES, acknowledge_with_cursor_and_ids, attention_row_class, dismiss_attention_item,
-    should_flash,
+    occurrence_id_for_subject, should_flash,
 };
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
@@ -139,25 +139,6 @@ fn activity_row_from_history(entry: &SystemHistoryEntry) -> ActivityRow {
     }
 }
 
-fn system_alert_occurrence_id(system: &SystemSummary) -> String {
-    format!(
-        "{}:{}:{}:{}:{}",
-        system.id,
-        match system.health_status {
-            HealthStatus::Healthy => "healthy",
-            HealthStatus::Warning => "warning",
-            HealthStatus::Critical => "critical",
-            HealthStatus::Offline => "offline",
-        },
-        system
-            .last_seen
-            .map(|at| at.timestamp().to_string())
-            .unwrap_or_else(|| "never".to_string()),
-        system.cve_counts.critical,
-        system.cve_counts.high
-    )
-}
-
 /// Systems list with toggles and filters.
 #[component]
 pub fn SystemsListView() -> Element {
@@ -245,46 +226,17 @@ pub fn SystemsListView() -> Element {
                 // Will be handled by early return below
                 return;
             }
-            let attention_count = result
-                .systems
-                .iter()
-                .filter(|s| {
-                    matches!(
-                        s.health_status,
-                        HealthStatus::Critical | HealthStatus::Offline
-                    )
-                })
-                .count() as i64;
-            let alert_ids = result
-                .systems
-                .iter()
-                .filter(|s| {
-                    matches!(
-                        s.health_status,
-                        HealthStatus::Critical | HealthStatus::Offline
-                    )
-                })
-                .map(system_alert_occurrence_id)
-                .collect::<Vec<_>>();
             let ack_snapshot = {
                 let badges = NAV_BADGES.read_unchecked();
-                (
-                    badges.observed_at.clone(),
-                    badges.systems_fingerprint.clone(),
-                )
+                badges.observed_at.clone()
             };
             local_systems.set(result.systems.clone());
             load_error.set(result.notice.clone());
             loading.set(false);
             if result.notice.is_none() {
-                if let (Some(cursor), fingerprint) = ack_snapshot {
-                    acknowledge_with_cursor_and_ids(
-                        "systems",
-                        attention_count,
-                        cursor,
-                        fingerprint,
-                        Some(alert_ids),
-                    );
+                if let Some(cursor) = ack_snapshot {
+                    let occurrence_ids = NAV_BADGES.read_unchecked().systems_occurrence_ids.clone();
+                    acknowledge_with_cursor_and_ids("systems", cursor, occurrence_ids);
                 }
             }
         }
@@ -426,7 +378,17 @@ pub fn SystemsListView() -> Element {
             system.health_status,
             HealthStatus::Critical | HealthStatus::Offline
         );
-        let system_key = system_alert_occurrence_id(system);
+        // The row-class dismissal identity must resolve the same way
+        // dismiss_attention_item resolves its local-storage key: prefer the
+        // canonical server occurrence key (which changes across episodes so
+        // a recurrence is not permanently hidden by a stale local entry),
+        // falling back to the stable subject id. Using a composite of
+        // mutable health/last_seen/CVE-count fields here would never match
+        // after a dismiss because the rendered key drifts on every
+        // heartbeat/count change.
+        let system_id_str = system.id.to_string();
+        let system_key =
+            occurrence_id_for_subject("systems", &system_id_str).unwrap_or(system_id_str);
         let ac = attention_row_class(
             "",
             "systems",
@@ -913,9 +875,12 @@ pub fn SystemsListView() -> Element {
                             flash: flash_global && matches!(system.health_status, HealthStatus::Critical | HealthStatus::Offline),
                             on_open: {
                                 let system_id = system.id;
-                                let alert_key = system_alert_occurrence_id(&system);
                                 move |_| {
-                                    dismiss_attention_item("systems", &alert_key);
+                                    dismiss_attention_item(
+                                        "systems",
+                                        &system_id.to_string(),
+                                        occurrence_id_for_subject("systems", &system_id.to_string()).as_deref(),
+                                    );
                                     let mut preview_system = preview_system.clone();
                                     spawn(async move {
                                         let detail = load_system_detail_with_fallback(&system_id.to_string()).await;
@@ -978,9 +943,11 @@ pub fn SystemsListView() -> Element {
                         }
                     },
                     on_open: move |id: uuid::Uuid| {
-                        if let Some(system) = filtered_systems.iter().find(|system| system.id == id) {
-                            dismiss_attention_item("systems", &system_alert_occurrence_id(system));
-                        }
+                        dismiss_attention_item(
+                            "systems",
+                            &id.to_string(),
+                            occurrence_id_for_subject("systems", &id.to_string()).as_deref(),
+                        );
                         let mut preview_system = preview_system.clone();
                         spawn(async move {
                             let detail = load_system_detail_with_fallback(&id.to_string()).await;

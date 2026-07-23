@@ -20,7 +20,7 @@ use web_sys::{Node, window};
 
 use crate::alerts::{
     NAV_BADGES, acknowledge_locally, acknowledge_with_cursor_and_ids_async, attention_row_class,
-    dismiss_attention_item, should_flash,
+    dismiss_attention_item, occurrence_id_for_subject, should_flash,
 };
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
@@ -3050,35 +3050,20 @@ pub fn FlakesListViewNew() -> Element {
         let _nonce = *reload_nonce.read();
         async move { fetch_flakes().await }
     });
-    // Environments are loaded lazily — only when the add/edit dialog opens.
-    // This avoids an unconditional second request on page mount.
-    let mut show_env_loader = use_signal(|| false);
-    let environments_resource = use_resource(move || {
-        let enabled = *show_env_loader.read();
-        async move {
-            if enabled {
-                fetch_environments().await
-            } else {
-                Ok(Vec::new())
-            }
-        }
-    });
+    // Environments are loaded eagerly on mount so the table/cards
+    // "Environments" column can render each pill with its real configured
+    // color (Environment.color_hex) from first paint, matching the pattern
+    // used by the Systems view (`environment_colors_resource` in
+    // systems_list.rs). Previously this was gated behind the add/edit
+    // dialog opening, so on a normal page load `db_environments` was empty
+    // and every pill silently fell back to a hardcoded 4-name palette that
+    // ignores the environment's actual color for any name outside that
+    // fixed set.
+    let environments_resource = use_resource(move || async move { fetch_environments().await });
     let db_environments: Vec<EnvironmentSummary> = match environments_resource.read().as_ref() {
         Some(Ok(envs)) => envs.clone(),
         _ => Vec::new(),
     };
-
-    // Trigger lazy environment load when add/edit dialog opens.
-    {
-        let mut show_env_loader = show_env_loader.clone();
-        let editing_flake_clone = editing_flake.clone();
-        let show_add_form_clone = show_add_form.clone();
-        use_effect(move || {
-            if editing_flake_clone.read().is_some() || *show_add_form_clone.read() {
-                show_env_loader.set(true);
-            }
-        });
-    }
 
     let (raw_flakes, load_error, loading) = match flakes_resource.read().as_ref() {
         Some(Ok(items)) => (items.clone(), None, false),
@@ -3119,21 +3104,6 @@ pub fn FlakesListViewNew() -> Element {
     let synced_count = all_flakes.iter().filter(|f| f.status == "synced").count();
     let syncing_count = all_flakes.iter().filter(|f| f.status == "syncing").count();
     let error_count = all_flakes.iter().filter(|f| f.status == "error").count();
-    let flake_alert_ids = raw_flakes
-        .iter()
-        .filter(|flake| flake.sync_status == "error")
-        .map(|flake| {
-            format!(
-                "flake:{}:{}",
-                flake.id,
-                flake
-                    .last_sync_at
-                    .map(|at| at.timestamp().to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            )
-        })
-        .collect::<Vec<_>>();
-
     // Acknowledge the "flakes" sidebar badge on first visit and trigger attention
     // flash on errored rows (TASK-385).
     let has_flake_errors = error_count > 0;
@@ -3146,18 +3116,13 @@ pub fn FlakesListViewNew() -> Element {
                 if flakes_last_ack_attempt_cursor.read().as_deref() == Some(cursor.as_str()) {
                     return;
                 }
-                let alert_ids = flake_alert_ids.clone();
+                let occurrence_ids = NAV_BADGES.read().flakes_occurrence_ids.clone();
                 flakes_ack_in_flight.set(true);
                 flakes_last_ack_attempt_cursor.set(Some(cursor.clone()));
                 spawn(async move {
-                    let success = acknowledge_with_cursor_and_ids_async(
-                        "flakes",
-                        error_count as i64,
-                        cursor,
-                        None,
-                        Some(alert_ids),
-                    )
-                    .await;
+                    let success =
+                        acknowledge_with_cursor_and_ids_async("flakes", cursor, occurrence_ids)
+                            .await;
                     flakes_ack_in_flight.set(false);
                     if success {
                         flakes_ack_sent.set(true);
@@ -4615,16 +4580,17 @@ fn FlakeTableNew(
                         {
                             let is_selected = selected_id == Some(flake.id);
                             let is_error = flake.status == "error";
-                            // Include the sync-attempt timestamp in the key so
-                            // a recovered-then-re-failed flake generates a new
-                            // dismissal key (different last_sync_at epoch).
-                            let flake_key = format!(
-                                "{}:{}",
-                                flake.id,
-                                flake.last_sync_at_raw
-                                    .map(|t| t.timestamp().to_string())
-                                    .unwrap_or_default()
-                            );
+                            // Resolve the same way dismiss_attention_item
+                            // resolves its local key: prefer the canonical
+                            // server occurrence key (a fresh episode id once
+                            // the flake recovers and fails again), falling
+                            // back to the stable flake id. Never a composite
+                            // including last_sync_at, which changes on every
+                            // retry of the same unresolved error and would
+                            // never match after a dismiss.
+                            let flake_id_str = flake.id.to_string();
+                            let flake_key = occurrence_id_for_subject("flakes", &flake_id_str)
+                                .unwrap_or(flake_id_str);
                             let row_class = attention_row_class(
                                 if is_selected { "selected" } else { "" },
                                 "flakes",
@@ -4643,7 +4609,11 @@ fn FlakeTableNew(
                                     style: "cursor: pointer;",
                                     onclick: move |_| {
                                         if is_error {
-                                            dismiss_attention_item("flakes", &flake_key);
+                                            dismiss_attention_item(
+                                                "flakes",
+                                                &flake_id_for_sync.to_string(),
+                                                occurrence_id_for_subject("flakes", &flake_id_for_sync.to_string()).as_deref(),
+                                            );
                                         }
                                         on_select.call(flake_for_select.clone());
                                     },
@@ -4819,14 +4789,13 @@ fn FlakeCardsNew(
                     } else {
                         ""
                     };
-                    // Same versioned key as the table view (id:last_sync_epoch).
-                    let flake_key = format!(
-                        "{}:{}",
-                        flake.id,
-                        flake.last_sync_at_raw
-                            .map(|t| t.timestamp().to_string())
-                            .unwrap_or_default()
-                    );
+                    // Same resolution as the table view — prefer the
+                    // canonical server occurrence key, falling back to the
+                    // stable flake id, matching what dismiss_attention_item
+                    // resolves for its local key.
+                    let flake_id_str = flake.id.to_string();
+                    let flake_key = occurrence_id_for_subject("flakes", &flake_id_str)
+                        .unwrap_or(flake_id_str);
                     let card_class = attention_row_class(
                         "sys-card compact",
                         "flakes",
@@ -4842,7 +4811,11 @@ fn FlakeCardsNew(
                             style: "{border_style}",
                             onclick: move |_| {
                                 if is_error {
-                                    dismiss_attention_item("flakes", &flake_key);
+                                    dismiss_attention_item(
+                                        "flakes",
+                                        &flake_id_for_sync.to_string(),
+                                        occurrence_id_for_subject("flakes", &flake_id_for_sync.to_string()).as_deref(),
+                                    );
                                 }
                                 on_select.call(flake_for_select.clone());
                             },
