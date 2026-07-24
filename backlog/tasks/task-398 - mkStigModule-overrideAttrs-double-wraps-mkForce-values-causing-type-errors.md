@@ -5,7 +5,7 @@ status: Review
 assignee:
   - claude-sonnet-4-6
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-24 01:13'
+updated_date: '2026-07-24 02:50'
 labels:
   - stig
   - nix
@@ -240,6 +240,16 @@ MR !308 force-pushed with corrected fix after reviewer findings:
 
 **Both nixosConfigurations evaluate cleanly:** cf-test-sys (stig-presets.off) and test-agent.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: @agent
+created: 2026-07-24 02:50
+---
+Round 4 (2026-07-24): Fixed root cause — overrideAttrs now checks for property wrappers BEFORE calling mapAttrsRecursiveCond. When stigConfig itself is a wrapper (e.g., stigConfig = mkMerge [...]), mapAttrsRecursiveCond destructured its internal fields. Added overrideDefinition for all 5 property types (merge, if, override, order, definition). Fixed definition branch recursion. Updated t9 with leaf-level and config-level mkMerge tests. All 9 tests pass. Pushed to MR !308.
+---
+<!-- COMMENTS:END -->
 
 ## Final Summary
 
