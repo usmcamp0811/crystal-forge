@@ -1,10 +1,10 @@
 ---
 id: TASK-397
 title: Evaluation errors silently drop systems from nixosConfigurations count
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-24 00:31'
+updated_date: '2026-07-24 03:22'
 labels:
   - evaluator
   - reporting
