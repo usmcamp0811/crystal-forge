@@ -2564,28 +2564,36 @@ pub async fn get_commit_changed_files(
     Ok(changed)
 }
 
-async fn load_commit_nixos_configurations(
+/// Evaluate nixosConfigurations for a single commit, with optional credentials.
+///
+/// Returns the sorted list of configuration attribute names. Propagates errors
+/// (timeout, nix eval failure, parse failure) — the caller should fail the
+/// evaluation when this cannot determine the expected system set.
+pub async fn load_commit_nixos_configurations_with_creds(
     repo_url: &str,
     commit_hash: &str,
+    creds: Option<&FlakeCredentialEnv>,
 ) -> Result<Vec<String>> {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     let flake_target = format!("{flake_ref}#nixosConfigurations");
 
-    let output = timeout(
-        NIX_CONFIG_EVAL_TIMEOUT,
-        tokio::process::Command::new("nix")
-            .args([
-                "eval",
-                "--json",
-                "--apply",
-                "builtins.attrNames",
-                flake_target.as_str(),
-            ])
-            .output(),
-    )
-    .await
-    .with_context(|| format!("Timed out evaluating nixosConfigurations for {commit_hash}"))?
-    .with_context(|| format!("Failed to evaluate nixosConfigurations for {commit_hash}"))?;
+    let mut cmd = tokio::process::Command::new("nix");
+    cmd.args([
+        "eval",
+        "--json",
+        "--apply",
+        "builtins.attrNames",
+        flake_target.as_str(),
+    ]);
+
+    if let Some(c) = creds {
+        c.apply_to_nix_command(&mut cmd);
+    }
+
+    let output = timeout(NIX_CONFIG_EVAL_TIMEOUT, cmd.output())
+        .await
+        .with_context(|| format!("Timed out evaluating nixosConfigurations for {commit_hash}"))?
+        .with_context(|| format!("Failed to evaluate nixosConfigurations for {commit_hash}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2597,6 +2605,13 @@ async fn load_commit_nixos_configurations(
     names.sort();
     names.dedup();
     Ok(names)
+}
+
+async fn load_commit_nixos_configurations(
+    repo_url: &str,
+    commit_hash: &str,
+) -> Result<Vec<String>> {
+    load_commit_nixos_configurations_with_creds(repo_url, commit_hash, None).await
 }
 
 async fn load_commit_changed_files(

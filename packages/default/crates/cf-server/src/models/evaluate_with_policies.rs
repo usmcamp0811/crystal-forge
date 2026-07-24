@@ -29,7 +29,7 @@ use crate::models::flakes::Flake;
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::derivations::{
     insert_derivation_with_target, mark_derivation_dry_run_complete, set_closure_counts,
-    set_expected_store_path,
+    set_expected_store_path, update_derivation_status, EvaluationStatus,
 };
 use crate::queries::systems::list_configuration_names_for_flake;
 use crate::queue::QueueNotifier;
@@ -175,6 +175,51 @@ async fn broadcast_and_persist_eval_log(
     }
 
     *sequence += 1;
+}
+
+/// Attempt to evaluate a single nixosConfiguration attribute to capture its error.
+///
+/// When nix-eval-jobs silently drops a system, the process-wide stderr may not
+/// contain that system's error at all, or may conflate errors. This function
+/// individually evaluates one attribute to get an accurate per-system error.
+/// It is best-effort: failures (timeout, nix error) return a descriptive string
+/// rather than propagating, so the caller can always proceed.
+async fn fallback_eval_single_system(
+    repo_url: &str,
+    commit_hash: &str,
+    system_name: &str,
+    creds: Option<&FlakeCredentialEnv>,
+) -> String {
+    let flake_ref = build_flake_reference(repo_url, commit_hash);
+    let target = format!(
+        "{flake_ref}#nixosConfigurations.{system_name}.config.system.build.toplevel.drvPath"
+    );
+
+    let mut cmd = tokio::process::Command::new("nix");
+    cmd.args(["eval", &target, "--impure"]);
+
+    if let Some(c) = creds {
+        c.apply_to_nix_command(&mut cmd);
+    }
+
+    let output = match tokio::time::timeout(Duration::from_secs(120), cmd.output()).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => return format!("Failed to run fallback eval: {}", e),
+        Err(_) => return format!("Fallback eval timed out for {}", system_name),
+    };
+
+    // A successful eval means the system actually succeeded (race with
+    // nix-eval-jobs for a flaky eval). Report a generic message.
+    if output.status.success() {
+        return "System evaluation was interrupted or failed silently with no error details".to_string();
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.trim().is_empty() {
+        "System evaluation failed with no error output".to_string()
+    } else {
+        stderr.chars().take(500).collect::<String>()
+    }
 }
 
 /// Evaluate a flake's nixosConfigurations with nix-eval-jobs and policy checking
@@ -333,38 +378,41 @@ pub async fn evaluate_with_nix_eval_jobs(
 
     // Load known system names from the artifact cache so we can detect systems
     // that nix-eval-jobs silently drops (no JSON line at all, not even an error).
+    // A DB error here must fail the evaluation — we cannot silently disable
+    // dropout detection.
     let mut known_systems: Vec<String> =
         crate::queries::commits_artifacts::get_commit_nixos_configurations_from_cache(
             pool,
             commit.id,
         )
-        .await
-        .unwrap_or_default();
+        .await?;
 
     // If the cache hasn't been populated yet (hydration loop runs every 30s,
     // only 3 commits per cycle), hydrate inline now so we can detect silently-
     // dropped systems even on the first evaluation.
     if known_systems.is_empty() {
-        let configs = crate::flake::commits::get_commit_nixos_configurations(
+        // Use the credential-aware variant so private flake discovery works.
+        // Failure here must propagate — we cannot proceed without knowing
+        // the expected system set.
+        known_systems = crate::flake::commits::load_commit_nixos_configurations_with_creds(
             repo_url,
-            &[commit_hash.to_string()],
+            commit_hash,
+            creds.as_ref(),
         )
-        .await
-        .remove(commit_hash)
-        .unwrap_or_default();
+        .await?;
 
-        if !configs.is_empty() {
-            if let Err(e) = crate::queries::commits_artifacts::upsert_commit_artifact_cache(
-                pool,
-                commit.id,
-                &configs,
-                &[],
-            )
-            .await
+        if !known_systems.is_empty() {
+            // Persist discovered systems without overwriting changed_files.
+            if let Err(e) =
+                crate::queries::commits_artifacts::upsert_commit_artifact_systems(
+                    pool,
+                    commit.id,
+                    &known_systems,
+                )
+                .await
             {
                 warn!("Failed to persist inline artifact cache: {}", e);
             }
-            known_systems = configs;
         }
     }
 
@@ -918,25 +966,22 @@ pub async fn evaluate_with_nix_eval_jobs(
             .cloned()
             .collect();
 
-        let stderr_text = stderr_output.join("\n");
-        // Safe character-boundary truncation at 500 chars.
-        let truncated_stderr: String = stderr_text.chars().take(500).collect();
-        let stderr_for_error = if stderr_text.chars().count() > 500 {
-            format!("{}...", truncated_stderr)
-        } else {
-            stderr_text.clone()
-        };
-
         for system in &expected_systems {
             if seen_systems.contains(system.as_str()) {
                 continue;
             }
 
-            let error_msg = if stderr_text.is_empty() {
-                "System evaluation was interrupted or failed silently with no error details".to_string()
-            } else {
-                stderr_for_error.clone()
-            };
+            // Obtain per-system error by individually evaluating the missing
+            // attribute. This is more accurate than reusing concatenated
+            // process-wide stderr, which may conflate or exclude the relevant
+            // error for this system.
+            let error_msg = fallback_eval_single_system(
+                repo_url,
+                commit_hash,
+                system,
+                creds.as_ref(),
+            )
+            .await;
 
             warn!(
                 "⚠️  System {} was expected but never appeared in nix-eval-jobs output. Recording as failed.",
@@ -965,11 +1010,13 @@ pub async fn evaluate_with_nix_eval_jobs(
                 .await;
             }
 
-            // ── Persist a derivation record so the system shows up in
-            //    the commit detail UI and can be retried. No drv_path
-            //    means we cannot mark DryRunComplete.
+            // ── Persist a derivation record with DryRunFailed status ───
+            // The caller (server/mod.rs) checks eval_failed_count by querying
+            // derivations with status_id = 6 (DryRunFailed). Setting both the
+            // status and error_message ensures the UI and policy matrix show
+            // the correct failure.
             let derivation_target = build_agent_target(repo_url, commit_hash, system);
-            if let Err(e) = insert_derivation_with_target(
+            let derivation = insert_derivation_with_target(
                 pool,
                 Some(commit),
                 system,
@@ -977,13 +1024,17 @@ pub async fn evaluate_with_nix_eval_jobs(
                 Some(&derivation_target),
                 None, // cf_agent_enabled = None → eval failed before policy
             )
-            .await
-            {
-                warn!(
-                    "⚠️  Failed to insert derivation for silently-dropped system {}: {}",
-                    system, e
-                );
-            }
+            .await?;
+
+            update_derivation_status(
+                pool,
+                derivation.id,
+                EvaluationStatus::DryRunFailed,
+                None,               // derivation_path — no .drv was produced
+                Some(&error_msg),    // error_message — root-cause for UI
+                None,               // store_path — not applicable
+            )
+            .await?;
 
             // ── Add a synthetic NixEvalJobResult ───────────────────────
             results.push(NixEvalJobResult {

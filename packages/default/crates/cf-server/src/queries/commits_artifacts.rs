@@ -78,6 +78,33 @@ pub async fn get_commit_nixos_configurations_from_cache(
     Ok(row.map(|r| r.systems).unwrap_or_default())
 }
 
+/// Upsert only the nixos_configurations column, preserving existing changed_files.
+///
+/// Unlike `upsert_commit_artifact_cache`, this does NOT overwrite changed_files
+/// with an empty array. Use this for inline hydration during evaluation so that
+/// previously cached changed_files are preserved.
+pub async fn upsert_commit_artifact_systems(
+    pool: &PgPool,
+    commit_id: i32,
+    nixos_configurations: &[String],
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO commit_artifacts_cache (commit_id, nixos_configurations, populated_at)
+        VALUES ($1, $2, NOW())
+        ON CONFLICT (commit_id) DO UPDATE
+        SET nixos_configurations = EXCLUDED.nixos_configurations,
+            populated_at = NOW()
+        "#,
+    )
+    .bind(commit_id)
+    .bind(nixos_configurations)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 /// Mark a commit as having failed artifact hydration (empty cache entry for retry prevention).
 pub async fn mark_commit_artifact_hydration_failed(pool: &PgPool, commit_id: i32) -> Result<()> {
     sqlx::query(
