@@ -333,13 +333,41 @@ pub async fn evaluate_with_nix_eval_jobs(
 
     // Load known system names from the artifact cache so we can detect systems
     // that nix-eval-jobs silently drops (no JSON line at all, not even an error).
-    let known_systems: Vec<String> =
+    let mut known_systems: Vec<String> =
         crate::queries::commits_artifacts::get_commit_nixos_configurations_from_cache(
             pool,
             commit.id,
         )
         .await
         .unwrap_or_default();
+
+    // If the cache hasn't been populated yet (hydration loop runs every 30s,
+    // only 3 commits per cycle), hydrate inline now so we can detect silently-
+    // dropped systems even on the first evaluation.
+    if known_systems.is_empty() {
+        let configs = crate::flake::commits::get_commit_nixos_configurations(
+            repo_url,
+            &[commit_hash.to_string()],
+        )
+        .await
+        .remove(commit_hash)
+        .unwrap_or_default();
+
+        if !configs.is_empty() {
+            if let Err(e) = crate::queries::commits_artifacts::upsert_commit_artifact_cache(
+                pool,
+                commit.id,
+                &configs,
+                &[],
+            )
+            .await
+            {
+                warn!("Failed to persist inline artifact cache: {}", e);
+            }
+            known_systems = configs;
+        }
+    }
+
     let has_known_systems = !known_systems.is_empty();
     let mut seen_systems: HashSet<String> = HashSet::new();
 
@@ -881,55 +909,106 @@ pub async fn evaluate_with_nix_eval_jobs(
     // the known systems from the artifact cache, we detect these dropouts and
     // synthesize a failed result for each.
     if has_known_systems {
+        // Only consider known systems that are NOT intentionally skipped by
+        // the build_scope filter. Systems excluded by cf_systems_only should
+        // never be reported as failures.
+        let expected_systems: Vec<String> = known_systems
+            .iter()
+            .filter(|s| !should_skip_system(&allowed_systems, s))
+            .cloned()
+            .collect();
+
         let stderr_text = stderr_output.join("\n");
-        for system in &known_systems {
-            if !seen_systems.contains(system) {
-                let error_msg = if stderr_text.is_empty() {
-                    "System evaluation was interrupted or failed silently with no error details".to_string()
-                } else {
-                    // Truncate stderr to avoid huge error messages
-                    if stderr_text.len() > 500 {
-                        format!("{}...", &stderr_text[..500])
-                    } else {
-                        stderr_text.clone()
-                    }
-                };
+        // Safe character-boundary truncation at 500 chars.
+        let truncated_stderr: String = stderr_text.chars().take(500).collect();
+        let stderr_for_error = if stderr_text.chars().count() > 500 {
+            format!("{}...", truncated_stderr)
+        } else {
+            stderr_text.clone()
+        };
 
-                warn!(
-                    "⚠️  System {} was expected but never appeared in nix-eval-jobs output. Recording as failed.",
-                    system
-                );
-
-                // Broadcast to WebSocket clients
-                if let Some(state) = cf_state {
-                    let log_msg = format!("❌ {}: {}", system, error_msg);
-                    broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
-                }
-
-                results.push(NixEvalJobResult {
-                    attr: system.clone(),
-                    attr_path: vec![system.clone()],
-                    name: Some(system.clone()),
-                    drv_path: None,
-                    error: Some(error_msg.clone()),
-                    cache_status: None,
-                    outputs: None,
-                    meta: None,
-                });
-
-                // Also create a synthetic policy check result so the system
-                // is counted in commit_metadata_cache as a failed evaluation.
-                policy_checks.push(PolicyCheckResult {
-                    system_name: system.clone(),
-                    cf_agent_enabled: None,
-                    has_required_packages: None,
-                    custom_checks: HashMap::new(),
-                    meets_requirements: false,
-                    warnings: vec!["System failed to evaluate (no output from nix-eval-jobs)".to_string()],
-                    failed_policies: vec![],
-                    cve_checks: vec![],
-                });
+        for system in &expected_systems {
+            if seen_systems.contains(system.as_str()) {
+                continue;
             }
+
+            let error_msg = if stderr_text.is_empty() {
+                "System evaluation was interrupted or failed silently with no error details".to_string()
+            } else {
+                stderr_for_error.clone()
+            };
+
+            warn!(
+                "⚠️  System {} was expected but never appeared in nix-eval-jobs output. Recording as failed.",
+                system
+            );
+
+            // ── Broadcast error log and structured status ───────────────
+            if let Some(state) = cf_state {
+                let log_msg = format!("❌ {}: {}", system, error_msg);
+                broadcast_and_persist_eval_log(
+                    pool,
+                    Some(state),
+                    commit.id,
+                    &mut log_sequence,
+                    log_msg,
+                )
+                .await;
+
+                crate::handlers::api::commits::broadcast_system_status(
+                    state,
+                    commit.id,
+                    system.clone(),
+                    crate::handlers::api::commits::SystemEvalStatus::Failed,
+                    Some(error_msg.clone()),
+                )
+                .await;
+            }
+
+            // ── Persist a derivation record so the system shows up in
+            //    the commit detail UI and can be retried. No drv_path
+            //    means we cannot mark DryRunComplete.
+            let derivation_target = build_agent_target(repo_url, commit_hash, system);
+            if let Err(e) = insert_derivation_with_target(
+                pool,
+                Some(commit),
+                system,
+                "nixos",
+                Some(&derivation_target),
+                None, // cf_agent_enabled = None → eval failed before policy
+            )
+            .await
+            {
+                warn!(
+                    "⚠️  Failed to insert derivation for silently-dropped system {}: {}",
+                    system, e
+                );
+            }
+
+            // ── Add a synthetic NixEvalJobResult ───────────────────────
+            results.push(NixEvalJobResult {
+                attr: system.clone(),
+                attr_path: vec![system.clone()],
+                name: Some(system.clone()),
+                drv_path: None,
+                error: Some(error_msg.clone()),
+                cache_status: None,
+                outputs: None,
+                meta: None,
+            });
+
+            // ── Also create a synthetic policy check result so the system
+            //    is counted in commit_metadata_cache as a failed evaluation.
+            policy_checks.push(PolicyCheckResult {
+                system_name: system.clone(),
+                cf_agent_enabled: None,
+                has_required_packages: None,
+                custom_checks: HashMap::new(),
+                meets_requirements: false,
+                warnings: vec!["System failed to evaluate (no output from nix-eval-jobs)".to_string()],
+                failed_policies: vec![],
+                cve_checks: vec![],
+            });
         }
     }
 
@@ -1029,12 +1108,12 @@ pub async fn evaluate_with_nix_eval_jobs(
     info!("✅ Evaluated {} configurations in parallel", results.len());
 
     // Calculate statistics for summary
-    // Use the known system count (from artifact cache) when available so that
-    // systems silently dropped by nix-eval-jobs are still counted in the total.
-    // Falls back to results.len() when the cache is not yet populated.
-    let total_systems = if has_known_systems { known_systems.len() } else { results.len() };
+    // `results` includes both stdout results and synthesized entries for
+    // systems that nix-eval-jobs silently dropped, so results.len() is the
+    // authoritative total.
     let successful = results.iter().filter(|r| r.error.is_none()).count();
-    let failed = total_systems - successful;
+    let failed = results.iter().filter(|r| r.error.is_some()).count();
+    let total_systems = successful + failed;
 
     let with_agent = policy_checks
         .iter()
