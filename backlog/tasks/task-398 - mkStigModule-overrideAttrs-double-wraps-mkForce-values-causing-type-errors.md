@@ -5,7 +5,7 @@ status: Review
 assignee:
   - claude-sonnet-4-6
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-24 00:44'
+updated_date: '2026-07-24 00:45'
 labels:
   - stig
   - nix
@@ -14,8 +14,7 @@ dependencies: []
 references:
   - 'lib/stig/default.nix:100'
   - 'modules/nixos/stig-modules/modules/timesyncd/default.nix:18'
-  - >-
-    https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/new?merge_request%5Bsource_branch%5D=TASK-398-fix-mkStigModule-double-wrap
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/308'
 modified_files:
   - lib/stig/default.nix
 priority: high
