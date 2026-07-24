@@ -59,11 +59,14 @@ pub async fn upsert_commit_artifact_cache(
 
 /// Get the known nixosConfigurations for a commit from the artifact cache.
 ///
-/// Returns an empty vec if no cache entry exists yet (hydration hasn't run).
+/// Returns:
+/// - `Ok(Some(vec))` — cache row exists with that system list (may be empty).
+/// - `Ok(None)` — no cache row exists (hydration has not run yet).
+/// - `Err(_)` — database error.
 pub async fn get_commit_nixos_configurations_from_cache(
     pool: &PgPool,
     commit_id: i32,
-) -> Result<Vec<String>> {
+) -> Result<Option<Vec<String>>> {
     let row = sqlx::query_as::<_, CachedSystemsRow>(
         r#"
         SELECT COALESCE(nixos_configurations, ARRAY[]::text[]) AS systems
@@ -75,7 +78,7 @@ pub async fn get_commit_nixos_configurations_from_cache(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| r.systems).unwrap_or_default())
+    Ok(row.map(|r| r.systems))
 }
 
 /// Upsert only the nixos_configurations column, preserving existing changed_files.
