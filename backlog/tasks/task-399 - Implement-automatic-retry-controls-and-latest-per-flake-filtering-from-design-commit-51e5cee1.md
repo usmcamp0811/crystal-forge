@@ -3,9 +3,11 @@ id: TASK-399
 title: >-
   Implement automatic retry controls and latest-per-flake filtering from design
   commit 51e5cee1
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Matt Camp
 created_date: '2026-07-24 03:26'
+updated_date: '2026-07-24 03:35'
 labels:
   - design-parity
   - web-ui
@@ -120,3 +122,9 @@ Use the repository Nix development environment. Add focused server/domain tests 
 - [ ] #22 Automated UI/state tests cover latest selection and tie-breaking, independent active/history scope, combined filters, pagination boundaries, live recomputation, retry form reset/save/error behavior, and accessibility state.
 - [ ] #23 The authoritative web-ui check passes with behavioral assertions for all three affected views, and the MR includes screenshots of the Admin retry card plus Builds/Evaluations latest markers and enabled latest-only state.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.6-sol on reckless in /home/mcamp/code/crystal-forge/TASK-399-automatic-retries-latest-flake
+<!-- SECTION:NOTES:END -->
