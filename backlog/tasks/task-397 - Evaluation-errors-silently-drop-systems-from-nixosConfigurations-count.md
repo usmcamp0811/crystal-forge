@@ -1,14 +1,16 @@
 ---
 id: TASK-397
 title: Evaluation errors silently drop systems from nixosConfigurations count
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-07-24 00:29'
+updated_date: '2026-07-24 00:31'
 labels:
   - evaluator
   - reporting
   - ux
-dependencies: []
+dependencies:
+  - TASK-398
 priority: high
 type: bug
 ordinal: 396000
@@ -77,3 +79,28 @@ Two separate fixes are needed:
 - [ ] #3 A system that crashes the evaluator never silently disappears — it is always accounted for in either the success or failure column
 - [ ] #4 The evaluation UI shows nix-builder-1 (and similar systems) as failed with the root cause error, not absent
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Sprint readiness notes
+
+**What this task is:** A Crystal Forge server-side evaluator bug. When `nix-eval-jobs` returns an error for a specific `nixosConfiguration`, the evaluator discards the system entirely instead of recording it as a named failure. The user sees fewer systems in "Total" than were discovered, with no indication which ones failed or why.
+
+**Where to look:** The evaluation pipeline in the Crystal Forge server — specifically the code that:
+1. Enumerates `nixosConfigurations` from the flake (this works — UI showed "Systems: 12")
+2. Hands each system to `nix-eval-jobs` for evaluation
+3. Collects results and builds the summary
+
+Step 3 is where the bug lives: errors from `nix-eval-jobs` for a specific system are logged (the ERROR lines are visible in the log) but not added to any failed-systems list, so they fall out of the total count.
+
+**Concrete trigger:** `nix-builder-1` in `ATALLC/nix-config` fails evaluation with:
+```
+error: A definition for option `services.timesyncd.enable' is not of type `boolean'
+```
+This error appears in the Crystal Forge log but `nix-builder-1` is absent from both success and failure lists.
+
+**Dependency:** TASK-398 fixes the underlying Nix evaluation error for `nix-builder-1`. Once that is fixed, this task's fix can be verified end-to-end. However, this task's fix (surface the failure, don't drop it) is independent and should be implemented regardless.
+
+**Verification:** Trigger a Crystal Forge evaluation of `ATALLC/nix-config`. Before TASK-398 is merged, `nix-builder-1` should appear as a **named failed system** with its error. After TASK-398, it should appear as a success.
+<!-- SECTION:NOTES:END -->
