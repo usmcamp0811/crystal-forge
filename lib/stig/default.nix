@@ -95,9 +95,10 @@ with lib; rec {
     extraOptions ? {},
   }: let
     cfg = config.crystal-forge.stig.${name};
-    # Apply mkOverride 1 (lowest numeric priority = highest precedence) to every
-    # value in stigConfig, ensuring active STIG controls beat all user config
-    # including mkForce (priority 50) and ordinary definitions (priority 100).
+    # Apply mkOverride 1 (lowest numeric priority = highest precedence) to
+    # every leaf value in stigConfig, ensuring active STIG controls beat all
+    # user config including mkForce (priority 50) and ordinary definitions
+    # (priority 100).
     #
     # NOTE on Nix priority semantics: LOWER number = HIGHER precedence.
     #   mkVMOverride    = mkOverride 10   (highest after ours)
@@ -106,29 +107,66 @@ with lib; rec {
     #   mkDefault       = mkOverride 1000 (weak default)
     #   mkOptionDefault = mkOverride 1500 (lowest)
     #
-    # We use mapAttrsRecursiveCond rather than mapAttrsRecursive because the
-    # unconditional variant always recurses into every attrset — including Nix
-    # module-system wrappers such as mkForce/mkDefault (which are attrsets with
-    # a `_type = "override"` field) and order wrappers such as mkBefore/mkAfter
-    # (which have `_type = "order"`). Recursing into those wrappers would corrupt
-    # their internal _type/priority/content fields.
+    # Since stigConfig may contain any valid NixOS option-definition value,
+    # including property wrappers such as mkOverride, mkForce, mkDefault,
+    # mkBefore, mkAfter, mkIf, and mkMerge, we cannot use plain mapAttrsRecursive
+    # (which would recurse into their internal _type/priority/content fields).
     #
-    # The predicate stops recursion when we reach either kind of wrapper:
-    #   - Override wrappers (mkForce, mkDefault, mkOverride N): the mapper
-    #     extracts v.content (the inner value) and re-wraps it at mkOverride 1.
-    #   - Order wrappers (mkBefore, mkAfter): the mapper wraps the whole
-    #     wrapper at mkOverride 1, which the module system correctly interprets
-    #     as "apply this ordering at the highest priority".
-    #   - Plain values (no _type): wrapped directly at mkOverride 1.
-    overrideAttrs = attrs: mapAttrsRecursiveCond
-      (v: !(v ? _type
-        && builtins.elem v._type [ "override" "order" ]))  # stop at both override and order wrappers
-      (_: v:
-        if v ? _type && v._type == "override"
-        then mkOverride 1 v.content   # unwrap and re-apply at STIG priority
-        else mkOverride 1 v           # plain value or order wrapper — wrap directly
-      )
-      attrs;
+    # Instead, overrideDefinition recurses INTO merge.contents and if.content
+    # (transforming their children at STIG priority), unwraps and replaces
+    # override priorities, and wraps whole order properties. The
+    # mapAttrsRecursiveCond predicate stops before any known property wrapper
+    # and hands control to the definition transformer.
+    #
+    # - merge:   recurse into each element of contents via overrideAttrs
+    # - if:      recurse into content via overrideAttrs
+    # - override: unwrap and re-apply at STIG priority
+    # - order:   wrap the whole wrapper at STIG priority
+    # - definition: preserve metadata, recurse into value
+    overrideDefinition = value:
+      if value ? _type then
+        if value._type == "merge" then
+          value // {
+            contents = map overrideAttrs value.contents;
+          }
+        else if value._type == "if" then
+          value // {
+            content = overrideAttrs value.content;
+          }
+        else if value._type == "override" then
+          mkOverride 1 value.content
+        else if value._type == "order" then
+          mkOverride 1 value
+        else if value._type == "definition" then
+          value // {
+            value = overrideAttrs value.value;
+          }
+        else
+          mkOverride 1 value
+      else
+        mkOverride 1 value;
+
+    propertyTypes = [ "merge" "if" "override" "order" "definition" ];
+
+    # Transform every value in a config attrset to wrap leaf values in
+    # mkOverride 1 (STIG priority). Property wrappers (merge, if, override,
+    # order, definition) are handled specially by overrideDefinition to
+    # avoid corrupting their internal structure.
+    #
+    # Must check for property wrappers BEFORE calling mapAttrsRecursiveCond,
+    # because mapAttrsRecursiveCond iterates all top-level keys of its input
+    # and would pass _type, contents, etc. through overrideDefinition,
+    # corrupting the wrapper's structure.
+    overrideAttrs = value:
+      if builtins.isAttrs value && builtins.elem (value._type or null) propertyTypes then
+        overrideDefinition value
+      else if builtins.isAttrs value then
+        mapAttrsRecursiveCond
+          (v: !(v ? _type && builtins.elem v._type propertyTypes))
+          (_: overrideDefinition)
+          value
+      else
+        mkOverride 1 value;
   in {
     options =
       extraOptions
