@@ -5,7 +5,7 @@ status: Review
 assignee:
   - claude-sonnet-4-6
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-24 01:02'
+updated_date: '2026-07-24 01:13'
 labels:
   - stig
   - nix
@@ -17,6 +17,7 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/308'
 modified_files:
   - lib/stig/default.nix
+  - checks/stig/default.nix
 priority: high
 type: bug
 ordinal: 397000
@@ -226,6 +227,18 @@ Verification passed locally:
 - nix eval .#nixosConfigurations.test-agent.config.system.build.toplevel → derivation (regression)
 
 Note: AC#3 (nix-builder-1 in CF evaluator) and AC#4 (regression at CF eval priority) require merging this fix and bumping the crystal-forge flake pin in ata-nix-config, then triggering a new CF evaluation.
+
+MR !308 force-pushed with corrected fix after reviewer findings:
+
+**P1 confirmed:** mapAttrsRecursive uses (as: true) predicate — always recurses into every attrset including mkForce wrappers. The unwrap condition in the first push never fired.
+
+**P2 confirmed:** mkOverride 1000 is WEAKER than normal config (100). Nix: lower number = higher precedence. Fixed to use mkOverride 1.
+
+**Fix:** mapAttrsRecursiveCond with predicate (v: !(v ? _type && v._type == "override")) stops recursion at override wrappers. Mapper unwraps v.content and applies mkOverride 1.
+
+**Tests added:** checks/stig/default.nix — 5 pure Nix unit tests. All pass: nix build .#checks.x86_64-linux.stig succeeded.
+
+**Both nixosConfigurations evaluate cleanly:** cf-test-sys (stig-presets.off) and test-agent.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
