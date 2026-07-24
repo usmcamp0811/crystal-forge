@@ -1,10 +1,11 @@
 ---
 id: TASK-398
 title: mkStigModule overrideAttrs double-wraps mkForce values causing type errors
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - claude-sonnet-4-6
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-24 00:31'
+updated_date: '2026-07-24 00:41'
 labels:
   - stig
   - nix
