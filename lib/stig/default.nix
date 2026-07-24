@@ -22,11 +22,11 @@ with lib; rec {
   * @param config        The global NixOS module `config` object for accessing control settings
   *                      and other system configuration. Required for accessing cfg values.
   *
-  * @param stigConfig    NixOS configuration attrset to apply when this control is enabled.
-  *                      This can include any valid NixOS configuration options
-  *                      (services, security, environment, etc.).
-  *                      All values are automatically overridden with priority 1000 to ensure
-  *                      STIG compliance takes precedence over other module definitions.
+   * @param stigConfig    NixOS configuration attrset to apply when this control is enabled.
+   *                      This can include any valid NixOS configuration options
+   *                      (services, security, environment, etc.).
+   *                      All values are automatically overridden with priority 1 to ensure
+   *                      STIG compliance takes precedence over other module definitions.
   *
   * @param extraOptions  Additional NixOS module options to define for this control.
   *                      Use this to declare custom configuration options that downstream
@@ -42,8 +42,8 @@ with lib; rec {
   *           - crystal-forge.stig.${name}.enable: boolean toggle (defaults to true)
   *           - crystal-forge.stig.${name}.justification: list of strings (required if disabled)
   *
-  *         - config:
-  *           - Applies stigConfig with mkOverride priority 1000 when enabled to override all other definitions
+   *         - config:
+   *           - Applies stigConfig with mkOverride priority 1 when enabled to override all other definitions
   *           - Populates crystal-forge.stig.active.${name} with srg, cci, and config when enabled
   *           - Populates crystal-forge.stig.inactive.${name} with srg, cci, justification, and config when disabled
   *           - Enforces assertion: disabled controls must have justification provided
@@ -109,25 +109,24 @@ with lib; rec {
     # We use mapAttrsRecursiveCond rather than mapAttrsRecursive because the
     # unconditional variant always recurses into every attrset — including Nix
     # module-system wrappers such as mkForce/mkDefault (which are attrsets with
-    # a `_type = "override"` field). Recursing into those wrappers would corrupt
-    # their internal _type/priority/content fields and produce a nested override
-    # attrset that the module system rejects as the wrong type for the option.
+    # a `_type = "override"` field) and order wrappers such as mkBefore/mkAfter
+    # (which have `_type = "order"`). Recursing into those wrappers would corrupt
+    # their internal _type/priority/content fields.
     #
-    # The predicate `!(v ? _type && v._type == "override")` stops recursion when
-    # we reach an override wrapper (mkForce, mkDefault, mkOverride N). The mapper
-    # then unwraps it and re-applies mkOverride 1, giving the STIG priority to the
-    # underlying value. Plain values (no _type) are wrapped directly.
-    #
-    # Order wrappers (mkBefore, mkAfter; _type = "order") do not have a plain
-    # content value that mkOverride can sensibly wrap, so they are left untouched.
-    # If stigConfig authors need ordering, they should use it at the plain-value
-    # level; mkStigModule does not support composing order+priority wrappers.
+    # The predicate stops recursion when we reach either kind of wrapper:
+    #   - Override wrappers (mkForce, mkDefault, mkOverride N): the mapper
+    #     extracts v.content (the inner value) and re-wraps it at mkOverride 1.
+    #   - Order wrappers (mkBefore, mkAfter): the mapper wraps the whole
+    #     wrapper at mkOverride 1, which the module system correctly interprets
+    #     as "apply this ordering at the highest priority".
+    #   - Plain values (no _type): wrapped directly at mkOverride 1.
     overrideAttrs = attrs: mapAttrsRecursiveCond
-      (v: !(v ? _type && v._type == "override"))   # stop at override wrappers; recurse into everything else
+      (v: !(v ? _type
+        && builtins.elem v._type [ "override" "order" ]))  # stop at both override and order wrappers
       (_: v:
         if v ? _type && v._type == "override"
         then mkOverride 1 v.content   # unwrap and re-apply at STIG priority
-        else mkOverride 1 v           # plain value — wrap directly
+        else mkOverride 1 v           # plain value or order wrapper — wrap directly
       )
       attrs;
   in {

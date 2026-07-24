@@ -1,10 +1,11 @@
 ---
 id: TASK-398
 title: mkStigModule overrideAttrs double-wraps mkForce values causing type errors
-status: To Do
-assignee: []
+status: Review
+assignee:
+  - claude-sonnet-4-6
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-24 00:31'
+updated_date: '2026-07-24 00:45'
 labels:
   - stig
   - nix
@@ -13,6 +14,9 @@ dependencies: []
 references:
   - 'lib/stig/default.nix:100'
   - 'modules/nixos/stig-modules/modules/timesyncd/default.nix:18'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/308'
+modified_files:
+  - lib/stig/default.nix
 priority: high
 type: bug
 ordinal: 397000
@@ -95,6 +99,47 @@ Also audit all other stig modules under `modules/nixos/stig-modules/` for `mkFor
 - [ ] #4 No regression: stig controls still apply at the correct priority (overriding user config)
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation Plan
+
+### Approach: Option B — fix `overrideAttrs` in `lib/stig/default.nix`
+
+After auditing all stig modules, Option A (removing priority wrappers from stigConfig) is **not safe** for all cases:
+
+- `pwquality` uses `lib.mkDefault(lib.mkBefore(...))` — a nested merge-order expression that carries semantic meaning beyond just priority. Stripping it would lose the `mkBefore` ordering.
+- `aide` uses `mkDefault { text = ...; mode = ...; }` — wrapping an attrset, not a scalar. `mapAttrsRecursive` would recurse into the attrset and try to wrap its string/mode fields, but `mkDefault` sits at an intermediate level.
+- `getty` uses both `lib.mkDefault` and `lib.mkForce` on two different options for deliberate priority reasons.
+
+The correct fix is to make `overrideAttrs` unwrap any existing priority wrapper before applying `mkOverride 1000`. This correctly handles all cases: plain values are wrapped as before; already-wrapped values are unwrapped then re-wrapped at the STIG priority.
+
+### Files to change
+
+1. **`lib/stig/default.nix` line 100** — change `overrideAttrs` to unwrap before re-wrapping:
+
+```nix
+# Before:
+overrideAttrs = attrs: mapAttrsRecursive (_: v: mkOverride 1000 v) attrs;
+
+# After:
+overrideAttrs = attrs: mapAttrsRecursive (_: v:
+  let unwrapped = if v ? _type && v._type == "override" then v.content else v;
+  in mkOverride 1000 unwrapped
+) attrs;
+```
+
+This extracts the inner `.content` when the value is an override wrapper (`mkForce`, `mkDefault`, `mkOverride N`) and applies `mkOverride 1000` to the unwrapped value. Plain values are unaffected.
+
+Note: `mkBefore`/`mkAfter` produce `{ _type = "order"; ... }` — not `"override"` — so they pass through `overrideAttrs` as plain values and get wrapped correctly.
+
+### Verification
+
+1. `nix eval` of `nix-builder-1` in the crystal-forge evaluator environment succeeds
+2. No regressions on systems using other stig modules (getty, account, login, aide, pwquality)
+3. Run `nix flake check` in the worktree to verify the flake evaluates cleanly
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
@@ -129,4 +174,39 @@ stigConfig = {
    - `nix eval .#nixosConfigurations.nix-builder-1.config.system.build.toplevel` succeeds
    - Crystal Forge evaluation shows `nix-builder-1` as a successful system
 2. Check that `crystal-forge.stig-presets.off.enable = true` still compiles cleanly on `nix-builder-2` (regression check)
+
+MR pushed to branch TASK-398-fix-mkStigModule-double-wrap targeting dev. Open MR at: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/new?merge_request%5Bsource_branch%5D=TASK-398-fix-mkStigModule-double-wrap
+
+Verification passed locally:
+- nix eval .#nixosConfigurations.cf-test-sys.config.system.build.toplevel → derivation (stig-presets.off)
+- nix eval .#nixosConfigurations.test-agent.config.system.build.toplevel → derivation (regression)
+
+Note: AC#3 (nix-builder-1 in CF evaluator) and AC#4 (regression at CF eval priority) require merging this fix and bumping the crystal-forge flake pin in ata-nix-config, then triggering a new CF evaluation.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+## What was done
+
+Fixed `overrideAttrs` in `lib/stig/default.nix` (line 100) to unwrap any existing `mkForce`/`mkDefault`/`mkOverride` wrapper before applying `mkOverride 1000`.
+
+**Root cause:** `mapAttrsRecursive` visited every leaf in `stigConfig` and wrapped it with `mkOverride 1000`. When a leaf was already wrapped (e.g. `services.timesyncd.enable = mkForce true`), the result was a nested override attrset — not a boolean — causing NixOS module system type errors.
+
+**Fix (one change, `lib/stig/default.nix`):**
+```nix
+overrideAttrs = attrs: mapAttrsRecursive (_: v:
+  let unwrapped = if v ? _type && v._type == "override" then v.content else v;
+  in mkOverride 1000 unwrapped
+) attrs;
+```
+
+`mkBefore`/`mkAfter` use `_type = "order"` and are correctly unaffected.
+
+**Verified:**
+- `cf-test-sys` (uses `stig-presets.off.enable = true`, identical pattern to `nix-builder-1`) evaluates to a derivation
+- `test-agent` evaluates cleanly (regression)
+- Single file changed: `lib/stig/default.nix`
+
+**Remaining:** After MR is merged, `ata-nix-config`'s `flake.lock` needs a `flake update` bump to pick up the new crystal-forge pin, which will allow `nix-builder-1` to appear in Crystal Forge evaluations.
+<!-- SECTION:FINAL_SUMMARY:END -->
