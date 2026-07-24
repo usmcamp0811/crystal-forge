@@ -19,6 +19,8 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
   const [filterStatus, setFilterStatus] = React.useState("all");
   const [filterFlake, setFilterFlake]   = React.useState("all");
   const [drawerEv, setDrawerEv]   = React.useState(null);
+  const [latestOnly, setLatestOnly] = React.useState(false);
+  const latestHistIds = React.useMemo(() => latestPerFlake(HISTORY_EVALS), []);
   const [evals, setEvals]         = React.useState(ACTIVE_EVALS);
   React.useEffect(() => {
     if (!focus) return;
@@ -116,10 +118,12 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
     if (filterStatus !== "all" && e.status !== filterStatus) return false;
     if (filterFlake  !== "all" && e.flake  !== filterFlake)  return false;
     if (!matchEval(e)) return false;
+    if (latestOnly && !latestHistIds.has(e.id)) return false;
     return true;
   });
   const historySel = useMultiSelect("hist|" + filterStatus + "|" + filterFlake + "|" + q);
-  const evalsShown = evals.filter(matchEval);
+  const latestActiveIds = React.useMemo(() => latestPerFlake(evals), [evals]);
+  const evalsShown = evals.filter(matchEval).filter(e => !latestOnly || latestActiveIds.has(e.id));
   const activePaging = useInfiniteScroll("active|" + q, 20);
   const evalsPaged = evalsShown.slice(0, activePaging.count);
   const activeHasMore = activePaging.count < evalsShown.length;
@@ -197,6 +201,9 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
             History <span className="sd-tab-badge">{HISTORY_EVALS.length}</span>
           </button>
           {((tab==="active" && evals.some(e=>e.canCancel)) || tab==="history") && <MultiSelectHint />}
+          <button className={`btn btn-ghost xs focus-ring${latestOnly?" active-filter":""}`} onClick={()=>setLatestOnly(v=>!v)} title="Show only the most recent evaluation per flake">
+            <Icon name="star" size={12}/> Latest per flake
+          </button>
           <div className="q-search">
             <Icon name="search" size={13} />
             <input className="q-search-input" placeholder={`Search ${tab==="active"?"queue":"history"}…`}
@@ -211,7 +218,7 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
             <div className="q-empty"><Icon name="search" size={20} /><div>No active evaluations match “{query}”.</div><button className="btn btn-ghost xs focus-ring" onClick={()=>setQuery("")}>Clear search</button></div>
           ) : (
             <>
-              <EvalActiveQueue evals={evalsPaged} activeIdx={activeIdx} onCancel={cancelEval} onMove={moveEval} onReorder={reorderEval} onOpen={setDrawerEv} sel={activeSel} reorderable={!q}/>
+              <EvalActiveQueue evals={evalsPaged} activeIdx={activeIdx} onCancel={cancelEval} onMove={moveEval} onReorder={reorderEval} onOpen={setDrawerEv} sel={activeSel} reorderable={!q} latestIds={latestActiveIds}/>
               {activeHasMore && <div ref={activePaging.sentinelRef} className="infinite-sentinel">Loading more…</div>}
             </>
           )
@@ -259,6 +266,7 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
               hasMore={histHasMore}
               sentinelRef={histPaging.sentinelRef}
               totalCount={historyFiltered.length}
+              latestIds={latestHistIds}
             />
           </>
         )}
@@ -292,7 +300,7 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
 }
 
 /* ── Active queue ───────────────────────────────────── */
-function EvalActiveQueue({ evals, activeIdx, onCancel, onMove, onReorder, onOpen, sel, reorderable = true }) {
+function EvalActiveQueue({ evals, activeIdx, onCancel, onMove, onReorder, onOpen, sel, reorderable = true, latestIds }) {
   const [dragId, setDragId] = React.useState(null);
   const [overIdx, setOverIdx] = React.useState(null);
   if (evals.length === 0) {
@@ -339,7 +347,7 @@ function EvalActiveQueue({ evals, activeIdx, onCancel, onMove, onReorder, onOpen
             </td>
             <td>
               <div style={{ fontWeight:600, fontSize:13, display:"flex", alignItems:"center", gap:6 }}><Icon name="git" size={12} style={{ color:"var(--cf-text-muted)" }}/>{ev.flake}</div>
-              <div className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{ev.commit}</div>
+              <div className={`mono${latestIds?.has(ev.id)?" commit-latest":""}`} style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{latestIds?.has(ev.id) && <Icon name="star" size={9} className="latest-star" style={{ marginRight:3, verticalAlign:"-1px" }}/>}{ev.commit}</div>
             </td>
             <td><span className="chip chip-unknown">{ev.branch}</span></td>
             <td><span className={`chip ${ev.meta.cls}`}><span className="chip-dot" style={{ background:ev.meta.color }} />{ev.meta.label}</span></td>
@@ -369,7 +377,7 @@ function EvalActiveQueue({ evals, activeIdx, onCancel, onMove, onReorder, onOpen
 }
 
 /* ── History ────────────────────────────────────────── */
-function EvalHistory({ entries, activeIdx, filterStatus, setFilterStatus, filterFlake, setFilterFlake, sel, onSelectAll, onOpen, onRowAction, flashFailed, hasMore, sentinelRef, totalCount }) {
+function EvalHistory({ entries, activeIdx, filterStatus, setFilterStatus, filterFlake, setFilterFlake, sel, onSelectAll, onOpen, onRowAction, flashFailed, hasMore, sentinelRef, totalCount, latestIds }) {
   const ids = entries.map(e => e.id);
   const allChecked = entries.length > 0 && entries.every(e => sel.has(e.id));
   return (
@@ -411,7 +419,7 @@ function EvalHistory({ entries, activeIdx, filterStatus, setFilterStatus, filter
               onMouseDown={(e)=>{ if(e.shiftKey) e.preventDefault(); }}
               onClick={(e)=>{ if (sel.handleClick(e, ev.id, ids)) return; sel.setAnchor(ev.id); onOpen(ev); }}
               style={{ cursor:"pointer" }}>
-              <td><div style={{ fontWeight:600, fontSize:13, display:"flex", alignItems:"center", gap:6 }}><Icon name="git" size={12} style={{ color:"var(--cf-text-muted)" }}/>{ev.flake}</div><div className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{ev.commit}</div></td>
+              <td><div style={{ fontWeight:600, fontSize:13, display:"flex", alignItems:"center", gap:6 }}><Icon name="git" size={12} style={{ color:"var(--cf-text-muted)" }}/>{ev.flake}</div><div className={`mono${latestIds?.has(ev.id)?" commit-latest":""}`} style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{latestIds?.has(ev.id) && <Icon name="star" size={9} className="latest-star" style={{ marginRight:3, verticalAlign:"-1px" }}/>}{ev.commit}</div></td>
               <td><span className="chip chip-unknown">{ev.branch}</span></td>
               <td><span className={`chip ${ev.meta.cls}`}><span className="chip-dot" style={{ background:ev.meta.color }} />{ev.meta.label}</span></td>
               <td style={{ fontSize:12 }}>{ev.systemCount}</td>

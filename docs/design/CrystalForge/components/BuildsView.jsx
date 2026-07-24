@@ -84,12 +84,14 @@ function BuildsView({ focus, onClearFocus }) {
   // Search filter — matches system, flake, commit, worker, arch, status label.
   const [query, setQuery] = React.useState("");
   React.useEffect(() => { setQuery(""); }, [tab]);
+  const [latestOnly, setLatestOnly] = React.useState(false);
   const q = query.trim().toLowerCase();
   const matchBuild = (b) => !q ||
     [b.system, b.flake, b.commit, b.worker, b.arch, b.meta?.label, b.currentPkg, b.failedPkg]
       .filter(Boolean).some(v => String(v).toLowerCase().includes(q));
   const baseList = tab === "active" ? activeList : historyList;
-  const filteredList = baseList.filter(matchBuild);
+  const latestIds = React.useMemo(() => latestPerFlake(baseList), [baseList]);
+  const filteredList = baseList.filter(matchBuild).filter(b => !latestOnly || latestIds.has(b.id));
   const { count, sentinelRef } = useInfiniteScroll(tab + "|" + q, 20);
   const pagedList = filteredList.slice(0, count);
   const hasMore = count < filteredList.length;
@@ -141,6 +143,9 @@ function BuildsView({ focus, onClearFocus }) {
             </button>
           ))}
           {selectableIds.length > 0 && <MultiSelectHint />}
+          <button className={`btn btn-ghost xs focus-ring${latestOnly?" active-filter":""}`} onClick={()=>setLatestOnly(v=>!v)} title="Show only the most recent build per flake">
+            <Icon name="star" size={12}/> Latest per flake
+          </button>
           <div className="q-search">
             <Icon name="search" size={13} />
             <input className="q-search-input" placeholder={`Search ${tab==="active"?"active":"completed"} builds…`}
@@ -170,6 +175,7 @@ function BuildsView({ focus, onClearFocus }) {
               flashFailed={tab==="history" && flashHistRows}
               onMove={moveBuild}
               onReorder={reorderBuild}
+              latestIds={latestIds}
             />
             {hasMore && <div ref={sentinelRef} className="infinite-sentinel">Loading more builds…</div>}
           </>
@@ -236,7 +242,7 @@ function WorkerCard({ w }) {
   );
 }
 
-function BuildQueueTable({ entries, selected, onSelect, onLog, sel, isCancellable, cancellable, selectableIds, reorderable, onMove, onReorder, flashFailed }) {
+function BuildQueueTable({ entries, selected, onSelect, onLog, sel, isCancellable, cancellable, selectableIds, reorderable, onMove, onReorder, flashFailed, latestIds }) {
   const cancellableIds = sel ? (selectableIds || cancellable.map(b => b.id)) : [];
   const [dragId, setDragId] = React.useState(null);
   const [overIdx, setOverIdx] = React.useState(null);
@@ -283,7 +289,7 @@ function BuildQueueTable({ entries, selected, onSelect, onLog, sel, isCancellabl
               <div style={{ fontWeight:600, fontSize:13, display:"flex", alignItems:"center", gap:6 }}>
                 <Icon name="server" size={12} style={{ color:"var(--cf-text-muted)" }}/>{b.system}
               </div>
-              <div style={{ fontSize:10, color:"var(--cf-text-muted)" }}>{b.flake} · <span className="mono">{b.commit}</span> · {b.arch}</div>
+              <div style={{ fontSize:10, color:"var(--cf-text-muted)" }}>{b.flake} · <span className={`mono${latestIds?.has(b.id)?" commit-latest":""}`}>{latestIds?.has(b.id) && <Icon name="star" size={9} className="latest-star" style={{ marginRight:3, verticalAlign:"-1px" }}/>}{b.commit}</span> · {b.arch}</div>
               {b.currentPkg && <div className="mono" style={{ fontSize:10, color:"#60a5fa", marginTop:2 }}>building {b.currentPkg}…</div>}
               {b.failedPkg && <div className="mono" style={{ fontSize:10, color:"#f87171", marginTop:2 }}>failed on {b.failedPkg}</div>}
             </td>

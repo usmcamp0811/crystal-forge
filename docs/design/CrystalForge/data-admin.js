@@ -85,6 +85,14 @@ const HEARTBEAT_CONFIG = (typeof __fx === "function" && __fx("admin.heartbeat"))
     lab: 300,              // lab hosts ping rarely
   },
 };
+const RETRY_CONFIG = (typeof __fx === "function" && __fx("admin.retry")) || {
+  buildRetries: 2,
+  evalRetries: 1,
+  backoffSec: 30,
+  onlyTransient: true,
+};
+Object.assign(window, { RETRY_CONFIG });
+
 const HEARTBEAT_INTERVALS = [
   { v:15, l:"15s" }, { v:30, l:"30s" }, { v:60, l:"1m" },
   { v:90, l:"90s" }, { v:120, l:"2m" }, { v:300, l:"5m" }, { v:600, l:"10m" },

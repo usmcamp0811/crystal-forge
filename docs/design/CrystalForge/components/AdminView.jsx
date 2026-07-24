@@ -613,6 +613,50 @@ function AdminHeartbeat() {
   );
 }
 
+function AdminRetries() {
+  const [cfg, setCfg] = React.useState(() => JSON.parse(JSON.stringify(RETRY_CONFIG)));
+  const set = (k, v) => setCfg(c => ({ ...c, [k]: v }));
+  return (
+    <>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:4 }}>
+        <h3 style={{ margin:0, fontSize:13, fontWeight:600 }}>Automatic retries</h3>
+        <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>How many times a failed build/eval is retried before it's left failed</span>
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginTop:14 }}>
+        <label style={{ display:"flex", flexDirection:"column", gap:5 }}>
+          <span style={{ fontSize:12, fontWeight:500 }}>Max build retries</span>
+          <select className="input focus-ring" style={{ width:120 }} value={cfg.buildRetries} onChange={e=>set("buildRetries", Number(e.target.value))}>
+            {[0,1,2,3,4,5].map(n => <option key={n} value={n}>{n === 0 ? "Never" : n}</option>)}
+          </select>
+        </label>
+        <label style={{ display:"flex", flexDirection:"column", gap:5 }}>
+          <span style={{ fontSize:12, fontWeight:500 }}>Max eval retries</span>
+          <select className="input focus-ring" style={{ width:120 }} value={cfg.evalRetries} onChange={e=>set("evalRetries", Number(e.target.value))}>
+            {[0,1,2,3,4,5].map(n => <option key={n} value={n}>{n === 0 ? "Never" : n}</option>)}
+          </select>
+        </label>
+        <label style={{ display:"flex", flexDirection:"column", gap:5 }}>
+          <span style={{ fontSize:12, fontWeight:500 }}>Backoff between attempts</span>
+          <select className="input focus-ring" style={{ width:120 }} value={cfg.backoffSec} onChange={e=>set("backoffSec", Number(e.target.value))}>
+            {[0,10,30,60,120,300].map(n => <option key={n} value={n}>{n === 0 ? "None" : n < 60 ? `${n}s` : `${n/60}m`}</option>)}
+          </select>
+        </label>
+        <label style={{ display:"flex", gap:9, alignItems:"flex-start", cursor:"pointer", marginTop:22 }}>
+          <input type="checkbox" checked={cfg.onlyTransient} onChange={e=>set("onlyTransient", e.target.checked)} style={{ marginTop:2 }}/>
+          <span>
+            <span style={{ display:"block", fontSize:12, fontWeight:500 }}>Only retry transient failures</span>
+            <span style={{ display:"block", fontSize:11, color:"var(--cf-text-muted)" }}>Skip auto-retry for eval/build errors that won't change on their own (e.g. bad derivation, assertion failure)</span>
+          </span>
+        </label>
+      </div>
+      <div style={{ display:"flex", justifyContent:"flex-end", gap:8, marginTop:14 }}>
+        <button className="btn btn-ghost focus-ring" onClick={()=>setCfg(JSON.parse(JSON.stringify(RETRY_CONFIG)))}>Reset</button>
+        <button className="btn btn-primary focus-ring"><Icon name="check" size={13}/> Save retry config</button>
+      </div>
+    </>
+  );
+}
+
 function AdminServer({ coach, classif, onClassif }) {
   const s = SERVER_INFO;
   const done = coach ? coach.count : 0;
@@ -641,6 +685,9 @@ function AdminServer({ coach, classif, onClassif }) {
       </div>
       <div className="card" style={{ padding:16, gridColumn:"1 / -1" }}>
         <AdminHeartbeat/>
+      </div>
+      <div className="card" style={{ padding:16, gridColumn:"1 / -1" }}>
+        <AdminRetries/>
       </div>
       <div className="card" style={{ padding:16, gridColumn:"1 / -1" }}>
         <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12, flexWrap:"wrap", marginBottom: cls.enabled ? 14 : 0 }}>

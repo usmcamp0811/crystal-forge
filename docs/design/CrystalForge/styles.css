@@ -607,6 +607,10 @@ body {
 
 .infinite-sentinel { padding: 14px; text-align: center; font-size: 11px; color: var(--cf-text-muted); }
 
+.latest-star { color: #fbbf24; flex-shrink: 0; }
+.commit-latest { color: #fbbf24 !important; font-weight: 600; }
+.btn-ghost.active-filter { background: var(--cf-hover-bg); border-color: var(--cf-brand-purple); color: var(--cf-text-primary); }
+
 /* Systems — table view */
 .sys-table {
   width: 100%;

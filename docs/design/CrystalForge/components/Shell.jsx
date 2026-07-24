@@ -59,6 +59,14 @@ function useInfiniteScroll(resetKey, pageSize = 30) {
 }
 window.useInfiniteScroll = useInfiniteScroll;
 
+// Marks, per flake, the id of the first (= latest, lists are newest-first) entry in `list`.
+function latestPerFlake(list) {
+  const seen = new Set(), ids = new Set();
+  for (const item of list) { if (item.flake && !seen.has(item.flake)) { seen.add(item.flake); ids.add(item.id); } }
+  return ids;
+}
+window.latestPerFlake = latestPerFlake;
+
 // Tracks a Set of selected ids with modifier-click (⌘/Ctrl toggle, Shift range) support.
 function useMultiSelect(resetKey) {
   const [ids, setIds] = React.useState(() => new Set());
