@@ -5,7 +5,7 @@ status: Review
 assignee:
   - claude-sonnet-4-6
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-24 00:45'
+updated_date: '2026-07-24 01:02'
 labels:
   - stig
   - nix
@@ -102,42 +102,86 @@ Also audit all other stig modules under `modules/nixos/stig-modules/` for `mkFor
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-## Implementation Plan
+## Revised Implementation Plan (after MR !308 review)
 
-### Approach: Option B — fix `overrideAttrs` in `lib/stig/default.nix`
+### Three problems confirmed by code inspection
 
-After auditing all stig modules, Option A (removing priority wrappers from stigConfig) is **not safe** for all cases:
+**P1 — `mapAttrsRecursive` always recurses into attrsets** (`lib/attrsets.nix:1161,1193`):
+```nix
+mapAttrsRecursive = f: set: mapAttrsRecursiveCond (as: true) f set;
+-- predicate is always true → always recurses into every attrset
+```
+`mkForce true` is `{ _type = "override"; priority = 50; content = true; }`. The traversal descends into it and maps `_type`, `priority`, `content` individually — it never presents the wrapper attrset to the mapping function. The unwrap condition in MR !308 never fires.
 
-- `pwquality` uses `lib.mkDefault(lib.mkBefore(...))` — a nested merge-order expression that carries semantic meaning beyond just priority. Stripping it would lose the `mkBefore` ordering.
-- `aide` uses `mkDefault { text = ...; mode = ...; }` — wrapping an attrset, not a scalar. `mapAttrsRecursive` would recurse into the attrset and try to wrap its string/mode fields, but `mkDefault` sits at an intermediate level.
-- `getty` uses both `lib.mkDefault` and `lib.mkForce` on two different options for deliberate priority reasons.
+**P2 — Priority 1000 is WEAKER than normal config, not stronger** (`lib/modules.nix:1587-1591`):
+```
+mkOptionDefault = mkOverride 1500   -- lowest precedence (option default)
+mkDefault       = mkOverride 1000   -- weak default (non-user modules)
+normal defs     = priority 100      -- ordinary user config
+mkForce         = mkOverride 50     -- highest user precedence
+mkVMOverride    = mkOverride 10     -- VM image overrides
+```
+Lower number wins. The comment "Priority 1000 is much higher than mkForce (50)" is backwards. Using `mkOverride 1000` for STIG values makes them *weaker than normal user config* — the opposite of the intended enforcement.
 
-The correct fix is to make `overrideAttrs` unwrap any existing priority wrapper before applying `mkOverride 1000`. This correctly handles all cases: plain values are wrapped as before; already-wrapped values are unwrapped then re-wrapped at the STIG priority.
+**P3 — `mkBefore`/`mkAfter` are also attrsets** (`_type = "order"`): `mapAttrsRecursiveCond` with `(as: true)` recurses into them too, corrupting their internals.
 
-### Files to change
+### Correct fix
 
-1. **`lib/stig/default.nix` line 100** — change `overrideAttrs` to unwrap before re-wrapping:
+Replace `mapAttrsRecursive` with `mapAttrsRecursiveCond` using a predicate that treats all Nix module-system wrapper attrsets as leaves (stops recursion). The wrapper types are: `"override"`, `"order"`, `"merge"`, `"if"`, `"push"`, `"override"`. Also fix the priority — STIG enforcement should use a priority lower than `mkForce` (50) to beat it, or match it. Since the goal is "STIG takes precedence over all user config including mkForce", use `mkOverride 1` (beats everything) or keep `mkForce`-level at 50 with a clear intent. Given the name `mkStigModule` and the comment "ensures STIG config takes precedence", use priority **1** (maximum precedence).
+
+Wait — re-reading the stig/off preset: when `stig-presets.off.enable = true`, ALL stig controls are *disabled*. The `overrideAttrs` only runs when `cfg.enable = true` (the control is active). So for nix-builder-1 which uses `stig-presets.off`, the `overrideAttrs` is never called — the issue is purely the type error from the wrong traversal when the module is loaded.
+
+**Revised understanding**: The real crash is not from `overrideAttrs` being called with wrong priority — it's from `mapAttrsRecursive` descending into `mkForce true` and wrapping the `content` field with `mkOverride 1000`, producing something like:
+```
+services.timesyncd.enable = { _type = "override"; priority = 1000; content = { _type = "override"; priority = 50; content = true; } }
+```
+The module system receives this as the value for `.enable` and rejects it because it's an attrset, not a boolean.
+
+The fix has two independent parts:
+
+**Part 1 — Fix the traversal** (stops the type error):
+Use `mapAttrsRecursiveCond` with a predicate that returns `false` (treat as leaf, apply mapper) for any attrset that is a Nix module-system wrapper:
 
 ```nix
-# Before:
-overrideAttrs = attrs: mapAttrsRecursive (_: v: mkOverride 1000 v) attrs;
-
-# After:
-overrideAttrs = attrs: mapAttrsRecursive (_: v:
-  let unwrapped = if v ? _type && v._type == "override" then v.content else v;
-  in mkOverride 1000 unwrapped
-) attrs;
+isModuleWrapper = v: isAttrs v && v ? _type;
+overrideAttrs = attrs: mapAttrsRecursiveCond
+  (v: !isModuleWrapper v)   # stop recursing when we hit a wrapper
+  (_: v: mkOverride 1 v)    # apply to leaf or wrapper as-is
+  attrs;
 ```
 
-This extracts the inner `.content` when the value is an override wrapper (`mkForce`, `mkDefault`, `mkOverride N`) and applies `mkOverride 1000` to the unwrapped value. Plain values are unaffected.
+This passes wrapper attrsets directly to the mapper without descending. The mapper then wraps the whole `mkForce true` with `mkOverride 1` — which is still wrong semantically (double-wrap at the merger level), but...
 
-Note: `mkBefore`/`mkAfter` produce `{ _type = "order"; ... }` — not `"override"` — so they pass through `overrideAttrs` as plain values and get wrapped correctly.
+Actually the cleanest fix is: **don't rewrap things that are already wrapped; pass them through unchanged**. The STIG module should control priority for plain values, and respect explicit wrappers as the module author intended.
 
-### Verification
+```nix
+overrideAttrs = attrs: mapAttrsRecursiveCond
+  (v: !(isAttrs v && v ? _type))   # treat module wrappers as leaves
+  (_: v:
+    if isAttrs v && v ? _type
+    then v                          # already wrapped — preserve as-is
+    else mkOverride 1 v             # plain value — apply STIG priority
+  )
+  attrs;
+```
 
-1. `nix eval` of `nix-builder-1` in the crystal-forge evaluator environment succeeds
-2. No regressions on systems using other stig modules (getty, account, login, aide, pwquality)
-3. Run `nix flake check` in the worktree to verify the flake evaluates cleanly
+**Part 2 — Fix the priority comment** (correctness):
+Change the comment to reflect that lower = higher precedence. Change `mkOverride 1000` to `mkOverride 1` for plain values (beats `mkForce` at 50), OR decide to leave plain values at a specific priority and document it. Since the stig-presets.off preset disables all controls anyway, this only matters when a control is active AND conflicts with user config.
+
+Decision: use `mkOverride 1` for plain STIG values — this ensures active STIG controls always win, consistent with the stated intent.
+
+### Regression test requirement (from reviewer)
+
+Add a NixOS test or nix-native test that:
+1. Passes `mkForce true` through `mkStigModule` and confirms evaluation succeeds
+2. Confirms a conflicting ordinary definition loses to an active STIG control
+3. Confirms an `mkBefore` order wrapper is preserved correctly
+
+Location: check if there's a test-flake or similar in the repo.
+
+### Files to change
+1. `lib/stig/default.nix` — fix `overrideAttrs` traversal and priority comment
+2. Regression test (location TBD after inspecting `lib/test-flake/`)
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
