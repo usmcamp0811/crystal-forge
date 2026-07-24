@@ -1,6 +1,12 @@
 use anyhow::Result;
 use sqlx::PgPool;
 
+/// Helper struct for reading the artifact cache systems column.
+#[derive(sqlx::FromRow)]
+struct CachedSystemsRow {
+    systems: Vec<String>,
+}
+
 /// Get commits that need artifact cache population (no cache entry yet).
 /// Returns up to `limit` commits, ordered by most recent first.
 pub async fn get_commits_needing_artifact_cache(
@@ -49,6 +55,27 @@ pub async fn upsert_commit_artifact_cache(
     .await?;
 
     Ok(())
+}
+
+/// Get the known nixosConfigurations for a commit from the artifact cache.
+///
+/// Returns an empty vec if no cache entry exists yet (hydration hasn't run).
+pub async fn get_commit_nixos_configurations_from_cache(
+    pool: &PgPool,
+    commit_id: i32,
+) -> Result<Vec<String>> {
+    let row = sqlx::query_as::<_, CachedSystemsRow>(
+        r#"
+        SELECT COALESCE(nixos_configurations, ARRAY[]::text[]) AS systems
+        FROM commit_artifacts_cache
+        WHERE commit_id = $1
+        "#,
+    )
+    .bind(commit_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| r.systems).unwrap_or_default())
 }
 
 /// Mark a commit as having failed artifact hydration (empty cache entry for retry prevention).
