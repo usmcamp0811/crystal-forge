@@ -95,9 +95,41 @@ with lib; rec {
     extraOptions ? {},
   }: let
     cfg = config.crystal-forge.stig.${name};
-    # Use mkOverride with priority 1000 to override all conflicting definitions
-    # Priority 1000 is much higher than mkForce (50) and ensures STIG config takes precedence
-    overrideAttrs = attrs: mapAttrsRecursive (_: v: mkOverride 1000 v) attrs;
+    # Apply mkOverride 1 (lowest numeric priority = highest precedence) to every
+    # value in stigConfig, ensuring active STIG controls beat all user config
+    # including mkForce (priority 50) and ordinary definitions (priority 100).
+    #
+    # NOTE on Nix priority semantics: LOWER number = HIGHER precedence.
+    #   mkVMOverride    = mkOverride 10   (highest after ours)
+    #   mkForce         = mkOverride 50
+    #   normal defs     = priority 100
+    #   mkDefault       = mkOverride 1000 (weak default)
+    #   mkOptionDefault = mkOverride 1500 (lowest)
+    #
+    # We use mapAttrsRecursiveCond rather than mapAttrsRecursive because the
+    # unconditional variant always recurses into every attrset — including Nix
+    # module-system wrappers such as mkForce/mkDefault (which are attrsets with
+    # a `_type = "override"` field). Recursing into those wrappers would corrupt
+    # their internal _type/priority/content fields and produce a nested override
+    # attrset that the module system rejects as the wrong type for the option.
+    #
+    # The predicate `!(v ? _type && v._type == "override")` stops recursion when
+    # we reach an override wrapper (mkForce, mkDefault, mkOverride N). The mapper
+    # then unwraps it and re-applies mkOverride 1, giving the STIG priority to the
+    # underlying value. Plain values (no _type) are wrapped directly.
+    #
+    # Order wrappers (mkBefore, mkAfter; _type = "order") do not have a plain
+    # content value that mkOverride can sensibly wrap, so they are left untouched.
+    # If stigConfig authors need ordering, they should use it at the plain-value
+    # level; mkStigModule does not support composing order+priority wrappers.
+    overrideAttrs = attrs: mapAttrsRecursiveCond
+      (v: !(v ? _type && v._type == "override"))   # stop at override wrappers; recurse into everything else
+      (_: v:
+        if v ? _type && v._type == "override"
+        then mkOverride 1 v.content   # unwrap and re-apply at STIG priority
+        else mkOverride 1 v           # plain value — wrap directly
+      )
+      attrs;
   in {
     options =
       extraOptions

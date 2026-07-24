@@ -26,7 +26,6 @@ Do not change files, backlog state, branches, or merge requests for a read-only 
 8. Use the repository's Nix development environment for project toolchains and verification.
 9. Do not merge an MR unless the user explicitly authorizes it.
 10. Ask before making a decision that materially changes public behavior, compatibility, persistence, security boundaries, architecture, or task scope.
-11. Don't rely on utilities to be installed like python or glab.. just use `nix run nixpkgs#glab` for these type of things
 
 ## Repository architecture
 
