@@ -1,9 +1,10 @@
 ---
 id: TASK-398
 title: mkStigModule overrideAttrs double-wraps mkForce values causing type errors
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-07-24 00:29'
+updated_date: '2026-07-24 00:31'
 labels:
   - stig
   - nix
@@ -93,3 +94,39 @@ Also audit all other stig modules under `modules/nixos/stig-modules/` for `mkFor
 - [ ] #3 nix-builder-1 evaluates successfully in the Crystal Forge evaluator (not just locally) and appears in the evaluation summary
 - [ ] #4 No regression: stig controls still apply at the correct priority (overriding user config)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Sprint readiness notes
+
+**What this task is:** A bug in the Crystal Forge flake's `lib/stig/default.nix`. The `mkStigModule` helper applies `mkOverride 1000` to all leaf values in `stigConfig` — but the `timesyncd` stig module already uses `mkForce true` inside its `stigConfig`. The double-wrap produces a nested attrset instead of a boolean, which the NixOS module system rejects.
+
+**Exact file to fix in the crystal-forge repo:**
+- `lib/stig/default.nix` line 100 — `overrideAttrs` definition
+- `modules/nixos/stig-modules/modules/timesyncd/default.nix` line 18 — `mkForce` inside stigConfig
+
+**Recommended fix (Option A):** Remove `mkForce` from `stigConfig` in the timesyncd module (and audit all other stig modules for the same pattern). The `overrideAttrs` wrapper already applies `mkOverride 1000`, which has higher priority than `mkForce` (priority 50), so `mkForce` inside `stigConfig` is both redundant and harmful.
+
+```nix
+# modules/nixos/stig-modules/modules/timesyncd/default.nix
+stigConfig = {
+  services.timesyncd.enable = true;        # was: mkForce true
+  services.timesyncd.extraConfig = ''
+    PollIntervalMaxSec=60
+  '';
+};
+```
+
+**Audit step:** Search all files under `modules/nixos/stig-modules/` for `mkForce` inside `stigConfig` blocks and remove them.
+
+**Why `nix-builder-1` was affected:** It sets `crystal-forge.stig-presets.off.enable = true`, which enables the stig modules including timesyncd. Other systems without that preset are not affected.
+
+**Why it works locally but not in Crystal Forge:** The local Nix store for `nix-config` has a different pinned version of the `crystal-forge` flake than what Crystal Forge's evaluator downloads fresh. The local pin may predate the introduction of `mkForce` into the timesyncd stig module.
+
+**Verification:**
+1. After fix is merged to the crystal-forge flake and `nix-config`'s `flake.lock` is updated to the new pin:
+   - `nix eval .#nixosConfigurations.nix-builder-1.config.system.build.toplevel` succeeds
+   - Crystal Forge evaluation shows `nix-builder-1` as a successful system
+2. Check that `crystal-forge.stig-presets.off.enable = true` still compiles cleanly on `nix-builder-2` (regression check)
+<!-- SECTION:NOTES:END -->
