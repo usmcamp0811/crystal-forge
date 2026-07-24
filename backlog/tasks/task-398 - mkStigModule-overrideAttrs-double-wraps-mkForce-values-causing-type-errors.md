@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-sonnet-4-6
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-24 00:41'
+updated_date: '2026-07-24 00:42'
 labels:
   - stig
   - nix
@@ -95,6 +95,47 @@ Also audit all other stig modules under `modules/nixos/stig-modules/` for `mkFor
 - [ ] #3 nix-builder-1 evaluates successfully in the Crystal Forge evaluator (not just locally) and appears in the evaluation summary
 - [ ] #4 No regression: stig controls still apply at the correct priority (overriding user config)
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation Plan
+
+### Approach: Option B — fix `overrideAttrs` in `lib/stig/default.nix`
+
+After auditing all stig modules, Option A (removing priority wrappers from stigConfig) is **not safe** for all cases:
+
+- `pwquality` uses `lib.mkDefault(lib.mkBefore(...))` — a nested merge-order expression that carries semantic meaning beyond just priority. Stripping it would lose the `mkBefore` ordering.
+- `aide` uses `mkDefault { text = ...; mode = ...; }` — wrapping an attrset, not a scalar. `mapAttrsRecursive` would recurse into the attrset and try to wrap its string/mode fields, but `mkDefault` sits at an intermediate level.
+- `getty` uses both `lib.mkDefault` and `lib.mkForce` on two different options for deliberate priority reasons.
+
+The correct fix is to make `overrideAttrs` unwrap any existing priority wrapper before applying `mkOverride 1000`. This correctly handles all cases: plain values are wrapped as before; already-wrapped values are unwrapped then re-wrapped at the STIG priority.
+
+### Files to change
+
+1. **`lib/stig/default.nix` line 100** — change `overrideAttrs` to unwrap before re-wrapping:
+
+```nix
+# Before:
+overrideAttrs = attrs: mapAttrsRecursive (_: v: mkOverride 1000 v) attrs;
+
+# After:
+overrideAttrs = attrs: mapAttrsRecursive (_: v:
+  let unwrapped = if v ? _type && v._type == "override" then v.content else v;
+  in mkOverride 1000 unwrapped
+) attrs;
+```
+
+This extracts the inner `.content` when the value is an override wrapper (`mkForce`, `mkDefault`, `mkOverride N`) and applies `mkOverride 1000` to the unwrapped value. Plain values are unaffected.
+
+Note: `mkBefore`/`mkAfter` produce `{ _type = "order"; ... }` — not `"override"` — so they pass through `overrideAttrs` as plain values and get wrapped correctly.
+
+### Verification
+
+1. `nix eval` of `nix-builder-1` in the crystal-forge evaluator environment succeeds
+2. No regressions on systems using other stig modules (getty, account, login, aide, pwquality)
+3. Run `nix flake check` in the worktree to verify the flake evaluates cleanly
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
