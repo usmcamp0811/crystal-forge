@@ -1,16 +1,24 @@
 ---
 id: TASK-397
 title: Evaluation errors silently drop systems from nixosConfigurations count
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-24 03:22'
+updated_date: '2026-07-24 03:29'
 labels:
   - evaluator
   - reporting
   - ux
 dependencies:
   - TASK-398
+references:
+  - 'lib/stig/default.nix:100'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/309'
+  - packages/default/crates/cf-server/src/models/evaluate_with_policies.rs
+  - packages/default/crates/cf-server/src/queries/commits_artifacts.rs
+modified_files:
+  - packages/default/crates/cf-server/src/models/evaluate_with_policies.rs
+  - packages/default/crates/cf-server/src/queries/commits_artifacts.rs
 priority: high
 type: bug
 ordinal: 396000
