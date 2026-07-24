@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-07-24 03:26'
-updated_date: '2026-07-24 03:47'
+updated_date: '2026-07-24 03:51'
 labels:
   - design-parity
   - web-ui
@@ -161,10 +161,14 @@ Use the repository Nix development environment. Add focused server/domain tests 
 ## Material decision checkpoint
 
 Before application-code writes, confirm the proposed compatibility/classification and historical-data choices: unknown failures from older builders are not retried when transient-only is enabled but may retry when disabled; manual retries start a fresh automatic budget as today; evaluation enqueue timestamps for existing rows are backfilled from the immutable Git commit timestamp with ID tie-breaking; and evaluation attempt lineage is persisted/exposed while existing commit-level log presentation remains unchanged unless implementation proves attempt-scoped logs are required for correctness.
+
+Decision checkpoint approved: unclassified older-builder failures are not retried in transient-only mode; manual retries begin a fresh automatic budget; historical evaluation enqueue timestamps are backfilled from Git commit time with deterministic ID tie-breaking; evaluation attempt lineage is persisted/exposed while commit-level log presentation remains unchanged unless correctness requires otherwise.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: gpt-5.6-sol on reckless in /home/mcamp/code/crystal-forge/TASK-399-automatic-retries-latest-flake
+
+Research confirmed latest identity must be computed server-side before filters/pagination because clients only hold capped growing prefixes. Builds can use `build_jobs.created_at`; evaluations require a new immutable enqueue timestamp. Existing build/evaluation retry paths are hard-coded/in-place and require transactional policy-at-failure scheduling.
 <!-- SECTION:NOTES:END -->
