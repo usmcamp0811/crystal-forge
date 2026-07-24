@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-07-24 03:26'
-updated_date: '2026-07-24 03:35'
+updated_date: '2026-07-24 03:47'
 labels:
   - design-parity
   - web-ui
@@ -122,6 +122,46 @@ Use the repository Nix development environment. Add focused server/domain tests 
 - [ ] #22 Automated UI/state tests cover latest selection and tie-breaking, independent active/history scope, combined filters, pagination boundaries, live recomputation, retry form reset/save/error behavior, and accessibility state.
 - [ ] #23 The authoritative web-ui check passes with behavioral assertions for all three affected views, and the MR includes screenshots of the Admin retry card plus Builds/Evaluations latest markers and enabled latest-only state.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation plan
+
+1. **Persist and authorize retry policy**
+   - Add a forward migration for a singleton retry-policy row with database constraints for counts `0..=5` and backoffs `0/10/30/60/120/300`, seeded to `2/1/30/transient-only`.
+   - Add shared server domain validation/defaults, atomic query functions, and admin-only GET/PUT endpoints. Validate the complete payload before one upsert so invalid requests cannot partially update policy.
+   - Add focused persistence, validation, and authorization tests.
+
+2. **Make retries durable, linked, policy-driven, and idempotent**
+   - Build retries: replace in-place requeue-on-failure with an atomic transaction that locks the source attempt, records its terminal failure, reads the policy effective at failure time, and inserts at most one linked child attempt with a durable `available_at` timestamp. Claims ignore future attempts. Preserve existing signed builder/session authorization for each claim and completion.
+   - Evaluation retries: add durable evaluation-attempt lineage and a due timestamp; remove hard-coded retry counts/backoffs. Make claim/failure/cancellation transitions conditional and idempotent, and keep cancellation out of normal failure handling. Wake evaluation coordination for the next due attempt without blocking a worker task.
+   - Centralize retry eligibility so cancellation, authorization/session failures, and derivation mismatch are always excluded; transient-only mode retries only explicitly transient classes. Extend the builder failure contract additively so deployed builders remain compatible.
+   - Keep manual retry/re-evaluate behavior unchanged except for recording lineage needed to distinguish attempts.
+   - Expose attempt number/parent/root and delayed retry timing through existing operational DTOs/details so operators can identify linked attempts.
+
+3. **Compute latest-per-flake over complete server domains**
+   - Add an immutable evaluation enqueue timestamp and stable flake identity to relevant DTOs.
+   - Update active/history build and evaluation queries to rank one latest logical item per flake by authoritative enqueue/creation timestamp and deterministic ID tie-break before search/status/flake filters and pagination.
+   - Return `is_latest_per_flake`, accept `latest_only`, and return enough unfiltered/filtered totals to distinguish genuinely empty domains from filter-empty results.
+   - Preserve existing display sorting and growing-prefix infinite scroll while resetting pagination on every effective criterion.
+
+4. **Implement production Admin, Builds, and Evaluations UI**
+   - Add a testable retry-form state model with separate last-server and editable values. Reset restores only the last successful server value; failed saves retain edits; success/error/authorization states remain visible.
+   - Add the Admin > Server Automatic retries card matching design commit `51e5cee1`.
+   - Add the star icon/styles and one session-level keyboard-accessible `Latest per flake` pressed toggle to Builds and Evaluations. Render server-authoritative markers in both tabs, reconcile hidden selections, and prevent reorder operations on a latest-filtered subset.
+   - Add filter-aware empty states and clear-filter actions without changing unrelated view layout.
+
+5. **Verification and evidence**
+   - Add DB/domain/handler tests for defaults, validation, persistence, authorization, budgets, eligibility, cancellation, backoff, policy timing, lineage, and duplicate-event concurrency.
+   - Add pure web state tests for reset/save/error behavior, marker/filter composition, tab scope, pagination reset, live replacement, tie results supplied by the API, and selection reconciliation.
+   - Extend the authoritative web-ui Playwright check with critical behavioral steps for Admin retry save/reset/error and latest toggles/markers in Builds and Evaluations; capture representative screenshots.
+   - Run targeted Rust/WASM formatting and tests, SQLx preparation against a verified isolated repository database, server/web-ui Nix builds, `nix build .#checks.x86_64-linux.web-ui --no-link`, and broader flake checks because this changes schema and cross-package contracts.
+
+## Material decision checkpoint
+
+Before application-code writes, confirm the proposed compatibility/classification and historical-data choices: unknown failures from older builders are not retried when transient-only is enabled but may retry when disabled; manual retries start a fresh automatic budget as today; evaluation enqueue timestamps for existing rows are backfilled from the immutable Git commit timestamp with ID tie-breaking; and evaluation attempt lineage is persisted/exposed while existing commit-level log presentation remains unchanged unless implementation proves attempt-scoped logs are required for correctness.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
