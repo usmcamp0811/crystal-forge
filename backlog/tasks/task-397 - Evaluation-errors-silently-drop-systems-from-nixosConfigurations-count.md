@@ -4,7 +4,7 @@ title: Evaluation errors silently drop systems from nixosConfigurations count
 status: Review
 assignee: []
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-25 14:28'
+updated_date: '2026-07-25 16:19'
 labels:
   - evaluator
   - reporting
@@ -133,4 +133,14 @@ This error appears in the Crystal Forge log but `nix-builder-1` is absent from b
 The initial `cargo sqlx prepare` only captured queries from non-test code. Test-only query! macros in cve_worker.rs and cve_scans.rs required `cargo sqlx prepare -- --all-targets` to be included. Without them, the Nix build's `cf-server (lib test)` target failed with 7 `set DATABASE_URL...` errors.
 
 Second-pass P1 fixes (commit 8ce85715): P1-1 CAS before side effects; P1-2 record_successful_eval_result atomic; P1-3 cancel API UPDATE...RETURNING; P1-4 reset clears flag + finalizer guarded by attempt. 14 new DB regression tests. nix build exit 0.
+
+Continued MR !309 P1 finalization fix in worktree `TASK-397-eval-errors-silently-drop`: refactored real and mock evaluator paths to return an in-memory `EvaluationPlan`; added `finalize_evaluation_attempt` as the single transaction that locks the commit row, checks attempt/cancellation state, writes successful derivations plus synthetic failures, updates commit metadata cache, and marks the attempt complete. Moved build-job creation, GC roots, closure counts, hardening scans, and `QueuedForBuild` broadcasts to the server after `EvaluationFinalizeOutcome::Completed`. Added timeout + `kill_on_drop(true)` around `nix-store --query --outputs`. Added ignored DB regression tests for cancellation-vs-finalization races, rollback on failed success/synthetic writes, and no build jobs before finalization.
+
+Verification run from the task worktree:
+- `nix develop -c cargo check -p cf-server --all-targets` (exit 0; existing warnings only)
+- `nix develop -c cargo sqlx prepare --check -- --all-targets` from `packages/default/crates/cf-server` (exit 0; existing warnings only)
+- `nix develop -c cargo test -p cf-server models::evaluate_with_policies::tests --lib` (exit 0; 7 passed, 5 ignored)
+- `nix develop -c cargo test -p cf-server models::evaluate_with_policies::tests::finalize_attempt_ --lib -- --ignored --test-threads=1` (exit 0; 5 passed)
+- `nix build .#packages.x86_64-linux.server --no-link` (first 120s run timed out/interrupted by shell timeout; rerun with 600s timeout exited 0)
+- `git diff --check` (exit 0)
 <!-- SECTION:NOTES:END -->
