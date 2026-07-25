@@ -4,7 +4,7 @@ title: Evaluation errors silently drop systems from nixosConfigurations count
 status: Review
 assignee: []
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-25 04:16'
+updated_date: '2026-07-25 14:28'
 labels:
   - evaluator
   - reporting
@@ -131,4 +131,6 @@ This error appears in the Crystal Forge log but `nix-builder-1` is absent from b
 ## SQLx metadata fix (commit a5ddcd33)
 
 The initial `cargo sqlx prepare` only captured queries from non-test code. Test-only query! macros in cve_worker.rs and cve_scans.rs required `cargo sqlx prepare -- --all-targets` to be included. Without them, the Nix build's `cf-server (lib test)` target failed with 7 `set DATABASE_URL...` errors.
+
+Second-pass P1 fixes (commit 8ce85715): P1-1 CAS before side effects; P1-2 record_successful_eval_result atomic; P1-3 cancel API UPDATE...RETURNING; P1-4 reset clears flag + finalizer guarded by attempt. 14 new DB regression tests. nix build exit 0.
 <!-- SECTION:NOTES:END -->
