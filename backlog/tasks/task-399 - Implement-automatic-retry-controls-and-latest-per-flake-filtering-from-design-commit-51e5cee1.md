@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-07-24 03:26'
-updated_date: '2026-07-24 03:51'
+updated_date: '2026-07-25 02:23'
 labels:
   - design-parity
   - web-ui
@@ -21,6 +21,7 @@ references:
   - >-
     https://gitlab.com/crystal-forge/crystal-forge/-/commit/51e5cee17e3477686c70029275a88d4030178048
   - TASK-275
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/310'
 documentation:
   - docs/design/CrystalForge/components/AdminView.jsx
   - docs/design/CrystalForge/components/BuildsView.jsx
@@ -98,29 +99,29 @@ Use the repository Nix development environment. Add focused server/domain tests 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Admin > Server displays an "Automatic retries" card matching commit 51e5cee1 with build retry, evaluation retry, backoff, transient-only, Reset, and Save controls.
-- [ ] #2 When no retry policy has been persisted, the UI and server report defaults of 2 build retries, 1 evaluation retry, 30-second backoff, and transient-only enabled.
-- [ ] #3 The server rejects retry counts outside 0 through 5 and backoff values outside none, 10 seconds, 30 seconds, 1 minute, 2 minutes, and 5 minutes without partially updating the saved policy.
-- [ ] #4 An authorized administrator can save the complete retry policy, receive visible success feedback, reload the application or restart the server, and observe the same values.
-- [ ] #5 A non-administrator cannot read or mutate retry policy beyond existing authorization rules, and authorization failures are surfaced without changing persisted values.
-- [ ] #6 Reset restores the last server-provided values and clears only unsaved edits; it does not persist a change or restore factory defaults.
-- [ ] #7 A failed evaluation receives no more than the configured number of additional attempts and a failed build receives no more than the configured number of additional attempts; zero disables automatic retries for that job type.
-- [ ] #8 Cancelled work and authorization failures are never automatically retried; transient-only mode excludes deterministic failures including invalid derivations and assertion failures, while disabling transient-only permits otherwise eligible failures.
-- [ ] #9 Each retry preserves the original logical job inputs, records attempt lineage, applies the configured backoff asynchronously, and remains subject to existing session and job authorization checks.
-- [ ] #10 Duplicate terminal/completion events or coordinator races cannot schedule more than one next attempt for the same failed attempt.
-- [ ] #11 Saving new policy affects failures observed after the save succeeds without reopening historical terminal jobs or duplicating retries already scheduled under the prior policy.
-- [ ] #12 Save validation, authorization, and server/persistence failures are visible and retain unsaved form edits so the administrator can correct or retry the operation.
-- [ ] #13 Builds and Evaluations active and history/completed tabs expose a keyboard-accessible "Latest per flake" toggle with a programmatically exposed active/pressed state.
-- [ ] #14 Each active/history tab identifies exactly one latest item per flake by greatest authoritative creation/enqueue timestamp with deterministic ID tie-breaking, independent of current table sort order.
-- [ ] #15 Latest identity is computed over the complete tab result domain before pagination, search, status, and flake filters; existing filters and search combine correctly with latest-only filtering.
-- [ ] #16 The latest build/evaluation for each flake displays the reference star and emphasized commit treatment while the toggle is off, and enabling the toggle hides every non-latest item.
-- [ ] #17 The latest-only toggle remains enabled across active/history tab switches in the current view session while each tab computes latest items from its own data.
-- [ ] #18 Latest markers and filtered rows recompute correctly after live updates, new jobs, cancellation, queue reorder, and pagination without stale or duplicate rows.
-- [ ] #19 Existing multi-select, row selection, queue actions, details/log views, search, filters, live refresh, and infinite scrolling remain functional with latest-only disabled or enabled.
-- [ ] #20 Builds and Evaluations show a filter-aware empty state when combined criteria yield no rows and allow users to clear the active filtering without misreporting that the underlying queue/history is empty.
-- [ ] #21 Automated server tests cover retry policy defaults, validation, persistence, authorization, retry budgets, failure eligibility, cancellation exclusion, backoff, and duplicate-event idempotency.
-- [ ] #22 Automated UI/state tests cover latest selection and tie-breaking, independent active/history scope, combined filters, pagination boundaries, live recomputation, retry form reset/save/error behavior, and accessibility state.
-- [ ] #23 The authoritative web-ui check passes with behavioral assertions for all three affected views, and the MR includes screenshots of the Admin retry card plus Builds/Evaluations latest markers and enabled latest-only state.
+- [x] #1 Admin > Server displays an "Automatic retries" card matching commit 51e5cee1 with build retry, evaluation retry, backoff, transient-only, Reset, and Save controls.
+- [x] #2 When no retry policy has been persisted, the UI and server report defaults of 2 build retries, 1 evaluation retry, 30-second backoff, and transient-only enabled.
+- [x] #3 The server rejects retry counts outside 0 through 5 and backoff values outside none, 10 seconds, 30 seconds, 1 minute, 2 minutes, and 5 minutes without partially updating the saved policy.
+- [x] #4 An authorized administrator can save the complete retry policy, receive visible success feedback, reload the application or restart the server, and observe the same values.
+- [x] #5 A non-administrator cannot read or mutate retry policy beyond existing authorization rules, and authorization failures are surfaced without changing persisted values.
+- [x] #6 Reset restores the last server-provided values and clears only unsaved edits; it does not persist a change or restore factory defaults.
+- [x] #7 A failed evaluation receives no more than the configured number of additional attempts and a failed build receives no more than the configured number of additional attempts; zero disables automatic retries for that job type.
+- [x] #8 Cancelled work and authorization failures are never automatically retried; transient-only mode excludes deterministic failures including invalid derivations and assertion failures, while disabling transient-only permits otherwise eligible failures.
+- [x] #9 Each retry preserves the original logical job inputs, records attempt lineage, applies the configured backoff asynchronously, and remains subject to existing session and job authorization checks.
+- [x] #10 Duplicate terminal/completion events or coordinator races cannot schedule more than one next attempt for the same failed attempt.
+- [x] #11 Saving new policy affects failures observed after the save succeeds without reopening historical terminal jobs or duplicating retries already scheduled under the prior policy.
+- [x] #12 Save validation, authorization, and server/persistence failures are visible and retain unsaved form edits so the administrator can correct or retry the operation.
+- [x] #13 Builds and Evaluations active and history/completed tabs expose a keyboard-accessible "Latest per flake" toggle with a programmatically exposed active/pressed state.
+- [x] #14 Each active/history tab identifies exactly one latest item per flake by greatest authoritative creation/enqueue timestamp with deterministic ID tie-breaking, independent of current table sort order.
+- [x] #15 Latest identity is computed over the complete tab result domain before pagination, search, status, and flake filters; existing filters and search combine correctly with latest-only filtering.
+- [x] #16 The latest build/evaluation for each flake displays the reference star and emphasized commit treatment while the toggle is off, and enabling the toggle hides every non-latest item.
+- [x] #17 The latest-only toggle remains enabled across active/history tab switches in the current view session while each tab computes latest items from its own data.
+- [x] #18 Latest markers and filtered rows recompute correctly after live updates, new jobs, cancellation, queue reorder, and pagination without stale or duplicate rows.
+- [x] #19 Existing multi-select, row selection, queue actions, details/log views, search, filters, live refresh, and infinite scrolling remain functional with latest-only disabled or enabled.
+- [x] #20 Builds and Evaluations show a filter-aware empty state when combined criteria yield no rows and allow users to clear the active filtering without misreporting that the underlying queue/history is empty.
+- [x] #21 Automated server tests cover retry policy defaults, validation, persistence, authorization, retry budgets, failure eligibility, cancellation exclusion, backoff, and duplicate-event idempotency.
+- [x] #22 Automated UI/state tests cover latest selection and tie-breaking, independent active/history scope, combined filters, pagination boundaries, live recomputation, retry form reset/save/error behavior, and accessibility state.
+- [x] #23 The authoritative web-ui check passes with behavioral assertions for all three affected views, and the MR includes screenshots of the Admin retry card plus Builds/Evaluations latest markers and enabled latest-only state.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -171,4 +172,43 @@ Decision checkpoint approved: unclassified older-builder failures are not retrie
 LOCK: gpt-5.6-sol on reckless in /home/mcamp/code/crystal-forge/TASK-399-automatic-retries-latest-flake
 
 Research confirmed latest identity must be computed server-side before filters/pagination because clients only hold capped growing prefixes. Builds can use `build_jobs.created_at`; evaluations require a new immutable enqueue timestamp. Existing build/evaluation retry paths are hard-coded/in-place and require transactional policy-at-failure scheduling.
+
+Implementation complete. All 23 acceptance criteria addressed; see final summary for evidence and residual risk notes.
+
+MR !310 opened against dev: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/310
+
+Branch pushed: TASK-399-automatic-retries-latest-flake (commit f9ddf15a).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+## Summary
+
+Implemented automatic build/evaluation retry policy and latest-per-flake filtering per design commit 51e5cee17e3477686c70029275a88d4030178048, across the server domain/persistence layer and the Dioxus web UI (Admin, Builds, Evaluations).
+
+## Server
+- Migration 0183: singleton admin-authorized `automatic_retry_policy` (build/eval retries 0-5, backoff none/10s/30s/1m/2m/5m, transient-only switch), defaults 2/1/30s/enabled, DB CHECK constraints, admin-only GET/PUT with complete-payload validation before one atomic upsert.
+- Migration 0184: durable, immutable build/evaluation attempt lineage (parent/root ids, attempt_number, available_at backoff timestamp); unique index enforces at most one automatic child per source attempt; claims ignore future-dated attempts.
+- Typed failure classification (transient/deterministic/authorization/cancelled/unknown) for build and evaluation failures; cancellation/authorization/derivation-mismatch never auto-retried; transient-only mode fails closed for unclassified legacy builder reports.
+- Evaluation completion/failure/cancellation made transactional and attempt-scoped (stale/duplicate events cannot affect a newer attempt); restart recovery finalizes in-flight cancellations instead of reopening them.
+- Due-time coordinator wakeup so configured backoff (incl. 0/10/30s) applies promptly without blocking job coordination.
+- Migration 0185: immutable evaluation enqueue timestamp (backfilled from commit time); Builds/Evaluations active+history queries rank one latest item per stable flake by timestamp + id tie-break before search/status/flake filters and pagination; responses expose is_latest_per_flake, accept latest_only, and return domain_total/filtered_total.
+
+## Web UI
+- Admin > Server "Automatic retries" card matching the design commit, with testable reset/save/error form state (Reset restores only last server value with no persistence; failed save retains edits and shows an error; success is visible and persists across reload).
+- Keyboard-accessible "Latest per flake" toggle (native button, aria-pressed) on Builds/Evaluations active+history tabs; one session-level toggle persists across tab switches while each tab computes its own latest domain server-side; server-authoritative latest markers render even when off; hidden-selection reconciliation; reorder disabled while latest-filtered; filter-aware empty states with a clear action.
+
+## Verification
+- cargo test (cf-protocol, cf-builder, cf-server, web-ui): all passing.
+- cargo check --all-targets with SQLX_OFFLINE=true: passing (offline metadata regenerated against an isolated local PostgreSQL instance created specifically for this task, never a shared/default dev DB).
+- nix build .#checks.x86_64-linux.web-ui: passing (exit 0). All 7 new TASK-399 steps are in the critical gating set and passed: 30a/30b/30c (Admin retries defaults/reset, save+reload, failed-save draft retention) and 15j/15k (Builds latest markers, combined filters/empty-state) and 26c/26d (Evaluations equivalents). Screenshots captured and attached to MR !310.
+- A handful of pre-existing, non-critical/advisory web-ui steps also failed on this run (15h, 15i, 26, 26b, plus unrelated Compliance/Caches/Systems/Hardening steps). Root-caused: their underlying view code paths are byte-identical to dev (confirmed via git show dev:...), so they predate this change and are not regressions from TASK-399.
+- Did not run full `nix flake check`; scope was server/web-ui packages and the web-ui check only, no flake/devshell/packaging changes, so targeted verification is proportional per repository policy.
+
+## Discovered and filed separately
+- TASK-400 (Backlog, not blocking): sqlx-cli's `migrate run` binary fails deterministically on a fresh database at pre-existing migration 0182, even though the same SQL applies cleanly via plain psql and via SQLx's library-level migrator (used by #[sqlx::test] and the server binary, both of which succeed). Does not affect this MR's own migrations (0183-0185), independently validated end-to-end via the library migrator in an isolated cluster.
+
+## State
+Pushed to branch TASK-399-automatic-retries-latest-flake (commit f9ddf15a). MR !310 opened against dev: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/310. Not merged; task moved to Review pending human/reviewer approval. Task worktree retained until merge per repository workflow.
+<!-- SECTION:FINAL_SUMMARY:END -->
