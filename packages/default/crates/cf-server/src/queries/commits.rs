@@ -283,18 +283,19 @@ pub async fn reset_stuck_commit_evaluations(pool: &PgPool) -> Result<()> {
 /// This will fail if another commit is already in_progress due to the unique constraint
 /// enforced by idx_commits_single_in_progress (migration 0088)
 pub async fn mark_commit_evaluation_started(pool: &PgPool, commit_id: i32) -> Result<()> {
-    sqlx::query!(
+    sqlx::query(
         r#"
         UPDATE commits
         SET 
             evaluation_status = 'in_progress',
             evaluation_started_at = NOW(),
             evaluation_completed_at = NULL,
-            evaluation_attempt_count = COALESCE(evaluation_attempt_count, 0) + 1
+            evaluation_attempt_count = COALESCE(evaluation_attempt_count, 0) + 1,
+            cancellation_requested = FALSE
         WHERE id = $1
         "#,
-        commit_id
     )
+    .bind(commit_id)
     .execute(pool)
     .await
     .map_err(|e| {
@@ -434,13 +435,21 @@ pub async fn mark_commit_evaluation_failed(
             END,
             evaluation_error_message = $2
         WHERE id = $1
+          AND evaluation_status NOT IN ('cancelled', 'cancelling')
+          AND COALESCE(cancellation_requested, FALSE) = FALSE
         RETURNING evaluation_status, evaluation_completed_at
         "#,
     )
     .bind(commit_id)
     .bind(error)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
+
+    let Some(row) = row else {
+        // Row was not updated because the evaluation was cancelled/cancelling
+        // or cancellation was requested.  Do not record a failure.
+        return Ok(());
+    };
 
     let status: &str = row.try_get("evaluation_status")?;
     if status == "failed" {
@@ -881,6 +890,41 @@ pub async fn check_cancellation_requested(pool: &PgPool, commit_id: i32) -> Resu
             .fetch_optional(pool)
             .await?;
     Ok(flag.unwrap_or(false))
+}
+
+/// Atomically finalize a user-requested evaluation cancellation.
+///
+/// Transitions `cancelling` or cancellation-requested commits to `cancelled`,
+/// clears the request flag, and records completion time without touching the
+/// attempt count or setting an error message.
+///
+/// Returns `true` when a transition actually occurred.
+pub async fn finalize_requested_commit_evaluation_cancellation(
+    pool: &PgPool,
+    commit_id: i32,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE commits
+        SET evaluation_status = 'cancelled',
+            cancellation_requested = FALSE,
+            evaluation_completed_at = COALESCE(
+                evaluation_completed_at,
+                NOW()
+            ),
+            evaluation_error_message = NULL
+        WHERE id = $1
+          AND (
+              evaluation_status = 'cancelling'
+              OR cancellation_requested IS TRUE
+          )
+        "#,
+    )
+    .bind(commit_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 /// Clean up partial derivations for a specific commit.

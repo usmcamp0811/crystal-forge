@@ -990,6 +990,54 @@ async fn process_pending_commits(
                     commit.git_commit_hash, e
                 );
 
+                // ── Check for user-requested cancellation FIRST ─────
+                // If the evaluation was cancelled, finalize the cancelled
+                // state atomically and return early — do NOT fall through to
+                // the generic failure handler which would overwrite the
+                // cancelled status with 'pending' or 'failed'.
+                let was_cancelled =
+                    crate::queries::commits::finalize_requested_commit_evaluation_cancellation(
+                        pool,
+                        commit.id,
+                    )
+                    .await?;
+
+                if was_cancelled {
+                    if let Err(cleanup_error) =
+                        crate::queries::commits::cleanup_partial_derivations_for_commit(
+                            pool,
+                            commit.id,
+                        )
+                        .await
+                    {
+                        warn!(
+                            "Failed to clean partial derivations for cancelled commit {}: {}",
+                            commit.id,
+                            cleanup_error,
+                        );
+                    }
+
+                    crate::handlers::api::commits::broadcast_eval_status(
+                        &cf_state,
+                        commit.id,
+                        "cancelled".to_string(),
+                        Some("Evaluation cancelled by user".to_string()),
+                    )
+                    .await;
+
+                    crate::handlers::api::commits::broadcast_eval_log(
+                        &cf_state,
+                        commit.id,
+                        "🚫 Evaluation cancelled by user".to_string(),
+                    )
+                    .await;
+
+                    crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
+
+                    return Ok(());
+                }
+
+                // ── Generic failure (not a cancellation) ────────────
                 // Broadcast failure status
                 crate::handlers::api::commits::broadcast_eval_status(
                     &cf_state,
@@ -1010,6 +1058,7 @@ async fn process_pending_commits(
 
                 // ⬇️ mark FAILED (function will set 'pending' or terminal 'failed'
                 // depending on attempt limit inside your SQL)
+                // Now guarded against overwriting cancelled/cancelling states.
                 if let Err(mark_err) =
                     mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await
                 {
