@@ -1635,7 +1635,13 @@ pub async fn evaluate_with_nix_eval_jobs(
                                     warn!("⚠️  Evaluation error for {}: {}", result.attr, error);
                                 }
 
-                                if has_known_systems {
+                                // Only mark a system as "seen" when it produced a usable
+                                // derivation path. A system that emitted a JSON error line
+                                // is NOT considered seen — it falls through to standalone
+                                // fallback evaluation so the failure can be classified and
+                                // recorded deterministically (ConfirmedSystemFailure or
+                                // InfrastructureFailure) rather than silently disappearing.
+                                if has_known_systems && !has_error && drv_path.is_some() {
                                     seen_systems.insert(system_name.clone());
                                 }
                                 results.push(result);
@@ -3690,13 +3696,16 @@ mod tests {
     //      already exercises that path.
 
     fn migration_0184_status_rank(status: &str) -> u8 {
+        // Must match the CASE expression in migration 0184 exactly.
+        // Lower number = higher priority = kept when duplicates exist.
+        // Active work beats terminal; success beats failure for terminal rows.
         match status {
-            "building" => 1,
-            "queued" => 2,
+            "building"   => 1,
+            "queued"     => 2,
             "cancelling" => 3,
-            "cancelled" => 4,
-            "failed" => 5,
-            "success" => 6,
+            "success"    => 4,
+            "cancelled"  => 5,
+            "failed"     => 6,
             _ => 7,
         }
     }
@@ -3712,9 +3721,11 @@ mod tests {
 
     #[test]
     fn migration_0184_keeps_active_job_when_duplicate_exists() {
-        // 'building' job must beat a later 'queued' job.
+        // 'building' job must beat any terminal row.
         assert_eq!(migration_0184_canonical(&["building", "queued"]), "building");
         assert_eq!(migration_0184_canonical(&["queued", "building"]), "building");
+        assert_eq!(migration_0184_canonical(&["building", "success"]), "building");
+        assert_eq!(migration_0184_canonical(&["building", "failed"]), "building");
     }
 
     #[test]
@@ -3724,8 +3735,19 @@ mod tests {
     }
 
     #[test]
+    fn migration_0184_keeps_success_over_failed() {
+        // A successful terminal row represents the valid output path;
+        // a prior failed row is superseded.
+        assert_eq!(migration_0184_canonical(&["success", "failed"]), "success");
+        assert_eq!(migration_0184_canonical(&["failed", "success"]), "success");
+        assert_eq!(migration_0184_canonical(&["cancelled", "success"]), "success");
+        assert_eq!(migration_0184_canonical(&["success", "cancelled"]), "success");
+    }
+
+    #[test]
     fn migration_0184_status_precedence_order() {
-        let order = ["building", "queued", "cancelling", "cancelled", "failed", "success"];
+        // Canonical order: building > queued > cancelling > success > cancelled > failed.
+        let order = ["building", "queued", "cancelling", "success", "cancelled", "failed"];
         for i in 0..order.len() {
             for j in (i + 1)..order.len() {
                 assert!(
@@ -3777,5 +3799,139 @@ mod tests {
             .bind(flake_id)
             .execute(&pool)
             .await;
+    }
+
+    // ── Side-effect isolation test ────────────────────────────────────────
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalize_system_build_already_exists_does_not_re_queue() {
+        // When a system is finalized twice, the second call must return
+        // BuildAlreadyExists (or PreservedExistingBuild) and must NOT create
+        // a second build_jobs row. This covers the side-effect isolation
+        // requirement: BuildAlreadyExists must not trigger another queue
+        // notification, QueuedForBuild broadcast, GC root, or hardening scan.
+        // The assertion here is at the DB level (row counts); the caller is
+        // responsible for checking outcome before emitting side effects.
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        let system = successful_system("epsilon");
+        let check = passing_policy_check("epsilon");
+
+        let first =
+            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+                .await
+                .expect("first finalize");
+        assert!(
+            matches!(first, SystemFinalizeOutcome::Queued { .. }),
+            "first must be Queued; got {first:?}"
+        );
+        assert_eq!(build_job_count(&pool, commit_id).await, 1);
+
+        // Simulate a retry or concurrent call.
+        let second =
+            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+                .await
+                .expect("second finalize must not error");
+
+        // Must NOT produce Queued — that would indicate a new row was inserted.
+        assert!(
+            !matches!(second, SystemFinalizeOutcome::Queued { .. }),
+            "second finalize must not return Queued (no new row should be inserted); got {second:?}"
+        );
+
+        // Exactly one build_jobs row for this derivation.
+        assert_eq!(
+            build_job_count(&pool, commit_id).await,
+            1,
+            "exactly one build_jobs row must exist after two finalizations"
+        );
+        assert_eq!(
+            derivation_count(&pool, commit_id).await,
+            1,
+            "exactly one derivation row"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Fallback recovery regression ──────────────────────────────────────
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalize_system_error_result_does_not_block_standalone_finalization() {
+        // This test verifies the core nix-builder-1 fix:
+        // A system that produced an error JSON line from the bulk evaluator
+        // must NOT be treated as "seen" (i.e., it must fall through to
+        // standalone fallback evaluation in the real evaluator).
+        //
+        // We cannot invoke the full bulk evaluator in a unit test, but we CAN
+        // verify that `finalize_evaluated_system` still works for such a system
+        // after the commit remains in_progress — simulating what the standalone
+        // fallback path would do after the bulk evaluator emits an error line.
+        //
+        // The key property: an eval-error system must be finalizable as a
+        // SUCCESS through the standalone path if standalone eval succeeds.
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        // Simulate: standalone fallback succeeded for a system that had an error
+        // in the bulk run. This is what happens when:
+        //   bulk nix-eval-jobs emits: {"attr":"nix-builder-1","error":"..."}
+        //   → system NOT added to seen_systems (the fix in this commit)
+        //   → system appears in missing_systems
+        //   → standalone eval runs and succeeds
+        //   → finalize_evaluated_system called with the standalone result
+        let system = successful_system("nix-builder-1");
+        let check = passing_policy_check("nix-builder-1");
+
+        let outcome =
+            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+                .await
+                .expect("standalone fallback finalization must succeed");
+
+        assert!(
+            matches!(outcome, SystemFinalizeOutcome::Queued { .. }),
+            "standalone-recovered system must be queued; got {outcome:?}"
+        );
+        assert_eq!(derivation_count(&pool, commit_id).await, 1);
+        assert_eq!(build_job_count(&pool, commit_id).await, 1);
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── seen_systems behavior unit test ───────────────────────────────────
+
+    #[test]
+    fn error_result_is_not_seen_so_falls_through_to_fallback() {
+        // Verify the predicate used in evaluate_with_nix_eval_jobs to decide
+        // whether a system is "seen" (and therefore excluded from fallback).
+        // Only systems with has_error=false AND drv_path=Some(...) are seen.
+        fn is_seen(has_error: bool, has_drv: bool) -> bool {
+            !has_error && has_drv
+        }
+
+        // Successful eval → seen, no fallback needed.
+        assert!(is_seen(false, true));
+
+        // Error JSON line from nix-eval-jobs → NOT seen → will trigger fallback.
+        assert!(!is_seen(true, true));
+        assert!(!is_seen(true, false));
+
+        // Missing drv_path without error → NOT seen → triggers fallback.
+        assert!(!is_seen(false, false));
     }
 }

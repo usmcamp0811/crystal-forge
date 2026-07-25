@@ -216,9 +216,10 @@ pub async fn create_build_job_for_derivation_tx(
 /// Called immediately after a derivation reaches `DryRunComplete` during evaluation,
 /// so builders can start work without waiting for the full commit to finish evaluating.
 ///
-/// Idempotency: the `NOT EXISTS` guard ensures at most one `build_jobs` row is ever
-/// created per derivation, so calling this multiple times (retries, restarts, or the
-/// post-eval backstop) is safe.
+/// Idempotency: uses `ON CONFLICT (derivation_id) DO NOTHING` to guarantee at most
+/// one `build_jobs` row per derivation. Concurrent callers are safe — the constraint
+/// absorbs races without returning an error, unlike a `NOT EXISTS` subquery which
+/// is non-atomic between the check and the insert.
 ///
 /// Returns `true` if a new job was created, `false` if one already existed.
 pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32) -> Result<bool> {
@@ -251,9 +252,8 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
         )
         WHERE d.id = $1
           AND d.status_id = 5  -- DryRunComplete
-          AND NOT EXISTS (
-              SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = d.id
-          )
+          AND d.cf_agent_enabled = TRUE
+        ON CONFLICT (derivation_id) DO NOTHING
         "#,
         derivation_id
     )
@@ -409,9 +409,9 @@ mod tests {
         );
     }
 
-    /// The per-derivation SQL uses a NOT EXISTS guard identical to the bulk
-    /// create_build_jobs_for_commit function. Both share status_id = 5
-    /// (DryRunComplete) as the eligibility gate.
+    /// The per-derivation SQL uses `ON CONFLICT (derivation_id) DO NOTHING` for
+    /// idempotent insertion, and shares status_id = 5 (DryRunComplete) as the
+    /// eligibility gate with the bulk `create_build_jobs_for_commit` function.
     ///
     /// This test documents the contract so regressions in the SQL predicate are caught.
     #[test]
@@ -466,7 +466,9 @@ mod tests {
         fn is_eligible(d: &MockDerivation) -> bool {
             d.status_id == 5              // DryRunComplete
             && d.cf_agent_enabled == Some(true)  // policy passed
-            && !d.has_existing_job // NOT EXISTS guard
+            // ON CONFLICT DO NOTHING handles existing jobs; has_existing_job
+            // is checked here for documentation of the expected outcome only.
+            && !d.has_existing_job
         }
 
         // Passes all conditions.
