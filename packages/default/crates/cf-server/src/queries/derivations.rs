@@ -354,6 +354,159 @@ pub async fn insert_derivation_with_target(
     Ok(derivation)
 }
 
+/// Outcome of atomically recording a successful evaluation result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuccessfulEvalWrite {
+    /// A new derivation row was inserted directly as DryRunComplete.
+    Inserted { derivation_id: i32 },
+    /// An existing non-build-state row was transitioned to DryRunComplete.
+    /// Callers should enqueue a build job.
+    UpdatedEvaluationState { derivation_id: i32 },
+    /// An existing row was in a build-active state (BuildPending, BuildInProgress,
+    /// BuildComplete, BuildFailed) and was preserved unchanged.
+    /// Callers must NOT enqueue a duplicate build job.
+    PreservedBuildState { derivation_id: i32, status_id: i32 },
+}
+
+/// Atomically record a successful evaluation result for a derivation.
+///
+/// Uses a transaction with `SELECT ... FOR UPDATE` to ensure the status check
+/// and any transition are atomic with respect to concurrent build-worker
+/// transitions — the same pattern as `record_synthetic_eval_failure`.
+///
+/// Permitted state transitions:
+/// - No row → insert directly as DryRunComplete (5)
+/// - DryRunPending (3), DryRunInProgress (4), DryRunFailed (6),
+///   DryRunComplete (5) → DryRunComplete (5), with all fields updated
+///   (clears stale error_message, sets cf_agent_enabled, path, etc.)
+/// - BuildPending (7), BuildInProgress (8), BuildComplete (10),
+///   BuildFailed (12) → preserved unchanged (do NOT overwrite active/done builds)
+///
+/// Returns the derivation id and outcome so the caller can decide whether
+/// to enqueue a build job (only for Inserted and UpdatedEvaluationState).
+pub async fn record_successful_eval_result(
+    pool: &PgPool,
+    commit_id: Option<i32>,
+    derivation_name: &str,
+    derivation_type: &str,
+    derivation_target: Option<&str>,
+    derivation_path: &str,
+    expected_store_path: Option<&str>,
+    cf_agent_enabled: Option<bool>,
+) -> Result<SuccessfulEvalWrite> {
+    let mut tx = pool.begin().await?;
+
+    // Attempt an atomic insert as DryRunComplete. ON CONFLICT DO NOTHING means
+    // an existing row is left unchanged and no row is returned, letting us fall
+    // through to the SELECT FOR UPDATE path.
+    let insert_result = sqlx::query_as::<_, (i32,)>(
+        r#"
+        INSERT INTO derivations (
+            commit_id,
+            derivation_type,
+            derivation_name,
+            derivation_target,
+            status_id,
+            attempt_count,
+            derivation_path,
+            expected_store_path,
+            cf_agent_enabled,
+            error_message,
+            completed_at,
+            scheduled_at
+        )
+        VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, NULL, NOW(), NOW())
+        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
+        DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(commit_id)
+    .bind(derivation_type)
+    .bind(derivation_name)
+    .bind(derivation_target)
+    .bind(EvaluationStatus::DryRunComplete.as_id())
+    .bind(derivation_path)
+    .bind(expected_store_path)
+    .bind(cf_agent_enabled)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let result = match insert_result {
+        Some((id,)) => SuccessfulEvalWrite::Inserted { derivation_id: id },
+        None => {
+            // Row already exists. Lock it and apply the state matrix.
+            let existing = sqlx::query_as::<_, (i32, i32)>(
+                r#"
+                SELECT id, status_id
+                FROM derivations
+                WHERE COALESCE(commit_id, -1) = COALESCE($1, -1)
+                  AND derivation_name = $2
+                  AND derivation_type = $3
+                FOR UPDATE
+                "#,
+            )
+            .bind(commit_id)
+            .bind(derivation_name)
+            .bind(derivation_type)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            match existing {
+                Some((id, status_id)) => match status_id {
+                    // Build-active or build-terminal: preserve everything.
+                    7 | 8 | 10 | 12 => SuccessfulEvalWrite::PreservedBuildState {
+                        derivation_id: id,
+                        status_id,
+                    },
+                    // DryRunPending (3), DryRunInProgress (4), DryRunFailed (6),
+                    // DryRunComplete (5): update to DryRunComplete with fresh data,
+                    // clearing any stale error.
+                    _ => {
+                        sqlx::query(
+                            r#"
+                            UPDATE derivations
+                            SET status_id = $1,
+                                derivation_path = $2,
+                                derivation_target = COALESCE($3, derivation_target),
+                                expected_store_path = $4,
+                                cf_agent_enabled = $5,
+                                error_message = NULL,
+                                completed_at = NOW(),
+                                evaluation_duration_ms =
+                                    EXTRACT(EPOCH FROM (NOW() - COALESCE(started_at, scheduled_at))) * 1000
+                            WHERE id = $6
+                            "#,
+                        )
+                        .bind(EvaluationStatus::DryRunComplete.as_id())
+                        .bind(derivation_path)
+                        .bind(derivation_target)
+                        .bind(expected_store_path)
+                        .bind(cf_agent_enabled)
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await?;
+
+                        SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id: id }
+                    }
+                },
+                None => {
+                    // Row disappeared between our INSERT and the SELECT — should not
+                    // happen in practice, but bail rather than silently dropping data.
+                    anyhow::bail!(
+                        "Concurrent race: row disappeared after INSERT ON CONFLICT DO NOTHING \
+                         for {}",
+                        derivation_name
+                    );
+                }
+            }
+        }
+    };
+
+    tx.commit().await?;
+    Ok(result)
+}
+
 // Convenience function for the common case with a commit
 pub async fn insert_derivation_for_commit(
     pool: &PgPool,
@@ -2257,4 +2410,292 @@ pub async fn get_derivation_id_by_store_path(
             .fetch_optional(pool)
             .await?;
     Ok(id)
+}
+
+// ── Derivation state-machine regression tests ────────────────────────────────
+//
+// Tests for record_successful_eval_result covering the build-state-preservation
+// matrix (P1-2 fix).  Requires an isolated database:
+//
+//   DATABASE_URL=postgres://crystal_forge:password@localhost:3042/crystal_forge \
+//     cargo test -p cf-server --lib queries::derivations::tests \
+//     -- --ignored --test-threads=1
+
+#[cfg(test)]
+mod tests {
+    use super::{record_successful_eval_result, record_synthetic_eval_failure, SuccessfulEvalWrite};
+    use sqlx::PgPool;
+
+    async fn test_pool() -> PgPool {
+        PgPool::connect(
+            &std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"),
+        )
+        .await
+        .expect("failed to connect to test database")
+    }
+
+    async fn insert_throwaway_flake(pool: &PgPool) -> i32 {
+        sqlx::query_scalar::<_, i32>(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!(
+            "drv-test-flake-{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+        .bind(format!(
+            "https://git.example/drv-test-{}.git",
+            uuid::Uuid::new_v4().simple()
+        ))
+        .fetch_one(pool)
+        .await
+        .expect("failed to insert test flake")
+    }
+
+    async fn insert_throwaway_commit(pool: &PgPool, flake_id: i32) -> i32 {
+        sqlx::query_scalar::<_, i32>(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) \
+             VALUES ($1, $2, NOW()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(uuid::Uuid::new_v4().simple().to_string())
+        .fetch_one(pool)
+        .await
+        .expect("failed to insert test commit")
+    }
+
+    // ── Test A: successful eval inserts a new DryRunComplete row ─────────────
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn successful_eval_inserts_new_row_as_dry_run_complete() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let name = format!("sys-insert-{}", uuid::Uuid::new_v4().simple());
+
+        let result = record_successful_eval_result(
+            &pool,
+            Some(commit_id),
+            &name,
+            "nixos",
+            Some("/nix/store/fake.target"),
+            "/nix/store/fake.drv",
+            None,
+            Some(true),
+        )
+        .await
+        .expect("record_successful_eval_result should not error");
+
+        assert!(
+            matches!(result, SuccessfulEvalWrite::Inserted { .. }),
+            "first write must be Inserted"
+        );
+
+        let status: i32 =
+            sqlx::query_scalar("SELECT status_id FROM derivations WHERE id = $1")
+                .bind(match result {
+                    SuccessfulEvalWrite::Inserted { derivation_id } => derivation_id,
+                    _ => unreachable!(),
+                })
+                .fetch_one(&pool)
+                .await
+                .expect("query should succeed");
+        assert_eq!(status, 5, "new row must be DryRunComplete (5)");
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test B: successful eval preserves BuildPending (7) ───────────────────
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn successful_eval_preserves_build_pending() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let name = format!("sys-bp-{}", uuid::Uuid::new_v4().simple());
+
+        // Insert row then manually set BuildPending (7).
+        record_successful_eval_result(
+            &pool,
+            Some(commit_id),
+            &name,
+            "nixos",
+            None,
+            "/nix/store/fake.drv",
+            None,
+            Some(true),
+        )
+        .await
+        .expect("insert should succeed");
+
+        sqlx::query("UPDATE derivations SET status_id = 7 WHERE COALESCE(commit_id,-1) = $1 AND derivation_name = $2 AND derivation_type = 'nixos'")
+            .bind(commit_id)
+            .bind(&name)
+            .execute(&pool)
+            .await
+            .expect("force to BuildPending");
+
+        // Retry eval — must NOT overwrite BuildPending.
+        let result = record_successful_eval_result(
+            &pool,
+            Some(commit_id),
+            &name,
+            "nixos",
+            None,
+            "/nix/store/updated.drv",
+            None,
+            Some(true),
+        )
+        .await
+        .expect("retry should not error");
+
+        assert!(
+            matches!(result, SuccessfulEvalWrite::PreservedBuildState { status_id: 7, .. }),
+            "BuildPending must be preserved on retry; got {:?}",
+            result
+        );
+
+        let status: i32 = sqlx::query_scalar(
+            "SELECT status_id FROM derivations WHERE COALESCE(commit_id,-1) = $1 AND derivation_name = $2 AND derivation_type = 'nixos'",
+        )
+        .bind(commit_id)
+        .bind(&name)
+        .fetch_one(&pool)
+        .await
+        .expect("query should succeed");
+        assert_eq!(status, 7, "status must remain BuildPending (7)");
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test C: successful eval preserves BuildInProgress (8) ────────────────
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn successful_eval_preserves_build_in_progress() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let name = format!("sys-bip-{}", uuid::Uuid::new_v4().simple());
+
+        record_successful_eval_result(
+            &pool,
+            Some(commit_id),
+            &name,
+            "nixos",
+            None,
+            "/nix/store/fake.drv",
+            None,
+            Some(true),
+        )
+        .await
+        .expect("insert should succeed");
+
+        sqlx::query("UPDATE derivations SET status_id = 8 WHERE COALESCE(commit_id,-1) = $1 AND derivation_name = $2 AND derivation_type = 'nixos'")
+            .bind(commit_id)
+            .bind(&name)
+            .execute(&pool)
+            .await
+            .expect("force to BuildInProgress");
+
+        let result = record_successful_eval_result(
+            &pool,
+            Some(commit_id),
+            &name,
+            "nixos",
+            None,
+            "/nix/store/updated.drv",
+            None,
+            Some(true),
+        )
+        .await
+        .expect("retry should not error");
+
+        assert!(
+            matches!(result, SuccessfulEvalWrite::PreservedBuildState { status_id: 8, .. }),
+            "BuildInProgress must be preserved; got {:?}",
+            result
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test D: successful eval clears stale error after synthetic failure ────
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn successful_eval_clears_stale_error_from_synthetic_failure() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let name = format!("sys-stale-err-{}", uuid::Uuid::new_v4().simple());
+
+        // First attempt: synthetic failure.
+        record_synthetic_eval_failure(
+            &pool,
+            Some(commit_id),
+            &name,
+            "nixos",
+            None,
+            "nix-eval-jobs silently dropped this system",
+        )
+        .await
+        .expect("synthetic failure should not error");
+
+        // Verify it has an error_message and status 6.
+        let (status, err): (i32, Option<String>) = sqlx::query_as(
+            "SELECT status_id, error_message FROM derivations WHERE COALESCE(commit_id,-1) = $1 AND derivation_name = $2 AND derivation_type = 'nixos'",
+        )
+        .bind(commit_id)
+        .bind(&name)
+        .fetch_one(&pool)
+        .await
+        .expect("query should succeed");
+        assert_eq!(status, 6, "initial status must be DryRunFailed (6)");
+        assert!(err.is_some(), "synthetic failure must set error_message");
+
+        // Second attempt: successful eval.
+        let result = record_successful_eval_result(
+            &pool,
+            Some(commit_id),
+            &name,
+            "nixos",
+            Some("/nix/store/target"),
+            "/nix/store/recovered.drv",
+            None,
+            Some(true),
+        )
+        .await
+        .expect("recovery should not error");
+
+        assert!(
+            matches!(result, SuccessfulEvalWrite::UpdatedEvaluationState { .. }),
+            "recovery from DryRunFailed must be UpdatedEvaluationState; got {:?}",
+            result
+        );
+
+        let (status, err, agent): (i32, Option<String>, Option<bool>) = sqlx::query_as(
+            "SELECT status_id, error_message, cf_agent_enabled FROM derivations WHERE COALESCE(commit_id,-1) = $1 AND derivation_name = $2 AND derivation_type = 'nixos'",
+        )
+        .bind(commit_id)
+        .bind(&name)
+        .fetch_one(&pool)
+        .await
+        .expect("query should succeed");
+
+        assert_eq!(status, 5, "recovered row must be DryRunComplete (5)");
+        assert!(err.is_none(), "stale error_message must be cleared on recovery");
+        assert_eq!(agent, Some(true), "cf_agent_enabled must be persisted");
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
 }

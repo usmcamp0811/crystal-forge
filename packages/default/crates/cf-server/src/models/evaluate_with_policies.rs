@@ -38,9 +38,9 @@ use crate::models::flakes::Flake;
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::commits_artifacts::CachedSystemsState;
 use crate::queries::derivations::{
-    insert_derivation_with_target, mark_derivation_dry_run_complete, record_synthetic_eval_failure,
-    set_closure_counts, set_expected_store_path, update_derivation_status, EvaluationStatus,
-    SyntheticFailureWrite,
+    record_successful_eval_result, record_synthetic_eval_failure,
+    set_closure_counts, update_derivation_status, EvaluationStatus,
+    SuccessfulEvalWrite, SyntheticFailureWrite,
 };
 use crate::queries::systems::list_configuration_names_for_flake;
 use crate::queue::QueueNotifier;
@@ -848,7 +848,17 @@ pub async fn evaluate_with_nix_eval_jobs(
                                     }
                                 }
 
-                                // Insert derivation with policy check results
+                                // Persist the evaluation result atomically.
+                                //
+                                // For a successful result (!has_error && drv_path present),
+                                // use the single-transaction record_successful_eval_result which
+                                // atomically inserts or updates the row to DryRunComplete, clears
+                                // any stale error, and sets all evaluation fields — without ever
+                                // overwriting an active build state (BuildPending/BuildInProgress).
+                                //
+                                // For an error result, just log. The derivation row for errored
+                                // systems is not created here; the fallback phase or the synthetic-
+                                // failure path handles it.
                                 if let Some(system_name) = result.attr_path.last() {
                                     let derivation_target = build_agent_target(
                                         &flake.repo_url,
@@ -856,61 +866,53 @@ pub async fn evaluate_with_nix_eval_jobs(
                                         system_name,
                                     );
 
-                                    match insert_derivation_with_target(
-                                        pool,
-                                        Some(commit),
-                                        system_name,
-                                        "nixos",
-                                        Some(&derivation_target),
-                                        cf_agent_enabled,
-                                    ).await {
-                                        Ok(deriv) => {
-                                            debug!("✅ Inserted/updated {} (id={}, CF agent: {:?})",
-                                                system_name, deriv.id, cf_agent_enabled);
+                                    if !has_error && drv_path.is_some() {
+                                        let drv = drv_path.clone().unwrap();
 
-                                            // Mark DryRunComplete and (if policy passed) enqueue.
-                                            // Conditions to mark DryRunComplete:
-                                            //   1. No evaluation error
-                                            //   2. Has a valid .drv path
-                                            // Additional condition to enqueue for build:
-                                            //   3. cf_agent_enabled == Some(true) (policy passed)
-                                            //      Policy-failed derivations are marked DryRunComplete
-                                            //      so their eval result is recorded, but must NOT be
-                                            //      queued for building.
-                                            if !has_error && drv_path.is_some() {
-                                                let drv = drv_path.clone().unwrap();
-                                                evaluated_derivations.push((deriv.id, drv.clone()));
-                                                debug!("📋 Queued {} for DryRunComplete update", system_name);
+                                        match record_successful_eval_result(
+                                            pool,
+                                            Some(commit.id),
+                                            system_name,
+                                            "nixos",
+                                            Some(&derivation_target),
+                                            &drv,
+                                            expected_store_path.as_deref(),
+                                            cf_agent_enabled,
+                                        ).await {
+                                            Ok(write_outcome) => {
+                                                let deriv_id = match &write_outcome {
+                                                    SuccessfulEvalWrite::Inserted { derivation_id }
+                                                    | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
+                                                    | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => *derivation_id,
+                                                };
 
-                                                match mark_derivation_dry_run_complete(pool, deriv.id, &drv).await {
-                                                    Ok(_) => {
-                                                        match crate::builder::create_drv_gc_root(&drv, deriv.id).await {
+                                                debug!("✅ Persisted {} (id={}, outcome={:?}, CF agent: {:?})",
+                                                    system_name, deriv_id, write_outcome, cf_agent_enabled);
+
+                                                // expected_store_path was already written atomically by
+                                                // record_successful_eval_result, so no separate call needed.
+
+                                                match &write_outcome {
+                                                    SuccessfulEvalWrite::Inserted { .. }
+                                                    | SuccessfulEvalWrite::UpdatedEvaluationState { .. } => {
+                                                        // Row is now DryRunComplete — root the drv, count
+                                                        // closure, trigger hardening scan, and (if policy
+                                                        // passed) enqueue a build job.
+                                                        evaluated_derivations.push((deriv_id, drv.clone()));
+
+                                                        match crate::builder::create_drv_gc_root(&drv, deriv_id).await {
                                                             Ok(true) => debug!(
                                                                 "📌 Rooted evaluated drv for {} (id={}, drv={})",
-                                                                system_name, deriv.id, drv
+                                                                system_name, deriv_id, drv
                                                             ),
                                                             Ok(false) => warn!(
                                                                 "⚠️  Evaluated drv for {} (id={}, drv={}) is not valid in the server store; remote builders may not be able to import it",
-                                                                system_name, deriv.id, drv
+                                                                system_name, deriv_id, drv
                                                             ),
                                                             Err(e) => warn!(
                                                                 "⚠️  Failed to create GC root for evaluated drv {} (id={}): {}",
-                                                                drv, deriv.id, e
+                                                                drv, deriv_id, e
                                                             ),
-                                                        }
-
-                                                        if let Some(expected_path) = expected_store_path.as_deref() {
-                                                            if let Err(e) = set_expected_store_path(pool, deriv.id, expected_path).await {
-                                                                warn!(
-                                                                    "⚠️  Failed to persist expected_store_path for {} (id={}): {}",
-                                                                    system_name, deriv.id, e
-                                                                );
-                                                            }
-                                                        } else {
-                                                            warn!(
-                                                                "⚠️  Could not resolve expected_store_path for {} (id={}) drv={}",
-                                                                system_name, deriv.id, drv
-                                                            );
                                                         }
 
                                                         // Count closure package totals asynchronously so the
@@ -918,7 +920,6 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                         {
                                                             let pool2 = pool.clone();
                                                             let drv2 = drv.clone();
-                                                            let deriv_id = deriv.id;
                                                             let sname = system_name.clone();
                                                             let limiter = closure_count_limiter();
                                                             info!(
@@ -958,13 +959,11 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                         }
 
                                                         // ── AUTOMATIC HARDENING SCAN ─────────────────────
-                                                        // Trigger hardening scan automatically after successful eval
-                                                        // Note: trigger_immediate_hardening_scan spawns its own background task
                                                         match trigger_immediate_hardening_scan(
                                                             pool.clone(),
-                                                            deriv.id,
+                                                            deriv_id,
                                                             &flake_ref,
-                                                            &system_name,
+                                                            system_name,
                                                         )
                                                         .await
                                                         {
@@ -992,11 +991,11 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                         // ── INCREMENTAL BUILD QUEUE ──────────────────────
                                                         // Only enqueue if policy passed.
                                                         if cf_agent_enabled == Some(true) {
-                                                            match enqueue_build_job_for_derivation(pool, deriv.id).await {
+                                                            match enqueue_build_job_for_derivation(pool, deriv_id).await {
                                                                 Ok(true) => {
                                                                     info!(
                                                                         "🚀 Incrementally queued build job for {} (derivation {})",
-                                                                        system_name, deriv.id
+                                                                        system_name, deriv_id
                                                                     );
                                                                     if let Some(state) = cf_state {
                                                                         broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
@@ -1010,7 +1009,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                                 Ok(false) => {
                                                                     debug!(
                                                                         "Build job for derivation {} already existed (idempotent); skipping",
-                                                                        deriv.id
+                                                                        deriv_id
                                                                     );
                                                                 }
                                                                 Err(e) => {
@@ -1028,23 +1027,26 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                         }
                                                         // ─────────────────────────────────────────────────
                                                     }
-                                                    Err(e) => {
-                                                        warn!(
-                                                            "⚠️  Failed to mark derivation {} as DryRunComplete (incremental): {}",
-                                                            deriv.id, e
+                                                    SuccessfulEvalWrite::PreservedBuildState { status_id, .. } => {
+                                                        // Row is in an active or terminal build state.
+                                                        // Do NOT enqueue a duplicate build job; the active
+                                                        // worker owns this row.
+                                                        debug!(
+                                                            "⏭️  {} (id={}) already in build state {} — not re-enqueuing",
+                                                            system_name, deriv_id, status_id
                                                         );
                                                     }
                                                 }
-                                            } else {
-                                                if has_error {
-                                                    warn!("⚠️  {} has evaluation error, not marking complete", system_name);
-                                                }
-                                                if drv_path.is_none() {
-                                                    warn!("⚠️  {} missing drv_path, not marking complete", system_name);
-                                                }
                                             }
+                                            Err(e) => warn!("⚠️  Failed to persist successful eval result for {}: {}", system_name, e),
                                         }
-                                        Err(e) => warn!("⚠️  Failed to insert {}: {}", system_name, e),
+                                    } else {
+                                        if has_error {
+                                            warn!("⚠️  {} has evaluation error, not marking complete", system_name);
+                                        }
+                                        if drv_path.is_none() {
+                                            warn!("⚠️  {} missing drv_path, not marking complete", system_name);
+                                        }
                                     }
                                 }
 
@@ -1846,51 +1848,69 @@ pub async fn evaluate_with_mock_eval_jobs(
 
         let policy_failed = should_mock_policy_fail(systems.len(), idx);
 
-        let derivation = insert_derivation_with_target(
+        let cf_agent_enabled = Some(!policy_failed);
+        let write_outcome = record_successful_eval_result(
             pool,
-            Some(commit),
+            Some(commit.id),
             system_name,
             "nixos",
             Some(&derivation_target),
-            Some(!policy_failed),
+            &drv_path,
+            None, // no expected_store_path for mock evals
+            cf_agent_enabled,
         )
         .await?;
 
-        mark_derivation_dry_run_complete(pool, derivation.id, &drv_path).await?;
+        let deriv_id = match &write_outcome {
+            SuccessfulEvalWrite::Inserted { derivation_id }
+            | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
+            | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => *derivation_id,
+        };
 
-        // Incremental enqueue: queue build job immediately for passing mock systems.
+        // Incremental enqueue: queue build job for passing mock systems that were
+        // freshly inserted or updated (not already in an active build state).
         if !policy_failed {
-            match enqueue_build_job_for_derivation(pool, derivation.id).await {
-                Ok(true) => {
-                    info!(
-                        "🚀 [mock] Incrementally queued build job for {} (derivation {})",
-                        system_name, derivation.id
-                    );
-                    if let Some(state) = cf_state {
-                        broadcast_and_persist_eval_log(
-                            pool,
-                            Some(state),
-                            commit.id,
-                            &mut log_sequence,
-                            format!("🚀 {}: build job queued incrementally (mock)", system_name),
-                        )
-                        .await;
-                    }
-                    if let Some(qn) = queue_notifier {
-                        qn.notify_build_queue();
-                    }
-                }
-                Ok(false) => {
+            match &write_outcome {
+                SuccessfulEvalWrite::PreservedBuildState { status_id, .. } => {
                     debug!(
-                        "[mock] Build job for derivation {} already existed; skipping",
-                        derivation.id
+                        "[mock] {} (id={}) already in build state {} — not re-enqueuing",
+                        system_name, deriv_id, status_id
                     );
                 }
-                Err(e) => {
-                    warn!(
-                        "⚠️  [mock] Failed to incrementally enqueue build job for {}: {}",
-                        system_name, e
-                    );
+                _ => {
+                    match enqueue_build_job_for_derivation(pool, deriv_id).await {
+                        Ok(true) => {
+                            info!(
+                                "🚀 [mock] Incrementally queued build job for {} (derivation {})",
+                                system_name, deriv_id
+                            );
+                            if let Some(state) = cf_state {
+                                broadcast_and_persist_eval_log(
+                                    pool,
+                                    Some(state),
+                                    commit.id,
+                                    &mut log_sequence,
+                                    format!("🚀 {}: build job queued incrementally (mock)", system_name),
+                                )
+                                .await;
+                            }
+                            if let Some(qn) = queue_notifier {
+                                qn.notify_build_queue();
+                            }
+                        }
+                        Ok(false) => {
+                            debug!(
+                                "[mock] Build job for derivation {} already existed; skipping",
+                                deriv_id
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "⚠️  [mock] Failed to incrementally enqueue build job for {}: {}",
+                                system_name, e
+                            );
+                        }
+                    }
                 }
             }
         }
