@@ -17,8 +17,11 @@
 ALTER TABLE commit_artifacts_cache
 ADD COLUMN nixos_configurations_populated BOOLEAN NOT NULL DEFAULT TRUE;
 
--- Existing rows that were written by mark_commit_artifact_hydration_failed
--- have nixos_configurations = '{}' and populated_at set. There is no reliable
--- way to distinguish them from a legitimately empty-but-successful discovery
--- at this point, so they keep the default TRUE. Only future hydration failures
--- will set FALSE, making the distinction meaningful going forward.
+-- Backfill existing rows that have empty arrays for both columns.
+-- These were written by mark_commit_artifact_hydration_failed prior to the
+-- addition of nixos_configurations_populated, and are indistinguishable from
+-- a legitimately empty discovery without this heuristic.
+UPDATE commit_artifacts_cache
+SET nixos_configurations_populated = FALSE
+WHERE COALESCE(cardinality(nixos_configurations), 0) = 0
+  AND COALESCE(cardinality(changed_files), 0) = 0;

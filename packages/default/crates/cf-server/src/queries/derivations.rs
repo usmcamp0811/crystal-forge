@@ -90,87 +90,114 @@ pub async fn record_synthetic_eval_failure(
 ) -> Result<SyntheticFailureWrite> {
     let mut tx = pool.begin().await?;
 
-    // Lock the row if it exists.
-    let existing = sqlx::query_as::<_, (i32, i32)>(
+    // Atomically try to insert a new row as DryRunFailed. If the row already
+    // exists (concurrent insert won), ON CONFLICT DO NOTHING returns no row
+    // and we fall through to the existing-row path below. This avoids the
+    // TOCTOU race between SELECT ... FOR UPDATE (which sees no row) and the
+    // subsequent INSERT (which conflicts with a concurrent insert).
+    let insert_result = sqlx::query_as::<_, (i32, i32)>(
         r#"
-        SELECT id, status_id
-        FROM derivations
-        WHERE COALESCE(commit_id, -1) = COALESCE($1, -1)
-          AND derivation_name = $2
-          AND derivation_type = $3
-        FOR UPDATE
+        INSERT INTO derivations (
+            commit_id,
+            derivation_type,
+            derivation_name,
+            derivation_target,
+            status_id,
+            attempt_count,
+            error_message,
+            completed_at
+        )
+        VALUES ($1, $2, $3, $4, $5, 0, $6, NOW())
+        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
+        DO NOTHING
+        RETURNING id, status_id
         "#,
     )
     .bind(commit_id)
-    .bind(derivation_name)
     .bind(derivation_type)
+    .bind(derivation_name)
+    .bind(derivation_target)
+    .bind(EvaluationStatus::DryRunFailed.as_id())
+    .bind(error_message)
     .fetch_optional(&mut *tx)
     .await?;
 
-    let result = match existing {
+    let result = match insert_result {
+        Some((id, _status_id)) => {
+            // We successfully inserted the row. Since ON CONFLICT DO NOTHING
+            // suppresses the conflict error, RETURNING only emits a row when
+            // an actual insert happened.
+            SyntheticFailureWrite::Inserted {
+                derivation_id: id,
+            }
+        }
         None => {
-            // No row — insert directly as DryRunFailed.
-            let row = sqlx::query_as::<_, (i32, i32)>(
+            // Row already exists (inserted concurrently by another transaction).
+            // Lock it with FOR UPDATE (waits for the concurrent inserter to
+            // commit) then check whether we need to transition the status.
+            let existing = sqlx::query_as::<_, (i32, i32)>(
                 r#"
-                INSERT INTO derivations (
-                    commit_id,
-                    derivation_type,
-                    derivation_name,
-                    derivation_target,
-                    status_id,
-                    attempt_count,
-                    error_message,
-                    completed_at
-                )
-                VALUES ($1, $2, $3, $4, $5, 0, $6, NOW())
-                RETURNING id, status_id
+                SELECT id, status_id
+                FROM derivations
+                WHERE COALESCE(commit_id, -1) = COALESCE($1, -1)
+                  AND derivation_name = $2
+                  AND derivation_type = $3
+                FOR UPDATE
                 "#,
             )
             .bind(commit_id)
-            .bind(derivation_type)
             .bind(derivation_name)
-            .bind(derivation_target)
-            .bind(EvaluationStatus::DryRunFailed.as_id())
-            .bind(error_message)
-            .fetch_one(&mut *tx)
+            .bind(derivation_type)
+            .fetch_optional(&mut *tx)
             .await?;
 
-            SyntheticFailureWrite::Inserted {
-                derivation_id: row.0,
-            }
-        }
-        Some((id, status_id)) => match status_id {
-            3 | 4 => {
-                // DryRunPending or DryRunInProgress → DryRunFailed.
-                // Also normalize stale evaluation fields (clear them).
-                sqlx::query(
-                    r#"
-                    UPDATE derivations
-                    SET status_id = $1,
-                        error_message = $2,
-                        completed_at = NOW(),
-                        derivation_path = NULL,
-                        store_path = NULL,
-                        expected_store_path = NULL,
-                        cf_agent_enabled = NULL
-                    WHERE id = $3
-                    "#,
-                )
-                .bind(EvaluationStatus::DryRunFailed.as_id())
-                .bind(error_message)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            match existing {
+                Some((id, status_id)) => match status_id {
+                    3 | 4 => {
+                        // DryRunPending or DryRunInProgress → DryRunFailed.
+                        // Also normalize stale evaluation fields (clear them).
+                        sqlx::query(
+                            r#"
+                            UPDATE derivations
+                            SET status_id = $1,
+                                error_message = $2,
+                                completed_at = NOW(),
+                                derivation_path = NULL,
+                                store_path = NULL,
+                                expected_store_path = NULL,
+                                cf_agent_enabled = NULL
+                            WHERE id = $3
+                            "#,
+                        )
+                        .bind(EvaluationStatus::DryRunFailed.as_id())
+                        .bind(error_message)
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await?;
 
-                SyntheticFailureWrite::UpdatedPendingEvaluation {
-                    derivation_id: id,
+                        SyntheticFailureWrite::UpdatedPendingEvaluation {
+                            derivation_id: id,
+                        }
+                    }
+                    _ => {
+                        // All other statuses — preserve unchanged.
+                        SyntheticFailureWrite::PreservedExisting {
+                            derivation_id: id,
+                            status_id,
+                        }
+                    }
+                },
+                None => {
+                    // This should not happen — the CONFLICT proved someone else
+                    // inserted, so the row must exist. Defensively bail.
+                    anyhow::bail!(
+                        "Concurrent race: row disappeared after INSERT ON CONFLICT DO NOTHING \
+                         for {}",
+                        derivation_name
+                    );
                 }
             }
-            _ => {
-                // All other statuses — preserve unchanged.
-                SyntheticFailureWrite::PreservedExisting { derivation_id: id, status_id }
-            }
-        },
+        }
     };
 
     tx.commit().await?;

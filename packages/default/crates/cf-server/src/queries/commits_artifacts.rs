@@ -47,11 +47,12 @@ pub async fn upsert_commit_artifact_cache(
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO commit_artifacts_cache (commit_id, nixos_configurations, changed_files, populated_at)
-        VALUES ($1, $2, $3, NOW())
+        INSERT INTO commit_artifacts_cache (commit_id, nixos_configurations, changed_files, nixos_configurations_populated, populated_at)
+        VALUES ($1, $2, $3, TRUE, NOW())
         ON CONFLICT (commit_id) DO UPDATE
         SET nixos_configurations = EXCLUDED.nixos_configurations,
             changed_files = EXCLUDED.changed_files,
+            nixos_configurations_populated = TRUE,
             populated_at = NOW()
         "#,
     )
