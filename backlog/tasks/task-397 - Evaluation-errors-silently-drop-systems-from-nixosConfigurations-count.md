@@ -4,7 +4,7 @@ title: Evaluation errors silently drop systems from nixosConfigurations count
 status: In Progress
 assignee: []
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-25 20:20'
+updated_date: '2026-07-25 21:49'
 labels:
   - evaluator
   - reporting
@@ -165,4 +165,25 @@ Verification from this pass:
 Blocked/partial verification:
 - `nix develop -c cargo sqlx migrate run --source migrations` against the existing local dev DB still fails before the new migration at migration 182 because `cves.fleet_relevant_since` already exists; did not reset or destructively repair that DB.
 - Attempted a scratch DB for ignored DB tests, but local DB role lacks CREATE DATABASE permission, so ignored `finalize_system_` tests remain unrun in this pass. Earlier failure mode was the expected missing unique constraint before migration 0184 is applied.
+
+Commit 5613786b pushed to MR !309.
+
+Changes:
+- Migration 0184 rewritten to use status-precedence deduplication (building > queued > cancelling > cancelled > failed > success) rather than oldest-first heuristic. Applied to dev DB: deleted 310 duplicate build_jobs rows, created unique index.
+- 9 new ignored DB regression tests covering: agent-disabled no-queue, multiple strict failures no-queue, cancellation after first system queued (first job survives), broken+healthy isolation (healthy queued before commit finalize, broken recorded, commit completes), retry idempotency via ON CONFLICT, and migration_0184 unique-index idempotency.
+- 3 pure-Rust unit tests for migration 0184 status ordering (run without DB).
+- State-machine CI script extended to run finalize_system_ and migration_0184_ ignored test groups.
+
+Local verification (commit 5613786b):
+- cargo check -p cf-server --all-targets: exit 0
+- cargo test …::tests --lib: 10 passed, 14 ignored
+- cargo test …::tests --lib -- --ignored --test-threads=1: 14 passed
+- cargo sqlx prepare --check -- --all-targets: exit 0
+- nix build .#packages.x86_64-linux.server --no-link: exit 0
+- nix build .#devScripts.state-machine-test --no-link: exit 0
+- git diff --check: exit 0
+
+Not yet verified locally (requires clean CI DB):
+- Full state-machine-test process-compose run (port conflict with dev DB on port 3042).
+- queries::commits::tests::stale_cancellation_finalizer_does_not_affect_newer_attempt: pre-existing dev DB pollution (commit 697 stuck in_progress); unrelated to these changes; passes on clean CI DB.
 <!-- SECTION:NOTES:END -->
