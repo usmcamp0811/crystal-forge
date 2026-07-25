@@ -200,6 +200,9 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
         BuildQueueItem {
             job_id: None,
             system_id: None,
+            attempt_number: 1,
+            flake_id: Some(1),
+            is_latest_per_flake: true,
             hostname: "web-server-1".to_string(),
             flake_name: "infrastructure".to_string(),
             commit_hash: "a1b2c3d".to_string(),
@@ -219,6 +222,9 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
         BuildQueueItem {
             job_id: None,
             system_id: None,
+            attempt_number: 1,
+            flake_id: Some(1),
+            is_latest_per_flake: false,
             hostname: "db-primary".to_string(),
             flake_name: "infrastructure".to_string(),
             commit_hash: "f7e8d9c".to_string(),
@@ -238,6 +244,9 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
         BuildQueueItem {
             job_id: None,
             system_id: None,
+            attempt_number: 1,
+            flake_id: Some(2),
+            is_latest_per_flake: true,
             hostname: "staging-app".to_string(),
             flake_name: "web-services".to_string(),
             commit_hash: "b2c3d4e".to_string(),
@@ -257,6 +266,9 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
         BuildQueueItem {
             job_id: None,
             system_id: None,
+            attempt_number: 1,
+            flake_id: Some(3),
+            is_latest_per_flake: true,
             hostname: "production-worker-node-with-very-long-hostname".to_string(),
             flake_name: "monitoring-stack".to_string(),
             commit_hash: "c3d4e5f".to_string(),
@@ -276,6 +288,9 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
         BuildQueueItem {
             job_id: None,
             system_id: None,
+            attempt_number: 1,
+            flake_id: Some(4),
+            is_latest_per_flake: true,
             hostname: "dev-machine".to_string(),
             flake_name: "development".to_string(),
             commit_hash: "d4e5f6a".to_string(),

@@ -938,6 +938,25 @@ body {
   background: var(--cf-hover-bg);
 }
 
+.btn-ghost.active-filter,
+.btn-ghost[aria-pressed="true"] {
+  color: var(--cf-amber);
+  border-color: color-mix(in oklab, var(--cf-amber) 55%, var(--cf-card-border));
+  background: var(--cf-amber-bg);
+}
+
+.latest-star {
+  color: var(--cf-amber);
+  flex-shrink: 0;
+}
+
+.commit-latest {
+  color: var(--cf-amber) !important;
+  font-weight: 600;
+}
+
+.commit-latest svg { margin-right: 3px; vertical-align: -1px; }
+
 .btn-ghost:disabled {
   opacity: 0.55;
   cursor: not-allowed;

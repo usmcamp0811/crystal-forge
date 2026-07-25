@@ -617,13 +617,20 @@ pub async fn fetch_system_agent_events(
 }
 
 /// Fetch the evaluation queue (active + completed commits).
-pub async fn fetch_eval_queue(limit: i64) -> Result<EvalQueueSummary, ApiClientError> {
-    let url = format!(
-        "{}/commits/eval-queue?limit={}&_ts={}",
-        base_url(),
-        limit,
-        js_sys::Date::now()
-    );
+pub async fn fetch_eval_queue(
+    limit: i64,
+    search: Option<&str>,
+    latest_only: bool,
+) -> Result<EvalQueueSummary, ApiClientError> {
+    let mut params = vec![
+        format!("limit={limit}"),
+        format!("latest_only={latest_only}"),
+    ];
+    if let Some(search) = search {
+        params.push(format!("search={}", encode_query_value(search)));
+    }
+    params.push(format!("_ts={}", js_sys::Date::now()));
+    let url = format!("{}/commits/eval-queue?{}", base_url(), params.join("&"));
     fetch_json(&url).await
 }
 
@@ -712,13 +719,18 @@ pub async fn fetch_eval_history(
     limit: i64,
     status: Option<&str>,
     flake: Option<&str>,
+    search: Option<&str>,
+    latest_only: bool,
 ) -> Result<EvalHistoryPage, ApiClientError> {
-    let mut params = format!("page={page}&limit={limit}");
+    let mut params = format!("page={page}&limit={limit}&latest_only={latest_only}");
     if let Some(s) = status {
         params.push_str(&format!("&status={}", encode_query_value(s)));
     }
     if let Some(f) = flake {
         params.push_str(&format!("&flake={}", encode_query_value(f)));
+    }
+    if let Some(search) = search {
+        params.push_str(&format!("&search={}", encode_query_value(search)));
     }
     let url = format!("{}/commits/eval-history?{}", base_url(), params);
     fetch_json(&url).await
@@ -791,6 +803,12 @@ pub async fn fetch_build_queue_paginated(
             encode_query_value(&qb.to_rfc3339())
         ));
     }
+    if let Some(search) = &params.search {
+        if !search.is_empty() {
+            parts.push(format!("search={}", encode_query_value(search)));
+        }
+    }
+    parts.push(format!("latest_only={}", params.latest_only));
 
     let url = if parts.is_empty() {
         base
@@ -861,9 +879,22 @@ pub async fn force_cancel_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClient
 
 /// Fetch recent completed/failed build jobs.
 pub async fn fetch_recent_build_jobs(
-    limit: i64,
+    params: &crate::api::models::BuildQueueParams,
 ) -> Result<crate::api::models::BuildQueuePageResponse, ApiClientError> {
-    let url = format!("{}/build-jobs/recent?limit={}", base_url(), limit);
+    let mut parts = vec![format!("limit={}", params.limit.unwrap_or(100))];
+    for (name, value) in [
+        ("status", params.status.as_deref()),
+        ("commit_hash", params.commit_hash.as_deref()),
+        ("flake_name", params.flake_name.as_deref()),
+        ("config_name", params.config_name.as_deref()),
+        ("search", params.search.as_deref()),
+    ] {
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            parts.push(format!("{name}={}", encode_query_value(value)));
+        }
+    }
+    parts.push(format!("latest_only={}", params.latest_only));
+    let url = format!("{}/build-jobs/recent?{}", base_url(), parts.join("&"));
     fetch_json(&url).await
 }
 
@@ -1892,5 +1923,19 @@ pub async fn set_classification_config(
     request: &UpdateClassificationBannerRequest,
 ) -> Result<ClassificationBannerConfig, ApiClientError> {
     let url = format!("{}/admin/classification-config", base_url());
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
+/// Fetch the persisted server-wide automatic retry policy.
+pub async fn fetch_automatic_retry_policy() -> Result<AutomaticRetryPolicy, ApiClientError> {
+    let url = format!("{}/admin/automatic-retry-policy", base_url());
+    fetch_json(&url).await
+}
+
+/// Persist the complete server-wide automatic retry policy.
+pub async fn set_automatic_retry_policy(
+    request: &UpdateAutomaticRetryPolicyRequest,
+) -> Result<AutomaticRetryPolicy, ApiClientError> {
+    let url = format!("{}/admin/automatic-retry-policy", base_url());
     send_json_with_csrf("PUT", &url, Some(request)).await
 }

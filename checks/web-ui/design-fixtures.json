@@ -56,23 +56,55 @@
   "builds": [
     {
       "system": "builder-primary",
+      "flake": "platform",
       "derivation": "system-closure",
       "status": "building",
-      "duration": "7m 12s"
+      "duration": "7m 12s",
+      "isLatestPerFlake": true
     },
     {
       "system": "edge-01",
+      "flake": "platform",
       "derivation": "nginx-edge-profile",
       "status": "queued",
-      "duration": "pending"
+      "duration": "pending",
+      "isLatestPerFlake": false
     },
     {
       "system": "orion-db",
+      "flake": "edge-lab",
       "derivation": "postgresql-ha-profile",
       "status": "failed",
-      "duration": "18m 04s"
+      "duration": "18m 04s",
+      "isLatestPerFlake": true
     }
   ],
+  "evaluations": [
+    {
+      "flake": "platform",
+      "commit": "a1b2c3d4e5f6",
+      "status": "in_progress",
+      "isLatestPerFlake": true
+    },
+    {
+      "flake": "platform",
+      "commit": "b2c3d4e5f6a7",
+      "status": "pending",
+      "isLatestPerFlake": false
+    },
+    {
+      "flake": "edge-lab",
+      "commit": "c3d4e5f6a7b8",
+      "status": "failed",
+      "isLatestPerFlake": true
+    }
+  ],
+  "automaticRetries": {
+    "maxBuildRetries": 2,
+    "maxEvaluationRetries": 1,
+    "backoffSeconds": 30,
+    "transientOnly": true
+  },
   "security": {
     "cves": [
       {

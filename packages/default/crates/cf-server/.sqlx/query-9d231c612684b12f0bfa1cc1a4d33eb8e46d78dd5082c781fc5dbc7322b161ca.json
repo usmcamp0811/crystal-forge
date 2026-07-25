@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE commits\n        SET\n            evaluation_status = 'cancelled',\n            evaluation_completed_at = COALESCE(evaluation_completed_at, NOW()),\n            cancellation_requested = FALSE\n        WHERE evaluation_status = 'cancelling'\n        RETURNING id, git_commit_hash\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "git_commit_hash",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "9d231c612684b12f0bfa1cc1a4d33eb8e46d78dd5082c781fc5dbc7322b161ca"
+}

@@ -320,6 +320,7 @@ pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result
                 AND bj.retry_count < bj.max_retries
                 AND d.cf_agent_enabled IS TRUE
                 AND d.policy_requirements_met IS TRUE
+                AND bj.available_at <= NOW()
                 AND (
                     -- No environment restrictions (wildcard builder)
                     NOT EXISTS (SELECT 1 FROM builder_environments)

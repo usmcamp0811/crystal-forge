@@ -171,30 +171,34 @@ pub async fn fetch_recent_deployments(pool: &PgPool) -> Result<Vec<RecentDeploym
 
 /// Fetch the active build queue (building + queued) from build_jobs.
 pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSummary> {
-    let rows = sqlx::query_as::<
-        _,
-        (
-            Option<Uuid>,
-            Option<Uuid>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            String,
-            Option<String>,
-            DateTime<Utc>,
-            Option<DateTime<Utc>>,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-            Option<f64>,
-            Option<DateTime<Utc>>,
-        ),
-    >(
+    #[derive(sqlx::FromRow)]
+    struct ActiveBuildRow {
+        job_id: Option<Uuid>,
+        system_id: Option<Uuid>,
+        flake_id: Option<i32>,
+        hostname: Option<String>,
+        flake_name: Option<String>,
+        commit_hash: Option<String>,
+        commit_message: Option<String>,
+        status: String,
+        builder_name: Option<String>,
+        queued_at: DateTime<Utc>,
+        started_at: Option<DateTime<Utc>>,
+        elapsed_secs: Option<i64>,
+        logs: Option<String>,
+        environment: Option<String>,
+        attempt_number: i32,
+        parent_job_id: Option<Uuid>,
+        root_job_id: Option<Uuid>,
+        available_at: DateTime<Utc>,
+    }
+
+    let rows = sqlx::query_as::<_, ActiveBuildRow>(
         r#"
         SELECT
             bj.id AS job_id,
             s.id AS system_id,
+            c.flake_id,
             COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS hostname,
             f.name AS flake_name,
             c.git_commit_hash AS commit_hash,
@@ -209,8 +213,10 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
             END AS elapsed_secs,
             bj.logs,
             e.name AS environment,
-            bj.priority_weight,
-            c.commit_timestamp
+            bj.attempt_number,
+            bj.parent_job_id,
+            bj.root_job_id,
+            bj.available_at
         FROM build_jobs bj
         JOIN derivations d ON d.id = bj.derivation_id
         LEFT JOIN commits c ON c.id = d.commit_id
@@ -237,54 +243,42 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
 
     let items = rows
         .into_iter()
-        .map(
-            |(
-                job_id,
-                system_id,
-                hostname,
-                flake_name,
-                commit_hash,
-                commit_message,
-                status,
-                builder_name,
-                queued_at,
-                started_at,
-                elapsed_secs,
-                logs,
-                environment,
-                _priority_weight,
-                _commit_timestamp,
-            )| {
-                let status = match status.as_str() {
-                    "queued" => BuildStatus::Queued,
-                    "building" => BuildStatus::Building,
-                    "cancelling" => BuildStatus::Cancelling,
-                    "cancelled" => BuildStatus::Cancelled,
-                    "failed" => BuildStatus::Failed,
-                    "success" => BuildStatus::Complete,
-                    _ => BuildStatus::Idle,
-                };
+        .map(|row| {
+            let status = match row.status.as_str() {
+                "queued" => BuildStatus::Queued,
+                "building" => BuildStatus::Building,
+                "cancelling" => BuildStatus::Cancelling,
+                "cancelled" => BuildStatus::Cancelled,
+                "failed" => BuildStatus::Failed,
+                "success" => BuildStatus::Complete,
+                _ => BuildStatus::Idle,
+            };
 
-                BuildQueueItem {
-                    job_id,
-                    system_id,
-                    hostname: hostname.unwrap_or_else(|| "unknown".to_string()),
-                    flake_name: flake_name.unwrap_or_else(|| "unknown".to_string()),
-                    commit_hash: commit_hash.unwrap_or_else(|| "unknown".to_string()),
-                    commit_message,
-                    status,
-                    builder_name,
-                    queued_at,
-                    started_at,
-                    elapsed_secs,
-                    logs,
-                    environment,
-                    total_derivs: 0,
-                    built_derivs: 0,
-                    cached_derivs: 0,
-                }
-            },
-        )
+            BuildQueueItem {
+                job_id: row.job_id,
+                system_id: row.system_id,
+                flake_id: row.flake_id,
+                is_latest_per_flake: false,
+                hostname: row.hostname.unwrap_or_else(|| "unknown".to_string()),
+                flake_name: row.flake_name.unwrap_or_else(|| "unknown".to_string()),
+                commit_hash: row.commit_hash.unwrap_or_else(|| "unknown".to_string()),
+                commit_message: row.commit_message,
+                status,
+                builder_name: row.builder_name,
+                queued_at: row.queued_at,
+                attempt_number: row.attempt_number,
+                parent_job_id: row.parent_job_id,
+                root_job_id: row.root_job_id,
+                available_at: Some(row.available_at),
+                started_at: row.started_at,
+                elapsed_secs: row.elapsed_secs,
+                logs: row.logs,
+                environment: row.environment,
+                total_derivs: 0,
+                built_derivs: 0,
+                cached_derivs: 0,
+            }
+        })
         .collect::<Vec<_>>();
 
     let building_count = items
@@ -307,12 +301,23 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
 /// Fetch recent completed/failed builds for history views as a growing prefix.
 pub async fn fetch_recent_build_history(
     pool: &PgPool,
-    limit: i64,
+    params: &BuildQueueParams,
 ) -> Result<BuildQueuePageResponse> {
+    let limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
+    let status_filter: Vec<String> = params
+        .status
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|status| !status.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
     #[derive(sqlx::FromRow)]
     struct RecentBuildRow {
         job_id: Option<Uuid>,
         system_id: Option<Uuid>,
+        flake_id: Option<i32>,
         hostname: Option<String>,
         flake_name: Option<String>,
         commit_hash: Option<String>,
@@ -324,14 +329,72 @@ pub async fn fetch_recent_build_history(
         elapsed_secs: Option<i64>,
         logs: Option<String>,
         environment: Option<String>,
-        total_count: i64,
+        attempt_number: i32,
+        parent_job_id: Option<Uuid>,
+        root_job_id: Option<Uuid>,
+        available_at: DateTime<Utc>,
+        is_latest_per_flake: bool,
     }
+
+    let counts: (i64, i64) = sqlx::query_as(
+        r#"
+        WITH domain AS (
+            SELECT bj.id, bj.status, bj.created_at, c.flake_id, c.git_commit_hash,
+                   f.name AS flake_name,
+                   COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS display_name,
+                   COALESCE(s.system_configuration_name, '') AS system_configuration_name,
+                   COALESCE(b.name, '') AS builder_name,
+                   ROW_NUMBER() OVER (PARTITION BY c.flake_id ORDER BY bj.created_at DESC, bj.id DESC) AS latest_rank
+            FROM build_jobs bj
+            JOIN derivations d ON d.id = bj.derivation_id
+            LEFT JOIN commits c ON c.id = d.commit_id
+            LEFT JOIN flakes f ON f.id = c.flake_id
+            LEFT JOIN LATERAL (
+                SELECT hostname, system_configuration_name
+                FROM systems
+                WHERE hostname = d.derivation_target
+                   OR (system_configuration_name IS NOT NULL AND system_configuration_name = d.derivation_target)
+                ORDER BY CASE WHEN hostname = d.derivation_target THEN 0 ELSE 1 END
+                LIMIT 1
+            ) s ON TRUE
+            LEFT JOIN builders b ON b.id = bj.builder_id
+            WHERE bj.status IN ('success', 'failed', 'cancelled')
+        ), filtered AS (
+            SELECT * FROM domain
+            WHERE ($1::text[] IS NULL OR cardinality($1::text[]) = 0 OR status = ANY($1::text[]))
+              AND ($2::text IS NULL OR git_commit_hash ILIKE ($2 || '%'))
+              AND ($3::text IS NULL OR flake_name ILIKE ('%' || $3 || '%'))
+              AND ($4::text IS NULL OR display_name ILIKE ('%' || $4 || '%') OR system_configuration_name ILIKE ('%' || $4 || '%'))
+              AND ($5::timestamptz IS NULL OR created_at >= $5)
+              AND ($6::timestamptz IS NULL OR created_at <= $6)
+              AND ($7::text IS NULL OR display_name ILIKE ('%' || $7 || '%') OR flake_name ILIKE ('%' || $7 || '%')
+                   OR git_commit_hash ILIKE ('%' || $7 || '%') OR builder_name ILIKE ('%' || $7 || '%')
+                   OR status ILIKE ('%' || $7 || '%')
+                   OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $7 || '%')
+                   OR 'x86_64-linux' ILIKE ('%' || $7 || '%'))
+              AND (NOT $8 OR (flake_id IS NOT NULL AND latest_rank = 1))
+        )
+        SELECT (SELECT COUNT(*) FROM domain), (SELECT COUNT(*) FROM filtered)
+        "#,
+    )
+    .bind(if status_filter.is_empty() { None } else { Some(status_filter.clone()) })
+    .bind(params.commit_hash.as_deref())
+    .bind(params.flake_name.as_deref())
+    .bind(params.config_name.as_deref())
+    .bind(params.queued_after)
+    .bind(params.queued_before)
+    .bind(params.search.as_deref())
+    .bind(params.latest_only)
+    .fetch_one(pool)
+    .await?;
 
     let rows = sqlx::query_as::<_, RecentBuildRow>(
         r#"
+        WITH domain AS (
         SELECT
             bj.id AS job_id,
             s.id AS system_id,
+            c.flake_id,
             COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS hostname,
             f.name AS flake_name,
             c.git_commit_hash AS commit_hash,
@@ -346,24 +409,65 @@ pub async fn fetch_recent_build_history(
             END AS elapsed_secs,
             bj.logs,
             e.name AS environment,
-            COUNT(*) OVER () AS total_count
+            bj.attempt_number,
+            bj.parent_job_id,
+            bj.root_job_id,
+            bj.available_at,
+            COALESCE(bj.completed_at, bj.updated_at, bj.created_at) AS completed_sort_at,
+            COALESCE(s.system_configuration_name, '') AS system_configuration_name,
+            ROW_NUMBER() OVER (
+                PARTITION BY c.flake_id
+                ORDER BY bj.created_at DESC, bj.id DESC
+            ) AS latest_rank
         FROM build_jobs bj
         JOIN derivations d ON d.id = bj.derivation_id
         LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id
-        LEFT JOIN systems s ON s.hostname = d.derivation_target
+        LEFT JOIN LATERAL (
+            SELECT id, hostname, environment_id, system_configuration_name
+            FROM systems
+            WHERE hostname = d.derivation_target
+               OR (system_configuration_name IS NOT NULL AND system_configuration_name = d.derivation_target)
+            ORDER BY CASE WHEN hostname = d.derivation_target THEN 0 ELSE 1 END
+            LIMIT 1
+        ) s ON TRUE
         LEFT JOIN environments e ON e.id = s.environment_id
         LEFT JOIN builders b ON b.id = bj.builder_id
         WHERE bj.status IN ('success', 'failed', 'cancelled')
-        ORDER BY COALESCE(bj.completed_at, bj.updated_at, bj.created_at) DESC
-        LIMIT $1
+        ), filtered AS (
+            SELECT * FROM domain
+            WHERE ($1::text[] IS NULL OR cardinality($1::text[]) = 0 OR status = ANY($1::text[]))
+              AND ($2::text IS NULL OR commit_hash ILIKE ($2 || '%'))
+              AND ($3::text IS NULL OR flake_name ILIKE ('%' || $3 || '%'))
+              AND ($4::text IS NULL OR hostname ILIKE ('%' || $4 || '%') OR system_configuration_name ILIKE ('%' || $4 || '%'))
+              AND ($5::timestamptz IS NULL OR queued_at >= $5)
+              AND ($6::timestamptz IS NULL OR queued_at <= $6)
+              AND ($7::text IS NULL OR hostname ILIKE ('%' || $7 || '%') OR flake_name ILIKE ('%' || $7 || '%')
+                   OR commit_hash ILIKE ('%' || $7 || '%') OR COALESCE(builder_name, '') ILIKE ('%' || $7 || '%')
+                   OR status ILIKE ('%' || $7 || '%')
+                   OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $7 || '%')
+                   OR 'x86_64-linux' ILIKE ('%' || $7 || '%'))
+              AND (NOT $8 OR (flake_id IS NOT NULL AND latest_rank = 1))
+        )
+        SELECT *, flake_id IS NOT NULL AND latest_rank = 1 AS is_latest_per_flake
+        FROM filtered
+        ORDER BY completed_sort_at DESC, job_id DESC
+        LIMIT $9
         "#,
     )
+    .bind(if status_filter.is_empty() { None } else { Some(status_filter) })
+    .bind(params.commit_hash.as_deref())
+    .bind(params.flake_name.as_deref())
+    .bind(params.config_name.as_deref())
+    .bind(params.queued_after)
+    .bind(params.queued_before)
+    .bind(params.search.as_deref())
+    .bind(params.latest_only)
     .bind(limit)
     .fetch_all(pool)
     .await?;
 
-    let total = rows.first().map(|row| row.total_count).unwrap_or(0);
+    let (domain_total, total) = counts;
 
     let items = rows
         .into_iter()
@@ -381,6 +485,8 @@ pub async fn fetch_recent_build_history(
             BuildQueueItem {
                 job_id: row.job_id,
                 system_id: row.system_id,
+                flake_id: row.flake_id,
+                is_latest_per_flake: row.is_latest_per_flake,
                 hostname: row.hostname.unwrap_or_else(|| "unknown".to_string()),
                 flake_name: row.flake_name.unwrap_or_else(|| "unknown".to_string()),
                 commit_hash: row.commit_hash.unwrap_or_else(|| "unknown".to_string()),
@@ -388,6 +494,10 @@ pub async fn fetch_recent_build_history(
                 status,
                 builder_name: row.builder_name,
                 queued_at: row.queued_at,
+                attempt_number: row.attempt_number,
+                parent_job_id: row.parent_job_id,
+                root_job_id: row.root_job_id,
+                available_at: Some(row.available_at),
                 started_at: row.started_at,
                 elapsed_secs: row.elapsed_secs,
                 logs: row.logs,
@@ -401,6 +511,7 @@ pub async fn fetch_recent_build_history(
 
     Ok(BuildQueuePageResponse {
         total,
+        domain_total,
         page: 1,
         limit,
         items,
@@ -436,6 +547,7 @@ pub async fn list_build_queue_paginated(
     struct BuildRow {
         job_id: Option<Uuid>,
         system_id: Option<Uuid>,
+        flake_id: Option<i32>,
         hostname: Option<String>,
         flake_name: Option<String>,
         commit_hash: Option<String>,
@@ -447,17 +559,103 @@ pub async fn list_build_queue_paginated(
         elapsed_secs: Option<i64>,
         logs: Option<String>,
         environment: Option<String>,
-        total_count: i64,
+        attempt_number: i32,
+        parent_job_id: Option<Uuid>,
+        root_job_id: Option<Uuid>,
+        available_at: DateTime<Utc>,
+        is_latest_per_flake: bool,
         total_derivs: i64,
         built_derivs: i64,
         cached_derivs: i64,
     }
 
+    let domain_kind = if !status_filter.is_empty()
+        && status_filter
+            .iter()
+            .all(|status| matches!(status.as_str(), "queued" | "building" | "cancelling"))
+    {
+        "active"
+    } else if !status_filter.is_empty()
+        && status_filter
+            .iter()
+            .all(|status| matches!(status.as_str(), "success" | "failed" | "cancelled"))
+    {
+        "history"
+    } else {
+        "all"
+    };
+
+    let counts: (i64, i64) = sqlx::query_as(
+        r#"
+        WITH domain AS (
+            SELECT
+                bj.id,
+                bj.status,
+                bj.created_at,
+                c.flake_id,
+                c.git_commit_hash,
+                f.name AS flake_name,
+                COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS display_name,
+                COALESCE(s.system_configuration_name, '') AS system_configuration_name,
+                COALESCE(b.name, '') AS builder_name,
+                ROW_NUMBER() OVER (
+                    PARTITION BY c.flake_id,
+                        bj.status IN ('queued', 'building', 'cancelling')
+                    ORDER BY bj.created_at DESC, bj.id DESC
+                ) AS latest_rank
+            FROM build_jobs bj
+            JOIN derivations d ON d.id = bj.derivation_id
+            LEFT JOIN commits c ON c.id = d.commit_id
+            LEFT JOIN flakes f ON f.id = c.flake_id
+            LEFT JOIN LATERAL (
+                SELECT hostname, system_configuration_name
+                FROM systems
+                WHERE hostname = d.derivation_target
+                   OR (system_configuration_name IS NOT NULL AND system_configuration_name = d.derivation_target)
+                ORDER BY CASE WHEN hostname = d.derivation_target THEN 0 ELSE 1 END
+                LIMIT 1
+            ) s ON TRUE
+            LEFT JOIN builders b ON b.id = bj.builder_id
+            WHERE ($1 = 'all')
+               OR ($1 = 'active' AND bj.status IN ('queued', 'building', 'cancelling'))
+               OR ($1 = 'history' AND bj.status IN ('success', 'failed', 'cancelled'))
+        ), filtered AS (
+            SELECT * FROM domain
+            WHERE ($2::text[] IS NULL OR cardinality($2::text[]) = 0 OR status = ANY($2::text[]))
+              AND ($3::text IS NULL OR git_commit_hash ILIKE ($3 || '%'))
+              AND ($4::text IS NULL OR flake_name ILIKE ('%' || $4 || '%'))
+              AND ($5::text IS NULL OR display_name ILIKE ('%' || $5 || '%') OR system_configuration_name ILIKE ('%' || $5 || '%'))
+              AND ($6::timestamptz IS NULL OR created_at >= $6)
+              AND ($7::timestamptz IS NULL OR created_at <= $7)
+              AND ($8::text IS NULL OR display_name ILIKE ('%' || $8 || '%') OR flake_name ILIKE ('%' || $8 || '%')
+                   OR git_commit_hash ILIKE ('%' || $8 || '%') OR builder_name ILIKE ('%' || $8 || '%')
+                   OR status ILIKE ('%' || $8 || '%')
+                   OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $8 || '%')
+                   OR 'x86_64-linux' ILIKE ('%' || $8 || '%'))
+              AND (NOT $9 OR (flake_id IS NOT NULL AND latest_rank = 1))
+        )
+        SELECT (SELECT COUNT(*) FROM domain), (SELECT COUNT(*) FROM filtered)
+        "#,
+    )
+    .bind(domain_kind)
+    .bind(if status_filter.is_empty() { None } else { Some(status_filter.clone()) })
+    .bind(params.commit_hash.as_deref())
+    .bind(params.flake_name.as_deref())
+    .bind(params.config_name.as_deref())
+    .bind(params.queued_after)
+    .bind(params.queued_before)
+    .bind(params.search.as_deref())
+    .bind(params.latest_only)
+    .fetch_one(pool)
+    .await?;
+
     let rows = sqlx::query_as::<_, BuildRow>(
         r#"
+        WITH domain AS (
         SELECT
             bj.id AS job_id,
             s.id AS system_id,
+            c.flake_id,
             COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS hostname,
             f.name AS flake_name,
             c.git_commit_hash AS commit_hash,
@@ -465,6 +663,7 @@ pub async fn list_build_queue_paginated(
             -- frontend sees None rather than an empty summary.
             NULLIF(split_part(COALESCE(c.message, ''), E'\n', 1), '') AS commit_message,
             bj.status,
+            bj.priority_weight,
             b.name AS builder_name,
             bj.created_at AS queued_at,
             bj.started_at,
@@ -482,7 +681,16 @@ pub async fn list_build_queue_paginated(
             END AS elapsed_secs,
             bj.logs,
             e.name AS environment,
-            COUNT(*) OVER () AS total_count,
+            bj.attempt_number,
+            bj.parent_job_id,
+            bj.root_job_id,
+            bj.available_at,
+            ROW_NUMBER() OVER (
+                PARTITION BY c.flake_id,
+                    bj.status IN ('queued', 'building', 'cancelling')
+                ORDER BY bj.created_at DESC, bj.id DESC
+            ) AS latest_rank,
+            COALESCE(s.system_configuration_name, '') AS system_configuration_name,
             -- Derivation progress counts for the same system config at this commit.
             -- total: all derivations that reached dry-run-complete or beyond (eligible to build).
             COALESCE((
@@ -524,63 +732,81 @@ pub async fn list_build_queue_paginated(
         ) s ON TRUE
         LEFT JOIN environments e ON e.id = COALESCE(s.environment_id, bj.environment_id)
         LEFT JOIN builders b ON b.id = bj.builder_id
+        WHERE ($1 = 'all')
+           OR ($1 = 'active' AND bj.status IN ('queued', 'building', 'cancelling'))
+           OR ($1 = 'history' AND bj.status IN ('success', 'failed', 'cancelled'))
+        ), filtered AS (
+        SELECT * FROM domain
         WHERE
             -- Status filter: if empty, include all statuses
             (
-                $1::text[] IS NULL
-                OR cardinality($1::text[]) = 0
-                OR bj.status = ANY($1::text[])
+                $2::text[] IS NULL
+                OR cardinality($2::text[]) = 0
+                OR status = ANY($2::text[])
             )
             -- Commit hash filter (prefix match)
-            AND ($2::text IS NULL OR c.git_commit_hash ILIKE ($2 || '%'))
+            AND ($3::text IS NULL OR commit_hash ILIKE ($3 || '%'))
             -- Flake name filter (partial match)
-            AND ($3::text IS NULL OR f.name ILIKE ('%' || $3 || '%'))
+            AND ($4::text IS NULL OR flake_name ILIKE ('%' || $4 || '%'))
             -- Config/hostname filter (partial match on resolved display name or config name)
             AND (
-                $4::text IS NULL
-                OR COALESCE(s.hostname, d.derivation_target, d.derivation_name) ILIKE ('%' || $4 || '%')
-                OR COALESCE(s.system_configuration_name, '') ILIKE ('%' || $4 || '%')
+                $5::text IS NULL
+                OR hostname ILIKE ('%' || $5 || '%')
+                OR system_configuration_name ILIKE ('%' || $5 || '%')
             )
             -- Time range filters on queued_at
-            AND ($5::timestamptz IS NULL OR bj.created_at >= $5)
-            AND ($6::timestamptz IS NULL OR bj.created_at <= $6)
+            AND ($6::timestamptz IS NULL OR queued_at >= $6)
+            AND ($7::timestamptz IS NULL OR queued_at <= $7)
+            AND ($8::text IS NULL OR hostname ILIKE ('%' || $8 || '%') OR flake_name ILIKE ('%' || $8 || '%')
+                 OR commit_hash ILIKE ('%' || $8 || '%') OR COALESCE(builder_name, '') ILIKE ('%' || $8 || '%')
+                 OR status ILIKE ('%' || $8 || '%')
+                 OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $8 || '%')
+                 OR 'x86_64-linux' ILIKE ('%' || $8 || '%'))
+            AND (NOT $9 OR (flake_id IS NOT NULL AND latest_rank = 1))
+        )
+        SELECT *, flake_id IS NOT NULL AND latest_rank = 1 AS is_latest_per_flake
+        FROM filtered
         ORDER BY
             -- In-progress first, stopping second, queued third, then terminal
             CASE
-                WHEN bj.status = 'building'   THEN 0
-                WHEN bj.status = 'cancelling' THEN 1
-                WHEN bj.status = 'queued'     THEN 2
+                WHEN status = 'building'   THEN 0
+                WHEN status = 'cancelling' THEN 1
+                WHEN status = 'queued'     THEN 2
                 ELSE 3
             END,
             -- For queued jobs, sort by priority_weight DESC (higher = higher priority)
             -- For non-queued jobs, sort by created_at DESC
             CASE
-                WHEN bj.status = 'queued' THEN bj.priority_weight
+                WHEN status = 'queued' THEN priority_weight
                 ELSE NULL
             END DESC NULLS LAST,
             -- For queued jobs, older jobs first (matches move_up/move_down order)
             -- For non-queued jobs, newer first
             CASE
-                WHEN bj.status = 'queued' THEN bj.created_at
+                WHEN status = 'queued' THEN queued_at
                 ELSE NULL
             END ASC NULLS LAST,
-            bj.created_at DESC NULLS LAST
-        LIMIT $7
-        OFFSET $8
+            queued_at DESC NULLS LAST,
+            job_id DESC
+        LIMIT $10
+        OFFSET $11
         "#,
     )
+    .bind(domain_kind)
     .bind(if status_filter.is_empty() { None } else { Some(status_filter.clone()) })
     .bind(params.commit_hash.as_deref())
     .bind(params.flake_name.as_deref())
     .bind(params.config_name.as_deref())
     .bind(params.queued_after)
     .bind(params.queued_before)
+    .bind(params.search.as_deref())
+    .bind(params.latest_only)
     .bind(limit)
     .bind(offset)
     .fetch_all(pool)
     .await?;
 
-    let total = rows.first().map(|r| r.total_count).unwrap_or(0);
+    let (domain_total, total) = counts;
 
     let items = rows
         .into_iter()
@@ -597,6 +823,8 @@ pub async fn list_build_queue_paginated(
             BuildQueueItem {
                 job_id: r.job_id,
                 system_id: r.system_id,
+                flake_id: r.flake_id,
+                is_latest_per_flake: r.is_latest_per_flake,
                 hostname: r.hostname.unwrap_or_else(|| "unknown".to_string()),
                 flake_name: r.flake_name.unwrap_or_else(|| "unknown".to_string()),
                 commit_hash: r.commit_hash.unwrap_or_else(|| "unknown".to_string()),
@@ -604,6 +832,10 @@ pub async fn list_build_queue_paginated(
                 status,
                 builder_name: r.builder_name,
                 queued_at: r.queued_at,
+                attempt_number: r.attempt_number,
+                parent_job_id: r.parent_job_id,
+                root_job_id: r.root_job_id,
+                available_at: Some(r.available_at),
                 started_at: r.started_at,
                 elapsed_secs: r.elapsed_secs,
                 logs: r.logs,
@@ -617,6 +849,7 @@ pub async fn list_build_queue_paginated(
 
     Ok(BuildQueuePageResponse {
         total,
+        domain_total,
         page,
         limit,
         items,
@@ -690,6 +923,123 @@ mod tests {
             .filter(|s| !s.is_empty())
             .collect();
         assert_eq!(status_filter, vec!["queued", "building"]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn latest_builds_rank_by_stable_flake_before_search_and_pagination(pool: PgPool) {
+        let queued_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+        let mut job_ids = Vec::new();
+
+        for (flake_offset, target) in [(0_u128, "needle-host"), (1, "other-host")] {
+            let flake_id: i32 = sqlx::query_scalar(
+                "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+            )
+            .bind(format!("latest-build-flake-{}", uuid::Uuid::new_v4()))
+            .bind(format!("https://example.test/{}.git", uuid::Uuid::new_v4()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let commit_id: i32 = sqlx::query_scalar(
+                "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, NOW()) RETURNING id",
+            )
+            .bind(flake_id)
+            .bind(format!("build-{}", uuid::Uuid::new_v4()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let derivation_id: i32 = sqlx::query_scalar(
+                "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id) \
+                 VALUES ($1, $2, $2, 'nixos', 5) RETURNING id",
+            )
+            .bind(commit_id)
+            .bind(target)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let job_id = uuid::Uuid::from_u128(100 + flake_offset);
+            sqlx::query(
+                "INSERT INTO build_jobs (id, derivation_id, status, created_at) VALUES ($1, $2, 'queued', $3)",
+            )
+            .bind(job_id)
+            .bind(derivation_id)
+            .bind(queued_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+            job_ids.push((flake_id, commit_id, derivation_id, job_id));
+        }
+
+        let newer_derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id) \
+             VALUES ($1, 'winner-host', 'winner-host', 'nixos', 5) RETURNING id",
+        )
+        .bind(job_ids[0].1)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let newer_id = uuid::Uuid::from_u128(102);
+        sqlx::query(
+            "INSERT INTO build_jobs (id, derivation_id, status, created_at) VALUES ($1, $2, 'queued', $3)",
+        )
+        .bind(newer_id)
+        .bind(newer_derivation_id)
+        .bind(queued_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let filtered = list_build_queue_paginated(
+            &pool,
+            &BuildQueueParams {
+                status: Some("queued".to_string()),
+                search: Some("needle-host".to_string()),
+                latest_only: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(filtered.domain_total, 3);
+        assert_eq!(filtered.total, 0);
+
+        let latest = list_build_queue_paginated(
+            &pool,
+            &BuildQueueParams {
+                page: 4,
+                limit: 1,
+                status: Some("queued".to_string()),
+                latest_only: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(latest.domain_total, 3);
+        assert_eq!(latest.total, 2);
+        assert!(latest.items.is_empty());
+
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'success', completed_at = NOW() WHERE id = ANY($1)",
+        )
+        .bind(vec![job_ids[0].3, job_ids[1].3, newer_id])
+        .execute(&pool)
+        .await
+        .unwrap();
+        let history = fetch_recent_build_history(
+            &pool,
+            &BuildQueueParams {
+                limit: 20,
+                latest_only: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(history.domain_total, 3);
+        assert_eq!(history.total, 2);
+        assert_eq!(history.items.len(), 2);
+        assert!(history.items.iter().all(|item| item.is_latest_per_flake));
     }
 
     // ── TASK-272: dashboard summary scope tests ──────────────────────────────

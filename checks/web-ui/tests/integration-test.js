@@ -123,9 +123,36 @@ async function assertDisabled(locator, message) {
 }
 
 async function assertEnabled(locator, message) {
+  const actionable = await locator
+    .click({ trial: true, timeout: 5000 })
+    .then(() => true)
+    .catch(() => false);
   const disabled = await locator.isDisabled().catch(() => true);
-  if (disabled) {
+  if (!actionable || disabled) {
     throw new Error(message);
+  }
+}
+
+async function assertAttribute(locator, name, expected, message) {
+  await locator.waitFor({ state: "visible", timeout: 5000 });
+  const actual = await locator.getAttribute(name);
+  if (actual !== expected) {
+    throw new Error(`${message} (expected ${name}=${expected}, got ${actual})`);
+  }
+}
+
+async function assertValue(locator, expected, message) {
+  await locator.waitFor({ state: "visible", timeout: 5000 });
+  const actual = await locator.inputValue();
+  if (actual !== expected) {
+    throw new Error(`${message} (expected value ${expected}, got ${actual})`);
+  }
+}
+
+async function assertCount(locator, expected, message) {
+  const actual = await locator.count();
+  if (actual !== expected) {
+    throw new Error(`${message} (expected ${expected}, got ${actual})`);
   }
 }
 
@@ -447,6 +474,7 @@ function mockBuildQueuePage() {
   const summary = mockBuildsDashboardSummary();
   return {
     total: summary.build_queue.items.length,
+    domain_total: summary.build_queue.items.length,
     page: 1,
     limit: 50,
     items: summary.build_queue.items,
@@ -589,7 +617,7 @@ function mockRecentBuilds(limit) {
       logs: null,
     },
   ];
-  return { total: items.length, page: 1, limit: limit || 100, items };
+  return { total: items.length, domain_total: items.length, page: 1, limit: limit || 100, items };
 }
 
 function mockRecentBuildsWithCancelled(limit) {
@@ -624,7 +652,7 @@ function mockRecentBuildsWithCancelled(limit) {
       logs: null,
     },
   ];
-  return { total: items.length, page: 1, limit: limit || 100, items };
+  return { total: items.length, domain_total: items.length, page: 1, limit: limit || 100, items };
 }
 
 async function routeBuildsData(page) {
@@ -755,6 +783,7 @@ async function routeBuildsDataWithCancelStates(page) {
   const summary = mockBuildsDashboardSummaryWithCancelStates();
   const queuePage = {
     total: summary.build_queue.items.length,
+    domain_total: summary.build_queue.items.length,
     page: 1,
     limit: 50,
     items: summary.build_queue.items,
@@ -803,6 +832,316 @@ async function unrouteBuildsDataWithCancelStates(page) {
   await page.unroute("**/api/v1/builders*");
   await page.unroute("**/api/v1/environments*");
   await page.unroute("**/api/v1/build-jobs*");
+}
+
+const LATEST_FIXTURE_TIME = "2026-07-24T12:00:00Z";
+
+function latestBuildItem(overrides) {
+  return {
+    job_id: "10000000-0000-4000-8000-000000000001",
+    system_id: "20000000-0000-4000-8000-000000000001",
+    flake_id: 1,
+    is_latest_per_flake: false,
+    hostname: "platform-old-active",
+    flake_name: "platform-core",
+    commit_hash: "1111111111111111111111111111111111111111",
+    commit_message: "Older platform build",
+    status: "queued",
+    builder_name: "builder-primary",
+    queued_at: LATEST_FIXTURE_TIME,
+    started_at: null,
+    elapsed_secs: null,
+    logs: null,
+    environment: "production",
+    total_derivs: 4,
+    built_derivs: 0,
+    cached_derivs: 0,
+    ...overrides,
+  };
+}
+
+function latestBuildFixtures(history) {
+  if (history) {
+    return [
+      latestBuildItem({
+        job_id: "10000000-0000-4000-8000-000000000011",
+        hostname: "platform-latest-history",
+        commit_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        commit_message: "Latest successful platform build",
+        status: "complete",
+        is_latest_per_flake: true,
+        elapsed_secs: 95,
+        started_at: "2026-07-24T11:58:25Z",
+      }),
+      latestBuildItem({
+        job_id: "10000000-0000-4000-8000-000000000012",
+        hostname: "platform-old-history",
+        commit_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        commit_message: "Older failed platform build",
+        status: "failed",
+        elapsed_secs: 30,
+        started_at: "2026-07-24T11:55:00Z",
+      }),
+      latestBuildItem({
+        job_id: "10000000-0000-4000-8000-000000000013",
+        system_id: "20000000-0000-4000-8000-000000000002",
+        flake_id: 2,
+        hostname: "edge-latest-history",
+        flake_name: "edge-fleet",
+        commit_hash: "cccccccccccccccccccccccccccccccccccccccc",
+        commit_message: "Latest failed edge build",
+        status: "failed",
+        is_latest_per_flake: true,
+        elapsed_secs: 44,
+        started_at: "2026-07-24T11:57:00Z",
+      }),
+    ];
+  }
+
+  return [
+    latestBuildItem({
+      job_id: "10000000-0000-4000-8000-000000000001",
+      hostname: "platform-latest-active",
+      commit_hash: "dddddddddddddddddddddddddddddddddddddddd",
+      commit_message: "Latest queued platform build",
+      status: "queued",
+      is_latest_per_flake: true,
+    }),
+    latestBuildItem({
+      job_id: "10000000-0000-4000-8000-000000000002",
+      hostname: "platform-old-active",
+      commit_hash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      commit_message: "Older running platform build",
+      status: "building",
+      started_at: "2026-07-24T11:59:00Z",
+      elapsed_secs: 60,
+    }),
+    latestBuildItem({
+      job_id: "10000000-0000-4000-8000-000000000003",
+      system_id: "20000000-0000-4000-8000-000000000002",
+      flake_id: 2,
+      hostname: "edge-latest-active",
+      flake_name: "edge-fleet",
+      commit_hash: "ffffffffffffffffffffffffffffffffffffffff",
+      commit_message: "Latest queued edge build",
+      status: "queued",
+      is_latest_per_flake: true,
+    }),
+  ];
+}
+
+function filterLatestBuilds(items, url) {
+  let filtered = items.slice();
+  if (url.searchParams.get("latest_only") === "true") {
+    filtered = filtered.filter((item) => item.is_latest_per_flake);
+  }
+  const statuses = url.searchParams.get("status")?.split(",") || [];
+  if (statuses.length > 0) {
+    filtered = filtered.filter((item) =>
+      statuses.some((status) => status === item.status || (status === "success" && item.status === "complete")),
+    );
+  }
+  const flake = url.searchParams.get("flake_name");
+  if (flake) filtered = filtered.filter((item) => item.flake_name === flake);
+  const search = url.searchParams.get("search")?.toLowerCase();
+  if (search) {
+    filtered = filtered.filter((item) =>
+      [item.hostname, item.flake_name, item.commit_hash, item.commit_message]
+        .filter(Boolean)
+        .some((value) => value.toLowerCase().includes(search)),
+    );
+  }
+  return filtered;
+}
+
+async function routeLatestBuildsData(page, requests) {
+  const activeItems = latestBuildFixtures(false);
+  await page.route("**/api/v1/dashboard/summary*", async (route) => {
+    const summary = mockBuildsDashboardSummary();
+    summary.timestamp = LATEST_FIXTURE_TIME;
+    summary.build_queue.timestamp = LATEST_FIXTURE_TIME;
+    summary.build_queue.items = activeItems;
+    summary.build_queue.building_count = 1;
+    summary.build_queue.queued_count = 2;
+    summary.active_builds = 3;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(summary) });
+  });
+  await page.route("**/api/v1/builders/**", fulfillBuildersRoute);
+  await page.route("**/api/v1/builders*", fulfillBuildersRoute);
+  await page.route("**/api/v1/environments*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(mockBuilderEnvironments()) });
+  });
+  const fulfillBuildJobs = async (route) => {
+    const url = new URL(route.request().url());
+    const history = url.pathname.includes("/build-jobs/recent");
+    requests.push({ history, params: Object.fromEntries(url.searchParams) });
+    const domain = latestBuildFixtures(history);
+    const items = filterLatestBuilds(domain, url);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ total: items.length, domain_total: domain.length, page: 1, limit: 100, items }),
+    });
+  };
+  await page.route("**/api/v1/build-jobs*", fulfillBuildJobs);
+  await page.route("**/api/v1/build-jobs/recent*", fulfillBuildJobs);
+}
+
+async function unrouteLatestBuildsData(page) {
+  await page.unroute("**/api/v1/build-jobs/recent*");
+  await unrouteBuildsData(page);
+}
+
+function latestEvalItem(overrides) {
+  return {
+    commit_id: 2001,
+    flake_id: 1,
+    flake_name: "infrastructure",
+    branch: "main",
+    commit_hash: "1111111111111111",
+    commit_message: "Older infrastructure evaluation",
+    author: "operator",
+    committed_at: "2026-07-24T11:30:00Z",
+    enqueued_at: "2026-07-24T11:31:00Z",
+    is_latest_per_flake: false,
+    evaluation_status: "pending",
+    queue_position: 1,
+    systems: [],
+    system_count: 2,
+    passed_count: 0,
+    policy_failed_count: 0,
+    eval_failed_count: 0,
+    ...overrides,
+  };
+}
+
+function latestEvalFixtures(history) {
+  if (history) {
+    return [
+      latestEvalItem({
+        commit_id: 2011,
+        commit_hash: "aaaaaaaaaaaaaaaa",
+        commit_message: "Latest completed infrastructure evaluation",
+        evaluation_status: "complete",
+        is_latest_per_flake: true,
+        evaluation_completed_at: "2026-07-24T11:59:00Z",
+        evaluation_duration_ms: 60000,
+        passed_count: 2,
+        alert_occurrence_id: "eval:2011:1",
+      }),
+      latestEvalItem({
+        commit_id: 2012,
+        commit_hash: "bbbbbbbbbbbbbbbb",
+        commit_message: "Older failed infrastructure evaluation",
+        evaluation_status: "failed",
+        evaluation_completed_at: "2026-07-24T11:40:00Z",
+        evaluation_duration_ms: 30000,
+        evaluation_error_message: "assertion failed",
+        eval_failed_count: 1,
+        alert_occurrence_id: "eval:2012:1",
+      }),
+      latestEvalItem({
+        commit_id: 2013,
+        flake_id: 2,
+        flake_name: "workstations",
+        branch: "dev",
+        commit_hash: "cccccccccccccccc",
+        commit_message: "Latest failed workstation evaluation",
+        evaluation_status: "failed",
+        is_latest_per_flake: true,
+        evaluation_completed_at: "2026-07-24T11:55:00Z",
+        evaluation_duration_ms: 45000,
+        evaluation_error_message: "transient evaluator failure",
+        eval_failed_count: 1,
+        alert_occurrence_id: "eval:2013:1",
+      }),
+    ];
+  }
+  return [
+    latestEvalItem({
+      commit_id: 2001,
+      commit_hash: "dddddddddddddddd",
+      commit_message: "Latest queued infrastructure evaluation",
+      is_latest_per_flake: true,
+      queue_position: 1,
+    }),
+    latestEvalItem({
+      commit_id: 2002,
+      commit_hash: "eeeeeeeeeeeeeeee",
+      commit_message: "Older running infrastructure evaluation",
+      evaluation_status: "in_progress",
+      queue_position: 2,
+    }),
+    latestEvalItem({
+      commit_id: 2003,
+      flake_id: 2,
+      flake_name: "workstations",
+      branch: "dev",
+      commit_hash: "ffffffffffffffff",
+      commit_message: "Latest queued workstation evaluation",
+      is_latest_per_flake: true,
+      queue_position: 3,
+    }),
+  ];
+}
+
+function filterLatestEvals(items, url) {
+  let filtered = items.slice();
+  if (url.searchParams.get("latest_only") === "true") {
+    filtered = filtered.filter((item) => item.is_latest_per_flake);
+  }
+  const status = url.searchParams.get("status");
+  if (status) filtered = filtered.filter((item) => item.evaluation_status === status);
+  const flake = url.searchParams.get("flake");
+  if (flake) filtered = filtered.filter((item) => item.flake_name === flake);
+  const search = url.searchParams.get("search")?.toLowerCase();
+  if (search) {
+    filtered = filtered.filter((item) =>
+      [item.flake_name, item.commit_hash, item.commit_message, item.author]
+        .filter(Boolean)
+        .some((value) => value.toLowerCase().includes(search)),
+    );
+  }
+  return filtered;
+}
+
+async function routeLatestEvaluationsData(page, requests) {
+  await page.route("**/api/v1/commits/eval-queue**", async (route) => {
+    const url = new URL(route.request().url());
+    requests.push({ history: false, params: Object.fromEntries(url.searchParams) });
+    const domain = latestEvalFixtures(false);
+    const items = filterLatestEvals(domain, url);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        active_count: items.length,
+        completed_count: 3,
+        failed_count: 2,
+        domain_total: domain.length,
+        filtered_total: items.length,
+        execution_mode: "standard",
+        timestamp: LATEST_FIXTURE_TIME,
+        items,
+      }),
+    });
+  });
+  await page.route("**/api/v1/commits/eval-history**", async (route) => {
+    const url = new URL(route.request().url());
+    requests.push({ history: true, params: Object.fromEntries(url.searchParams) });
+    const domain = latestEvalFixtures(true);
+    const items = filterLatestEvals(domain, url);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ total_count: items.length, domain_total: domain.length, page: 1, limit: 50, items }),
+    });
+  });
+}
+
+async function unrouteLatestEvaluationsData(page) {
+  await page.unroute("**/api/v1/commits/eval-queue**");
+  await page.unroute("**/api/v1/commits/eval-history**");
 }
 
 function mockSetupCoachProgress() {
@@ -5073,6 +5412,85 @@ const steps = [
     },
   },
   {
+    name: "15j-builds-latest-per-flake-populated",
+    description: "Builds active and completed tabs honor server-authoritative latest markers and retain the pressed filter",
+    action: async (page) => {
+      const requests = [];
+      await routeLatestBuildsData(page, requests);
+      try {
+        await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+        const toggle = page.getByRole("button", { name: "Latest per flake" });
+        await assertVisible(page.getByText("platform-latest-active").first(), "Expected populated active build fixture");
+        await assertAttribute(toggle, "aria-pressed", "false", "Latest build toggle should expose its off state");
+        await assertCount(page.locator("[data-testid='build-queue-row']"), 3, "Latest-off active build view should retain non-latest rows");
+        await assertCount(page.locator("[data-testid='build-queue-row'] .commit-latest"), 2, "Server-marked active builds should show exactly one latest marker per flake");
+
+        await toggle.click();
+        await assertHidden(page.getByText("platform-old-active").first(), "Latest-only should hide the non-latest active build");
+        await assertAttribute(toggle, "aria-pressed", "true", "Latest build toggle should expose its pressed state");
+        await assertCount(page.locator("[data-testid='build-queue-row']"), 2, "Latest-only should leave one active build per flake");
+        if (!requests.some((request) => !request.history && request.params.latest_only === "true")) {
+          throw new Error("Expected active builds request with latest_only=true");
+        }
+
+        const completedTab = page.locator(".sd-tab", { hasText: "Completed" });
+        await completedTab.click();
+        await assertVisible(page.getByText("aaaaaaa", { exact: true }), "Expected populated completed build fixture");
+        await assertHidden(page.getByText("platform-old-history").first(), "Pressed latest filter should persist when switching to Completed");
+        await assertAttribute(toggle, "aria-pressed", "true", "Latest build filter should remain pressed across tabs");
+        await assertCount(page.locator("[data-testid='build-queue-row']"), 2, "Completed latest-only view should leave one build per flake");
+        await assertCount(page.locator("[data-testid='build-queue-row'] .commit-latest"), 2, "Completed rows should retain server-authoritative latest markers");
+      } finally {
+        await unrouteLatestBuildsData(page);
+      }
+    },
+  },
+  {
+    name: "15k-builds-latest-combined-filters-empty-clear",
+    description: "Build latest-only composes with active status criteria and search and exposes a clearable filter-aware empty state",
+    action: async (page) => {
+      const requests = [];
+      await routeLatestBuildsData(page, requests);
+      try {
+        await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+        const toggle = page.getByRole("button", { name: "Latest per flake" });
+        await assertVisible(page.getByText("platform-latest-active").first(), "Expected populated active build fixture");
+        await toggle.click();
+
+        const activeSearch = page.getByPlaceholder("Search active builds…");
+        await activeSearch.fill("edge-fleet");
+        await assertVisible(page.getByText("edge-latest-active").first(), "Latest-only should compose with active build search");
+        await assertHidden(page.getByText("platform-latest-active").first(), "Active search should exclude the other latest flake");
+        if (!requests.some((request) => !request.history && request.params.latest_only === "true" && request.params.status === "queued,building,cancelling" && request.params.search === "edge-fleet")) {
+          throw new Error("Expected active build request to combine latest_only, active status criteria, and search");
+        }
+
+        await page.locator(".sd-tab", { hasText: "Completed" }).click();
+        const historySearch = page.getByPlaceholder("Search completed builds…");
+        await historySearch.fill("edge-fleet");
+        await assertVisible(page.getByText("edge-latest-history").first(), "Latest-only should compose with completed build search");
+        await assertHidden(page.getByText("platform-latest-history").first(), "Combined completed filters should exclude nonmatching latest rows");
+        if (!requests.some((request) => request.history && request.params.latest_only === "true" && request.params.search === "edge-fleet")) {
+          throw new Error("Expected completed build request to combine latest_only and search");
+        }
+
+        await historySearch.fill("no-such-build");
+        await assertVisible(page.getByText("No builds match the active filters."), "Expected filter-aware build empty state");
+        const clear = page.getByRole("button", { name: "Clear active filters" });
+        await assertVisible(clear, "Expected clear action for filtered build empty state");
+        await clear.click();
+        await assertVisible(page.getByText("platform-old-history").first(), "Clearing build filters should restore non-latest rows");
+        await assertAttribute(toggle, "aria-pressed", "false", "Clearing build filters should clear latest-only");
+
+        await toggle.click();
+        await assertVisible(page.getByText("platform-latest-history").first(), "Expected representative populated latest build state after clear");
+        await assertCount(page.locator("[data-testid='build-queue-row']"), 2, "Re-enabled latest filter should restore one completed row per flake");
+      } finally {
+        await unrouteLatestBuildsData(page);
+      }
+    },
+  },
+  {
     name: "16-cves",
     description: "CVE dashboard - fleet overview",
     action: async (page) => {
@@ -6009,6 +6427,8 @@ const steps = [
         active_count: 3,
         completed_count: 12,
         failed_count: 0,
+        domain_total: 3,
+        filtered_total: 3,
         execution_mode: "standard",
         timestamp: new Date().toISOString(),
         items: [
@@ -6021,6 +6441,8 @@ const steps = [
             commit_message: "feat: upgrade postgresql to 17.x",
             author: "alice",
             committed_at: new Date(Date.now() - 120000).toISOString(),
+            enqueued_at: new Date(Date.now() - 110000).toISOString(),
+            is_latest_per_flake: true,
             evaluation_status: "in_progress",
             queue_position: 1,
             systems: ["gray", "reckless", "butler", "chesty"],
@@ -6038,6 +6460,8 @@ const steps = [
             commit_message: "chore: update nixpkgs input",
             author: "bob",
             committed_at: new Date(Date.now() - 300000).toISOString(),
+            enqueued_at: new Date(Date.now() - 290000).toISOString(),
+            is_latest_per_flake: false,
             evaluation_status: "pending",
             queue_position: 2,
             systems: [],
@@ -6055,6 +6479,8 @@ const steps = [
             commit_message: "fix: add missing font packages",
             author: "carol",
             committed_at: new Date(Date.now() - 600000).toISOString(),
+            enqueued_at: new Date(Date.now() - 590000).toISOString(),
+            is_latest_per_flake: true,
             evaluation_status: "cancelling",
             queue_position: 3,
             systems: [],
@@ -6109,6 +6535,8 @@ const steps = [
         active_count: 0,
         completed_count: 15,
         failed_count: 0,
+        domain_total: 0,
+        filtered_total: 0,
         execution_mode: "standard",
         timestamp: new Date().toISOString(),
         items: [],
@@ -6116,6 +6544,7 @@ const steps = [
 
       const evalHistoryMock = {
         total_count: 15,
+        domain_total: 15,
         page: 1,
         limit: 50,
         items: [
@@ -6128,6 +6557,8 @@ const steps = [
             commit_message: "feat: upgrade postgresql to 17.x",
             author: "alice",
             committed_at: new Date(Date.now() - 3600000).toISOString(),
+            enqueued_at: new Date(Date.now() - 3590000).toISOString(),
+            is_latest_per_flake: true,
             evaluation_status: "complete",
             evaluation_completed_at: new Date(Date.now() - 3500000).toISOString(),
             evaluation_duration_ms: 83000,
@@ -6147,6 +6578,8 @@ const steps = [
             commit_message: "fix: add missing font packages",
             author: "bob",
             committed_at: new Date(Date.now() - 7200000).toISOString(),
+            enqueued_at: new Date(Date.now() - 7190000).toISOString(),
+            is_latest_per_flake: true,
             evaluation_status: "failed",
             evaluation_completed_at: new Date(Date.now() - 7100000).toISOString(),
             evaluation_duration_ms: 12000,
@@ -6166,6 +6599,8 @@ const steps = [
             commit_message: "chore: update nixpkgs input",
             author: "carol",
             committed_at: new Date(Date.now() - 10800000).toISOString(),
+            enqueued_at: new Date(Date.now() - 10790000).toISOString(),
+            is_latest_per_flake: false,
             evaluation_status: "cancelled",
             evaluation_completed_at: new Date(Date.now() - 10750000).toISOString(),
             evaluation_duration_ms: null,
@@ -6230,6 +6665,87 @@ const steps = [
 
       await page.unroute("**/api/v1/commits/eval-queue**");
       await page.unroute("**/api/v1/commits/eval-history**");
+    },
+  },
+  {
+    name: "26c-evaluations-latest-per-flake-populated",
+    description: "Evaluation active and history tabs honor server-authoritative latest markers and retain the pressed filter",
+    action: async (page) => {
+      const requests = [];
+      await routeLatestEvaluationsData(page, requests);
+      try {
+        await page.goto(`${baseUrl}/evaluations`, { timeout: LOAD_TIMEOUT });
+        const toggle = page.getByRole("button", { name: "Latest per flake" });
+        const tableRows = page.locator(".sys-table tbody tr");
+        await assertVisible(page.getByText("dddddddddddd", { exact: true }), "Expected populated active evaluation fixture");
+        await assertAttribute(toggle, "aria-pressed", "false", "Latest evaluation toggle should expose its off state");
+        await assertCount(tableRows, 3, "Latest-off active evaluations should retain non-latest rows");
+        await assertCount(page.locator(".sys-table tbody .commit-latest"), 2, "Active evaluations should display server-authoritative latest markers");
+
+        await toggle.click();
+        await assertHidden(page.getByText("eeeeeeeeeeee", { exact: true }), "Latest-only should hide non-latest active evaluations");
+        await assertAttribute(toggle, "aria-pressed", "true", "Latest evaluation toggle should expose its pressed state");
+        await assertCount(tableRows, 2, "Latest-only should leave one active evaluation per flake");
+        if (!requests.some((request) => !request.history && request.params.latest_only === "true")) {
+          throw new Error("Expected active evaluation request with latest_only=true");
+        }
+
+        await page.getByRole("button", { name: /History/ }).click();
+        await assertVisible(page.getByText("aaaaaaaaaaaa", { exact: true }), "Expected populated evaluation history fixture");
+        await assertHidden(page.getByText("bbbbbbbbbbbb", { exact: true }), "Pressed latest filter should persist when switching to evaluation history");
+        await assertAttribute(toggle, "aria-pressed", "true", "Latest evaluation filter should remain pressed across tabs");
+        await assertCount(tableRows, 2, "History latest-only should leave one evaluation per flake");
+        await assertCount(page.locator(".sys-table tbody .commit-latest"), 2, "Evaluation history should retain server-authoritative latest markers");
+      } finally {
+        await unrouteLatestEvaluationsData(page);
+      }
+    },
+  },
+  {
+    name: "26d-evaluations-latest-combined-filters-empty-clear",
+    description: "Evaluation latest-only composes with search, status, and flake filters and exposes a clearable filter-aware empty state",
+    action: async (page) => {
+      const requests = [];
+      await routeLatestEvaluationsData(page, requests);
+      try {
+        await page.goto(`${baseUrl}/evaluations`, { timeout: LOAD_TIMEOUT });
+        const toggle = page.getByRole("button", { name: "Latest per flake" });
+        await assertVisible(page.getByText("dddddddddddd", { exact: true }), "Expected populated active evaluation fixture");
+        await toggle.click();
+
+        const activeSearch = page.getByPlaceholder("Search queue…");
+        await activeSearch.fill("workstations");
+        await assertVisible(page.getByText("ffffffffffff", { exact: true }), "Latest-only should compose with active evaluation search");
+        await assertHidden(page.getByText("dddddddddddd", { exact: true }), "Active evaluation search should exclude the other latest flake");
+        if (!requests.some((request) => !request.history && request.params.latest_only === "true" && request.params.search === "workstations")) {
+          throw new Error("Expected active evaluation request to combine latest_only and search");
+        }
+
+        await page.getByRole("button", { name: /History/ }).click();
+        await page.getByRole("button", { name: "failed", exact: true }).click();
+        await page.locator("select.filter-select").selectOption("workstations");
+        const historySearch = page.getByPlaceholder("Search history…");
+        await historySearch.fill("workstation");
+        await assertVisible(page.getByText("cccccccccccc", { exact: true }), "Latest-only should compose with evaluation status, flake, and search filters");
+        await assertHidden(page.getByText("aaaaaaaaaaaa", { exact: true }), "Combined evaluation filters should exclude nonmatching latest rows");
+        if (!requests.some((request) => request.history && request.params.latest_only === "true" && request.params.status === "failed" && request.params.flake === "workstations" && request.params.search === "workstation")) {
+          throw new Error("Expected evaluation history request to combine latest_only, status, flake, and search");
+        }
+
+        await historySearch.fill("no-such-evaluation");
+        await assertVisible(page.getByText("No evaluations match the active filters."), "Expected filter-aware evaluation empty state");
+        const clear = page.getByRole("button", { name: "Clear active filters" });
+        await assertVisible(clear, "Expected clear action for filtered evaluation empty state");
+        await clear.click();
+        await assertVisible(page.getByText("bbbbbbbbbbbb", { exact: true }), "Clearing evaluation filters should restore non-latest rows");
+        await assertAttribute(toggle, "aria-pressed", "false", "Clearing evaluation filters should clear latest-only");
+
+        await toggle.click();
+        await assertVisible(page.getByText("aaaaaaaaaaaa", { exact: true }), "Expected representative populated latest evaluation state after clear");
+        await assertCount(page.locator(".sys-table tbody tr"), 2, "Re-enabled latest filter should restore one history row per flake");
+      } finally {
+        await unrouteLatestEvaluationsData(page);
+      }
     },
   },
   {
@@ -7036,6 +7552,114 @@ const steps = [
         page.getByText("Page not found").first(),
         "Admin route must not fall through to the 404 view",
       );
+    },
+  },
+  {
+    name: "30a-admin-automatic-retries-defaults-reset",
+    description: "Admin Server shows retry defaults and Reset restores the server baseline without persisting drafts",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/admin`, { timeout: LOAD_TIMEOUT });
+      await page.getByRole("button", { name: "Server", exact: true }).click();
+      await assertVisible(page.getByRole("heading", { name: "Automatic retries" }), "Expected Automatic retries card on Admin Server tab");
+
+      const buildRetries = page.getByLabel("Max build retries");
+      const evalRetries = page.getByLabel("Max eval retries");
+      const backoff = page.getByLabel("Backoff between attempts");
+      const transientOnly = page.getByLabel("Only retry transient failures");
+      await assertEnabled(buildRetries, "Retry controls should become enabled after loading the server baseline");
+      await assertValue(buildRetries, "2", "Expected default maximum build retries");
+      await assertValue(evalRetries, "1", "Expected default maximum evaluation retries");
+      await assertValue(backoff, "30", "Expected default retry backoff");
+      if (!(await transientOnly.isChecked())) throw new Error("Expected transient-only retry default to be enabled");
+
+      await buildRetries.selectOption("5");
+      await evalRetries.selectOption("4");
+      await backoff.selectOption("120");
+      await transientOnly.uncheck();
+      await page.locator("[data-testid='automatic-retries-reset']").click();
+      await assertValue(buildRetries, "2", "Reset should restore server build retry baseline");
+      await assertValue(evalRetries, "1", "Reset should restore server evaluation retry baseline");
+      await assertValue(backoff, "30", "Reset should restore server backoff baseline");
+      if (!(await transientOnly.isChecked())) throw new Error("Reset should restore server transient-only baseline");
+
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.getByRole("button", { name: "Server", exact: true }).click();
+      await assertEnabled(page.getByLabel("Max build retries"), "Retry controls should reload from the server");
+      await assertValue(page.getByLabel("Max build retries"), "2", "Reset must not persist the edited build retry draft");
+      await assertValue(page.getByLabel("Max eval retries"), "1", "Reset must not persist the edited evaluation retry draft");
+      await assertValue(page.getByLabel("Backoff between attempts"), "30", "Reset must not persist the edited backoff draft");
+      if (!(await page.getByLabel("Only retry transient failures").isChecked())) {
+        throw new Error("Reset must not persist the edited transient-only draft");
+      }
+    },
+  },
+  {
+    name: "30b-admin-automatic-retries-save-reload",
+    description: "Admin saves every retry policy field to the real server and observes the persisted values after reload",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/admin`, { timeout: LOAD_TIMEOUT });
+      await page.getByRole("button", { name: "Server", exact: true }).click();
+      const buildRetries = page.getByLabel("Max build retries");
+      const evalRetries = page.getByLabel("Max eval retries");
+      const backoff = page.getByLabel("Backoff between attempts");
+      const transientOnly = page.getByLabel("Only retry transient failures");
+      await assertEnabled(buildRetries, "Retry controls should load before save");
+
+      await buildRetries.selectOption("5");
+      await evalRetries.selectOption("4");
+      await backoff.selectOption("120");
+      await transientOnly.uncheck();
+      await page.getByRole("button", { name: "Save retry config" }).click();
+      await assertVisible(page.getByText("Automatic retry configuration saved."), "Expected visible retry save success feedback");
+
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.getByRole("button", { name: "Server", exact: true }).click();
+      await assertEnabled(page.getByLabel("Max build retries"), "Persisted retry controls should load after reload");
+      await assertValue(page.getByLabel("Max build retries"), "5", "Saved build retries should survive reload");
+      await assertValue(page.getByLabel("Max eval retries"), "4", "Saved evaluation retries should survive reload");
+      await assertValue(page.getByLabel("Backoff between attempts"), "120", "Saved retry backoff should survive reload");
+      if (await page.getByLabel("Only retry transient failures").isChecked()) {
+        throw new Error("Saved transient-only=false should survive reload");
+      }
+    },
+  },
+  {
+    name: "30c-admin-automatic-retries-failed-save-retains-draft",
+    description: "Admin retry persistence failure is visible and retains every unsaved draft field",
+    action: async (page) => {
+      await page.route("**/api/v1/admin/automatic-retry-policy*", async (route) => {
+        if (route.request().method() === "PUT") {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "simulated retry policy persistence failure" }),
+          });
+          return;
+        }
+        await route.continue();
+      });
+      try {
+        await page.goto(`${baseUrl}/admin`, { timeout: LOAD_TIMEOUT });
+        await page.getByRole("button", { name: "Server", exact: true }).click();
+        const buildRetries = page.getByLabel("Max build retries");
+        const evalRetries = page.getByLabel("Max eval retries");
+        const backoff = page.getByLabel("Backoff between attempts");
+        const transientOnly = page.getByLabel("Only retry transient failures");
+        await assertEnabled(buildRetries, "Retry controls should load before failed save");
+
+        await buildRetries.selectOption("3");
+        await evalRetries.selectOption("2");
+        await backoff.selectOption("10");
+        await transientOnly.check();
+        await page.getByRole("button", { name: "Save retry config" }).click();
+        await assertVisible(page.locator("[data-testid='automatic-retries-save-error']"), "Expected visible retry save failure feedback");
+        await assertValue(buildRetries, "3", "Failed save should retain build retry draft");
+        await assertValue(evalRetries, "2", "Failed save should retain evaluation retry draft");
+        await assertValue(backoff, "10", "Failed save should retain backoff draft");
+        if (!(await transientOnly.isChecked())) throw new Error("Failed save should retain transient-only draft");
+      } finally {
+        await page.unroute("**/api/v1/admin/automatic-retry-policy*");
+      }
     },
   },
   {

@@ -229,6 +229,11 @@ impl CommitBuilder {
             git_commit_hash: self.git_commit_hash.clone(),
             commit_timestamp: self.commit_timestamp,
             attempt_count: self.attempt_count,
+            evaluation_attempt_id: None,
+            evaluation_attempt_number: 0,
+            evaluation_parent_attempt_id: None,
+            evaluation_root_attempt_id: None,
+            evaluation_available_at: None,
         }
     }
 }

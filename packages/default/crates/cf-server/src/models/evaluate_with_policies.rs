@@ -332,12 +332,81 @@ use crate::models::deployment_policies::{
     build_nix_eval_expression, policies_for_config, policy_requirements_met, policy_results_json,
 };
 use crate::models::flakes::Flake;
+use crate::models::retry_policy::RetryFailureClass;
 use crate::queries::build_jobs::{
     BuildJobInsertOutcome, QueuedBuild, create_build_job_for_derivation_tx,
+};
+use crate::queries::derivations::{
+    insert_derivation_with_target, mark_derivation_dry_run_complete, set_closure_counts,
+    set_expected_store_path,
 };
 use crate::queries::commits_artifacts::CachedSystemsState;
 use crate::queries::systems::list_configuration_names_for_flake;
 use crate::queue::QueueNotifier;
+
+#[derive(Debug)]
+pub struct EvaluationFailure {
+    source: anyhow::Error,
+    pub class: RetryFailureClass,
+}
+
+impl std::fmt::Display for EvaluationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(f)
+    }
+}
+
+impl std::error::Error for EvaluationFailure {}
+
+fn classify_evaluation_failure(message: &str) -> RetryFailureClass {
+    let message = message.to_ascii_lowercase();
+    if message.contains("cancelled by user") || message.contains("canceled by user") {
+        RetryFailureClass::Cancelled
+    } else if [
+        "unauthorized",
+        "forbidden",
+        "authentication",
+        "permission denied",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        RetryFailureClass::Authorization
+    } else if [
+        "assertion failed",
+        "is not a derivation",
+        "invalid derivation",
+        "does not exist",
+        "infinite recursion",
+        "syntax error",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        RetryFailureClass::Deterministic
+    } else if [
+        "timed out",
+        "timeout",
+        "temporary failure",
+        "connection reset",
+        "connection refused",
+        "could not resolve host",
+        "network is unreachable",
+        "service unavailable",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        RetryFailureClass::Transient
+    } else {
+        RetryFailureClass::Unknown
+    }
+}
+
+fn structured_evaluation_failure(source: anyhow::Error) -> EvaluationFailure {
+    let class = classify_evaluation_failure(&format!("{source:#}"));
+    EvaluationFailure { source, class }
+}
 
 /// NixEvalJobResult with meta field
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2192,7 +2261,39 @@ pub async fn evaluate_with_nix_eval_jobs(
     server_config: &ServerConfig,
     policies_by_configuration: &Arc<PoliciesByConfiguration>,
     cf_state: Option<&crate::handlers::agent_request::CFState>,
-    _queue_notifier: Option<&QueueNotifier>,
+    queue_notifier: Option<&QueueNotifier>,
+) -> std::result::Result<EvaluationPlan, EvaluationFailure> {
+    evaluate_with_nix_eval_jobs_inner(
+        pool,
+        commit,
+        expected_attempt,
+        flake,
+        repo_url,
+        commit_hash,
+        target_system,
+        build_config,
+        server_config,
+        policies_by_configuration,
+        cf_state,
+        queue_notifier,
+    )
+    .await
+    .map_err(structured_evaluation_failure)
+}
+
+async fn evaluate_with_nix_eval_jobs_inner(
+    pool: &PgPool,
+    commit: &Commit,
+    expected_attempt: i32,
+    flake: &Flake,
+    repo_url: &str,
+    commit_hash: &str,
+    target_system: &str,
+    build_config: &BuildConfig,
+    server_config: &ServerConfig,
+    policies_by_configuration: &Arc<PoliciesByConfiguration>,
+    cf_state: Option<&crate::handlers::agent_request::CFState>,
+    queue_notifier: Option<&QueueNotifier>,
 ) -> Result<EvaluationPlan> {
     // Re-evaluation safety: clear previous persisted logs for this commit so
     // (commit_id, log_sequence) uniqueness cannot collide on subsequent runs.
@@ -2841,7 +2942,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                 };
                                                 let successful = successful.clone();
                                                 let cf_state_owned = cf_state.cloned();
-                                                let queue_notifier_owned = _queue_notifier.cloned();
+                                                let queue_notifier_owned = queue_notifier.cloned();
 
                                                 info!(
                                                     commit_id,
@@ -2988,7 +3089,7 @@ pub async fn evaluate_with_nix_eval_jobs(
 
                                                 // Re-notify queue if the existing job is still queued.
                                                 if build_job_status == "queued" {
-                                                    if let Some(notifier) = _queue_notifier {
+                                                    if let Some(notifier) = queue_notifier {
                                                         notifier.notify_build_queue();
                                                     }
                                                     if let Some(state) = cf_state {
@@ -3481,7 +3582,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                             match handle_system_finalize_outcome(
                                 pool,
                                 cf_state,
-                                _queue_notifier,
+                                queue_notifier,
                                 commit.id,
                                 &result.system_name,
                                 finalize_outcome,
@@ -3887,6 +3988,38 @@ pub async fn evaluate_with_nix_eval_jobs(
 /// transitions so UI and process workflows can be validated quickly.
 #[allow(clippy::too_many_arguments)]
 pub async fn evaluate_with_mock_eval_jobs(
+    pool: &PgPool,
+    commit: &Commit,
+    flake: &Flake,
+    repo_url: &str,
+    commit_hash: &str,
+    target_system: &str,
+    build_config: &BuildConfig,
+    server_config: &ServerConfig,
+    policies_by_configuration: &Arc<PoliciesByConfiguration>,
+    configured_systems: &[String],
+    cf_state: Option<&crate::handlers::agent_request::CFState>,
+    queue_notifier: Option<&QueueNotifier>,
+) -> std::result::Result<EvaluationPlan, EvaluationFailure> {
+    evaluate_with_mock_eval_jobs_inner(
+        pool,
+        commit,
+        flake,
+        repo_url,
+        commit_hash,
+        target_system,
+        build_config,
+        server_config,
+        policies_by_configuration,
+        configured_systems,
+        cf_state,
+        queue_notifier,
+    )
+    .await
+    .map_err(structured_evaluation_failure)
+}
+
+async fn evaluate_with_mock_eval_jobs_inner(
     pool: &PgPool,
     commit: &Commit,
     flake: &Flake,
@@ -4301,6 +4434,39 @@ fn summarize_commit_metadata(
 
 #[cfg(test)]
 mod tests {
+    use super::classify_evaluation_failure;
+    use crate::models::retry_policy::RetryFailureClass;
+
+    #[test]
+    fn evaluation_failures_are_classified_at_source() {
+        for (message, expected) in [
+            ("evaluation timed out", RetryFailureClass::Transient),
+            (
+                "temporary failure resolving source",
+                RetryFailureClass::Transient,
+            ),
+            (
+                "assertion failed at module.nix:4",
+                RetryFailureClass::Deterministic,
+            ),
+            (
+                "result is not a derivation",
+                RetryFailureClass::Deterministic,
+            ),
+            (
+                "evaluation cancelled by user request",
+                RetryFailureClass::Cancelled,
+            ),
+            (
+                "repository authentication failed",
+                RetryFailureClass::Authorization,
+            ),
+            ("unrecognized evaluator crash", RetryFailureClass::Unknown),
+        ] {
+            assert_eq!(classify_evaluation_failure(message), expected, "{message}");
+        }
+    }
+
     use super::{
         CappedOutput, ConfirmedSystemFailure, EvaluationFinalizeOutcome, EvaluationPlan,
         NixEvalJobResult, NixEvalProcessGuard, SuccessfulSystemResult,

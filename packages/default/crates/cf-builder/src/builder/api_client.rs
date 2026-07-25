@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use cf_config::config::BuilderConfig;
 use cf_protocol::builder::{
-    BuildFailurePhase, BuildProgressRequest, EstablishBuilderSessionRequest,
+    BuildFailureClass, BuildFailurePhase, BuildProgressRequest, EstablishBuilderSessionRequest,
     EstablishBuilderSessionResponse, NextJobRequest, NextJobResponse, RemoteBuildExecutionStrategy,
     ReportMetricsRequest, ResolveBuilderIdRequest, ResolveBuilderIdResponse,
 };
@@ -1123,8 +1123,13 @@ impl BuilderApiClient {
 
     /// Fail a job with an error message
     pub async fn fail_job(&self, job_id: uuid::Uuid, error_message: &str) -> Result<()> {
-        self.fail_job_with_phase(job_id, BuildFailurePhase::Build, error_message)
-            .await
+        self.fail_job_with_phase(
+            job_id,
+            BuildFailurePhase::Build,
+            BuildFailureClass::Unknown,
+            error_message,
+        )
+        .await
     }
 
     /// Fail a job with an explicit remote-build phase classification.
@@ -1132,12 +1137,14 @@ impl BuilderApiClient {
         &self,
         job_id: uuid::Uuid,
         phase: BuildFailurePhase,
+        failure_class: BuildFailureClass,
         error_message: &str,
     ) -> Result<()> {
         #[derive(Serialize)]
         struct FailRequest {
             status: &'static str,
             failure_phase: String,
+            failure_class: BuildFailureClass,
             error_message: String,
         }
 
@@ -1146,6 +1153,7 @@ impl BuilderApiClient {
         let request = FailRequest {
             status: "failed",
             failure_phase: phase.to_string(),
+            failure_class,
             error_message: error_message.to_string(),
         };
         let body = serde_json::to_vec(&request)?;

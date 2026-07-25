@@ -6,8 +6,8 @@ use cf_builder::cache::builder_cache_to_config;
 use cf_builder::derivations;
 use cf_config::config::{CacheConfig, CacheType, CrystalForgeConfig};
 use cf_protocol::builder::{
-    BuildFailurePhase, BuildJobDerivation, BuilderCachePushConfig, NextJobResponse,
-    RemoteBuildExecutionStrategy, ReportMetricsRequest, SourceInputDeliveryMode,
+    BuildFailureClass, BuildFailurePhase, BuildJobDerivation, BuilderCachePushConfig,
+    NextJobResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest, SourceInputDeliveryMode,
     VerifiedSourceIdentity,
 };
 #[allow(deprecated)]
@@ -36,6 +36,50 @@ use tracing_subscriber::EnvFilter;
 const LOG_CHANNEL_CAPACITY: usize = 64;
 const LOG_DRAIN_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
 const DERIVATION_DELTA_ARCHIVE_REQUEST_MAX_BYTES: usize = 512 * 1024;
+
+fn classify_nix_failure(message: &str) -> BuildFailureClass {
+    let message = message.to_ascii_lowercase();
+    if [
+        "unauthorized",
+        "forbidden",
+        "authentication",
+        "permission denied",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        BuildFailureClass::Authorization
+    } else if [
+        "assertion failed",
+        "attribute '",
+        "does not exist",
+        "commit not found",
+        "is not a derivation",
+        "infinite recursion",
+        "syntax error",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        BuildFailureClass::Deterministic
+    } else if [
+        "timed out",
+        "timeout",
+        "temporary failure",
+        "connection reset",
+        "connection refused",
+        "could not resolve host",
+        "network is unreachable",
+        "service unavailable",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        BuildFailureClass::Transient
+    } else {
+        BuildFailureClass::Unknown
+    }
+}
 
 fn required_cache_push_reference(
     cache_config: &CacheConfig,
@@ -266,7 +310,12 @@ async fn run_api_job_loop(
                     );
                     error!("❌ Job #{} rejected: {}", job.id, message);
                     if let Err(report_err) = client
-                        .fail_job_with_phase(job.id, BuildFailurePhase::Build, &message)
+                        .fail_job_with_phase(
+                            job.id,
+                            BuildFailurePhase::Build,
+                            BuildFailureClass::Deterministic,
+                            &message,
+                        )
                         .await
                     {
                         error!(
@@ -316,6 +365,7 @@ async fn run_api_job_loop(
 #[derive(Debug)]
 struct PreBuildFailure {
     phase: BuildFailurePhase,
+    class: BuildFailureClass,
     message: String,
 }
 
@@ -351,6 +401,7 @@ where
                 };
                 break VerificationOutcome::Completed(Err(PreBuildFailure {
                     phase,
+                    class: BuildFailureClass::Transient,
                     message: format!(
                         "verified source pre-build {} timed out after {:?}",
                         if phase == BuildFailurePhase::Evaluation {
@@ -379,6 +430,7 @@ fn expected_drv_path(payload: &BuildJobDerivation) -> Result<&str, PreBuildFailu
         .filter(|drv| drv.ends_with(".drv"))
         .ok_or_else(|| PreBuildFailure {
             phase: BuildFailurePhase::Evaluation,
+            class: BuildFailureClass::Deterministic,
             message: "verified source job is missing expected .drvPath".to_string(),
         })
 }
@@ -412,11 +464,13 @@ fn source_flake_ref(
         }
         SourceInputDeliveryMode::ServerBundledArchive => Err(PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Deterministic,
             message: "server-bundled source delivery selected but archive_url is missing"
                 .to_string(),
         }),
         SourceInputDeliveryMode::None => Err(PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Deterministic,
             message: "verified source job is missing source delivery metadata".to_string(),
         }),
     }
@@ -451,6 +505,7 @@ fn source_workspace_paths_for_job(
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Deterministic,
             message: "local git worktree delivery is missing mirror_id".to_string(),
         })?;
 
@@ -505,6 +560,7 @@ async fn acquire_mirror_lock(mirror_path: &Path) -> Result<MirrorLock, PreBuildF
             .await
             .map_err(|e| PreBuildFailure {
                 phase: BuildFailurePhase::SourceFetch,
+                class: BuildFailureClass::Unknown,
                 message: format!(
                     "failed to create source mirror lock parent {}: {e}",
                     parent.display()
@@ -519,6 +575,7 @@ async fn acquire_mirror_lock(mirror_path: &Path) -> Result<MirrorLock, PreBuildF
         .open(&lock_path)
         .map_err(|e| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
             message: format!(
                 "failed to open source mirror lock {}: {e}",
                 lock_path.display()
@@ -535,6 +592,7 @@ async fn acquire_mirror_lock(mirror_path: &Path) -> Result<MirrorLock, PreBuildF
             Err(e) => {
                 return Err(PreBuildFailure {
                     phase: BuildFailurePhase::SourceFetch,
+                    class: BuildFailureClass::Unknown,
                     message: format!(
                         "failed to acquire source mirror lock {}: {e}",
                         lock_path.display()
@@ -559,6 +617,7 @@ async fn ensure_mirror_has_commit(
     let _lock = acquire_mirror_lock(mirror_path).await?;
     let source_fetch = |message: String| PreBuildFailure {
         phase: BuildFailurePhase::SourceFetch,
+        class: classify_nix_failure(&message),
         message,
     };
 
@@ -716,6 +775,7 @@ async fn ensure_source_worktree(
             .await
             .map_err(|e| PreBuildFailure {
                 phase: BuildFailurePhase::SourceFetch,
+                class: BuildFailureClass::Unknown,
                 message: format!(
                     "failed to create source worktree parent {}: {e}",
                     parent.display()
@@ -736,6 +796,7 @@ async fn ensure_source_worktree(
         .await
         .map_err(|e| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
             message: format!("failed to spawn git worktree add: {e}"),
         })?;
 
@@ -743,6 +804,7 @@ async fn ensure_source_worktree(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
             message: format!("git worktree add failed: {stderr}"),
         });
     }
@@ -776,6 +838,7 @@ async fn ensure_source_worktree_from_mirror(
         .filter(|v| !v.is_empty())
         .ok_or_else(|| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Deterministic,
             message: "ServerBundledArchive delivery is missing mirror_id for worktree path"
                 .to_string(),
         })?;
@@ -801,6 +864,7 @@ async fn ensure_source_worktree_from_mirror(
             .await
             .map_err(|e| PreBuildFailure {
                 phase: BuildFailurePhase::SourceFetch,
+                class: BuildFailureClass::Unknown,
                 message: format!(
                     "failed to create source worktree parent {}: {e}",
                     parent.display()
@@ -821,6 +885,7 @@ async fn ensure_source_worktree_from_mirror(
         .await
         .map_err(|e| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
             message: format!("failed to spawn git worktree add: {e}"),
         })?;
 
@@ -828,6 +893,7 @@ async fn ensure_source_worktree_from_mirror(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
             message: format!("git worktree add failed: {stderr}"),
         });
     }
@@ -851,6 +917,7 @@ async fn verify_worktree_head(
         .await
         .map_err(|e| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
             message: format!(
                 "failed to inspect source worktree {}: {e}",
                 worktree_path.display()
@@ -861,6 +928,7 @@ async fn verify_worktree_head(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
             message: format!(
                 "git rev-parse failed for {}: {stderr}",
                 worktree_path.display()
@@ -874,6 +942,7 @@ async fn verify_worktree_head(
     } else {
         Err(PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Deterministic,
             message: format!(
                 "source worktree {} is at {}, expected {}",
                 worktree_path.display(),
@@ -1018,6 +1087,7 @@ fn verify_drv_identity(expected: &str, actual: &str) -> Result<(), PreBuildFailu
     } else {
         Err(PreBuildFailure {
             phase: BuildFailurePhase::DerivationMismatch,
+            class: BuildFailureClass::Deterministic,
             message: format!(
                 "builder evaluated drvPath {actual}, expected server-authorized drvPath {expected}"
             ),
@@ -1039,6 +1109,7 @@ async fn evaluate_verified_source_drv(
         // extract it to the mirror path, then create a worktree from the mirror.
         let source_err = |msg: String| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: classify_nix_failure(&msg),
             message: msg,
         };
 
@@ -1147,6 +1218,7 @@ async fn evaluate_verified_source_drv(
         .await
         .map_err(|e| PreBuildFailure {
             phase: BuildFailurePhase::Evaluation,
+            class: BuildFailureClass::Unknown,
             message: format!("failed to spawn nix eval for {eval_attr}: {e}"),
         })?;
 
@@ -1154,6 +1226,7 @@ async fn evaluate_verified_source_drv(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(PreBuildFailure {
             phase: BuildFailurePhase::Evaluation,
+            class: classify_nix_failure(&stderr),
             message: format!("nix eval failed for {eval_attr}: {stderr}"),
         });
     }
@@ -1174,6 +1247,7 @@ async fn verify_source_build_plan(
     let expected = expected_drv_path(payload)?.to_string();
     let source = payload.source.as_ref().ok_or_else(|| PreBuildFailure {
         phase: BuildFailurePhase::SourceFetch,
+        class: BuildFailureClass::Deterministic,
         message: "verified source job is missing immutable source identity".to_string(),
     })?;
     let actual = evaluate_verified_source_drv(
@@ -1278,7 +1352,7 @@ async fn execute_build_job(
                     job_id, failure.phase, failure.message
                 );
                 if let Err(report_err) = client
-                    .fail_job_with_phase(job_id, failure.phase, &failure.message)
+                    .fail_job_with_phase(job_id, failure.phase, failure.class, &failure.message)
                     .await
                 {
                     error!(
@@ -1354,6 +1428,7 @@ async fn execute_build_job(
                 .fail_job_with_phase(
                     job_id,
                     BuildFailurePhase::PathMaterialization,
+                    classify_nix_failure(&e.to_string()),
                     &e.to_string(),
                 )
                 .await
@@ -1557,8 +1632,10 @@ async fn execute_build_job(
                             )
                             .await;
                         if let Err(report_error) = client
-                            .fail_job(
+                            .fail_job_with_phase(
                                 job_id,
+                                BuildFailurePhase::Build,
+                                BuildFailureClass::Deterministic,
                                 &format!("Cache push is required but not configured: {:#}", e),
                             )
                             .await
@@ -1591,8 +1668,10 @@ async fn execute_build_job(
                             .append_logs(job_id, &format!("❌ Cache push failed: {:#}\n", e))
                             .await;
                         if let Err(report_error) = client
-                            .fail_job(
+                            .fail_job_with_phase(
                                 job_id,
+                                BuildFailurePhase::Build,
+                                classify_nix_failure(&e.to_string()),
                                 &format!("Cache push failed after successful build: {:#}", e),
                             )
                             .await
@@ -1686,7 +1765,15 @@ async fn execute_build_job(
 
             // Report failure to the server, which records the derivation-level
             // failure server-side (no builder DB access).
-            if let Err(report_err) = client.fail_job(job_id, &e.to_string()).await {
+            if let Err(report_err) = client
+                .fail_job_with_phase(
+                    job_id,
+                    BuildFailurePhase::Build,
+                    classify_nix_failure(&e.to_string()),
+                    &e.to_string(),
+                )
+                .await
+            {
                 error!(
                     "❌ Failed to report job #{} failure: {}",
                     job_id, report_err
@@ -1715,7 +1802,15 @@ async fn execute_build_job(
             .await;
 
             // Report timeout failure to the server (server records derivation failure).
-            if let Err(report_err) = client.fail_job(job_id, &timeout_msg).await {
+            if let Err(report_err) = client
+                .fail_job_with_phase(
+                    job_id,
+                    BuildFailurePhase::Build,
+                    BuildFailureClass::Transient,
+                    &timeout_msg,
+                )
+                .await
+            {
                 error!(
                     "❌ Failed to report job #{} timeout failure: {}",
                     job_id, report_err
@@ -2129,6 +2224,29 @@ fn is_local_db_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::classify_nix_failure;
+    use cf_protocol::builder::BuildFailureClass;
+
+    #[test]
+    fn builder_failure_classification_is_explicit_and_fail_closed() {
+        for (message, expected) in [
+            (
+                "connection reset while downloading source",
+                BuildFailureClass::Transient,
+            ),
+            ("build timed out", BuildFailureClass::Transient),
+            ("assertion failed", BuildFailureClass::Deterministic),
+            ("path is not a derivation", BuildFailureClass::Deterministic),
+            (
+                "repository authentication failed",
+                BuildFailureClass::Authorization,
+            ),
+            ("unexpected nix failure", BuildFailureClass::Unknown),
+        ] {
+            assert_eq!(classify_nix_failure(message), expected, "{message}");
+        }
+    }
+
     use super::{
         PRE_BUILD_SOURCE_FETCH, cleanup_candidate_worktree, drv_path_eval_attr,
         ensure_mirror_has_commit, mock_store_path, should_mock_build_fail, source_flake_ref,

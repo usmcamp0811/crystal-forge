@@ -14,6 +14,7 @@ pub mod evaluations;
 pub mod flakes;
 pub mod flakes_list;
 pub mod hardening;
+mod latest_filter;
 pub mod login;
 pub mod not_found;
 pub mod policies;

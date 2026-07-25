@@ -15,6 +15,10 @@ use crate::models::builders::{
     ReportMetricsRequest, UpdateBuilderRequest,
 };
 use crate::models::public_key::PublicKey;
+use crate::models::retry_policy::{
+    AutomaticRetryPolicy, RetryFailureClass, automatic_retry_budget_remaining,
+    automatic_retry_eligible,
+};
 use crate::queries::attention;
 
 const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
@@ -29,6 +33,7 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
         FROM build_jobs
         JOIN derivations d ON d.id = build_jobs.derivation_id
         WHERE build_jobs.status = 'queued'
+          AND build_jobs.available_at <= NOW()
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
         ORDER BY
@@ -57,6 +62,7 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
         FROM build_jobs
         JOIN derivations d ON d.id = build_jobs.derivation_id
         WHERE build_jobs.status = 'queued'
+          AND build_jobs.available_at <= NOW()
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
@@ -88,6 +94,7 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL: &str = r#"
         LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
         WHERE build_jobs.status = 'queued'
+          AND build_jobs.available_at <= NOW()
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
           AND (
@@ -123,6 +130,7 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
         LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
         WHERE build_jobs.status = 'queued'
+          AND build_jobs.available_at <= NOW()
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
@@ -1599,17 +1607,26 @@ pub async fn reorder_build_queue(pool: &PgPool, ordered_job_ids: &[Uuid]) -> Res
     Ok(())
 }
 
-/// Mark a job as failed with retry logic
-/// If retry_count < max_retries, re-queue the job with incremented retry_count
-/// Otherwise, mark as permanently failed
+#[derive(Debug)]
+pub struct BuildFailureTransition {
+    pub failed_job: BuildJob,
+    pub retry_job: Option<BuildJob>,
+}
+
+/// Terminally fail one attempt and atomically schedule at most one automatic child.
 pub async fn mark_job_failed_with_retry(
     pool: &PgPool,
     job_id: &Uuid,
     builder_id: &Uuid,
     builder_session_id: Option<&Uuid>,
     error_message: Option<&str>,
-) -> Result<BuildJob> {
-    // First, get the current job state
+    failure_class: RetryFailureClass,
+) -> Result<BuildFailureTransition> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin fail transaction")?;
+
     let job = sqlx::query_as::<_, BuildJobRow>(
         r#"
         SELECT *
@@ -1618,87 +1635,88 @@ pub async fn mark_job_failed_with_retry(
           AND builder_id = $2
           AND (builder_session_id IS NULL OR builder_session_id = $3)
           AND status = 'building'
+        FOR UPDATE
         "#,
     )
     .bind(job_id)
     .bind(builder_id)
     .bind(builder_session_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .context("Failed to load owned building job for fail transition")?
     .ok_or_else(|| {
         anyhow::anyhow!("Build job not found or no longer owned by this builder in building status")
     })?;
 
-    if job.retry_count < job.max_retries {
-        // Re-queue the job with incremented retry count
-        // Slightly reduce priority weight on retry (newer commits stay higher priority)
-        let new_priority = job.priority_weight * 0.95;
+    let policy = sqlx::query_as::<_, AutomaticRetryPolicy>(
+        "SELECT max_build_retries, max_evaluation_retries, backoff_seconds, transient_only FROM automatic_retry_policy WHERE id = 1",
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to read retry policy during build failure")?
+    .unwrap_or_default();
 
-        let updated_job = sqlx::query(
-            r#"
-            UPDATE build_jobs
-            SET status = 'queued',
-                retry_count = retry_count + 1,
-                priority_weight = $2,
-                builder_id = NULL,
-                builder_session_id = NULL,
-                started_at = NULL,
-                created_at = now(),
-                updated_at = now()
-            WHERE id = $1
-              AND builder_id = $3
-              AND (builder_session_id IS NULL OR builder_session_id = $4)
-              AND status = 'building'
+    let failed_job = sqlx::query_as::<_, BuildJobRow>(
+        r#"
+        UPDATE build_jobs
+        SET status = 'failed',
+            completed_at = NOW(),
+            logs = CASE
+                WHEN $2::text IS NULL THEN logs
+                ELSE COALESCE(logs, '') || E'\n\nError: ' || $2
+            END,
+            updated_at = NOW()
+        WHERE id = $1 AND status = 'building'
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .bind(error_message)
+    .fetch_one(&mut *tx)
+    .await
+    .context("Failed to mark build attempt failed")?;
+
+    let retry_job =
+        if automatic_retry_budget_remaining(job.retry_count, i32::from(policy.max_build_retries))
+            && automatic_retry_eligible(policy.transient_only, failure_class)
+        {
+            sqlx::query_as::<_, BuildJobRow>(
+                r#"
+            INSERT INTO build_jobs (
+                derivation_id, environment_id, status, retry_count, max_retries,
+                priority_weight, parent_job_id, root_job_id,
+                automatic_retry_source_id, attempt_number, available_at
+            )
+            VALUES (
+                $1, $2, 'queued', $3, $4, $5, $6, $7, $6, $8,
+                NOW() + make_interval(secs => $9)
+            )
+            ON CONFLICT (automatic_retry_source_id)
+                WHERE automatic_retry_source_id IS NOT NULL DO NOTHING
+            RETURNING *
             "#,
-        )
-        .bind(job_id)
-        .bind(new_priority)
-        .bind(builder_id)
-        .bind(builder_session_id)
-        .execute(pool)
+            )
+            .bind(job.derivation_id)
+            .bind(job.environment_id)
+            .bind(job.retry_count + 1)
+            .bind(i32::from(policy.max_build_retries))
+            .bind(job.priority_weight * 0.95)
+            .bind(job.id)
+            .bind(job.root_job_id.unwrap_or(job.id))
+            .bind(job.attempt_number + 1)
+            .bind(policy.backoff_seconds)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to schedule automatic build retry")?
+        } else {
+            None
+        };
+
+    tx.commit()
         .await
-        .context("Failed to re-queue job for retry")?;
+        .context("Failed to commit build failure")?;
 
-        if updated_job.rows_affected() == 0 {
-            bail!("Build job ownership/status changed before retry transition could be applied");
-        }
-
-        let updated_job = get_build_job_by_id(pool, job_id).await?.ok_or_else(|| {
-            anyhow::anyhow!("Build job disappeared after successful retry transition")
-        })?;
-
-        Ok(updated_job)
-    } else {
-        // Permanently failed - exceeded max retries
-        let failed_job = sqlx::query(
-            r#"
-            UPDATE build_jobs
-            SET status = 'failed',
-                completed_at = now(),
-                updated_at = now()
-            WHERE id = $1
-              AND builder_id = $2
-              AND (builder_session_id IS NULL OR builder_session_id = $3)
-              AND status = 'building'
-            "#,
-        )
-        .bind(job_id)
-        .bind(builder_id)
-        .bind(builder_session_id)
-        .execute(pool)
-        .await
-        .context("Failed to mark job as permanently failed")?;
-
-        if failed_job.rows_affected() == 0 {
-            bail!("Build job ownership/status changed before fail transition could be applied");
-        }
-
-        let failed_job = get_build_job_by_id(pool, job_id).await?.ok_or_else(|| {
-            anyhow::anyhow!("Build job disappeared after successful fail transition")
-        })?;
-
-        // Open a canonical attention occurrence for the terminal failure.
+    if retry_job.is_none() {
         let opened_at = failed_job.completed_at.unwrap_or_else(Utc::now);
         let _ = attention::open_or_observe(
             pool,
@@ -1711,9 +1729,12 @@ pub async fn mark_job_failed_with_retry(
         )
         .await
         .map_err(|e| tracing::error!("failed to open build attention occurrence: {e:#}"));
-
-        Ok(failed_job)
     }
+
+    Ok(BuildFailureTransition {
+        failed_job,
+        retry_job,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1880,7 +1901,8 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
     let inserted = sqlx::query_as::<_, BuildJobRow>(
         r#"
         WITH source_job AS (
-            SELECT derivation_id, environment_id, max_retries
+            SELECT derivation_id, environment_id, id,
+                   COALESCE(root_job_id, id) AS root_job_id, attempt_number
             FROM build_jobs
             WHERE id = $1
               AND status IN ('cancelled', 'failed', 'success')
@@ -1895,15 +1917,23 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
             status,
             retry_count,
             max_retries,
-            priority_weight
+            priority_weight,
+            parent_job_id,
+            root_job_id,
+            attempt_number,
+            available_at
         )
         SELECT
             s.derivation_id,
             s.environment_id,
             'queued',
             0,
-            s.max_retries,
-            q.tail_weight
+            COALESCE((SELECT max_build_retries FROM automatic_retry_policy WHERE id = 1), 2),
+            q.tail_weight,
+            s.id,
+            s.root_job_id,
+            s.attempt_number + 1,
+            NOW()
         FROM source_job s
         CROSS JOIN queue_tail q
         RETURNING *
@@ -2238,6 +2268,80 @@ mod tests {
             requeued.priority_weight > 0.0,
             "priority_weight must satisfy DB CHECK (priority_weight > 0)"
         );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn automatic_retry_creates_one_delayed_linked_child_and_keeps_source_terminal(
+        pool: PgPool,
+    ) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/retry-{}.git", Uuid::new_v4()),
+            &format!("retry-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "retry-system",
+            5.0,
+            now,
+        )
+        .await;
+        let builder = create_active_test_builder(&pool, "automatic-retry-builder").await;
+
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'building', builder_id = $2, started_at = NOW() WHERE id = $1",
+        )
+        .bind(job_id)
+        .bind(builder.id)
+        .execute(&pool)
+        .await
+        .expect("assign source attempt");
+        sqlx::query(
+            "UPDATE automatic_retry_policy SET max_build_retries = 2, backoff_seconds = 30, transient_only = TRUE WHERE id = 1",
+        )
+        .execute(&pool)
+        .await
+        .expect("set policy governing the observed failure");
+
+        let transition = mark_job_failed_with_retry(
+            &pool,
+            &job_id,
+            &builder.id,
+            None,
+            Some("temporary source timeout"),
+            RetryFailureClass::Transient,
+        )
+        .await
+        .expect("fail transition should schedule retry");
+
+        let child = transition.retry_job.expect("retry child should exist");
+        assert_eq!(transition.failed_job.status, "failed");
+        assert!(transition.failed_job.completed_at.is_some());
+        assert_eq!(child.parent_job_id, Some(job_id));
+        assert_eq!(child.root_job_id, Some(job_id));
+        assert_eq!(child.attempt_number, 2);
+        assert_eq!(child.retry_count, 1);
+        assert!(child.available_at >= now + Duration::seconds(29));
+
+        let duplicate = mark_job_failed_with_retry(
+            &pool,
+            &job_id,
+            &builder.id,
+            None,
+            Some("duplicate event"),
+            RetryFailureClass::Transient,
+        )
+        .await;
+        assert!(duplicate.is_err());
+        let child_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM build_jobs WHERE automatic_retry_source_id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count retry children");
+        assert_eq!(child_count, 1);
     }
 
     #[tokio::test]
@@ -3720,6 +3824,7 @@ mod tests {
             &builder_a.id,
             None,
             Some("late failure from stale builder"),
+            RetryFailureClass::Unknown,
         )
         .await;
         assert!(stale_fail.is_err(), "stale builder A fail must be rejected");
