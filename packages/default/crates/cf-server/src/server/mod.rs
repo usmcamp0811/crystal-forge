@@ -1084,6 +1084,7 @@ async fn process_pending_commits(
             evaluate_with_nix_eval_jobs(
                 pool,
                 &commit,
+                attempt,
                 &flake,
                 &flake.repo_url,
                 &commit.git_commit_hash,

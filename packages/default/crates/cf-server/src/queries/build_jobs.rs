@@ -15,6 +15,12 @@ pub struct QueuedBuild {
     pub system_name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildJobInsertOutcome {
+    Inserted { build_job_id: Uuid },
+    AlreadyExists { build_job_id: Uuid },
+}
+
 /// Create build jobs for all derivations associated with a commit.
 ///
 /// This function is called after successful commit evaluation to queue
@@ -139,6 +145,70 @@ pub async fn create_build_jobs_for_commit_tx(
     .context("Failed to create build jobs for commit")?;
 
     Ok(rows)
+}
+
+pub async fn create_build_job_for_derivation_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    derivation_id: i32,
+) -> Result<Option<BuildJobInsertOutcome>> {
+    let inserted: Option<(Uuid,)> = sqlx::query_as(
+        r#"
+        INSERT INTO build_jobs (
+            derivation_id,
+            environment_id,
+            priority_weight,
+            status
+        )
+        SELECT
+            d.id AS derivation_id,
+            s.environment_id,
+            CASE
+                WHEN s.id IS NOT NULL THEN 10.0
+                ELSE 1.0
+            END *
+            CASE
+                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 3600 THEN 2.0
+                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
+                ELSE 1.0
+            END AS priority_weight,
+            'queued' AS status
+        FROM derivations d
+        INNER JOIN commits c ON d.commit_id = c.id
+        LEFT JOIN systems s ON (
+            d.derivation_target = s.hostname
+            AND s.flake_id = c.flake_id
+        )
+        WHERE d.id = $1
+            AND d.status_id = 5
+            AND d.cf_agent_enabled = TRUE
+        ON CONFLICT (derivation_id) DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(derivation_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("Failed to create build job for derivation")?;
+
+    if let Some((build_job_id,)) = inserted {
+        return Ok(Some(BuildJobInsertOutcome::Inserted { build_job_id }));
+    }
+
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        r#"
+        SELECT id
+        FROM build_jobs
+        WHERE derivation_id = $1
+        ORDER BY created_at ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(derivation_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("Failed to fetch existing build job for derivation")?;
+
+    Ok(existing.map(|(build_job_id,)| BuildJobInsertOutcome::AlreadyExists { build_job_id }))
 }
 
 /// Incrementally enqueue a single derivation as a build job.

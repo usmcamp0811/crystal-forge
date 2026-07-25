@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 use tokio::time::{Duration, Instant};
 
 const MOCK_EVAL_TOTAL_DURATION_MS: u64 = 30_000;
@@ -22,20 +23,25 @@ const MAX_INDIVIDUAL_FALLBACKS: usize = 8;
 const FALLBACK_CONCURRENCY: usize = 2;
 /// Overall deadline for the fallback phase.
 const FALLBACK_PHASE_TIMEOUT: Duration = Duration::from_secs(180);
+const CLOSURE_COUNT_MAX_CONCURRENT: usize = 2;
+static CLOSURE_COUNT_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BuildConfig, ServerConfig};
-use crate::derivations::utils::build_flake_reference;
+use crate::derivations::utils::{build_flake_reference, count_closure_packages};
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
     DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
 };
 use crate::models::flakes::Flake;
-use crate::queries::build_jobs::{QueuedBuild, create_build_jobs_for_commit_tx};
+use crate::queries::build_jobs::{
+    BuildJobInsertOutcome, QueuedBuild, create_build_job_for_derivation_tx,
+};
 use crate::queries::commits_artifacts::CachedSystemsState;
 use crate::queries::systems::list_configuration_names_for_flake;
 use crate::queue::QueueNotifier;
+use crate::services::hardening_scans::trigger_commit_hardening_scans;
 
 /// NixEvalJobResult with meta field
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +152,84 @@ async fn resolve_expected_store_path(
     }
 }
 
+fn closure_count_limiter() -> Arc<Semaphore> {
+    CLOSURE_COUNT_LIMITER
+        .get_or_init(|| Arc::new(Semaphore::new(CLOSURE_COUNT_MAX_CONCURRENT)))
+        .clone()
+}
+
+async fn run_incremental_system_side_effects(
+    pool: &PgPool,
+    commit_id: i32,
+    flake_repo_url: &str,
+    commit_hash: &str,
+    finalized: &FinalizedDerivation,
+) {
+    match crate::builder::create_drv_gc_root(&finalized.drv_path, finalized.derivation_id).await {
+        Ok(true) => debug!(
+            "📌 Rooted evaluated drv (id={}, drv={})",
+            finalized.derivation_id, finalized.drv_path
+        ),
+        Ok(false) => warn!(
+            "⚠️  Evaluated drv (id={}, drv={}) is not valid in the server store; remote builders may not be able to import it",
+            finalized.derivation_id, finalized.drv_path
+        ),
+        Err(err) => warn!(
+            "⚠️  Failed to create GC root for evaluated drv {} (id={}): {}",
+            finalized.drv_path, finalized.derivation_id, err
+        ),
+    }
+
+    let pool2 = pool.clone();
+    let drv2 = finalized.drv_path.clone();
+    let derivation_id = finalized.derivation_id;
+    let limiter = closure_count_limiter();
+    tokio::spawn(async move {
+        let permit = match limiter.acquire_owned().await {
+            Ok(permit) => permit,
+            Err(err) => {
+                warn!(
+                    "⚠️  Failed to acquire closure count permit for id={}: {}",
+                    derivation_id, err
+                );
+                return;
+            }
+        };
+
+        match count_closure_packages(&drv2).await {
+            Ok((total, cached)) => {
+                if let Err(err) = crate::queries::derivations::set_closure_counts(
+                    &pool2,
+                    derivation_id,
+                    total,
+                    cached,
+                )
+                .await
+                {
+                    warn!(
+                        "⚠️  Failed to store closure counts for id={}: {}",
+                        derivation_id, err
+                    );
+                }
+            }
+            Err(err) => warn!(
+                "⚠️  Failed to count closure packages for id={}: {}",
+                derivation_id, err
+            ),
+        }
+        drop(permit);
+    });
+
+    if let Err(err) =
+        trigger_commit_hardening_scans(pool.clone(), commit_id, flake_repo_url, commit_hash).await
+    {
+        warn!(
+            "Failed to queue hardening scans for commit {} after system {} finalized: {}",
+            commit_id, finalized.system_name, err
+        );
+    }
+}
+
 /// Helper function to broadcast eval log via WebSocket AND persist to database.
 ///
 /// This ensures logs are both:
@@ -199,6 +283,7 @@ async fn broadcast_and_persist_eval_log(
 ///
 /// Each variant includes the system name so the outcome can be processed
 /// independently of the iteration order.
+#[allow(dead_code)]
 #[derive(Debug)]
 enum FallbackEvalOutcome {
     /// The `nix eval` command exited with a nonzero status — the system
@@ -222,6 +307,7 @@ enum FallbackEvalOutcome {
 /// Unlike [`FallbackEvalOutcome`] (which is a raw command result), this type
 /// incorporates a control-system re-evaluation so the caller can safely
 /// decide whether to persist a `DryRunFailed` derivation.
+#[allow(dead_code)]
 #[derive(Debug)]
 enum VerifiedFallbackOutcome {
     /// The system genuinely failed standalone evaluation AND the control
@@ -241,6 +327,159 @@ enum VerifiedFallbackOutcome {
     InfrastructureFailure { system_name: String, error: String },
 }
 
+#[derive(Debug)]
+pub enum StandaloneSystemOutcome {
+    Success {
+        result: SuccessfulSystemResult,
+        policy_check: PolicyCheckResult,
+    },
+    ConfirmedSystemFailure {
+        system_name: String,
+        error: String,
+    },
+    InfrastructureFailure {
+        system_name: String,
+        error: String,
+    },
+}
+
+fn build_single_system_eval_expression(
+    flake_ref: &str,
+    system_name: &str,
+    policies: &[DeploymentPolicy],
+) -> String {
+    let nix_policies: Vec<&DeploymentPolicy> =
+        policies.iter().filter(|p| p.is_nix_evaluated()).collect();
+
+    let policy_fields = if nix_policies.is_empty() {
+        "        # No policies configured".to_string()
+    } else {
+        nix_policies
+            .iter()
+            .enumerate()
+            .flat_map(|(policy_idx, policy)| match policy {
+                DeploymentPolicy::CustomCheck { rules, .. } if !rules.is_empty() => rules
+                    .iter()
+                    .map(|rule| format!("        {} = {};", rule.field_name, rule.expression))
+                    .collect::<Vec<_>>(),
+                _ => {
+                    let (field_name, expr) = policy.to_nix_expression_with_index(policy_idx);
+                    vec![format!("        {} = {};", field_name, expr)]
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        r#"
+let
+  flake = builtins.getFlake "{}";
+  cfg = builtins.getAttr "{}" flake.nixosConfigurations;
+  drv = cfg.config.system.build.toplevel;
+  policyResults = {{
+{}
+  }};
+in {{
+  drvPath = drv.drvPath;
+  outputs = drv.outputs or {{}};
+  policies = policyResults;
+}}
+"#,
+        flake_ref, system_name, policy_fields
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct StandaloneEvalJson {
+    #[serde(rename = "drvPath")]
+    drv_path: String,
+    #[serde(default)]
+    outputs: serde_json::Value,
+    #[serde(default)]
+    policies: serde_json::Value,
+}
+
+pub async fn evaluate_single_system_with_policies(
+    repo_url: &str,
+    commit_hash: &str,
+    system_name: &str,
+    policies: &[DeploymentPolicy],
+    creds: Option<&FlakeCredentialEnv>,
+    build_config: &BuildConfig,
+) -> Result<StandaloneSystemOutcome> {
+    let flake_ref = build_flake_reference(repo_url, commit_hash);
+    let nix_expr = build_single_system_eval_expression(&flake_ref, system_name, policies);
+
+    let mut cmd = tokio::process::Command::new("nix");
+    cmd.kill_on_drop(true);
+    cmd.args(["eval", "--impure", "--json", "--expr", &nix_expr]);
+    build_config.apply_to_command(&mut cmd);
+    if let Some(c) = creds {
+        c.apply_to_nix_command(&mut cmd);
+    }
+
+    let output = match tokio::time::timeout(Duration::from_secs(120), cmd.output()).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            return Ok(StandaloneSystemOutcome::InfrastructureFailure {
+                system_name: system_name.to_string(),
+                error: format!("Failed to run standalone eval: {}", e),
+            });
+        }
+        Err(_) => {
+            return Ok(StandaloneSystemOutcome::InfrastructureFailure {
+                system_name: system_name.to_string(),
+                error: format!("Standalone eval timed out for {}", system_name),
+            });
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let error = if stderr.trim().is_empty() {
+            "System evaluation failed with no error output".to_string()
+        } else {
+            stderr.chars().take(500).collect::<String>()
+        };
+        return Ok(StandaloneSystemOutcome::ConfirmedSystemFailure {
+            system_name: system_name.to_string(),
+            error,
+        });
+    }
+
+    let parsed: StandaloneEvalJson = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("Failed to parse standalone eval JSON for {}", system_name))?;
+
+    let expected_store_path =
+        resolve_expected_store_path(&parsed.drv_path, Some(&parsed.outputs)).await;
+    let policy_check = if policies.is_empty() {
+        PolicyCheckResult {
+            system_name: system_name.to_string(),
+            cf_agent_enabled: None,
+            has_required_packages: None,
+            custom_checks: HashMap::new(),
+            meets_requirements: true,
+            warnings: Vec::new(),
+            failed_policies: Vec::new(),
+            cve_checks: Vec::new(),
+        }
+    } else {
+        PolicyCheckResult::from_json(system_name.to_string(), &parsed.policies, policies)
+    };
+
+    Ok(StandaloneSystemOutcome::Success {
+        result: SuccessfulSystemResult {
+            system_name: system_name.to_string(),
+            derivation_target: build_agent_target(repo_url, commit_hash, system_name),
+            drv_path: parsed.drv_path,
+            expected_store_path,
+            cf_agent_enabled: policy_check.cf_agent_enabled,
+        },
+        policy_check,
+    })
+}
+
 /// Attempt to evaluate a single nixosConfiguration attribute to capture its error.
 ///
 /// When nix-eval-jobs silently drops a system, the process-wide stderr may not
@@ -250,6 +489,7 @@ enum VerifiedFallbackOutcome {
 /// Returns a raw [`FallbackEvalOutcome`] — the caller MUST perform control
 /// verification (via [`evaluate_and_verify_missing_system`]) before treating a
 /// `CommandFailed` outcome as a confirmed system failure.
+#[allow(dead_code)]
 async fn fallback_eval_single_system(
     repo_url: &str,
     commit_hash: &str,
@@ -340,6 +580,7 @@ in
 /// re-evaluation so that timeout and cancellation enforcement wraps both
 /// operations together (the outer `tokio::select!` race in the fallback
 /// phase races the entire buffered stream, not individual steps).
+#[allow(dead_code)]
 async fn evaluate_and_verify_missing_system(
     repo_url: &str,
     commit_hash: &str,
@@ -481,6 +722,171 @@ pub enum EvaluationFinalizeOutcome {
     Superseded,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemFinalizeOutcome {
+    Queued {
+        derivation_id: i32,
+        build_job_id: uuid::Uuid,
+    },
+    RecordedWithoutBuild {
+        derivation_id: i32,
+        reason: SystemNotQueuedReason,
+    },
+    BuildAlreadyExists {
+        derivation_id: i32,
+        build_job_id: uuid::Uuid,
+    },
+    PreservedExistingBuild {
+        derivation_id: i32,
+        status_id: i32,
+    },
+    Cancelled,
+    Superseded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemNotQueuedReason {
+    StrictPolicyFailure,
+    AgentPolicyFailure,
+    BuildNotRequested,
+}
+
+fn system_not_queued_reason(policy_check: &PolicyCheckResult) -> Option<SystemNotQueuedReason> {
+    if policy_check.cf_agent_enabled == Some(false) {
+        return Some(SystemNotQueuedReason::AgentPolicyFailure);
+    }
+
+    if policy_check
+        .failed_policies
+        .iter()
+        .any(|(description, strict)| {
+            *strict
+                && description
+                    .to_ascii_lowercase()
+                    .contains("crystal forge agent")
+        })
+    {
+        return Some(SystemNotQueuedReason::AgentPolicyFailure);
+    }
+
+    if policy_check
+        .failed_policies
+        .iter()
+        .any(|(_, strict)| *strict)
+    {
+        return Some(SystemNotQueuedReason::StrictPolicyFailure);
+    }
+
+    None
+}
+
+pub async fn finalize_evaluated_system(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+    result: &SuccessfulSystemResult,
+    policy_check: &PolicyCheckResult,
+) -> Result<SystemFinalizeOutcome> {
+    use crate::queries::derivations::{SuccessfulEvalWrite, record_successful_eval_result_in_tx};
+
+    let mut tx = pool.begin().await?;
+
+    #[derive(sqlx::FromRow)]
+    struct CommitState {
+        evaluation_status: Option<String>,
+        evaluation_attempt_count: Option<i32>,
+        cancellation_requested: Option<bool>,
+    }
+
+    let state = sqlx::query_as::<_, CommitState>(
+        r#"
+        SELECT evaluation_status, evaluation_attempt_count, cancellation_requested
+        FROM commits
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(commit_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(state) = state else {
+        tx.rollback().await?;
+        return Ok(SystemFinalizeOutcome::Superseded);
+    };
+
+    let attempt_count = state.evaluation_attempt_count.unwrap_or(0);
+    let status = state.evaluation_status.as_deref().unwrap_or("pending");
+    let cancellation = state.cancellation_requested.unwrap_or(false);
+
+    if attempt_count != expected_attempt || !matches!(status, "in_progress" | "cancelling") {
+        tx.rollback().await?;
+        return Ok(SystemFinalizeOutcome::Superseded);
+    }
+
+    if cancellation || status == "cancelling" {
+        tx.rollback().await?;
+        return Ok(SystemFinalizeOutcome::Cancelled);
+    }
+
+    let write = record_successful_eval_result_in_tx(
+        &mut tx,
+        Some(commit_id),
+        &result.system_name,
+        "nixos",
+        Some(&result.derivation_target),
+        &result.drv_path,
+        result.expected_store_path.as_deref(),
+        result.cf_agent_enabled,
+    )
+    .await
+    .with_context(|| format!("Failed to write derivation for {}", result.system_name))?;
+
+    let derivation_id = match write {
+        SuccessfulEvalWrite::Inserted { derivation_id }
+        | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id } => derivation_id,
+        SuccessfulEvalWrite::PreservedBuildState {
+            derivation_id,
+            status_id,
+        } => {
+            tx.commit().await?;
+            return Ok(SystemFinalizeOutcome::PreservedExistingBuild {
+                derivation_id,
+                status_id,
+            });
+        }
+    };
+
+    if let Some(reason) = system_not_queued_reason(policy_check) {
+        tx.commit().await?;
+        return Ok(SystemFinalizeOutcome::RecordedWithoutBuild {
+            derivation_id,
+            reason,
+        });
+    }
+
+    let build_outcome = create_build_job_for_derivation_tx(&mut tx, derivation_id).await?;
+    let outcome = match build_outcome {
+        Some(BuildJobInsertOutcome::Inserted { build_job_id }) => SystemFinalizeOutcome::Queued {
+            derivation_id,
+            build_job_id,
+        },
+        Some(BuildJobInsertOutcome::AlreadyExists { build_job_id }) => {
+            SystemFinalizeOutcome::BuildAlreadyExists {
+                derivation_id,
+                build_job_id,
+            }
+        }
+        None => SystemFinalizeOutcome::RecordedWithoutBuild {
+            derivation_id,
+            reason: SystemNotQueuedReason::BuildNotRequested,
+        },
+    };
+
+    tx.commit().await?;
+    Ok(outcome)
+}
+
 /// Atomically finalize a validated evaluation attempt.
 ///
 /// Acquires a `FOR UPDATE` lock on the commit row, checks the attempt number
@@ -500,10 +906,7 @@ pub async fn finalize_evaluation_attempt(
     expected_attempt: i32,
     plan: &EvaluationPlan,
 ) -> Result<EvaluationFinalizeOutcome> {
-    use crate::queries::derivations::{
-        SuccessfulEvalWrite, record_successful_eval_result_in_tx,
-        record_synthetic_eval_failure_in_tx,
-    };
+    use crate::queries::derivations::record_synthetic_eval_failure_in_tx;
 
     let mut tx = pool.begin().await?;
 
@@ -563,46 +966,11 @@ pub async fn finalize_evaluation_attempt(
         return Ok(EvaluationFinalizeOutcome::Cancelled);
     }
 
-    // Write all derivations inside the transaction.  Sort by name for a
-    // deterministic lock acquisition order (reduces deadlock risk when
-    // concurrent callers touch overlapping derivation sets).
-    let mut sorted_successes = plan.successful_systems.clone();
-    sorted_successes.sort_by(|a, b| a.system_name.cmp(&b.system_name));
-
+    // Successful systems were finalized incrementally as soon as each one
+    // evaluated. This commit-level finalizer only records confirmed synthetic
+    // failures and transitions the attempt state.
     let mut sorted_failures = plan.confirmed_failures.clone();
     sorted_failures.sort_by(|a, b| a.system_name.cmp(&b.system_name));
-
-    let mut finalized_derivations: Vec<FinalizedDerivation> = Vec::new();
-
-    for sr in &sorted_successes {
-        let write = record_successful_eval_result_in_tx(
-            &mut tx,
-            Some(commit_id),
-            &sr.system_name,
-            "nixos",
-            Some(&sr.derivation_target),
-            &sr.drv_path,
-            sr.expected_store_path.as_deref(),
-            sr.cf_agent_enabled,
-        )
-        .await
-        .with_context(|| format!("Failed to write derivation for {}", sr.system_name))?;
-
-        match write {
-            SuccessfulEvalWrite::Inserted { derivation_id }
-            | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id } => {
-                finalized_derivations.push(FinalizedDerivation {
-                    derivation_id,
-                    drv_path: sr.drv_path.clone(),
-                    system_name: sr.system_name.clone(),
-                    cf_agent_enabled: sr.cf_agent_enabled,
-                });
-            }
-            SuccessfulEvalWrite::PreservedBuildState { .. } => {
-                // Build already in progress — do not re-queue.
-            }
-        }
-    }
 
     for cf in &sorted_failures {
         record_synthetic_eval_failure_in_tx(
@@ -621,10 +989,6 @@ pub async fn finalize_evaluation_attempt(
     if plan.force_build_job_insert_failure {
         bail!("forced build-job insertion failure for rollback test");
     }
-
-    let queued_builds = create_build_jobs_for_commit_tx(&mut tx, commit_id)
-        .await
-        .context("Failed to create build jobs during evaluation finalization")?;
 
     // Write metadata cache inside the transaction so it is always consistent
     // with the derivation rows.
@@ -701,8 +1065,8 @@ pub async fn finalize_evaluation_attempt(
 
     tx.commit().await?;
     Ok(EvaluationFinalizeOutcome::Completed {
-        derivations: finalized_derivations,
-        queued_builds,
+        derivations: Vec::new(),
+        queued_builds: Vec::new(),
     })
 }
 
@@ -712,6 +1076,7 @@ pub async fn finalize_evaluation_attempt(
 pub async fn evaluate_with_nix_eval_jobs(
     pool: &PgPool,
     commit: &Commit,
+    expected_attempt: i32,
     flake: &Flake,
     repo_url: &str,
     commit_hash: &str,
@@ -853,6 +1218,14 @@ pub async fn evaluate_with_nix_eval_jobs(
     };
     let has_known_systems = !known_systems.is_empty();
     let mut seen_systems: HashSet<String> = HashSet::new();
+    let excluded_systems: Vec<String> = known_systems
+        .iter()
+        .filter(|s| should_skip_system(&allowed_systems, s))
+        .cloned()
+        .collect();
+    info!("Expected systems: {}", known_systems.len());
+    info!("Expected system names: {:?}", known_systems);
+    info!("Build-scope excluded systems: {:?}", excluded_systems);
 
     // Run nix-eval-jobs with --meta flag to get policy results.
     // --impure is required because the Nix expression uses builtins.getFlake with a
@@ -1030,6 +1403,7 @@ pub async fn evaluate_with_nix_eval_jobs(
 
                                 // Extract policy check results from meta.policies
                                 let mut cf_agent_enabled = None;
+                                let mut policy_check_for_system: Option<PolicyCheckResult> = None;
                                 if let Some(meta) = &result.meta {
                                     if let Some(policies_json) = meta.get("policies") {
                                         // Parse policy results from meta.policies
@@ -1067,12 +1441,28 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             }
                                         }
 
+                                        policy_check_for_system = Some(check.clone());
                                         policy_checks.push(check);
                                     } else {
                                         debug!("⚠️  No policies in meta for {}", system_name);
                                     }
                                 } else {
                                     debug!("⚠️  No meta field for {}", system_name);
+                                }
+
+                                if policy_check_for_system.is_none() && policies.is_empty() {
+                                    let check = PolicyCheckResult {
+                                        system_name: system_name.clone(),
+                                        cf_agent_enabled: None,
+                                        has_required_packages: None,
+                                        custom_checks: HashMap::new(),
+                                        meets_requirements: true,
+                                        warnings: Vec::new(),
+                                        failed_policies: Vec::new(),
+                                        cve_checks: Vec::new(),
+                                    };
+                                    policy_check_for_system = Some(check.clone());
+                                    policy_checks.push(check);
                                 }
 
                                 // Broadcast post-policy status to WebSocket clients.
@@ -1123,11 +1513,9 @@ pub async fn evaluate_with_nix_eval_jobs(
                                     }
                                 }
 
-                                // ── Collect the result for deferred persistence ──────────
-                                // Durable side effects (DB writes, build jobs, GC roots, scans)
-                                // are deferred until the entire attempt is validated (child exit,
-                                // fallback outcomes, infrastructure checks).  Only log/broadcast
-                                // activity is allowed here.
+                                // ── Incrementally persist successful systems ──────────
+                                // A healthy system must be queued as soon as its own eval,
+                                // policy check, derivation write, and build-job insertion commit.
                                 if let Some(system_name) = result.attr_path.last() {
                                     if !has_error && drv_path.is_some() {
                                         let drv = drv_path.clone().unwrap();
@@ -1136,15 +1524,96 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             &commit.git_commit_hash,
                                             system_name,
                                         );
-                                        successful_results.push(SuccessfulSystemResult {
+                                        let successful = SuccessfulSystemResult {
                                             system_name: system_name.clone(),
                                             derivation_target,
                                             drv_path: drv,
                                             expected_store_path: expected_store_path.clone(),
                                             cf_agent_enabled,
-                                        });
-                                        debug!("📋 Collected {} for deferred persistence (CF agent: {:?})",
-                                            system_name, cf_agent_enabled);
+                                        };
+
+                                        let default_check;
+                                        let policy_check = match policy_check_for_system.as_ref() {
+                                            Some(check) => check,
+                                            None => {
+                                                default_check = PolicyCheckResult {
+                                                    system_name: system_name.clone(),
+                                                    cf_agent_enabled,
+                                                    has_required_packages: None,
+                                                    custom_checks: HashMap::new(),
+                                                    meets_requirements: cf_agent_enabled != Some(false),
+                                                    warnings: Vec::new(),
+                                                    failed_policies: Vec::new(),
+                                                    cve_checks: Vec::new(),
+                                                };
+                                                &default_check
+                                            }
+                                        };
+
+                                        match finalize_evaluated_system(
+                                            pool,
+                                            commit.id,
+                                            expected_attempt,
+                                            &successful,
+                                            policy_check,
+                                        )
+                                        .await?
+                                        {
+                                            SystemFinalizeOutcome::Queued { derivation_id, build_job_id }
+                                            | SystemFinalizeOutcome::BuildAlreadyExists { derivation_id, build_job_id } => {
+                                                let finalized = FinalizedDerivation {
+                                                    derivation_id,
+                                                    drv_path: successful.drv_path.clone(),
+                                                    system_name: successful.system_name.clone(),
+                                                    cf_agent_enabled: successful.cf_agent_enabled,
+                                                };
+                                                successful_results.push(successful.clone());
+                                                if let Some(queue_notifier) = _queue_notifier {
+                                                    queue_notifier.notify_build_queue();
+                                                }
+                                                if let Some(state) = cf_state {
+                                                    crate::handlers::api::commits::broadcast_system_status(
+                                                        state,
+                                                        commit.id,
+                                                        finalized.system_name.clone(),
+                                                        crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
+                                                        None,
+                                                    ).await;
+                                                    broadcast_and_persist_eval_log(
+                                                        pool,
+                                                        Some(state),
+                                                        commit.id,
+                                                        &mut log_sequence,
+                                                        format!("🚀 {}: build job queued ({})", finalized.system_name, build_job_id),
+                                                    ).await;
+                                                }
+                                                run_incremental_system_side_effects(
+                                                    pool,
+                                                    commit.id,
+                                                    &flake.repo_url,
+                                                    &commit.git_commit_hash,
+                                                    &finalized,
+                                                ).await;
+                                            }
+                                            SystemFinalizeOutcome::RecordedWithoutBuild { derivation_id, reason } => {
+                                                debug!(
+                                                    "📋 Recorded {} as derivation {} without build: {:?}",
+                                                    system_name, derivation_id, reason
+                                                );
+                                                successful_results.push(successful);
+                                            }
+                                            SystemFinalizeOutcome::PreservedExistingBuild { derivation_id, status_id } => {
+                                                debug!(
+                                                    "📋 Preserved existing build state {} for {} derivation {}",
+                                                    status_id, system_name, derivation_id
+                                                );
+                                                successful_results.push(successful);
+                                            }
+                                            SystemFinalizeOutcome::Cancelled => return Err(EvaluationCancelled.into()),
+                                            SystemFinalizeOutcome::Superseded => {
+                                                bail!("evaluation attempt was superseded while finalizing {}", system_name);
+                                            }
+                                        }
                                     } else {
                                         if has_error {
                                             debug!("⚠️  {} has evaluation error, will not be persisted as success", system_name);
@@ -1282,6 +1751,14 @@ pub async fn evaluate_with_nix_eval_jobs(
         .filter(|s| !seen_systems.contains(s.as_str()))
         .map(|s| s.as_str())
         .collect();
+    let unexpected_systems: Vec<String> = seen_systems
+        .iter()
+        .filter(|seen| !expected_systems.iter().any(|expected| expected == *seen))
+        .cloned()
+        .collect();
+    info!("Seen systems: {:?}", seen_systems);
+    info!("Missing systems: {:?}", missing_systems);
+    info!("Unexpected systems: {:?}", unexpected_systems);
     let mut confirmed_failures: Vec<ConfirmedSystemFailure> = Vec::new();
 
     if missing_systems.len() > MAX_INDIVIDUAL_FALLBACKS {
@@ -1292,15 +1769,13 @@ pub async fn evaluate_with_nix_eval_jobs(
         );
     }
 
-    // ── Validate child exit status BEFORE any durable side effects ────
-    // A nonzero child exit means nix-eval-jobs crashed or encountered an
-    // unrecoverable error.  Partial output cannot be trusted — bail now so
-    // no derivations, build jobs, or scans are persisted from this attempt.
-    // The CAS retry path (mark_commit_evaluation_failed) will re-queue the
-    // commit for a clean evaluation.
+    info!(
+        "Main evaluator exit status for commit {}: {}",
+        commit.id, child_status
+    );
     if !child_status.success() {
         let stderr_text = stderr_output.join("\n");
-        bail!(
+        warn!(
             "nix-eval-jobs failed with exit code: {}\nStderr:\n{}",
             child_status.code().unwrap_or(-1),
             stderr_text.chars().take(500).collect::<String>(),
@@ -1309,7 +1784,6 @@ pub async fn evaluate_with_nix_eval_jobs(
 
     // Track fallback-outcome counts for diagnostic logging and the combined
     // error message below.
-    let mut unexpected_success_count: usize = 0;
     let mut infra_failure_count: usize = 0;
 
     // ── Fallback phase: evaluate missing systems concurrently ──
@@ -1332,23 +1806,9 @@ pub async fn evaluate_with_nix_eval_jobs(
             missing_systems.len()
         );
 
-        // Pick one control system before building futures.  The control must
-        // have been successfully evaluated by nix-eval-jobs (error is None AND
-        // drv_path is Some) and must not itself be a missing system.
-        let control_system = results
-            .iter()
-            .find(|result| {
-                result.error.is_none()
-                    && result.drv_path.is_some()
-                    && !missing_systems
-                        .iter()
-                        .any(|missing| *missing == result.attr)
-            })
-            .map(|result| result.attr.clone());
-
         // Build owned futures for each missing system.  Each future performs
-        // both target evaluation and control verification so the outer race
-        // wraps the entire operation.
+        // a complete standalone eval with the same policies and Nix config as
+        // the bulk evaluator.
         let creds_arc = Arc::clone(&creds);
         let build_config_owned = build_config.clone();
         let mut fallback_futures = Vec::with_capacity(missing_systems.len());
@@ -1356,19 +1816,25 @@ pub async fn evaluate_with_nix_eval_jobs(
             let repo_url = repo_url.to_string();
             let commit_hash = commit_hash.to_string();
             let system_name = system_name.to_string();
-            let control_system = control_system.clone();
             let creds = Arc::clone(&creds_arc);
             let build_config = build_config_owned.clone();
+            let policies = policies.to_vec();
             fallback_futures.push(async move {
-                evaluate_and_verify_missing_system(
+                evaluate_single_system_with_policies(
                     &repo_url,
                     &commit_hash,
                     &system_name,
-                    control_system.as_deref(),
+                    &policies,
                     creds.as_ref().as_ref(),
                     &build_config,
                 )
                 .await
+                .unwrap_or_else(|err| {
+                    StandaloneSystemOutcome::InfrastructureFailure {
+                        system_name,
+                        error: err.to_string(),
+                    }
+                })
             });
         }
 
@@ -1417,13 +1883,11 @@ pub async fn evaluate_with_nix_eval_jobs(
             }
         };
 
-        // ── Classify verified outcomes — NO DB/broadcast yet ────────────
-        // First classify all outcomes in memory without any durable side
-        // effects.  DB writes and status broadcasts happen only after child
-        // exit status and infrastructure checks pass (P1-3 fix).
+        // ── Classify fallback outcomes. Successful recovered systems are
+        // finalized immediately just like streaming bulk successes.
         for outcome in outcomes {
             match outcome {
-                VerifiedFallbackOutcome::ConfirmedSystemFailure { system_name, error } => {
+                StandaloneSystemOutcome::ConfirmedSystemFailure { system_name, error } => {
                     warn!(
                         "⚠️  System {} was expected but never appeared in nix-eval-jobs output (confirmed failure).",
                         system_name
@@ -1435,27 +1899,94 @@ pub async fn evaluate_with_nix_eval_jobs(
                         error,
                     });
                 }
-                VerifiedFallbackOutcome::StandaloneEvaluationSucceeded { system_name } => {
-                    warn!(
-                        "⚠️  System {} was expected but never appeared, yet standalone eval succeeded. \
-                         This is an evaluator omission, not a system failure.",
-                        system_name
-                    );
-                    unexpected_success_count += 1;
-                }
-                VerifiedFallbackOutcome::EvaluatorUnhealthy {
-                    system_name,
-                    target_error,
-                    control_error,
+                StandaloneSystemOutcome::Success {
+                    result,
+                    policy_check,
                 } => {
                     warn!(
-                        "⚠️  System {} failed target eval ({}), and control verification failed ({:?}); \
-                         evaluator is unhealthy, evaluation should be retried",
-                        system_name, target_error, control_error
+                        "⚠️  System {} was expected but never appeared; standalone policy eval succeeded and will be recorded.",
+                        result.system_name
                     );
-                    infra_failure_count += 1;
+                    let nix_result = NixEvalJobResult {
+                        attr: result.system_name.clone(),
+                        attr_path: vec![result.system_name.clone()],
+                        name: Some(result.system_name.clone()),
+                        drv_path: Some(result.drv_path.clone()),
+                        error: None,
+                        cache_status: None,
+                        outputs: None,
+                        meta: None,
+                    };
+                    match finalize_evaluated_system(
+                        pool,
+                        commit.id,
+                        expected_attempt,
+                        &result,
+                        &policy_check,
+                    )
+                    .await?
+                    {
+                        SystemFinalizeOutcome::Queued {
+                            derivation_id,
+                            build_job_id,
+                        }
+                        | SystemFinalizeOutcome::BuildAlreadyExists {
+                            derivation_id,
+                            build_job_id,
+                        } => {
+                            let finalized = FinalizedDerivation {
+                                derivation_id,
+                                drv_path: result.drv_path.clone(),
+                                system_name: result.system_name.clone(),
+                                cf_agent_enabled: result.cf_agent_enabled,
+                            };
+                            if let Some(queue_notifier) = _queue_notifier {
+                                queue_notifier.notify_build_queue();
+                            }
+                            if let Some(state) = cf_state {
+                                crate::handlers::api::commits::broadcast_system_status(
+                                    state,
+                                    commit.id,
+                                    finalized.system_name.clone(),
+                                    crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
+                                    None,
+                                )
+                                .await;
+                                broadcast_and_persist_eval_log(
+                                    pool,
+                                    Some(state),
+                                    commit.id,
+                                    &mut log_sequence,
+                                    format!(
+                                        "🚀 {}: build job queued ({})",
+                                        finalized.system_name, build_job_id
+                                    ),
+                                )
+                                .await;
+                            }
+                            run_incremental_system_side_effects(
+                                pool,
+                                commit.id,
+                                &flake.repo_url,
+                                &commit.git_commit_hash,
+                                &finalized,
+                            )
+                            .await;
+                        }
+                        SystemFinalizeOutcome::RecordedWithoutBuild { .. }
+                        | SystemFinalizeOutcome::PreservedExistingBuild { .. } => {}
+                        SystemFinalizeOutcome::Cancelled => return Err(EvaluationCancelled.into()),
+                        SystemFinalizeOutcome::Superseded => {
+                            bail!(
+                                "evaluation attempt was superseded while finalizing fallback system"
+                            )
+                        }
+                    }
+                    successful_results.push(result);
+                    policy_checks.push(policy_check);
+                    results.push(nix_result);
                 }
-                VerifiedFallbackOutcome::InfrastructureFailure { system_name, error } => {
+                StandaloneSystemOutcome::InfrastructureFailure { system_name, error } => {
                     warn!(
                         "⚠️  Fallback eval for {} failed with infrastructure error: {}",
                         system_name, error
@@ -1465,28 +1996,14 @@ pub async fn evaluate_with_nix_eval_jobs(
             }
         }
 
-        // ── Reject attempt if infra/unexpected-success failures exist ───
+        // ── Reject attempt if fallback had infrastructure failures ───
         // Do this BEFORE persisting confirmed_failures so no synthetic rows
         // are written for a run we are about to retry.
-        if unexpected_success_count > 0 || infra_failure_count > 0 {
-            if unexpected_success_count > 0 && infra_failure_count > 0 {
-                bail!(
-                    "Fallback evaluations had {} unexpected successes and {} infrastructure/evaluator failures; \
-                     evaluation should be retried",
-                    unexpected_success_count,
-                    infra_failure_count,
-                );
-            } else if unexpected_success_count > 0 {
-                bail!(
-                    "One or more expected systems succeeded in standalone eval but were dropped by nix-eval-jobs; \
-                     evaluation should be retried"
-                );
-            } else {
-                bail!(
-                    "One or more fallback evaluations failed due to infrastructure/evaluator issues; \
-                     evaluation should be retried"
-                );
-            }
+        if infra_failure_count > 0 {
+            bail!(
+                "One or more fallback evaluations failed due to infrastructure/evaluator issues; \
+                 evaluation should be retried"
+            );
         }
 
         // Validation passed — add synthetic results to the in-memory plan.
@@ -1647,7 +2164,11 @@ pub async fn evaluate_with_nix_eval_jobs(
     // authoritative total.
     let successful = results.iter().filter(|r| r.error.is_none()).count();
     let failed = results.iter().filter(|r| r.error.is_some()).count();
-    let total_systems = successful + failed;
+    let total_systems = if !expected_systems.is_empty() {
+        expected_systems.len()
+    } else {
+        successful + failed
+    };
 
     let with_agent = policy_checks
         .iter()
@@ -2224,7 +2745,8 @@ fn summarize_commit_metadata(
 mod tests {
     use super::{
         ConfirmedSystemFailure, EvaluationFinalizeOutcome, EvaluationPlan, NixEvalJobResult,
-        SuccessfulSystemResult, finalize_evaluation_attempt, mock_eval_stage_delay,
+        SuccessfulSystemResult, SystemFinalizeOutcome, SystemNotQueuedReason,
+        finalize_evaluated_system, finalize_evaluation_attempt, mock_eval_stage_delay,
         resolve_mock_systems, should_mock_policy_fail, summarize_commit_metadata,
     };
     use crate::api::models::CancelEvalOutcome;
@@ -2335,6 +2857,27 @@ mod tests {
         }
     }
 
+    fn passing_policy_check(system_name: &str) -> PolicyCheckResult {
+        check(system_name, true)
+    }
+
+    fn failing_policy_check(
+        system_name: &str,
+        strict: bool,
+        description: &str,
+    ) -> PolicyCheckResult {
+        PolicyCheckResult {
+            system_name: system_name.to_string(),
+            cf_agent_enabled: Some(true),
+            has_required_packages: Some(false),
+            custom_checks: std::collections::HashMap::new(),
+            meets_requirements: !strict,
+            warnings: vec![format!("Missing required packages for {system_name}")],
+            failed_policies: vec![(description.to_string(), strict)],
+            cve_checks: vec![],
+        }
+    }
+
     fn plan(
         successes: Vec<SuccessfulSystemResult>,
         failures: Vec<ConfirmedSystemFailure>,
@@ -2381,15 +2924,6 @@ mod tests {
             had_system_eval_errors: false,
             force_build_job_insert_failure: false,
         }
-    }
-
-    fn plan_with_forced_build_job_failure(
-        successes: Vec<SuccessfulSystemResult>,
-        failures: Vec<ConfirmedSystemFailure>,
-    ) -> EvaluationPlan {
-        let mut plan = plan(successes, failures);
-        plan.force_build_job_insert_failure = true;
-        plan
     }
 
     async fn derivation_count(pool: &PgPool, commit_id: i32) -> i64 {
@@ -2634,7 +3168,7 @@ mod tests {
             outcome,
             EvaluationFinalizeOutcome::Completed { .. }
         ));
-        assert_eq!(derivation_count(&pool, commit_id).await, 1);
+        assert_eq!(derivation_count(&pool, commit_id).await, 0);
         assert_eq!(
             cancel_commit_evaluation(&pool, commit_id).await.unwrap(),
             CancelEvalOutcome::AlreadyTerminal
@@ -2648,25 +3182,26 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn finalize_attempt_rolls_back_when_later_success_write_fails() {
+    async fn finalize_attempt_does_not_rewrite_incremental_successes() {
         let pool = test_pool().await;
         cleanup_throwaway_flakes(&pool).await;
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
 
-        let mut bad = successful_system("bad");
-        bad.system_name = "bad\0name".to_string();
-
-        finalize_evaluation_attempt(
+        let outcome = finalize_evaluation_attempt(
             &pool,
             commit_id,
             attempt,
-            &plan(vec![successful_system("alpha"), bad], vec![]),
+            &plan(vec![successful_system("alpha")], vec![]),
         )
         .await
-        .expect_err("nul byte should make the transaction fail");
+        .expect("commit finalizer should ignore already-incremental successes");
 
+        assert!(matches!(
+            outcome,
+            EvaluationFinalizeOutcome::Completed { .. }
+        ));
         assert_eq!(derivation_count(&pool, commit_id).await, 0);
 
         let status: String =
@@ -2675,7 +3210,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(status, "in_progress");
+        assert_eq!(status, "complete");
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
@@ -2722,26 +3257,21 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn finalize_attempt_creates_build_jobs_in_transaction() {
+    async fn finalize_system_creates_build_job_in_transaction() {
         let pool = test_pool().await;
         cleanup_throwaway_flakes(&pool).await;
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
 
-        let outcome = finalize_evaluation_attempt(
-            &pool,
-            commit_id,
-            attempt,
-            &plan(vec![successful_system("alpha")], vec![]),
-        )
-        .await
-        .expect("finalize should not error");
+        let system = successful_system("alpha");
+        let check = passing_policy_check("alpha");
 
-        assert!(matches!(
-            outcome,
-            EvaluationFinalizeOutcome::Completed { .. }
-        ));
+        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("system finalize should not error");
+
+        assert!(matches!(outcome, SystemFinalizeOutcome::Queued { .. }));
         assert_eq!(derivation_count(&pool, commit_id).await, 1);
         assert_eq!(build_job_count(&pool, commit_id).await, 1);
 
@@ -2753,23 +3283,28 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn finalize_attempt_rolls_back_when_build_job_insert_fails() {
+    async fn finalize_system_strict_policy_failure_does_not_queue() {
         let pool = test_pool().await;
         cleanup_throwaway_flakes(&pool).await;
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
 
-        finalize_evaluation_attempt(
-            &pool,
-            commit_id,
-            attempt,
-            &plan_with_forced_build_job_failure(vec![successful_system("alpha")], vec![]),
-        )
-        .await
-        .expect_err("forced build-job insertion failure should roll back finalization");
+        let system = successful_system("alpha");
+        let check = failing_policy_check("alpha", true, "Require packages: git");
 
-        assert_eq!(derivation_count(&pool, commit_id).await, 0);
+        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("system finalize should record strict policy failures");
+
+        assert!(matches!(
+            outcome,
+            SystemFinalizeOutcome::RecordedWithoutBuild {
+                reason: SystemNotQueuedReason::StrictPolicyFailure,
+                ..
+            }
+        ));
+        assert_eq!(derivation_count(&pool, commit_id).await, 1);
         assert_eq!(build_job_count(&pool, commit_id).await, 0);
 
         let status: String =
@@ -2788,6 +3323,70 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
+    async fn finalize_system_non_strict_policy_failure_still_queues() {
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        let system = successful_system("alpha");
+        let check = failing_policy_check("alpha", false, "Require packages: git");
+
+        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("non-strict policy warning should not block queueing");
+
+        assert!(matches!(outcome, SystemFinalizeOutcome::Queued { .. }));
+        assert_eq!(derivation_count(&pool, commit_id).await, 1);
+        assert_eq!(build_job_count(&pool, commit_id).await, 1);
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalize_system_retry_reuses_existing_build_job() {
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        let system = successful_system("alpha");
+        let check = passing_policy_check("alpha");
+
+        let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("first finalization should queue build");
+        let first_job_id = match first {
+            SystemFinalizeOutcome::Queued { build_job_id, .. } => build_job_id,
+            other => panic!("expected queued outcome, got {other:?}"),
+        };
+
+        let second = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("retry finalization should be idempotent");
+
+        assert!(matches!(
+            second,
+            SystemFinalizeOutcome::BuildAlreadyExists { build_job_id, .. }
+                if build_job_id == first_job_id
+        ));
+        assert_eq!(derivation_count(&pool, commit_id).await, 1);
+        assert_eq!(build_job_count(&pool, commit_id).await, 1);
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
     async fn finalize_attempt_error_can_be_routed_to_retry_failure_cas() {
         let pool = test_pool().await;
         cleanup_throwaway_flakes(&pool).await;
@@ -2795,21 +3394,26 @@ mod tests {
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
 
-        let err = finalize_evaluation_attempt(
+        finalize_evaluation_attempt(
             &pool,
             commit_id,
             attempt,
-            &plan_with_forced_build_job_failure(vec![successful_system("alpha")], vec![]),
+            &plan(vec![], vec![failed_system("bad\0system", "module error")]),
         )
         .await
-        .expect_err("forced build-job insertion failure should roll back finalization");
+        .expect_err("synthetic failure write should roll back finalization");
 
         assert_eq!(derivation_count(&pool, commit_id).await, 0);
         assert_eq!(build_job_count(&pool, commit_id).await, 0);
 
-        let failure = mark_commit_evaluation_failed(&pool, commit_id, &err.to_string(), attempt)
-            .await
-            .expect("failure CAS should succeed after finalizer rollback");
+        let failure = mark_commit_evaluation_failed(
+            &pool,
+            commit_id,
+            "synthetic failure finalization failed",
+            attempt,
+        )
+        .await
+        .expect("failure CAS should succeed after finalizer rollback");
         assert_eq!(failure, EvalFailureOutcome::RetryScheduled);
 
         #[derive(sqlx::FromRow)]
@@ -2830,7 +3434,7 @@ mod tests {
             row.evaluation_error_message
                 .as_deref()
                 .unwrap_or_default()
-                .contains("forced build-job insertion failure")
+                .contains("synthetic failure finalization failed")
         );
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
