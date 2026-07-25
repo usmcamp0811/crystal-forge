@@ -1,10 +1,10 @@
 ---
 id: TASK-397
 title: Evaluation errors silently drop systems from nixosConfigurations count
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-25 19:00'
+updated_date: '2026-07-25 19:56'
 labels:
   - evaluator
   - reporting
@@ -91,6 +91,12 @@ Two separate fixes are needed:
 - [ ] #3 A system that crashes the evaluator never silently disappears — it is always accounted for in either the success or failure column
 - [ ] #4 The evaluation UI shows nix-builder-1 (and similar systems) as failed with the root cause error, not absent
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Reviewer-directed architecture correction for MR !309: replace commit-wide successful-result persistence/queueing with incremental per-system transactional finalization. Add `finalize_evaluated_system` that locks the commit attempt, records one successful derivation with existing state-preserving rules, gates build eligibility on strict policy semantics plus CF-agent requirement, and inserts/fetches an idempotent build job in the same transaction. During stdout and standalone fallback success processing, call this finalizer immediately, then only after commit run queue notification, `QueuedForBuild` broadcast, GC root, closure-count scheduling, and hardening-scan trigger. Keep commit-level finalization limited to summary/status transition and synthetic confirmed failures. Preserve fallback after nonzero `nix-eval-jobs` exit, add authoritative expected/seen/missing logging, and add focused regression tests for strict vs non-strict policy queue gating, fallback success queueing, deterministic missing failure recording, retry idempotency, and cancellation/duplicate finalize races where practical within the existing DB test harness.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
