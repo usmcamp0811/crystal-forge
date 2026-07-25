@@ -4,7 +4,7 @@ title: Evaluation errors silently drop systems from nixosConfigurations count
 status: Review
 assignee: []
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-25 18:38'
+updated_date: '2026-07-25 19:00'
 labels:
   - evaluator
   - reporting
@@ -145,4 +145,6 @@ Verification run from the task worktree:
 - `git diff --check` (exit 0)
 
 Post-review pass for MR !309: routed evaluator/finalizer errors through the attempt-aware failure CAS, moved build-job insertion into the finalization transaction with queued-build IDs returned for broadcasts, added rollback/orchestration DB regressions, restored bounded closure-count concurrency, and added the ignored finalize-attempt DB tests to the state-machine CI script. Verification after trimming unrelated rustfmt-only changes: `nix develop -c cargo check -p cf-server --all-targets` (exit 0), `nix develop -c cargo sqlx prepare --check -- --all-targets` from `packages/default/crates/cf-server` (exit 0), `nix develop -c cargo test -p cf-server models::evaluate_with_policies::tests --lib` (exit 0; 7 passed/7 ignored), `nix develop -c cargo test -p cf-server models::evaluate_with_policies::tests::finalize_attempt_ --lib -- --ignored --test-threads=1` (exit 0; 7 passed), `nix build .#packages.x86_64-linux.server --no-link` (exit 0), and `git diff --check` (exit 0). Existing warnings only.
+
+CI state-machine-tests on commit `26f59f43` failed before running tests because the new dev script line did not escape `$DB_URL` inside the generated `bash -c` string; ShellCheck SC2027 failed the Nix build of `run-state-machine-tests`. Fixed the escaping in `packages/devScripts/default.nix`, verified `nix build .#devScripts.state-machine-test --no-link` (exit 0) and `git diff --check` (exit 0), committed `e042d40b fix: escape state machine test database url`, and pushed it to MR !309. New exact-head CI for `e042d40b` is expected to start; not waiting per user instruction.
 <!-- SECTION:NOTES:END -->
