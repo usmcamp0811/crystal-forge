@@ -15,7 +15,7 @@ use crate::queue::QueueNotifier;
 use crate::server::jobs::{BackgroundJobHandle, BackgroundJobRegistry};
 // NOTE: removed increment_commit_list_attempt_count – we now rely on the new evaluation_* fields
 use crate::queries::flakes::get_all_flakes_from_db_with_ids;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::time;
@@ -878,12 +878,17 @@ async fn process_pending_commits(
                 // ── CAS FIRST: only proceed with side effects if we win the race ──
                 match mark_commit_evaluation_complete(pool, commit.id, attempt).await {
                     Err(e) => {
-                        error!(
-                            "❌ Failed to mark commit {} evaluation complete: {}",
-                            commit.git_commit_hash, e
-                        );
+                        // A database error on the terminal transition leaves
+                        // the commit stuck in in_progress.  Propagate so the
+                        // outer loop logs the error; the startup reconciler
+                        // will recover stranded in_progress rows.
                         crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
-                        return Ok(());
+                        return Err(e).with_context(|| {
+                            format!(
+                                "Failed to mark commit {} evaluation complete (attempt {})",
+                                commit.git_commit_hash, attempt
+                            )
+                        });
                     }
                     Ok(EvalCompleteOutcome::SupersededOrCancelled) => {
                         // The commit was cancelled or superseded before we could
@@ -897,7 +902,12 @@ async fn process_pending_commits(
                                 attempt,
                             )
                             .await
-                            .unwrap_or(EvalCancellationOutcome::Superseded);
+                            .with_context(|| {
+                                format!(
+                                    "Failed to finalize cancellation for commit {} attempt {}",
+                                    commit.id, attempt
+                                )
+                            })?;
 
                         if matches!(
                             cancel_outcome,
@@ -1065,12 +1075,16 @@ async fn process_pending_commits(
                 // which we handle below without broadcasting "failed".
                 match mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt).await {
                     Err(mark_err) => {
-                        error!(
-                            "❌ Failed to mark commit {} evaluation failed: {}",
-                            commit.git_commit_hash, mark_err
-                        );
+                        // Database error on terminal transition — propagate so
+                        // the outer loop logs it; the startup reconciler recovers
+                        // stranded in_progress rows.
                         crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
-                        return Ok(());
+                        return Err(mark_err).with_context(|| {
+                            format!(
+                                "Failed to mark commit {} evaluation failed (attempt {})",
+                                commit.git_commit_hash, attempt
+                            )
+                        });
                     }
 
                     Ok(EvalFailureOutcome::SupersededOrCancelled) => {
@@ -1083,7 +1097,12 @@ async fn process_pending_commits(
                                 attempt,
                             )
                             .await
-                            .unwrap_or(EvalCancellationOutcome::Superseded);
+                            .with_context(|| {
+                                format!(
+                                    "Failed to finalize cancellation for commit {} attempt {}",
+                                    commit.id, attempt
+                                )
+                            })?;
 
                         if matches!(
                             cancel_outcome,
@@ -1125,8 +1144,8 @@ async fn process_pending_commits(
                         return Ok(());
                     }
 
-                    Ok(outcome @ (EvalFailureOutcome::RetryScheduled | EvalFailureOutcome::PermanentlyFailed)) => {
-                        // ⬇️ UPDATE CACHE to record eval error (no policy checks available)
+                    Ok(EvalFailureOutcome::RetryScheduled) => {
+                        // ⬇️ UPDATE CACHE to record eval error
                         if let Err(cache_err) =
                             update_commit_metadata_cache(pool, commit.id, &[], true).await
                         {
@@ -1136,10 +1155,38 @@ async fn process_pending_commits(
                             );
                         }
 
-                        if matches!(outcome, EvalFailureOutcome::RetryScheduled) {
-                            info!(
-                                "Commit {} evaluation will be retried (attempt {})",
-                                commit.git_commit_hash, attempt
+                        info!(
+                            "Commit {} evaluation will be retried (attempt {})",
+                            commit.git_commit_hash, attempt
+                        );
+
+                        // Broadcast "retrying" — not "failed" — so clients know
+                        // the attempt is transient, not permanently failed (P2 fix).
+                        crate::handlers::api::commits::broadcast_eval_status(
+                            &cf_state,
+                            commit.id,
+                            "retrying".to_string(),
+                            Some(format!("Evaluation will be retried: {}", e)),
+                        )
+                        .await;
+                        crate::handlers::api::commits::broadcast_eval_log(
+                            &cf_state,
+                            commit.id,
+                            format!("🔄 Evaluation will be retried (attempt {}): {}", attempt, e),
+                        )
+                        .await;
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
+                        return Ok(());
+                    }
+
+                    Ok(EvalFailureOutcome::PermanentlyFailed) => {
+                        // ⬇️ UPDATE CACHE to record eval error
+                        if let Err(cache_err) =
+                            update_commit_metadata_cache(pool, commit.id, &[], true).await
+                        {
+                            error!(
+                                "❌ Failed to update commit metadata cache for {}: {}",
+                                commit.git_commit_hash, cache_err
                             );
                         }
 
@@ -1154,7 +1201,7 @@ async fn process_pending_commits(
                         crate::handlers::api::commits::broadcast_eval_log(
                             &cf_state,
                             commit.id,
-                            format!("❌ Evaluation failed: {}", e),
+                            format!("❌ Evaluation permanently failed: {}", e),
                         )
                         .await;
                         crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;

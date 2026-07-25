@@ -584,6 +584,30 @@ let
     '';
   };
 
+  runStateMachineTests = pkgs.writeShellApplication {
+    name = "run-state-machine-tests";
+    runtimeInputs = with pkgs; [ nix coreutils ];
+    text = ''
+      set -euo pipefail
+
+      REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
+      DB_URL="postgresql://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge"
+
+      nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
+        cd \"$REPO_ROOT/packages/default\"
+        DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source migrations
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib queries::commits::tests \
+          -- --ignored --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib queries::derivations::tests \
+          -- --ignored --test-threads=1
+      "
+    '';
+  };
+
   runCveProcessingTest = pkgs.writeShellApplication {
     name = "run-cve-processing-test";
     runtimeInputs = with pkgs; [ nix coreutils ];
@@ -1143,6 +1167,15 @@ let
     };
   };
 
+  state-machine-test-module = {
+    settings.processes.state-machine-tests = {
+      inherit namespace;
+      command = runStateMachineTests;
+      availability.exit_on_end = true;
+      depends_on."db".condition = "process_healthy";
+    };
+  };
+
   full-stack = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
@@ -1183,6 +1216,14 @@ let
     ];
   };
 
+  stateMachineTest = pkgs.process-compose-flake.evalModules {
+    modules = [
+      inputs.services-flake.processComposeModules.default
+      db-core-module
+      state-machine-test-module
+    ];
+  };
+
   oidc-stack = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
@@ -1196,6 +1237,7 @@ in full-stack.config.outputs.package // {
   inherit runServer runAgent runBuilder simulatePush startBuilderApi
     runUiDev runUiFrontend bootstrapDevBuilder envExports;
   cve-test = cveTest.config.outputs.package;
+  state-machine-test = stateMachineTest.config.outputs.package;
   db-only = dbOnly.config.outputs.package;
   server-only = server-only.config.outputs.package;
   server-stack-mock = server-stack-mock.config.outputs.package;

@@ -1369,8 +1369,16 @@ mod tests {
     use super::{open_eval_attention_if_current, resolve_eval_attention_unless_failed};
     use sqlx::PgPool;
 
+    fn test_database_url() -> String {
+        std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect(
+                "CRYSTAL_FORGE_TEST_DATABASE_URL or DATABASE_URL must be set for database tests",
+            )
+    }
+
     async fn test_pool() -> PgPool {
-        PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"))
+        PgPool::connect(&test_database_url())
             .await
             .expect("failed to connect to test database")
     }
@@ -1926,6 +1934,129 @@ mod tests {
             outcome,
             EvalStartOutcome::NoLongerPending,
             "cancelled commit must not be resurrected by mark_evaluation_started"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 11: cancel is idempotent on already-cancelled commit ─────────────
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cancel_api_idempotent_on_already_cancelled() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        // First cancel: pending → cancelled
+        let first = cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("first cancel should not error");
+        assert_eq!(first, CancelEvalOutcome::Cancelled);
+
+        // Second cancel: already terminal
+        let second = cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("second cancel should not error");
+        assert_eq!(
+            second,
+            CancelEvalOutcome::AlreadyTerminal,
+            "repeated cancel must return AlreadyTerminal"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 12: complete CAS wins before cancellation flag set ───────────────
+    // If mark_commit_evaluation_complete is called before any cancellation
+    // request is made, it must succeed.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn complete_cas_wins_when_no_cancellation_requested() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let attempt = start_eval(&pool, commit_id).await;
+
+        // Complete without any cancellation → should win.
+        let result = mark_commit_evaluation_complete(&pool, commit_id, attempt)
+            .await
+            .expect("complete should not error");
+        assert_eq!(result, EvalCompleteOutcome::Completed);
+
+        let status: String =
+            sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
+                .bind(commit_id)
+                .fetch_one(&pool)
+                .await
+                .expect("query should succeed");
+        assert_eq!(status, "complete");
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 13: finalizer Superseded when commit is already complete ──────────
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalizer_superseded_when_commit_already_complete() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let attempt = start_eval(&pool, commit_id).await;
+        // Completion wins.
+        mark_commit_evaluation_complete(&pool, commit_id, attempt)
+            .await
+            .expect("complete should not error");
+
+        // Stale finalizer should see Superseded (not Cancelled).
+        let outcome =
+            finalize_requested_commit_evaluation_cancellation(&pool, commit_id, attempt)
+                .await
+                .expect("finalizer should not error");
+        assert_eq!(
+            outcome,
+            EvalCancellationOutcome::Superseded,
+            "finalizer must return Superseded when commit already completed"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 14: mark_evaluation_failed retry increments attempt count ────────
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn failed_attempt_retry_increments_count() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        // Attempt 1 starts and fails (with retry).
+        let attempt1 = start_eval(&pool, commit_id).await;
+        let outcome1 = mark_commit_evaluation_failed(&pool, commit_id, "error1", attempt1)
+            .await
+            .expect("fail should not error");
+        // With attempt_count = 1 (< 3), should retry.
+        assert_eq!(outcome1, EvalFailureOutcome::RetryScheduled);
+
+        // Attempt 2 starts.
+        let attempt2 = start_eval(&pool, commit_id).await;
+        assert_eq!(
+            attempt2,
+            attempt1 + 1,
+            "attempt counter must increment on retry"
         );
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")

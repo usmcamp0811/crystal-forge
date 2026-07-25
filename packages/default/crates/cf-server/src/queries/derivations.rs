@@ -2426,12 +2426,18 @@ mod tests {
     use super::{record_successful_eval_result, record_synthetic_eval_failure, SuccessfulEvalWrite};
     use sqlx::PgPool;
 
+    fn test_database_url() -> String {
+        std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect(
+                "CRYSTAL_FORGE_TEST_DATABASE_URL or DATABASE_URL must be set for database tests",
+            )
+    }
+
     async fn test_pool() -> PgPool {
-        PgPool::connect(
-            &std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"),
-        )
-        .await
-        .expect("failed to connect to test database")
+        PgPool::connect(&test_database_url())
+            .await
+            .expect("failed to connect to test database")
     }
 
     async fn insert_throwaway_flake(pool: &PgPool) -> i32 {
