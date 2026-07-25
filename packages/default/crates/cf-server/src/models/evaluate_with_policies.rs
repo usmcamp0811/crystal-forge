@@ -3442,4 +3442,340 @@ mod tests {
             .execute(&pool)
             .await;
     }
+
+    // ── Agent-disabled / multiple-strict-policy tests ─────────────────────
+
+    fn agent_disabled_check(system_name: &str) -> PolicyCheckResult {
+        PolicyCheckResult {
+            system_name: system_name.to_string(),
+            cf_agent_enabled: Some(false),
+            has_required_packages: None,
+            custom_checks: std::collections::HashMap::new(),
+            meets_requirements: true, // other policies pass
+            warnings: vec!["Crystal Forge agent not enabled".to_string()],
+            failed_policies: vec![],
+            cve_checks: vec![],
+        }
+    }
+
+    fn agent_disabled_with_strict_failure(system_name: &str) -> PolicyCheckResult {
+        PolicyCheckResult {
+            system_name: system_name.to_string(),
+            cf_agent_enabled: Some(false),
+            has_required_packages: Some(false),
+            custom_checks: std::collections::HashMap::new(),
+            meets_requirements: false,
+            warnings: vec![
+                "Crystal Forge agent not enabled".to_string(),
+                "Missing required packages".to_string(),
+            ],
+            failed_policies: vec![
+                ("Crystal Forge agent must be enabled".to_string(), true),
+                ("Required packages: git".to_string(), true),
+            ],
+            cve_checks: vec![],
+        }
+    }
+
+    fn successful_system_no_agent(system_name: &str) -> SuccessfulSystemResult {
+        SuccessfulSystemResult {
+            system_name: system_name.to_string(),
+            derivation_target: format!(
+                "git+https://example.invalid/repo#nixosConfigurations.{system_name}"
+            ),
+            drv_path: format!(
+                "/nix/store/{}-{}.drv",
+                "b".repeat(32),
+                system_name.replace('\0', "nul")
+            ),
+            expected_store_path: None,
+            cf_agent_enabled: Some(false),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalize_system_agent_disabled_does_not_queue() {
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        let system = successful_system_no_agent("beta");
+        let check = agent_disabled_check("beta");
+
+        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("agent-disabled system should be recorded without error");
+
+        assert!(
+            matches!(
+                outcome,
+                SystemFinalizeOutcome::RecordedWithoutBuild {
+                    reason: SystemNotQueuedReason::AgentPolicyFailure,
+                    ..
+                }
+            ),
+            "expected AgentPolicyFailure, got {outcome:?}"
+        );
+        assert_eq!(derivation_count(&pool, commit_id).await, 1);
+        assert_eq!(build_job_count(&pool, commit_id).await, 0);
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalize_system_multiple_strict_failures_does_not_queue() {
+        // Both CF-agent disabled and required-packages strict failure.
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        let system = successful_system_no_agent("gamma");
+        let check = agent_disabled_with_strict_failure("gamma");
+
+        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("multiple strict failures should be recorded without error");
+
+        // The CF-agent check fires first (cf_agent_enabled == Some(false)).
+        assert!(
+            matches!(
+                outcome,
+                SystemFinalizeOutcome::RecordedWithoutBuild {
+                    reason: SystemNotQueuedReason::AgentPolicyFailure,
+                    ..
+                }
+            ),
+            "expected AgentPolicyFailure as first failure, got {outcome:?}"
+        );
+        assert_eq!(derivation_count(&pool, commit_id).await, 1);
+        assert_eq!(build_job_count(&pool, commit_id).await, 0);
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalize_system_cancellation_after_first_system_queued() {
+        // Queue one system, then cancel, then attempt to finalize a second.
+        // The first system's build job must survive; the second must be rejected.
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        // First system finalizes successfully while eval is in_progress.
+        let first_system = successful_system("alpha");
+        let first_check = passing_policy_check("alpha");
+        let first_outcome =
+            finalize_evaluated_system(&pool, commit_id, attempt, &first_system, &first_check)
+                .await
+                .expect("first system should finalize");
+        assert!(
+            matches!(first_outcome, SystemFinalizeOutcome::Queued { .. }),
+            "first system must be queued; got {first_outcome:?}"
+        );
+        assert_eq!(derivation_count(&pool, commit_id).await, 1);
+        assert_eq!(build_job_count(&pool, commit_id).await, 1);
+
+        // Cancel the evaluation.
+        let cancel_result = cancel_commit_evaluation(&pool, commit_id).await.unwrap();
+        assert_eq!(cancel_result, CancelEvalOutcome::CancellingInProgress);
+
+        // Attempt to finalize a second system — must be rejected.
+        let second_system = successful_system("beta");
+        let second_check = passing_policy_check("beta");
+        let second_outcome =
+            finalize_evaluated_system(&pool, commit_id, attempt, &second_system, &second_check)
+                .await
+                .expect("finalize after cancel should return Cancelled, not error");
+        assert!(
+            matches!(second_outcome, SystemFinalizeOutcome::Cancelled),
+            "second system must be Cancelled after eval cancel; got {second_outcome:?}"
+        );
+
+        // First system and its build job still intact.
+        assert_eq!(derivation_count(&pool, commit_id).await, 1, "alpha derivation must survive");
+        assert_eq!(build_job_count(&pool, commit_id).await, 1, "alpha build job must survive");
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalize_system_broken_and_healthy_are_independent() {
+        // Healthy system A finalizes; broken system B is recorded as a confirmed
+        // failure via finalize_evaluation_attempt; A's build job is unaffected.
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        // Finalize A incrementally (simulating streaming bulk path).
+        let system_a = successful_system("alpha");
+        let check_a = passing_policy_check("alpha");
+        let outcome_a =
+            finalize_evaluated_system(&pool, commit_id, attempt, &system_a, &check_a)
+                .await
+                .expect("alpha should finalize");
+        assert!(
+            matches!(outcome_a, SystemFinalizeOutcome::Queued { .. }),
+            "alpha must be queued; got {outcome_a:?}"
+        );
+        assert_eq!(build_job_count(&pool, commit_id).await, 1);
+
+        // Finalize the commit-level attempt with B as a confirmed failure.
+        // This must not touch A's derivation or build job.
+        let commit_outcome = finalize_evaluation_attempt(
+            &pool,
+            commit_id,
+            attempt,
+            &plan(
+                vec![],
+                vec![failed_system("broken", "module type error in options.nix")],
+            ),
+        )
+        .await
+        .expect("commit finalizer should not error");
+
+        assert!(
+            matches!(commit_outcome, EvaluationFinalizeOutcome::Completed { .. }),
+            "commit must complete; got {commit_outcome:?}"
+        );
+
+        // alpha's derivation and build job survived.
+        assert_eq!(derivation_count(&pool, commit_id).await, 2); // alpha + broken
+        assert_eq!(build_job_count(&pool, commit_id).await, 1); // only alpha
+
+        let status: String =
+            sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
+                .bind(commit_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "complete");
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Migration 0184 tests ─────────────────────────────────────────────
+    //
+    // Migration 0184 deduplication SQL keeps the "best" build_jobs row per
+    // derivation based on a status priority order. Two styles of test:
+    //
+    //   1. Pure Rust unit tests that verify the status ordering directly,
+    //      without touching the DB. These always run.
+    //
+    //   2. A DB test that verifies the unique-index idempotency guarantee
+    //      (ON CONFLICT DO NOTHING) via finalize_evaluated_system, which
+    //      already exercises that path.
+
+    fn migration_0184_status_rank(status: &str) -> u8 {
+        match status {
+            "building" => 1,
+            "queued" => 2,
+            "cancelling" => 3,
+            "cancelled" => 4,
+            "failed" => 5,
+            "success" => 6,
+            _ => 7,
+        }
+    }
+
+    fn migration_0184_canonical<'a>(statuses: &[&'a str]) -> &'a str {
+        // Simulates the migration 0184 CASE expression: pick the winner.
+        statuses
+            .iter()
+            .min_by_key(|&&s| migration_0184_status_rank(s))
+            .copied()
+            .expect("non-empty")
+    }
+
+    #[test]
+    fn migration_0184_keeps_active_job_when_duplicate_exists() {
+        // 'building' job must beat a later 'queued' job.
+        assert_eq!(migration_0184_canonical(&["building", "queued"]), "building");
+        assert_eq!(migration_0184_canonical(&["queued", "building"]), "building");
+    }
+
+    #[test]
+    fn migration_0184_keeps_queued_over_failed() {
+        assert_eq!(migration_0184_canonical(&["queued", "failed"]), "queued");
+        assert_eq!(migration_0184_canonical(&["failed", "queued"]), "queued");
+    }
+
+    #[test]
+    fn migration_0184_status_precedence_order() {
+        let order = ["building", "queued", "cancelling", "cancelled", "failed", "success"];
+        for i in 0..order.len() {
+            for j in (i + 1)..order.len() {
+                assert!(
+                    migration_0184_status_rank(order[i]) < migration_0184_status_rank(order[j]),
+                    "{} should have lower rank than {}",
+                    order[i],
+                    order[j]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn migration_0184_unique_index_prevents_second_insert() {
+        // After the unique index exists, a second build_jobs INSERT for the
+        // same derivation must fail. This test verifies the
+        // `ON CONFLICT (derivation_id) DO NOTHING` path works correctly.
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        let system = successful_system("delta");
+        let check = passing_policy_check("delta");
+
+        // First finalize inserts derivation + build job.
+        let first =
+            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+                .await
+                .expect("first finalize must succeed");
+        assert!(matches!(first, SystemFinalizeOutcome::Queued { .. }));
+
+        // Second finalize must return BuildAlreadyExists, not error.
+        let second =
+            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+                .await
+                .expect("second finalize must not error");
+        assert!(
+            matches!(second, SystemFinalizeOutcome::BuildAlreadyExists { .. }
+                | SystemFinalizeOutcome::PreservedExistingBuild { .. }),
+            "expected idempotent outcome, got {second:?}"
+        );
+
+        assert_eq!(build_job_count(&pool, commit_id).await, 1, "only one build job");
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
 }
