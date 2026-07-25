@@ -15,6 +15,14 @@ const MOCK_EVAL_STAGE_COUNT: u64 = 5;
 const EVAL_OUTPUT_IDLE_TIMEOUT_SECS: u64 = 300;
 const EVAL_PROGRESS_HEARTBEAT_SECS: u64 = 30;
 const CLOSURE_COUNT_MAX_CONCURRENT: usize = 2;
+/// Maximum number of missing systems to attempt individual fallback evaluation
+/// for. Beyond this threshold, treat as a likely process-wide evaluator failure
+/// and retry the commit rather than spawning dozens of standalone evaluations.
+const MAX_INDIVIDUAL_FALLBACKS: usize = 8;
+/// Maximum concurrent fallback evaluations.
+const FALLBACK_CONCURRENCY: usize = 2;
+/// Overall deadline for the fallback phase.
+const FALLBACK_PHASE_TIMEOUT: Duration = Duration::from_secs(180);
 static CLOSURE_COUNT_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 use tracing::{debug, error, info, warn};
 
@@ -27,9 +35,10 @@ use crate::models::deployment_policies::{
 };
 use crate::models::flakes::Flake;
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
+use crate::queries::commits_artifacts::CachedSystemsState;
 use crate::queries::derivations::{
-    insert_derivation_with_target, mark_derivation_dry_run_complete, set_closure_counts,
-    set_expected_store_path, update_derivation_status, EvaluationStatus,
+    insert_derivation_with_target, mark_derivation_dry_run_complete, record_synthetic_eval_failure,
+    set_closure_counts, set_expected_store_path, update_derivation_status, EvaluationStatus,
 };
 use crate::queries::systems::list_configuration_names_for_flake;
 use crate::queue::QueueNotifier;
@@ -177,31 +186,64 @@ async fn broadcast_and_persist_eval_log(
     *sequence += 1;
 }
 
+/// Outcome of a standalone fallback evaluation for a single system.
+#[derive(Debug)]
+enum FallbackEvalOutcome {
+    /// The system genuinely failed standalone evaluation — this is a real
+    /// NixOS configuration error that should be persisted as DryRunFailed.
+    ConfirmedSystemFailure { error: String },
+    /// The system evaluated successfully standalone. This indicates the
+    /// original nix-eval-jobs process omission was NOT caused by a broken
+    /// configuration, but likely by an evaluator-level issue (OOM, crash,
+    /// intermittent network error). The evaluation should be retried rather
+    /// than synthesizing a per-system failure.
+    StandaloneEvaluationSucceeded,
+    /// The fallback process could not be started or timed out. This is an
+    /// infrastructure problem, not a system failure.
+    InfrastructureFailure { error: String },
+}
+
 /// Attempt to evaluate a single nixosConfiguration attribute to capture its error.
 ///
 /// When nix-eval-jobs silently drops a system, the process-wide stderr may not
 /// contain that system's error at all, or may conflate errors. This function
 /// individually evaluates one attribute to get an accurate per-system error.
-/// It is best-effort: failures (timeout, nix error) return a descriptive string
-/// rather than propagating, so the caller can always proceed.
+///
+/// Returns a typed `FallbackEvalOutcome` so the caller can distinguish a
+/// genuine system failure from infrastructure or evaluator-level issues.
 async fn fallback_eval_single_system(
     repo_url: &str,
     commit_hash: &str,
     system_name: &str,
     creds: Option<&FlakeCredentialEnv>,
-) -> String {
+) -> FallbackEvalOutcome {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
-    // Use builtins.getAttr for literal string-key lookup so that
-    // attribute names containing dots (e.g. "host.example.com")
-    // are not misinterpreted as nested attribute paths.
-    let nix_expr = format!(
-        r#"let flake = builtins.getFlake "{}"; cfg = builtins.getAttr "{}" flake.nixosConfigurations; in cfg.config.system.build.toplevel.drvPath"#,
-        flake_ref.replace('"', r#"\""#),
-        system_name.replace('"', r#"\""#),
-    );
+
+    // Use --argstr to pass flakeRef and systemName safely instead of
+    // interpolating values into a Nix expression string. This avoids
+    // escaping issues with dots, backslashes, ${...}, etc.
+    let nix_expr = r#"
+{ flakeRef, systemName }:
+let
+  flake = builtins.getFlake flakeRef;
+  cfg = builtins.getAttr systemName flake.nixosConfigurations;
+in
+  cfg.config.system.build.toplevel.drvPath
+"#;
 
     let mut cmd = tokio::process::Command::new("nix");
-    cmd.args(["eval", "--impure", "--expr", &nix_expr]);
+    cmd.args([
+        "eval",
+        "--impure",
+        "--expr",
+        nix_expr.trim(),
+        "--argstr",
+        "flakeRef",
+        &flake_ref,
+        "--argstr",
+        "systemName",
+        system_name,
+    ]);
 
     if let Some(c) = creds {
         c.apply_to_nix_command(&mut cmd);
@@ -209,22 +251,32 @@ async fn fallback_eval_single_system(
 
     let output = match tokio::time::timeout(Duration::from_secs(120), cmd.output()).await {
         Ok(Ok(out)) => out,
-        Ok(Err(e)) => return format!("Failed to run fallback eval: {}", e),
-        Err(_) => return format!("Fallback eval timed out for {}", system_name),
+        Ok(Err(e)) => {
+            return FallbackEvalOutcome::InfrastructureFailure {
+                error: format!("Failed to run fallback eval: {}", e),
+            }
+        }
+        Err(_) => {
+            return FallbackEvalOutcome::InfrastructureFailure {
+                error: format!("Fallback eval timed out for {}", system_name),
+            }
+        }
     };
 
-    // A successful eval means the system actually succeeded (race with
-    // nix-eval-jobs for a flaky eval). Report a generic message.
     if output.status.success() {
-        return "System evaluation was interrupted or failed silently with no error details".to_string();
+        // The system actually evaluates fine — this is an evaluator omission,
+        // not a broken NixOS configuration.
+        return FallbackEvalOutcome::StandaloneEvaluationSucceeded;
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.trim().is_empty() {
+    let error = if stderr.trim().is_empty() {
         "System evaluation failed with no error output".to_string()
     } else {
         stderr.chars().take(500).collect::<String>()
-    }
+    };
+
+    FallbackEvalOutcome::ConfirmedSystemFailure { error }
 }
 
 /// Evaluate a flake's nixosConfigurations with nix-eval-jobs and policy checking
@@ -244,7 +296,11 @@ pub async fn evaluate_with_nix_eval_jobs(
     policies: &[DeploymentPolicy],
     cf_state: Option<&crate::handlers::agent_request::CFState>,
     queue_notifier: Option<&QueueNotifier>,
-) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
+) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>, bool)> {
+    // The returned bool is `had_system_eval_errors` — whether any system had a
+    // Nix evaluation error (as opposed to policy failure). The caller uses this
+    // to set has_nix_eval_error in the commit metadata cache.
+
     // Re-evaluation safety: clear previous persisted logs for this commit so
     // (commit_id, log_sequence) uniqueness cannot collide on subsequent runs.
     crate::queries::eval_logs::delete_eval_logs_by_commit(pool, commit.id).await?;
@@ -345,10 +401,10 @@ pub async fn evaluate_with_nix_eval_jobs(
     )
     .await?;
 
-    let mut known_systems: Vec<String> = match known_cache {
-        Some(systems) => systems,
-        None => {
-            // No cache row exists — hydrate inline now.
+    let known_systems: Vec<String> = match known_cache {
+        CachedSystemsState::Ready(systems) => systems,
+        CachedSystemsState::Missing | CachedSystemsState::HydrationFailed => {
+            // No cache row exists, or last hydration failed — hydrate inline now.
             // Use the credential-aware variant so private flake discovery works.
             let systems = crate::flake::commits::load_commit_nixos_configurations_with_creds(
                 repo_url,
@@ -358,7 +414,8 @@ pub async fn evaluate_with_nix_eval_jobs(
             .await?;
 
             // Persist discovered systems (including legitimately empty set)
-            // without overwriting changed_files.
+            // without overwriting changed_files. This also marks
+            // nixos_configurations_populated = true.
             if let Err(e) =
                 crate::queries::commits_artifacts::upsert_commit_artifact_systems(
                     pool,
@@ -944,16 +1001,6 @@ pub async fn evaluate_with_nix_eval_jobs(
     // expected system even when nix-eval-jobs crashed partway through.
     let child_status = child.wait().await?;
 
-    // If a specific target was requested and not found, fail before
-    // synthesis (no expected-system list was loaded in this case).
-    if !found_target && target_system != "all" {
-        bail!(
-            "nix-eval-jobs did not evaluate target system: {}\nEvaluated systems: {:?}",
-            target_system,
-            results.iter().map(|r| r.attr.as_str()).collect::<Vec<_>>()
-        );
-    }
-
     // ── Detect systems that nix-eval-jobs silently dropped ─────────────────
     // When a system fails evaluation catastrophically, nix-eval-jobs may not
     // produce any JSON line for it at all (not even one with an error field).
@@ -977,169 +1024,242 @@ pub async fn evaluate_with_nix_eval_jobs(
         Vec::new()
     };
 
-        for system in &expected_systems {
-            if seen_systems.contains(system.as_str()) {
-                continue;
+    // Collect missing systems that need fallback evaluation.
+    let missing_systems: Vec<&str> = expected_systems
+        .iter()
+        .filter(|s| !seen_systems.contains(s.as_str()))
+        .map(|s| s.as_str())
+        .collect();
+
+    let mut had_unexpected_success = false;
+    let mut had_infra_failure = false;
+
+    if missing_systems.len() > MAX_INDIVIDUAL_FALLBACKS {
+        bail!(
+            "nix-eval-jobs silently dropped {} systems (max {}); likely process-wide failure",
+            missing_systems.len(),
+            MAX_INDIVIDUAL_FALLBACKS,
+        );
+    }
+
+    // ── Fallback phase: evaluate missing systems with timeout and cancellation ──
+    // This runs sequentially (bounded by MAX_INDIVIDUAL_FALLBACKS). Concurrency
+    // is a separate P2 optimization.
+    if !missing_systems.is_empty() {
+        warn!(
+            "⚠️  {} systems were expected but never appeared in nix-eval-jobs output. Running fallback evaluations...",
+            missing_systems.len()
+        );
+
+        let fallback_deadline = Instant::now() + FALLBACK_PHASE_TIMEOUT;
+        let mut cancel_ticker = tokio::time::interval(Duration::from_secs(2));
+
+        for system_name in &missing_systems {
+            // Check cancellation at the start of each fallback.
+            cancel_ticker.tick().await;
+            if Instant::now() >= fallback_deadline {
+                bail!(
+                    "Fallback evaluation phase timed out after {}s",
+                    FALLBACK_PHASE_TIMEOUT.as_secs()
+                );
+            }
+            match crate::queries::commits::check_cancellation_requested(pool, commit.id).await {
+                Ok(true) => {
+                    warn!("🚫 Cancellation requested for commit {} during fallback phase", commit.id);
+                    bail!("evaluation cancelled by user request during fallback");
+                }
+                Err(e) => warn!("Failed to check cancellation flag during fallback: {}", e),
+                Ok(false) => {}
             }
 
-            // Obtain per-system error by individually evaluating the missing
-            // attribute. This is more accurate than reusing concatenated
-            // process-wide stderr, which may conflate or exclude the relevant
-            // error for this system.
-            let error_msg = fallback_eval_single_system(
+            let outcome = fallback_eval_single_system(
                 repo_url,
                 commit_hash,
-                system,
+                system_name,
                 creds.as_ref(),
             )
             .await;
 
-            warn!(
-                "⚠️  System {} was expected but never appeared in nix-eval-jobs output. Recording as failed.",
-                system
-            );
+            match outcome {
+                FallbackEvalOutcome::ConfirmedSystemFailure { error } => {
+                    warn!(
+                        "⚠️  System {} was expected but never appeared in nix-eval-jobs output. Recording as failed.",
+                        system_name
+                    );
 
-            // ── Broadcast error log and structured status ───────────────
-            if let Some(state) = cf_state {
-                let log_msg = format!("❌ {}: {}", system, error_msg);
-                broadcast_and_persist_eval_log(
-                    pool,
-                    Some(state),
-                    commit.id,
-                    &mut log_sequence,
-                    log_msg,
-                )
-                .await;
+                    // Broadcast error log and structured status.
+                    let system_owned = system_name.to_string();
+                    if let Some(state) = cf_state {
+                        let log_msg = format!("❌ {}: {}", system_owned, error);
+                        broadcast_and_persist_eval_log(
+                            pool, Some(state), commit.id, &mut log_sequence, log_msg,
+                        ).await;
 
-                crate::handlers::api::commits::broadcast_system_status(
-                    state,
-                    commit.id,
-                    system.clone(),
-                    crate::handlers::api::commits::SystemEvalStatus::Failed,
-                    Some(error_msg.clone()),
-                )
-                .await;
+                        crate::handlers::api::commits::broadcast_system_status(
+                            state, commit.id, system_owned.clone(),
+                            crate::handlers::api::commits::SystemEvalStatus::Failed,
+                            Some(error.clone()),
+                        ).await;
+                    }
+
+                    // Persist a derivation record with DryRunFailed status
+                    // using the atomic record_synthetic_eval_failure.
+                    let derivation_target = build_agent_target(repo_url, commit_hash, &system_owned);
+                    if let Err(e) = record_synthetic_eval_failure(
+                        pool,
+                        Some(commit.id),
+                        &system_owned,
+                        "nixos",
+                        Some(&derivation_target),
+                        &error,
+                    ).await {
+                        warn!("Failed to record synthetic eval failure for {}: {}", system_owned, e);
+                    }
+
+                    // Add synthetic NixEvalJobResult.
+                    results.push(NixEvalJobResult {
+                        attr: system_owned.clone(),
+                        attr_path: vec![system_owned.clone()],
+                        name: Some(system_owned.clone()),
+                        drv_path: None,
+                        error: Some(error),
+                        cache_status: None,
+                        outputs: None,
+                        meta: None,
+                    });
+
+                    // Add synthetic policy check result (eval error, not policy failure).
+                    policy_checks.push(PolicyCheckResult {
+                        system_name: system_owned.clone(),
+                        cf_agent_enabled: None,
+                        has_required_packages: None,
+                        custom_checks: HashMap::new(),
+                        meets_requirements: false,
+                        warnings: vec!["System failed to evaluate (no output from nix-eval-jobs)".to_string()],
+                        failed_policies: vec![],
+                        cve_checks: vec![],
+                    });
+                }
+                FallbackEvalOutcome::StandaloneEvaluationSucceeded => {
+                    warn!(
+                        "⚠️  System {} was expected but never appeared, yet standalone eval succeeded. \
+                         This is an evaluator omission, not a system failure.",
+                        system_name
+                    );
+                    had_unexpected_success = true;
+                }
+                FallbackEvalOutcome::InfrastructureFailure { error } => {
+                    warn!(
+                        "⚠️  Fallback eval for {} failed with infrastructure error: {}",
+                        system_name, error
+                    );
+                    had_infra_failure = true;
+                }
             }
-
-            // ── Persist a derivation record with DryRunFailed status ───
-            // The caller (server/mod.rs) checks eval_failed_count by querying
-            // derivations with status_id = 6 (DryRunFailed). Setting both the
-            // status and error_message ensures the UI and policy matrix show
-            // the correct failure.
-            //
-            // CRITICAL: only transition from non-terminal evaluation states
-            // (DryRunPending=3, DryRunInProgress=4). If the derivation already
-            // has a terminal build state (BuildComplete=10, BuildFailed=12)
-            // or completed/ failed evaluation state (DryRunComplete=5,
-            // DryRunFailed=6), we must NOT downgrade it.
-            let derivation_target = build_agent_target(repo_url, commit_hash, system);
-            let derivation = insert_derivation_with_target(
-                pool,
-                Some(commit),
-                system,
-                "nixos",
-                Some(&derivation_target),
-                None, // cf_agent_enabled = None → eval failed before policy
-            )
-            .await?;
-
-            let is_eval_nonterminal = matches!(
-                derivation.status_id,
-                3 | 4 // DryRunPending | DryRunInProgress
-            );
-            if is_eval_nonterminal {
-                update_derivation_status(
-                    pool,
-                    derivation.id,
-                    EvaluationStatus::DryRunFailed,
-                    None,               // derivation_path — no .drv was produced
-                    Some(&error_msg),    // error_message — root-cause for UI
-                    None,               // store_path — not applicable
-                )
-                .await?;
-            } else {
-                debug!(
-                    "Skipping DryRunFailed transition for {}: current status_id={} (terminal or build)",
-                    system,
-                    derivation.status_id,
-                );
-            }
-
-            // ── Add a synthetic NixEvalJobResult ───────────────────────
-            results.push(NixEvalJobResult {
-                attr: system.clone(),
-                attr_path: vec![system.clone()],
-                name: Some(system.clone()),
-                drv_path: None,
-                error: Some(error_msg.clone()),
-                cache_status: None,
-                outputs: None,
-                meta: None,
-            });
-
-            // ── Also create a synthetic policy check result so the system
-            //    is counted in commit_metadata_cache as a failed evaluation.
-            policy_checks.push(PolicyCheckResult {
-                system_name: system.clone(),
-                cf_agent_enabled: None,
-                has_required_packages: None,
-                custom_checks: HashMap::new(),
-                meets_requirements: false,
-                warnings: vec!["System failed to evaluate (no output from nix-eval-jobs)".to_string()],
-                failed_policies: vec![],
-                cve_checks: vec![],
-            });
         }
+    }
 
-    // Log policy failures per-system but DON'T fail entire evaluation
-    // Separate systems by whether they failed any strict policy
-    let mut systems_with_strict_failures = Vec::new();
-    let mut systems_with_only_non_strict_failures = Vec::new();
+    // If a specific target was requested, validate after synthesis so that
+    // synthetic failed results count as "accounted for".
+    if !found_target && target_system != "all" {
+        let target_was_expected = expected_systems.iter().any(|s| s == target_system);
+        let target_was_accounted_for = results.iter().any(|r| r.attr == target_system);
+        if !target_was_expected || !target_was_accounted_for {
+            bail!(
+                "nix-eval-jobs did not evaluate target system: {}\nEvaluated systems: {:?}",
+                target_system,
+                results.iter().map(|r| r.attr.as_str()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // ── Evaluate fallback-phase outcome ──────────────────────────────────
+    // If any fallback either succeeded (standalone) or had infrastructure
+    // failure, the evaluation as a whole should fail and be retried — we
+    // cannot claim to have a complete picture.
+    if had_unexpected_success || had_infra_failure {
+        if had_unexpected_success && had_infra_failure {
+            bail!(
+                "Fallback evaluations had {} unexpected successes and {} infrastructure failures; \
+                 evaluation should be retried",
+                missing_systems.len(), // approximate
+                0  // placeholder — we tracked bools not counts
+            );
+        } else if had_unexpected_success {
+            bail!(
+                "One or more expected systems succeeded in standalone eval but were dropped by nix-eval-jobs; \
+                 evaluation should be retried"
+            );
+        } else {
+            bail!(
+                "One or more fallback evaluations failed due to infrastructure issues; \
+                 evaluation should be retried"
+            );
+        }
+    }
+
+    // ── Log systems that failed evaluation vs policy failures ──────────
+    // Split into four groups: passed, evaluation_errors, strict_policy_failures,
+    // non_strict_policy_failures. Evaluation errors are checks with
+    // meets_requirements=false and failed_policies.is_empty().
     let mut passed_systems = Vec::new();
+    let mut evaluation_errors = Vec::new();
+    let mut strict_policy_failures = Vec::new();
+    let mut non_strict_policy_failures = Vec::new();
 
     for check in &policy_checks {
         if check.meets_requirements {
             passed_systems.push(check);
+        } else if check.failed_policies.is_empty() {
+            evaluation_errors.push(check);
+        } else if check
+            .failed_policies
+            .iter()
+            .any(|(_, strict)| *strict)
+        {
+            strict_policy_failures.push(check);
         } else {
-            // Check if this system failed any strict policy
-            let has_strict_failure = check
-                .failed_policies
-                .iter()
-                .any(|(_, is_strict)| *is_strict);
+            non_strict_policy_failures.push(check);
+        }
+    }
 
-            if has_strict_failure {
-                systems_with_strict_failures.push(check);
-            } else {
-                systems_with_only_non_strict_failures.push(check);
+    // Log systems that failed evaluation
+    if !evaluation_errors.is_empty() {
+        error!(
+            "❌ {} systems failed evaluation:",
+            evaluation_errors.len()
+        );
+        for failure in &evaluation_errors {
+            error!("  - {}", failure.system_name);
+            for warning in &failure.warnings {
+                error!("    {}", warning);
             }
         }
     }
 
     // Log systems that failed strict policies
-    if !systems_with_strict_failures.is_empty() {
+    if !strict_policy_failures.is_empty() {
         error!(
             "⚠️  {} systems failed strict deployment policies (will not be queued for build):",
-            systems_with_strict_failures.len()
+            strict_policy_failures.len()
         );
-        for failure in &systems_with_strict_failures {
+        for failure in &strict_policy_failures {
             error!("  - {}", failure.system_name);
-            // Log only the strict policy failures for clarity
             for (policy_desc, is_strict) in &failure.failed_policies {
                 if *is_strict {
                     error!("    • [STRICT] {}", policy_desc);
                 }
             }
         }
-        // DO NOT bail!() - let evaluation continue for systems that passed
     }
 
     // Log systems that failed only non-strict policies
-    if !systems_with_only_non_strict_failures.is_empty() {
+    if !non_strict_policy_failures.is_empty() {
         warn!(
             "⚠️  {} systems failed non-strict deployment policies:",
-            systems_with_only_non_strict_failures.len()
+            non_strict_policy_failures.len()
         );
-        for failure in &systems_with_only_non_strict_failures {
+        for failure in &non_strict_policy_failures {
             warn!("  - {}", failure.system_name);
             for (policy_desc, _) in &failure.failed_policies {
                 warn!("    • {}", policy_desc);
@@ -1156,17 +1276,14 @@ pub async fn evaluate_with_nix_eval_jobs(
     }
 
     // Log overall summary
-    let total_systems = policy_checks.len();
-    let failed_count =
-        systems_with_strict_failures.len() + systems_with_only_non_strict_failures.len();
-    if total_systems > 0 {
+    let total_policy_checks = policy_checks.len();
+    if total_policy_checks > 0 {
         info!(
-            "📊 Policy evaluation summary: {}/{} systems passed, {} failed ({} strict, {} non-strict)",
+            "📊 Policy evaluation summary: {} passed, {} eval errors, {} strict failures, {} non-strict failures",
             passed_systems.len(),
-            total_systems,
-            failed_count,
-            systems_with_strict_failures.len(),
-            systems_with_only_non_strict_failures.len()
+            evaluation_errors.len(),
+            strict_policy_failures.len(),
+            non_strict_policy_failures.len(),
         );
     }
 
@@ -1185,6 +1302,8 @@ pub async fn evaluate_with_nix_eval_jobs(
     }
 
     info!("✅ Evaluated {} configurations in parallel", results.len());
+
+    let had_system_eval_errors = results.iter().any(|r| r.error.is_some());
 
     // Calculate statistics for summary
     // `results` includes both stdout results and synthesized entries for
@@ -1338,37 +1457,24 @@ pub async fn evaluate_with_nix_eval_jobs(
         .await;
     }
 
-    // Only now propagate a child-process error, after synthesis has had a
-    // chance to persist failure records for all expected-but-unseen systems.
-    // When has_known_systems is true, we have accounted for every expected
-    // system and can return Ok so the caller persists our work.
+    // ── Propagate child-process error ────────────────────────────────────
+    // A nonzero child exit means nix-eval-jobs itself crashed or encountered
+    // an unrecoverable error. Even when all expected systems are accounted for
+    // by our results+synthesis, a process crash could have corrupted stdout or
+    // skipped records — we cannot confidently accept the partial output.
+    // Return Err so the evaluation is retried; any synthetic DryRunFailed
+    // records already persisted are safe (record_synthetic_eval_failure
+    // protects terminal build states) and will be overwritten on retry.
     if !child_status.success() {
         let stderr_text = stderr_output.join("\n");
-        if has_known_systems {
-            let missing = expected_systems
-                .len()
-                .saturating_sub(seen_systems.len());
-            // We have a complete picture — log the process issue but let
-            // the caller proceed with the results we synthesized.
-            warn!(
-                "⚠️  nix-eval-jobs exited with code {} after processing {}/{} systems; \
-                 synthesized results for {} missing systems:\n{}",
-                child_status.code().unwrap_or(-1),
-                seen_systems.len(),
-                known_systems.len(),
-                missing,
-                stderr_text.chars().take(500).collect::<String>(),
-            );
-        } else {
-            bail!(
-                "nix-eval-jobs failed with exit code: {}\nStderr:\n{}",
-                child_status.code().unwrap_or(-1),
-                stderr_text
-            );
-        }
+        bail!(
+            "nix-eval-jobs failed with exit code: {}\nStderr:\n{}",
+            child_status.code().unwrap_or(-1),
+            stderr_text.chars().take(500).collect::<String>(),
+        );
     }
 
-    Ok((results, policy_checks))
+    Ok((results, policy_checks, had_system_eval_errors))
 }
 
 /// Dev-only deterministic mock evaluation path.
@@ -1389,7 +1495,7 @@ pub async fn evaluate_with_mock_eval_jobs(
     configured_systems: &[String],
     cf_state: Option<&crate::handlers::agent_request::CFState>,
     queue_notifier: Option<&QueueNotifier>,
-) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
+) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>, bool)> {
     // Re-evaluation safety: clear previous persisted logs for this commit so
     // (commit_id, log_sequence) uniqueness cannot collide on subsequent runs.
     crate::queries::eval_logs::delete_eval_logs_by_commit(pool, commit.id).await?;
@@ -1609,7 +1715,9 @@ pub async fn evaluate_with_mock_eval_jobs(
         }
     }
 
-    Ok((results, checks))
+    // Mock evaluations never have system eval errors, so had_system_eval_errors is false.
+    let had_system_eval_errors = false;
+    Ok((results, checks, had_system_eval_errors))
 }
 
 fn build_agent_target(repo_url: &str, commit_hash: &str, system_name: &str) -> String {

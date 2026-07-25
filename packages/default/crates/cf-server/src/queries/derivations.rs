@@ -45,6 +45,138 @@ impl EvaluationStatus {
     }
 }
 
+/// Outcome of recording a synthetic evaluation failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyntheticFailureWrite {
+    /// Inserted a new derivation row with status DryRunFailed.
+    Inserted { derivation_id: i32 },
+    /// Updated an existing derivation from a non-terminal evaluation state
+    /// (DryRunPending, DryRunInProgress) to DryRunFailed.
+    UpdatedPendingEvaluation { derivation_id: i32 },
+    /// An existing derivation was preserved because it is in a terminal or build
+    /// state (DryRunComplete, DryRunFailed, BuildPending, BuildInProgress,
+    /// BuildComplete, BuildFailed).
+    PreservedExisting { derivation_id: i32, status_id: i32 },
+}
+
+/// Atomically record a synthetic evaluation failure for a derivation.
+///
+/// Uses a transaction with `SELECT ... FOR UPDATE` so the status check and
+/// potential status transition are mutually atomic with respect to concurrent
+/// build worker transitions.
+///
+/// Permitted state transitions:
+/// - No existing row → insert directly as DryRunFailed (6)
+/// - DryRunPending (3) → DryRunFailed (6)
+/// - DryRunInProgress (4) → DryRunFailed (6)
+/// - All other statuses → preserved unchanged
+///
+/// When transitioning from 3 or 4, stale evaluation fields are explicitly
+/// normalized (derivation_path, store_path, etc. are cleared) and the error
+/// message is set.
+///
+/// This function also locks the row via `FOR UPDATE` and performs the
+/// transition inside the same transaction, so a concurrent transition
+/// (e.g. from 4 → 7 by a build worker) cannot race between the check and
+/// the update. If the row was already modified concurrently, the `FOR UPDATE`
+/// wait ensures we see the latest committed state before deciding.
+pub async fn record_synthetic_eval_failure(
+    pool: &PgPool,
+    commit_id: Option<i32>,
+    derivation_name: &str,
+    derivation_type: &str,
+    derivation_target: Option<&str>,
+    error_message: &str,
+) -> Result<SyntheticFailureWrite> {
+    let mut tx = pool.begin().await?;
+
+    // Lock the row if it exists.
+    let existing = sqlx::query_as::<_, (i32, i32)>(
+        r#"
+        SELECT id, status_id
+        FROM derivations
+        WHERE COALESCE(commit_id, -1) = COALESCE($1, -1)
+          AND derivation_name = $2
+          AND derivation_type = $3
+        FOR UPDATE
+        "#,
+    )
+    .bind(commit_id)
+    .bind(derivation_name)
+    .bind(derivation_type)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let result = match existing {
+        None => {
+            // No row — insert directly as DryRunFailed.
+            let row = sqlx::query_as::<_, (i32, i32)>(
+                r#"
+                INSERT INTO derivations (
+                    commit_id,
+                    derivation_type,
+                    derivation_name,
+                    derivation_target,
+                    status_id,
+                    attempt_count,
+                    error_message,
+                    completed_at
+                )
+                VALUES ($1, $2, $3, $4, $5, 0, $6, NOW())
+                RETURNING id, status_id
+                "#,
+            )
+            .bind(commit_id)
+            .bind(derivation_type)
+            .bind(derivation_name)
+            .bind(derivation_target)
+            .bind(EvaluationStatus::DryRunFailed.as_id())
+            .bind(error_message)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            SyntheticFailureWrite::Inserted {
+                derivation_id: row.0,
+            }
+        }
+        Some((id, status_id)) => match status_id {
+            3 | 4 => {
+                // DryRunPending or DryRunInProgress → DryRunFailed.
+                // Also normalize stale evaluation fields (clear them).
+                sqlx::query(
+                    r#"
+                    UPDATE derivations
+                    SET status_id = $1,
+                        error_message = $2,
+                        completed_at = NOW(),
+                        derivation_path = NULL,
+                        store_path = NULL,
+                        expected_store_path = NULL,
+                        cf_agent_enabled = NULL
+                    WHERE id = $3
+                    "#,
+                )
+                .bind(EvaluationStatus::DryRunFailed.as_id())
+                .bind(error_message)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+
+                SyntheticFailureWrite::UpdatedPendingEvaluation {
+                    derivation_id: id,
+                }
+            }
+            _ => {
+                // All other statuses — preserve unchanged.
+                SyntheticFailureWrite::PreservedExisting { derivation_id: id, status_id }
+            }
+        },
+    };
+
+    tx.commit().await?;
+    Ok(result)
+}
+
 /// Inserts or updates a derivation entry, assigning the correct status via enum IDs.
 pub async fn insert_derivation(
     pool: &PgPool,

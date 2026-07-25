@@ -865,7 +865,7 @@ async fn process_pending_commits(
         };
 
         match eval_result {
-            Ok((results, policy_checks)) => {
+            Ok((results, policy_checks, had_system_eval_errors)) => {
                 // Broadcast completion status
                 crate::handlers::api::commits::broadcast_eval_status(
                     &cf_state,
@@ -896,8 +896,10 @@ async fn process_pending_commits(
                 }
 
                 // ⬇️ UPDATE CACHE with evaluation summary
+                // had_system_eval_errors is true when any result has error != None,
+                // including synthesized failures for silently-dropped systems.
                 if let Err(e) =
-                    update_commit_metadata_cache(pool, commit.id, &policy_checks, false).await
+                    update_commit_metadata_cache(pool, commit.id, &policy_checks, had_system_eval_errors).await
                 {
                     error!(
                         "❌ Failed to update commit metadata cache for {}: {}",

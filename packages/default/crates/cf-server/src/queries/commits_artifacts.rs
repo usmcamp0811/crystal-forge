@@ -1,10 +1,17 @@
 use anyhow::Result;
 use sqlx::PgPool;
 
-/// Helper struct for reading the artifact cache systems column.
-#[derive(sqlx::FromRow)]
-struct CachedSystemsRow {
-    systems: Vec<String>,
+/// Represents the state of cached nixosConfigurations for a commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CachedSystemsState {
+    /// No cache row exists at all — hydration has never run for this commit.
+    Missing,
+    /// A cache row exists but the last hydration attempt failed.
+    /// Inline discovery should be retried.
+    HydrationFailed,
+    /// A cache row exists with systems populated by a successful discovery.
+    /// The inner Vec may be empty (legitimately empty nixosConfigurations set).
+    Ready(Vec<String>),
 }
 
 /// Get commits that need artifact cache population (no cache entry yet).
@@ -57,19 +64,23 @@ pub async fn upsert_commit_artifact_cache(
     Ok(())
 }
 
-/// Get the known nixosConfigurations for a commit from the artifact cache.
+/// Get the known nixosConfigurations state for a commit from the artifact cache.
 ///
-/// Returns:
-/// - `Ok(Some(vec))` — cache row exists with that system list (may be empty).
-/// - `Ok(None)` — no cache row exists (hydration has not run yet).
-/// - `Err(_)` — database error.
+/// Returns one of:
+/// - `CachedSystemsState::Missing` — no cache row exists.
+/// - `CachedSystemsState::HydrationFailed` — last hydration attempt failed;
+///   inline discovery should be retried.
+/// - `CachedSystemsState::Ready(systems)` — successful discovery; systems may
+///   be an empty vector for legitimately empty nixosConfigurations.
 pub async fn get_commit_nixos_configurations_from_cache(
     pool: &PgPool,
     commit_id: i32,
-) -> Result<Option<Vec<String>>> {
-    let row = sqlx::query_as::<_, CachedSystemsRow>(
+) -> Result<CachedSystemsState> {
+    let row = sqlx::query_as::<_, (Option<Vec<String>>, bool)>(
         r#"
-        SELECT COALESCE(nixos_configurations, ARRAY[]::text[]) AS systems
+        SELECT
+            nixos_configurations,
+            nixos_configurations_populated
         FROM commit_artifacts_cache
         WHERE commit_id = $1
         "#,
@@ -78,7 +89,17 @@ pub async fn get_commit_nixos_configurations_from_cache(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| r.systems))
+    match row {
+        Some((systems, populated)) => {
+            if populated {
+                let systems = systems.unwrap_or_default();
+                Ok(CachedSystemsState::Ready(systems))
+            } else {
+                Ok(CachedSystemsState::HydrationFailed)
+            }
+        }
+        None => Ok(CachedSystemsState::Missing),
+    }
 }
 
 /// Upsert only the nixos_configurations column, preserving existing changed_files.
@@ -86,6 +107,7 @@ pub async fn get_commit_nixos_configurations_from_cache(
 /// Unlike `upsert_commit_artifact_cache`, this does NOT overwrite changed_files
 /// with an empty array. Use this for inline hydration during evaluation so that
 /// previously cached changed_files are preserved.
+/// Always marks `nixos_configurations_populated = true`.
 pub async fn upsert_commit_artifact_systems(
     pool: &PgPool,
     commit_id: i32,
@@ -93,10 +115,11 @@ pub async fn upsert_commit_artifact_systems(
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO commit_artifacts_cache (commit_id, nixos_configurations, populated_at)
-        VALUES ($1, $2, NOW())
+        INSERT INTO commit_artifacts_cache (commit_id, nixos_configurations, nixos_configurations_populated, populated_at)
+        VALUES ($1, $2, TRUE, NOW())
         ON CONFLICT (commit_id) DO UPDATE
         SET nixos_configurations = EXCLUDED.nixos_configurations,
+            nixos_configurations_populated = TRUE,
             populated_at = NOW()
         "#,
     )
@@ -108,13 +131,19 @@ pub async fn upsert_commit_artifact_systems(
     Ok(())
 }
 
-/// Mark a commit as having failed artifact hydration (empty cache entry for retry prevention).
+/// Mark a commit as having failed artifact hydration.
+///
+/// Sets `nixos_configurations_populated = false` so that a subsequent inline
+/// discovery during evaluation does not mistake this sentinel for a successful
+/// empty discovery.
 pub async fn mark_commit_artifact_hydration_failed(pool: &PgPool, commit_id: i32) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO commit_artifacts_cache (commit_id, nixos_configurations, changed_files, populated_at)
-        VALUES ($1, ARRAY[]::text[], ARRAY[]::text[], NOW())
-        ON CONFLICT (commit_id) DO NOTHING
+        INSERT INTO commit_artifacts_cache (commit_id, nixos_configurations, changed_files, nixos_configurations_populated, populated_at)
+        VALUES ($1, ARRAY[]::text[], ARRAY[]::text[], FALSE, NOW())
+        ON CONFLICT (commit_id) DO UPDATE
+        SET nixos_configurations_populated = FALSE,
+            populated_at = NOW()
         "#,
     )
     .bind(commit_id)
