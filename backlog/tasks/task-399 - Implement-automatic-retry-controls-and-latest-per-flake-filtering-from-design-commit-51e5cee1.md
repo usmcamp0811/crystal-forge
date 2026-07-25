@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-07-24 03:26'
-updated_date: '2026-07-25 02:23'
+updated_date: '2026-07-25 02:24'
 labels:
   - design-parity
   - web-ui
@@ -178,6 +178,8 @@ Implementation complete. All 23 acceptance criteria addressed; see final summary
 MR !310 opened against dev: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/310
 
 Branch pushed: TASK-399-automatic-retries-latest-flake (commit f9ddf15a).
+
+LOCK RELEASED: awaiting review (MR !310 open against dev, not yet merged).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
