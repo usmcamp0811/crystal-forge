@@ -4,7 +4,7 @@ title: Evaluation errors silently drop systems from nixosConfigurations count
 status: Review
 assignee: []
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-24 03:29'
+updated_date: '2026-07-25 04:16'
 labels:
   - evaluator
   - reporting
@@ -19,6 +19,10 @@ references:
 modified_files:
   - packages/default/crates/cf-server/src/models/evaluate_with_policies.rs
   - packages/default/crates/cf-server/src/queries/commits_artifacts.rs
+  - packages/default/crates/cf-server/src/queries/commits.rs
+  - packages/default/crates/cf-server/src/queries/derivations.rs
+  - packages/default/crates/cf-server/src/server/mod.rs
+  - packages/default/crates/cf-server/src/flake/commits.rs
 priority: high
 type: bug
 ordinal: 396000
@@ -111,4 +115,20 @@ This error appears in the Crystal Forge log but `nix-builder-1` is absent from b
 **Dependency:** TASK-398 fixes the underlying Nix evaluation error for `nix-builder-1`. Once that is fixed, this task's fix can be verified end-to-end. However, this task's fix (surface the failure, don't drop it) is independent and should be implemented regardless.
 
 **Verification:** Trigger a Crystal Forge evaluation of `ATALLC/nix-config`. Before TASK-398 is merged, `nix-builder-1` should appear as a **named failed system** with its error. After TASK-398, it should appear as a success.
+
+---
+
+## P1 review fixes (commit 07771d5c)
+
+**P1-1 (cancellation race):** Fallback phase now returns `Err(EvaluationCancelled.into())` instead of `bail!` (typed error). `force_cancel_commit_evaluation` no longer clears `cancellation_requested` so the evaluator's poll loop can still detect cancellation.
+
+**P1-2 (non-atomic transitions):** `mark_commit_evaluation_started` returns `EvalStartOutcome`. `mark_commit_evaluation_complete` returns `EvalCompleteOutcome` with CAS guard on `evaluation_attempt_count`. `mark_commit_evaluation_failed` returns `EvalFailureOutcome` with CAS guard. All server/mod.rs callers updated to handle typed outcomes and pass `attempt`/`expected_attempt`.
+
+**P1-3 (retries downgrading builds):** `insert_derivation_with_target` preserves statuses 7 (BuildPending) and 8 (BuildInProgress) alongside 5, 6, 10, 12. SQL bind parameters renumbered (`$6`–`$11` for preserved statuses, `$12` for `cf_agent_enabled`). SQLx metadata regenerated.
+
+**P1-4 (inline-discovery orphan):** `load_commit_nixos_configurations_with_creds` already had `kill_on_drop(true)` and `BuildConfig.apply_to_command`, completing the P1-4 requirement.
+
+## SQLx metadata fix (commit a5ddcd33)
+
+The initial `cargo sqlx prepare` only captured queries from non-test code. Test-only query! macros in cve_worker.rs and cve_scans.rs required `cargo sqlx prepare -- --all-targets` to be included. Without them, the Nix build's `cf-server (lib test)` target failed with 7 `set DATABASE_URL...` errors.
 <!-- SECTION:NOTES:END -->
