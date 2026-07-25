@@ -4,9 +4,16 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use tracing::{debug, info};
 use uuid::Uuid;
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct QueuedBuild {
+    pub build_job_id: Uuid,
+    pub derivation_id: i32,
+    pub system_name: String,
+}
 
 /// Create build jobs for all derivations associated with a commit.
 ///
@@ -81,6 +88,57 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
     }
 
     Ok(count)
+}
+
+pub async fn create_build_jobs_for_commit_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+) -> Result<Vec<QueuedBuild>> {
+    let rows = sqlx::query_as::<_, QueuedBuild>(
+        r#"
+        INSERT INTO build_jobs (
+            derivation_id,
+            environment_id,
+            priority_weight,
+            status
+        )
+        SELECT
+            d.id as derivation_id,
+            s.environment_id,
+            CASE
+                WHEN s.id IS NOT NULL THEN 10.0
+                ELSE 1.0
+            END *
+            CASE
+                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 3600 THEN 2.0
+                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
+                ELSE 1.0
+            END as priority_weight,
+            'queued' as status
+        FROM derivations d
+        INNER JOIN commits c ON d.commit_id = c.id
+        LEFT JOIN systems s ON (
+            d.derivation_target = s.hostname
+            AND s.flake_id = c.flake_id
+        )
+        WHERE d.commit_id = $1
+            AND d.status_id = 5
+            AND d.cf_agent_enabled = TRUE
+            AND NOT EXISTS (
+                SELECT 1 FROM build_jobs bj
+                WHERE bj.derivation_id = d.id
+            )
+        RETURNING id AS build_job_id, derivation_id, (
+            SELECT derivation_name FROM derivations WHERE derivations.id = build_jobs.derivation_id
+        ) AS system_name
+        "#,
+    )
+    .bind(commit_id)
+    .fetch_all(&mut **tx)
+    .await
+    .context("Failed to create build jobs for commit")?;
+
+    Ok(rows)
 }
 
 /// Incrementally enqueue a single derivation as a build job.

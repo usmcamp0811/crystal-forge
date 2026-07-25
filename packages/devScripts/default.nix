@@ -604,6 +604,10 @@ let
           cargo test --manifest-path Cargo.toml \
           -p cf-server --lib queries::derivations::tests \
           -- --ignored --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL="$DB_URL" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib models::evaluate_with_policies::tests::finalize_attempt_ \
+          -- --ignored --test-threads=1
       "
     '';
   };

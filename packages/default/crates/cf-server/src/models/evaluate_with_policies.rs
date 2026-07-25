@@ -32,6 +32,7 @@ use crate::models::deployment_policies::{
     DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
 };
 use crate::models::flakes::Flake;
+use crate::queries::build_jobs::{QueuedBuild, create_build_jobs_for_commit_tx};
 use crate::queries::commits_artifacts::CachedSystemsState;
 use crate::queries::systems::list_configuration_names_for_flake;
 use crate::queue::QueueNotifier;
@@ -462,6 +463,8 @@ pub struct EvaluationPlan {
     pub confirmed_failures: Vec<ConfirmedSystemFailure>,
     /// True when any result has a Nix evaluation error.
     pub had_system_eval_errors: bool,
+    #[cfg(test)]
+    pub force_build_job_insert_failure: bool,
 }
 
 /// Outcome of `finalize_evaluation_attempt`.
@@ -470,6 +473,7 @@ pub enum EvaluationFinalizeOutcome {
     /// Attempt accepted; derivations are written and commit is complete.
     Completed {
         derivations: Vec<FinalizedDerivation>,
+        queued_builds: Vec<QueuedBuild>,
     },
     /// A user cancellation won the race before the commit row could be locked.
     Cancelled,
@@ -613,6 +617,15 @@ pub async fn finalize_evaluation_attempt(
         .with_context(|| format!("Failed to write synthetic failure for {}", cf.system_name))?;
     }
 
+    #[cfg(test)]
+    if plan.force_build_job_insert_failure {
+        bail!("forced build-job insertion failure for rollback test");
+    }
+
+    let queued_builds = create_build_jobs_for_commit_tx(&mut tx, commit_id)
+        .await
+        .context("Failed to create build jobs during evaluation finalization")?;
+
     // Write metadata cache inside the transaction so it is always consistent
     // with the derivation rows.
     let (
@@ -689,6 +702,7 @@ pub async fn finalize_evaluation_attempt(
     tx.commit().await?;
     Ok(EvaluationFinalizeOutcome::Completed {
         derivations: finalized_derivations,
+        queued_builds,
     })
 }
 
@@ -1785,6 +1799,8 @@ pub async fn evaluate_with_nix_eval_jobs(
         successful_systems: successful_results,
         confirmed_failures,
         had_system_eval_errors,
+        #[cfg(test)]
+        force_build_job_insert_failure: false,
     })
 }
 
@@ -1984,6 +2000,8 @@ pub async fn evaluate_with_mock_eval_jobs(
         successful_systems,
         confirmed_failures: Vec::new(),
         had_system_eval_errors,
+        #[cfg(test)]
+        force_build_job_insert_failure: false,
     })
 }
 
@@ -2212,7 +2230,8 @@ mod tests {
     use crate::api::models::CancelEvalOutcome;
     use crate::models::deployment_policies::PolicyCheckResult;
     use crate::queries::commits::{
-        EvalStartOutcome, cancel_commit_evaluation, mark_commit_evaluation_started,
+        EvalFailureOutcome, EvalStartOutcome, cancel_commit_evaluation,
+        mark_commit_evaluation_failed, mark_commit_evaluation_started,
     };
     use sqlx::PgPool;
 
@@ -2360,7 +2379,17 @@ mod tests {
             successful_systems: successes,
             confirmed_failures: failures,
             had_system_eval_errors: false,
+            force_build_job_insert_failure: false,
         }
+    }
+
+    fn plan_with_forced_build_job_failure(
+        successes: Vec<SuccessfulSystemResult>,
+        failures: Vec<ConfirmedSystemFailure>,
+    ) -> EvaluationPlan {
+        let mut plan = plan(successes, failures);
+        plan.force_build_job_insert_failure = true;
+        plan
     }
 
     async fn derivation_count(pool: &PgPool, commit_id: i32) -> i64 {
@@ -2693,7 +2722,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn finalize_attempt_does_not_create_external_build_jobs() {
+    async fn finalize_attempt_creates_build_jobs_in_transaction() {
         let pool = test_pool().await;
         cleanup_throwaway_flakes(&pool).await;
         let flake_id = insert_throwaway_flake(&pool).await;
@@ -2714,7 +2743,95 @@ mod tests {
             EvaluationFinalizeOutcome::Completed { .. }
         ));
         assert_eq!(derivation_count(&pool, commit_id).await, 1);
+        assert_eq!(build_job_count(&pool, commit_id).await, 1);
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalize_attempt_rolls_back_when_build_job_insert_fails() {
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        finalize_evaluation_attempt(
+            &pool,
+            commit_id,
+            attempt,
+            &plan_with_forced_build_job_failure(vec![successful_system("alpha")], vec![]),
+        )
+        .await
+        .expect_err("forced build-job insertion failure should roll back finalization");
+
+        assert_eq!(derivation_count(&pool, commit_id).await, 0);
         assert_eq!(build_job_count(&pool, commit_id).await, 0);
+
+        let status: String =
+            sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
+                .bind(commit_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "in_progress");
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalize_attempt_error_can_be_routed_to_retry_failure_cas() {
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        let err = finalize_evaluation_attempt(
+            &pool,
+            commit_id,
+            attempt,
+            &plan_with_forced_build_job_failure(vec![successful_system("alpha")], vec![]),
+        )
+        .await
+        .expect_err("forced build-job insertion failure should roll back finalization");
+
+        assert_eq!(derivation_count(&pool, commit_id).await, 0);
+        assert_eq!(build_job_count(&pool, commit_id).await, 0);
+
+        let failure = mark_commit_evaluation_failed(&pool, commit_id, &err.to_string(), attempt)
+            .await
+            .expect("failure CAS should succeed after finalizer rollback");
+        assert_eq!(failure, EvalFailureOutcome::RetryScheduled);
+
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            evaluation_status: String,
+            evaluation_error_message: Option<String>,
+        }
+        let row = sqlx::query_as::<_, Row>(
+            "SELECT evaluation_status, evaluation_error_message FROM commits WHERE id = $1",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row.evaluation_status, "pending");
+        assert!(
+            row.evaluation_error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("forced build-job insertion failure")
+        );
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
