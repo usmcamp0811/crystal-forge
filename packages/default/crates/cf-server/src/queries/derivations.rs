@@ -295,19 +295,19 @@ pub async fn insert_derivation_with_target(
             scheduled_at,
             cf_agent_enabled
         )
-        VALUES ($1, $2, $3, $4, $5, 0, NOW(), $10)
+        VALUES ($1, $2, $3, $4, $5, 0, NOW(), $12)
         ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
         DO UPDATE SET
-            -- keep terminal states; otherwise reset
+            -- keep terminal AND active-build states; otherwise reset
             status_id = CASE
-                WHEN derivations.status_id IN ($6, $7, $8, $9) THEN derivations.status_id
+                WHEN derivations.status_id IN ($6, $7, $8, $9, $10, $11) THEN derivations.status_id
                 ELSE EXCLUDED.status_id
             END,
             -- keep/refresh target if provided
             derivation_target = COALESCE(EXCLUDED.derivation_target, derivations.derivation_target),
-            -- nudge the scheduler only for non-terminal rows
+            -- nudge the scheduler only for preserved-state rows
             scheduled_at = CASE
-                WHEN derivations.status_id IN ($6, $7, $8, $9) THEN derivations.scheduled_at
+                WHEN derivations.status_id IN ($6, $7, $8, $9, $10, $11) THEN derivations.scheduled_at
                 ELSE NOW()
             END
         RETURNING
@@ -339,9 +339,11 @@ pub async fn insert_derivation_with_target(
         derivation_name,
         derivation_target,
         EvaluationStatus::DryRunPending.as_id(),
-        // $6..$9  (terminal statuses)
+        // $6..$9  (statuses to preserve — terminal OR active build)
         EvaluationStatus::DryRunComplete.as_id(),
         EvaluationStatus::DryRunFailed.as_id(),
+        EvaluationStatus::BuildPending.as_id(),
+        EvaluationStatus::BuildInProgress.as_id(),
         EvaluationStatus::BuildComplete.as_id(),
         EvaluationStatus::BuildFailed.as_id(),
         cf_agent_enabled

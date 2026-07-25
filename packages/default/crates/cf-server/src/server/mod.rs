@@ -9,6 +9,7 @@ use crate::models::commits::Commit;
 use crate::models::deployment_policies::DeploymentPolicy;
 use crate::models::evaluate_with_policies::{
     evaluate_with_mock_eval_jobs, evaluate_with_nix_eval_jobs, update_commit_metadata_cache,
+    EvaluationCancelled,
 };
 use crate::models::flakes::Flake;
 use crate::queue::QueueNotifier;
@@ -32,7 +33,8 @@ use crate::queries::builders::{
 };
 use crate::queries::commits::{
     get_commits_pending_evaluation, mark_commit_evaluation_complete, mark_commit_evaluation_failed,
-    mark_commit_evaluation_started, reset_stuck_commit_evaluations,
+    mark_commit_evaluation_started, reset_stuck_commit_evaluations, EvalCompleteOutcome,
+    EvalFailureOutcome, EvalStartOutcome,
 };
 use crate::queries::deployment_policies::list_enabled_deployment_policies;
 use crate::queries::derivations::{cleanup_partial_derivations, reset_stuck_builds};
@@ -745,22 +747,23 @@ async fn process_pending_commits(
             return Ok(());
         };
         // ⬇️ mark STARTED (bumps evaluation_attempt_count internally)
-        if let Err(e) = mark_commit_evaluation_started(pool, commit.id).await {
-            let error_text = e.to_string();
-            if error_text.contains("another commit is already being evaluated") {
+        let attempt = match mark_commit_evaluation_started(pool, commit.id).await {
+            Ok(EvalStartOutcome::Started { attempt }) => attempt,
+            Ok(EvalStartOutcome::NoLongerPending) => {
                 debug!(
-                    "⏭️ Eval start race for commit {} ({}): another worker/loop iteration already claimed in_progress",
+                    "⏭️ Eval start race for commit {} ({}): another worker/loop iteration already took pending",
                     commit.id, commit.git_commit_hash
                 );
                 return Ok(());
-            } else {
+            }
+            Err(e) => {
                 error!(
                     "❌ Could not mark commit {} evaluation started: {}",
                     commit.git_commit_hash, e
                 );
+                return Ok(());
             }
-            return Ok(());
-        }
+        };
 
         // Get flake info (post-claim; failures now go through retry/defer path)
         let flake = match commit.get_flake(&pool).await {
@@ -770,7 +773,7 @@ async fn process_pending_commits(
                     "❌ Failed to get flake for commit {}: {}",
                     commit.git_commit_hash, e
                 );
-                let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await;
+                let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt).await;
                 return Ok(());
             }
         };
@@ -780,7 +783,7 @@ async fn process_pending_commits(
             Ok(cfg) => cfg,
             Err(e) => {
                 error!("❌ Failed to load config: {}", e);
-                let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await;
+                let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt).await;
                 return Ok(());
             }
         };
@@ -887,12 +890,23 @@ async fn process_pending_commits(
                 // Cleanup WebSocket broadcast channel
                 crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
 
-                // ⬇️ mark COMPLETE
-                if let Err(e) = mark_commit_evaluation_complete(pool, commit.id).await {
-                    error!(
-                        "❌ Failed to mark commit {} evaluation complete: {}",
-                        commit.git_commit_hash, e
-                    );
+                // ⬇️ mark COMPLETE (CAS guarded by attempt)
+                match mark_commit_evaluation_complete(pool, commit.id, attempt).await {
+                    Ok(EvalCompleteOutcome::Completed) => {
+                        // success – no extra logging needed
+                    }
+                    Ok(EvalCompleteOutcome::SupersededOrCancelled) => {
+                        warn!(
+                            "Commit {} evaluation superseded or cancelled before completion was written",
+                            commit.git_commit_hash
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            "❌ Failed to mark commit {} evaluation complete: {}",
+                            commit.git_commit_hash, e
+                        );
+                    }
                 }
 
                 // ⬇️ UPDATE CACHE with evaluation summary
@@ -991,18 +1005,29 @@ async fn process_pending_commits(
                 );
 
                 // ── Check for user-requested cancellation FIRST ─────
-                // If the evaluation was cancelled, finalize the cancelled
-                // state atomically and return early — do NOT fall through to
-                // the generic failure handler which would overwrite the
+                // There are two ways cancellation can be detected:
+                //
+                // 1. The evaluator returned a typed `EvaluationCancelled`
+                //    error (cooperative cancellation inside the eval loop).
+                // 2. The database row is still `cancelling` or has
+                //    `cancellation_requested = TRUE`, which means the cancel
+                //    API was called but the evaluator hasn't yet reacted.
+                //
+                // In either case, atomically finalize the cancelled state,
+                // clean up partial derivations, broadcast the cancelled
+                // event, and return early — do NOT fall through to the
+                // generic failure handler which would overwrite the
                 // cancelled status with 'pending' or 'failed'.
-                let was_cancelled =
+                let is_typed_cancellation =
+                    e.downcast_ref::<EvaluationCancelled>().is_some();
+                let finalized =
                     crate::queries::commits::finalize_requested_commit_evaluation_cancellation(
                         pool,
                         commit.id,
                     )
                     .await?;
 
-                if was_cancelled {
+                if is_typed_cancellation || finalized {
                     if let Err(cleanup_error) =
                         crate::queries::commits::cleanup_partial_derivations_for_commit(
                             pool,
@@ -1056,16 +1081,29 @@ async fn process_pending_commits(
                 // Cleanup WebSocket broadcast channel
                 crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
 
-                // ⬇️ mark FAILED (function will set 'pending' or terminal 'failed'
-                // depending on attempt limit inside your SQL)
-                // Now guarded against overwriting cancelled/cancelling states.
-                if let Err(mark_err) =
-                    mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await
-                {
-                    error!(
-                        "❌ Failed to mark commit {} evaluation failed: {}",
-                        commit.git_commit_hash, mark_err
-                    );
+                // ⬇️ mark FAILED (atomically; CAS guarded by attempt)
+                match mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt).await {
+                    Ok(EvalFailureOutcome::PermanentlyFailed) => {
+                        // attention occurrence already opened inside the function
+                    }
+                    Ok(EvalFailureOutcome::RetryScheduled) => {
+                        info!(
+                            "Commit {} evaluation will be retried (attempt {})",
+                            commit.git_commit_hash, attempt
+                        );
+                    }
+                    Ok(EvalFailureOutcome::SupersededOrCancelled) => {
+                        warn!(
+                            "Commit {} evaluation superseded or cancelled instead of marking failed",
+                            commit.git_commit_hash
+                        );
+                    }
+                    Err(mark_err) => {
+                        error!(
+                            "❌ Failed to mark commit {} evaluation failed: {}",
+                            commit.git_commit_hash, mark_err
+                        );
+                    }
                 }
 
                 // ⬇️ UPDATE CACHE to record eval error (no policy checks available)

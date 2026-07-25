@@ -405,6 +405,21 @@ async fn evaluate_and_verify_missing_system(
 
 /// Evaluate a flake's nixosConfigurations with nix-eval-jobs and policy checking
 ///
+/// Error returned when a user requests cancellation of an in-progress
+/// evaluation.  The outer handler in process_pending_commits recognizes
+/// this type to finalize the cancelled state atomically and broadcast
+/// the cancelled event — never entering the generic failure path.
+#[derive(Debug)]
+pub struct EvaluationCancelled;
+
+impl std::fmt::Display for EvaluationCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "evaluation cancelled by user")
+    }
+}
+
+impl std::error::Error for EvaluationCancelled {}
+
 /// FIXED: Now properly:
 /// 1. Stores derivation_path from nix-eval-jobs
 /// 2. Updates status to DryRunComplete after successful evaluation
@@ -537,6 +552,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                 repo_url,
                 commit_hash,
                 creds.as_ref().as_ref(),
+                Some(build_config),
             )
             .await?;
 
@@ -626,14 +642,15 @@ pub async fn evaluate_with_nix_eval_jobs(
                 match crate::queries::commits::check_cancellation_requested(pool, commit.id).await {
                     Ok(true) => {
                         warn!("🚫 Cancellation requested for commit {} — killing nix-eval-jobs", commit.id);
-                        let _ = child.kill().await;
-                        // Transition cancelling → cancelled
-                        let _ = crate::queries::commits::force_cancel_commit_evaluation(pool, commit.id).await;
-                        // Run partial derivation cleanup inline (same as startup cleanup)
-                        if let Err(e) = crate::queries::commits::cleanup_partial_derivations_for_commit(pool, commit.id).await {
-                            warn!("Failed to clean up partial derivations for cancelled commit {}: {e}", commit.id);
+                        if let Err(kill_err) = child.kill().await {
+                            warn!("Failed to kill nix-eval-jobs for cancelled commit {}: {kill_err}", commit.id);
                         }
-                        bail!("evaluation cancelled by user request");
+                        // Do NOT call force_cancel_commit_evaluation here — the
+                        // outer handler (process_pending_commits) is the single
+                        // authority that atomically transitions the state and
+                        // broadcasts the cancelled event.  We just return a
+                        // typed error.
+                        return Err(EvaluationCancelled.into());
                     }
                     Ok(false) => {} // not cancelled, continue
                     Err(e) => {
@@ -1259,7 +1276,7 @@ pub async fn evaluate_with_nix_eval_jobs(
 
             cancellation_result = &mut cancellation => {
                 cancellation_result?;
-                bail!("evaluation cancelled by user request during fallback");
+                return Err(EvaluationCancelled.into());
             }
 
             fallback_result = tokio::time::timeout(

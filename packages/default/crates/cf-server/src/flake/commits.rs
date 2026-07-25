@@ -2573,6 +2573,7 @@ pub async fn load_commit_nixos_configurations_with_creds(
     repo_url: &str,
     commit_hash: &str,
     creds: Option<&FlakeCredentialEnv>,
+    build_config: Option<&crate::config::BuildConfig>,
 ) -> Result<Vec<String>> {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     let flake_target = format!("{flake_ref}#nixosConfigurations");
@@ -2585,6 +2586,18 @@ pub async fn load_commit_nixos_configurations_with_creds(
         "builtins.attrNames",
         flake_target.as_str(),
     ]);
+
+    // Kill the nix process if the future is dropped (timeout or
+    // cancellation).  Without this, a timed-out discovery can orphan
+    // a nix process that continues running indefinitely.
+    cmd.kill_on_drop(true);
+
+    // Apply Nix configuration (offline mode, substitute behaviour,
+    // timeouts, sandbox settings, etc.) consistently with the main
+    // and fallback evaluators.
+    if let Some(bc) = build_config {
+        bc.apply_to_command(&mut cmd);
+    }
 
     if let Some(c) = creds {
         c.apply_to_nix_command(&mut cmd);
@@ -2611,7 +2624,7 @@ async fn load_commit_nixos_configurations(
     repo_url: &str,
     commit_hash: &str,
 ) -> Result<Vec<String>> {
-    load_commit_nixos_configurations_with_creds(repo_url, commit_hash, None).await
+    load_commit_nixos_configurations_with_creds(repo_url, commit_hash, None, None).await
 }
 
 async fn load_commit_changed_files(

@@ -278,61 +278,98 @@ pub async fn reset_stuck_commit_evaluations(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-/// Mark commit evaluation as started
+/// Outcome of attempting to start a commit evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalStartOutcome {
+    /// Evaluation started successfully; includes the current attempt number.
+    Started { attempt: i32 },
+    /// The commit is no longer pending (already started, cancelled, or
+    /// completed by another worker).
+    NoLongerPending,
+}
+
+/// Atomically claim a pending commit for evaluation.
 ///
-/// This will fail if another commit is already in_progress due to the unique constraint
-/// enforced by idx_commits_single_in_progress (migration 0088)
-pub async fn mark_commit_evaluation_started(pool: &PgPool, commit_id: i32) -> Result<()> {
-    sqlx::query(
+/// Uses a compare-and-set pattern: only transitions `pending` → `in_progress`.
+/// Returns `Started` with the attempt count when the claim succeeds, or
+/// `NoLongerPending` when the commit is no longer in a startable state.
+/// This prevents resurrecting a cancelled evaluation (Race C in the review).
+pub async fn mark_commit_evaluation_started(
+    pool: &PgPool,
+    commit_id: i32,
+) -> Result<EvalStartOutcome> {
+    let row = sqlx::query_as::<_, (i32,)>(
         r#"
         UPDATE commits
         SET 
             evaluation_status = 'in_progress',
             evaluation_started_at = NOW(),
             evaluation_completed_at = NULL,
+            evaluation_error_message = NULL,
             evaluation_attempt_count = COALESCE(evaluation_attempt_count, 0) + 1,
             cancellation_requested = FALSE
         WHERE id = $1
+          AND COALESCE(evaluation_status, 'pending') = 'pending'
+        RETURNING evaluation_attempt_count
         "#,
     )
     .bind(commit_id)
-    .execute(pool)
-    .await
-    .map_err(|e| {
-        // Check if this is a unique constraint violation (another commit is in_progress)
-        if let sqlx::Error::Database(ref db_err) = e {
-            if db_err.code().as_deref() == Some("23505") {
-                return anyhow::anyhow!(
-                    "Cannot start evaluation for commit {}: another commit is already being evaluated",
-                    commit_id
-                );
-            }
-        }
-        anyhow::anyhow!("Failed to mark commit {} as in_progress: {}", commit_id, e)
-    })?;
+    .fetch_optional(pool)
+    .await?;
 
-    Ok(())
+    match row {
+        Some((attempt,)) => Ok(EvalStartOutcome::Started { attempt }),
+        None => Ok(EvalStartOutcome::NoLongerPending),
+    }
 }
 
-/// Mark commit evaluation as successfully completed
-pub async fn mark_commit_evaluation_complete(pool: &PgPool, commit_id: i32) -> Result<()> {
-    sqlx::query(
+/// Outcome of attempting to mark a commit evaluation as complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalCompleteOutcome {
+    /// The evaluation was successfully marked complete.
+    Completed,
+    /// The row could not be updated — the evaluation may have been
+    /// cancelled or superseded by another transition.
+    SupersededOrCancelled,
+}
+
+/// Atomically mark a commit evaluation as complete (compare-and-set).
+///
+/// Only transitions `in_progress` → `complete` when cancellation has not
+/// been requested and the attempt count matches.  Returns
+/// `SupersededOrCancelled` if the row was already in a different state
+/// (e.g. cancelled), preventing a completion broadcast from overwriting
+/// a concurrent cancellation (Race B).
+pub async fn mark_commit_evaluation_complete(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+) -> Result<EvalCompleteOutcome> {
+    let result = sqlx::query(
         r#"
         UPDATE commits
         SET
             evaluation_status = 'complete',
             evaluation_completed_at = NOW(),
-            evaluation_error_message = NULL
+            evaluation_error_message = NULL,
+            cancellation_requested = FALSE
         WHERE id = $1
+          AND evaluation_status = 'in_progress'
+          AND COALESCE(cancellation_requested, FALSE) = FALSE
+          AND evaluation_attempt_count = $2
         "#,
     )
     .bind(commit_id)
+    .bind(expected_attempt)
     .execute(pool)
     .await?;
 
-    resolve_eval_attention_unless_failed(pool, commit_id).await;
-
-    Ok(())
+    if result.rows_affected() > 0 {
+        resolve_eval_attention_unless_failed(pool, commit_id).await;
+        Ok(EvalCompleteOutcome::Completed)
+    } else {
+        Ok(EvalCompleteOutcome::SupersededOrCancelled)
+    }
 }
 
 /// Resolve the evaluation-failure attention occurrence for a commit, but
@@ -407,7 +444,25 @@ async fn resolve_eval_attention_unless_failed(pool: &PgPool, commit_id: i32) {
     }
 }
 
+/// Outcome of attempting to mark a commit evaluation as failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalFailureOutcome {
+    /// The evaluation was marked for retry (will become `pending`).
+    RetryScheduled,
+    /// The evaluation is permanently failed (attempt limit reached).
+    PermanentlyFailed,
+    /// The evaluation state was superseded or cancelled — no failure
+    /// metadata or broadcast should be emitted.
+    SupersededOrCancelled,
+}
+
 /// Mark commit evaluation as failed (with retry logic)
+///
+/// Atomically transitions `in_progress` → `pending`/`failed` only when
+/// cancellation has not been requested and the attempt count matches.
+/// Returns `SupersededOrCancelled` if the row is not in `in_progress` or
+/// cancellation was requested, preventing the generic failure handler
+/// from overwriting a concurrent cancellation.
 ///
 /// Retries up to 3 times with exponential backoff:
 /// - Attempt 1: immediate
@@ -420,7 +475,8 @@ pub async fn mark_commit_evaluation_failed(
     pool: &PgPool,
     commit_id: i32,
     error: &str,
-) -> Result<()> {
+    expected_attempt: i32,
+) -> Result<EvalFailureOutcome> {
     let row = sqlx::query(
         r#"
         UPDATE commits
@@ -435,20 +491,20 @@ pub async fn mark_commit_evaluation_failed(
             END,
             evaluation_error_message = $2
         WHERE id = $1
-          AND evaluation_status NOT IN ('cancelled', 'cancelling')
+          AND evaluation_status = 'in_progress'
           AND COALESCE(cancellation_requested, FALSE) = FALSE
+          AND evaluation_attempt_count = $3
         RETURNING evaluation_status, evaluation_completed_at
         "#,
     )
     .bind(commit_id)
     .bind(error)
+    .bind(expected_attempt)
     .fetch_optional(pool)
     .await?;
 
     let Some(row) = row else {
-        // Row was not updated because the evaluation was cancelled/cancelling
-        // or cancellation was requested.  Do not record a failure.
-        return Ok(());
+        return Ok(EvalFailureOutcome::SupersededOrCancelled);
     };
 
     let status: &str = row.try_get("evaluation_status")?;
@@ -458,9 +514,10 @@ pub async fn mark_commit_evaluation_failed(
         if let Some(completed_at) = completed_at {
             open_eval_attention_if_current(pool, commit_id, completed_at).await;
         }
+        Ok(EvalFailureOutcome::PermanentlyFailed)
+    } else {
+        Ok(EvalFailureOutcome::RetryScheduled)
     }
-
-    Ok(())
 }
 
 /// Open (or observe) the evaluation-failure attention occurrence for a
@@ -855,6 +912,11 @@ pub async fn cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<C
 /// sets cancellation_requested and lets the loop kill the process cooperatively),
 /// then use force-cancel only if it gets stuck in `cancelling`.
 ///
+/// NOTE: does NOT clear `cancellation_requested` so a still-running evaluator
+/// can detect the cancellation via its poll loop and return a typed
+/// `EvaluationCancelled` error, which the outer handler treats as a
+/// cancellation rather than a generic failure.
+///
 /// Returns `true` if the row was updated, `false` if it was already in a
 /// different state (idempotent).
 pub async fn force_cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<bool> {
@@ -862,7 +924,6 @@ pub async fn force_cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Re
         r#"
         UPDATE commits
         SET evaluation_status = 'cancelled',
-            cancellation_requested = FALSE,
             evaluation_completed_at = COALESCE(evaluation_completed_at, NOW())
         WHERE id = $1
           AND evaluation_status = 'cancelling'
