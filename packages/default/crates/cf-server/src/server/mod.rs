@@ -8,7 +8,8 @@ use crate::log::log_builder_worker_status;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::DeploymentPolicy;
 use crate::models::evaluate_with_policies::{
-    evaluate_with_mock_eval_jobs, evaluate_with_nix_eval_jobs, update_commit_metadata_cache,
+    EvaluationFinalizeOutcome, FinalizedDerivation, evaluate_with_mock_eval_jobs,
+    evaluate_with_nix_eval_jobs, finalize_evaluation_attempt, update_commit_metadata_cache,
 };
 use crate::models::flakes::Flake;
 use crate::queue::QueueNotifier;
@@ -25,18 +26,20 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
+use crate::derivations::utils::count_closure_packages;
 use crate::queries::build_jobs::create_build_jobs_for_commit;
 use crate::queries::builders::{
     cleanup_expired_build_logs, mark_stale_builders_offline,
     requeue_orphaned_building_jobs_with_reason,
 };
 use crate::queries::commits::{
-    get_commits_pending_evaluation, mark_commit_evaluation_complete, mark_commit_evaluation_failed,
-    mark_commit_evaluation_started, reset_stuck_commit_evaluations, EvalCancellationOutcome,
-    EvalCompleteOutcome, EvalFailureOutcome, EvalStartOutcome,
+    EvalCancellationOutcome, EvalFailureOutcome, EvalStartOutcome, get_commits_pending_evaluation,
+    mark_commit_evaluation_failed, mark_commit_evaluation_started, reset_stuck_commit_evaluations,
 };
 use crate::queries::deployment_policies::list_enabled_deployment_policies;
-use crate::queries::derivations::{cleanup_partial_derivations, reset_stuck_builds};
+use crate::queries::derivations::{
+    cleanup_partial_derivations, reset_stuck_builds, set_closure_counts,
+};
 use crate::services::hardening_scans::trigger_commit_hardening_scans;
 
 fn custom_field_name(name: &str, id: uuid::Uuid) -> String {
@@ -90,6 +93,76 @@ fn normalize_custom_policy_expression(expression: &str) -> (String, bool) {
 
     normalized.push_str(&expression[cursor..]);
     (normalized, changed)
+}
+
+async fn run_post_finalize_derivation_side_effects(
+    pool: &PgPool,
+    cf_state: &crate::handlers::agent_request::CFState,
+    commit_id: i32,
+    derivations: &[FinalizedDerivation],
+) {
+    for derivation in derivations {
+        match crate::builder::create_drv_gc_root(&derivation.drv_path, derivation.derivation_id)
+            .await
+        {
+            Ok(true) => debug!(
+                "📌 Rooted evaluated drv (id={}, drv={})",
+                derivation.derivation_id, derivation.drv_path
+            ),
+            Ok(false) => warn!(
+                "⚠️  Evaluated drv (id={}, drv={}) is not valid in the server store; \
+                 remote builders may not be able to import it",
+                derivation.derivation_id, derivation.drv_path
+            ),
+            Err(err) => warn!(
+                "⚠️  Failed to create GC root for evaluated drv {} (id={}): {}",
+                derivation.drv_path, derivation.derivation_id, err
+            ),
+        }
+
+        let pool2 = pool.clone();
+        let drv2 = derivation.drv_path.clone();
+        let derivation_id = derivation.derivation_id;
+        tokio::spawn(async move {
+            match count_closure_packages(&drv2).await {
+                Ok((total, cached)) => {
+                    if let Err(err) = set_closure_counts(&pool2, derivation_id, total, cached).await
+                    {
+                        warn!(
+                            "⚠️  Failed to store closure counts for id={}: {}",
+                            derivation_id, err
+                        );
+                    } else {
+                        info!(
+                            "📦 closure id={}: {}/{} packages cached/local",
+                            derivation_id, cached, total
+                        );
+                    }
+                }
+                Err(err) => warn!(
+                    "⚠️  Failed to count closure packages for id={}: {}",
+                    derivation_id, err
+                ),
+            }
+        });
+
+        if derivation.cf_agent_enabled == Some(true) {
+            crate::handlers::api::commits::broadcast_system_status(
+                cf_state,
+                commit_id,
+                derivation.system_name.clone(),
+                crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
+                None,
+            )
+            .await;
+            crate::handlers::api::commits::broadcast_eval_log(
+                cf_state,
+                commit_id,
+                format!("🚀 {}: build job queued", derivation.system_name),
+            )
+            .await;
+        }
+    }
 }
 
 fn parse_deployment_policy_record(
@@ -772,7 +845,8 @@ async fn process_pending_commits(
                     "❌ Failed to get flake for commit {}: {}",
                     commit.git_commit_hash, e
                 );
-                let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt).await;
+                let _ =
+                    mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt).await;
                 return Ok(());
             }
         };
@@ -782,7 +856,8 @@ async fn process_pending_commits(
             Ok(cfg) => cfg,
             Err(e) => {
                 error!("❌ Failed to load config: {}", e);
-                let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt).await;
+                let _ =
+                    mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt).await;
                 return Ok(());
             }
         };
@@ -874,99 +949,63 @@ async fn process_pending_commits(
         // comment so the borrow checker sees each use in its own scope.
 
         match eval_result {
-            Ok((results, policy_checks, had_system_eval_errors)) => {
-                // ── CAS FIRST: only proceed with side effects if we win the race ──
-                match mark_commit_evaluation_complete(pool, commit.id, attempt).await {
+            Ok(plan) => {
+                let results = plan.results.clone();
+                let policy_checks = plan.policy_checks.clone();
+
+                match finalize_evaluation_attempt(pool, commit.id, attempt, &plan).await {
                     Err(e) => {
-                        // A database error on the terminal transition leaves
-                        // the commit stuck in in_progress.  Propagate so the
-                        // outer loop logs the error; the startup reconciler
-                        // will recover stranded in_progress rows.
-                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
+                            .await;
                         return Err(e).with_context(|| {
                             format!(
-                                "Failed to mark commit {} evaluation complete (attempt {})",
+                                "Failed to atomically finalize commit {} evaluation (attempt {})",
                                 commit.git_commit_hash, attempt
                             )
                         });
                     }
-                    Ok(EvalCompleteOutcome::SupersededOrCancelled) => {
-                        // The commit was cancelled or superseded before we could
-                        // mark it complete.  Finalize the cancelled state, clean
-                        // up partial derivations, and notify clients — without
-                        // broadcasting "complete" or creating build jobs.
-                        let cancel_outcome =
-                            crate::queries::commits::finalize_requested_commit_evaluation_cancellation(
-                                pool,
-                                commit.id,
-                                attempt,
+                    Ok(EvaluationFinalizeOutcome::Cancelled) => {
+                        if let Err(err) =
+                            crate::queries::commits::cleanup_partial_derivations_for_commit(
+                                pool, commit.id,
                             )
                             .await
-                            .with_context(|| {
-                                format!(
-                                    "Failed to finalize cancellation for commit {} attempt {}",
-                                    commit.id, attempt
-                                )
-                            })?;
-
-                        if matches!(
-                            cancel_outcome,
-                            EvalCancellationOutcome::Cancelled | EvalCancellationOutcome::AlreadyCancelled
-                        ) {
-                            if let Err(err) =
-                                crate::queries::commits::cleanup_partial_derivations_for_commit(
-                                    pool,
-                                    commit.id,
-                                )
-                                .await
-                            {
-                                warn!(
-                                    "Failed to clean partial derivations for cancelled commit {}: {}",
-                                    commit.id, err
-                                );
-                            }
-                            crate::handlers::api::commits::broadcast_eval_status(
-                                &cf_state,
-                                commit.id,
-                                "cancelled".to_string(),
-                                Some("Evaluation cancelled by user".to_string()),
-                            )
-                            .await;
-                            crate::handlers::api::commits::broadcast_eval_log(
-                                &cf_state,
-                                commit.id,
-                                "🚫 Evaluation cancelled by user".to_string(),
-                            )
-                            .await;
-                        } else {
+                        {
                             warn!(
-                                "Commit {} evaluation superseded before completion was written",
-                                commit.git_commit_hash
+                                "Failed to clean partial derivations for cancelled commit {}: {}",
+                                commit.id, err
                             );
                         }
-
-                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
+                        crate::handlers::api::commits::broadcast_eval_status(
+                            &cf_state,
+                            commit.id,
+                            "cancelled".to_string(),
+                            Some("Evaluation cancelled by user".to_string()),
+                        )
+                        .await;
+                        crate::handlers::api::commits::broadcast_eval_log(
+                            &cf_state,
+                            commit.id,
+                            "🚫 Evaluation cancelled by user".to_string(),
+                        )
+                        .await;
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
+                            .await;
                         return Ok(());
                     }
-                    Ok(EvalCompleteOutcome::Completed) => {
-                        // CAS succeeded — now safe to run all completion side effects.
+                    Ok(EvaluationFinalizeOutcome::Superseded) => {
+                        warn!(
+                            "Commit {} evaluation superseded before finalization",
+                            commit.git_commit_hash
+                        );
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
+                            .await;
+                        return Ok(());
+                    }
+                    Ok(EvaluationFinalizeOutcome::Completed { derivations }) => {
+                        // Atomic DB finalization succeeded — now safe to run all
+                        // external completion side effects.
 
-                        // ⬇️ UPDATE CACHE with evaluation summary
-                        if let Err(e) = update_commit_metadata_cache(
-                            pool,
-                            commit.id,
-                            &policy_checks,
-                            had_system_eval_errors,
-                        )
-                        .await
-                        {
-                            error!(
-                                "❌ Failed to update commit metadata cache for {}: {}",
-                                commit.git_commit_hash, e
-                            );
-                        }
-
-                        // ⬇️ CREATE BUILD JOBS for evaluated derivations
                         match create_build_jobs_for_commit(pool, commit.id).await {
                             Ok(job_count) if job_count > 0 => {
                                 info!(
@@ -988,6 +1027,14 @@ async fn process_pending_commits(
                                 );
                             }
                         }
+
+                        run_post_finalize_derivation_side_effects(
+                            pool,
+                            &cf_state,
+                            commit.id,
+                            &derivations,
+                        )
+                        .await;
 
                         match trigger_commit_hardening_scans(
                             pool.clone(),
@@ -1056,7 +1103,8 @@ async fn process_pending_commits(
                             ),
                         )
                         .await;
-                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
+                            .await;
                     }
                 }
             }
@@ -1073,12 +1121,14 @@ async fn process_pending_commits(
                 // so a cancellation win (typed EvaluationCancelled OR a concurrent
                 // cancel API call that set the flag) will return SupersededOrCancelled,
                 // which we handle below without broadcasting "failed".
-                match mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt).await {
+                match mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt).await
+                {
                     Err(mark_err) => {
                         // Database error on terminal transition — propagate so
                         // the outer loop logs it; the startup reconciler recovers
                         // stranded in_progress rows.
-                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
+                            .await;
                         return Err(mark_err).with_context(|| {
                             format!(
                                 "Failed to mark commit {} evaluation failed (attempt {})",
@@ -1106,12 +1156,12 @@ async fn process_pending_commits(
 
                         if matches!(
                             cancel_outcome,
-                            EvalCancellationOutcome::Cancelled | EvalCancellationOutcome::AlreadyCancelled
+                            EvalCancellationOutcome::Cancelled
+                                | EvalCancellationOutcome::AlreadyCancelled
                         ) {
                             if let Err(err) =
                                 crate::queries::commits::cleanup_partial_derivations_for_commit(
-                                    pool,
-                                    commit.id,
+                                    pool, commit.id,
                                 )
                                 .await
                             {
@@ -1140,7 +1190,8 @@ async fn process_pending_commits(
                             );
                         }
 
-                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
+                            .await;
                         return Ok(());
                     }
 
@@ -1175,7 +1226,8 @@ async fn process_pending_commits(
                             format!("🔄 Evaluation will be retried (attempt {}): {}", attempt, e),
                         )
                         .await;
-                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
+                            .await;
                         return Ok(());
                     }
 
@@ -1204,7 +1256,8 @@ async fn process_pending_commits(
                             format!("❌ Evaluation permanently failed: {}", e),
                         )
                         .await;
-                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
+                            .await;
                         return Ok(());
                     }
                 }

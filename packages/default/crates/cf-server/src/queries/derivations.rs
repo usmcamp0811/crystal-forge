@@ -127,9 +127,7 @@ pub async fn record_synthetic_eval_failure(
             // We successfully inserted the row. Since ON CONFLICT DO NOTHING
             // suppresses the conflict error, RETURNING only emits a row when
             // an actual insert happened.
-            SyntheticFailureWrite::Inserted {
-                derivation_id: id,
-            }
+            SyntheticFailureWrite::Inserted { derivation_id: id }
         }
         None => {
             // Row already exists (inserted concurrently by another transaction).
@@ -175,9 +173,7 @@ pub async fn record_synthetic_eval_failure(
                         .execute(&mut *tx)
                         .await?;
 
-                        SyntheticFailureWrite::UpdatedPendingEvaluation {
-                            derivation_id: id,
-                        }
+                        SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id: id }
                     }
                     _ => {
                         // All other statuses — preserve unchanged.
@@ -505,6 +501,210 @@ pub async fn record_successful_eval_result(
 
     tx.commit().await?;
     Ok(result)
+}
+
+/// Transaction-aware variant of `record_successful_eval_result`.
+///
+/// Operates through a caller-owned transaction so multiple systems can be
+/// written atomically; if any write fails the caller can roll back all of them.
+///
+/// State matrix and behaviour are identical to `record_successful_eval_result`.
+pub async fn record_successful_eval_result_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    commit_id: Option<i32>,
+    derivation_name: &str,
+    derivation_type: &str,
+    derivation_target: Option<&str>,
+    derivation_path: &str,
+    expected_store_path: Option<&str>,
+    cf_agent_enabled: Option<bool>,
+) -> Result<SuccessfulEvalWrite> {
+    let insert_result = sqlx::query_as::<_, (i32,)>(
+        r#"
+        INSERT INTO derivations (
+            commit_id,
+            derivation_type,
+            derivation_name,
+            derivation_target,
+            status_id,
+            attempt_count,
+            derivation_path,
+            expected_store_path,
+            cf_agent_enabled,
+            error_message,
+            completed_at,
+            scheduled_at
+        )
+        VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, NULL, NOW(), NOW())
+        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
+        DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(commit_id)
+    .bind(derivation_type)
+    .bind(derivation_name)
+    .bind(derivation_target)
+    .bind(EvaluationStatus::DryRunComplete.as_id())
+    .bind(derivation_path)
+    .bind(expected_store_path)
+    .bind(cf_agent_enabled)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    match insert_result {
+        Some((id,)) => Ok(SuccessfulEvalWrite::Inserted { derivation_id: id }),
+        None => {
+            let existing = sqlx::query_as::<_, (i32, i32)>(
+                r#"
+                SELECT id, status_id
+                FROM derivations
+                WHERE COALESCE(commit_id, -1) = COALESCE($1, -1)
+                  AND derivation_name = $2
+                  AND derivation_type = $3
+                FOR UPDATE
+                "#,
+            )
+            .bind(commit_id)
+            .bind(derivation_name)
+            .bind(derivation_type)
+            .fetch_optional(&mut **tx)
+            .await?;
+
+            match existing {
+                Some((id, status_id)) => match status_id {
+                    7 | 8 | 10 | 12 => Ok(SuccessfulEvalWrite::PreservedBuildState {
+                        derivation_id: id,
+                        status_id,
+                    }),
+                    _ => {
+                        sqlx::query(
+                            r#"
+                            UPDATE derivations
+                            SET status_id = $1,
+                                derivation_path = $2,
+                                derivation_target = COALESCE($3, derivation_target),
+                                expected_store_path = $4,
+                                cf_agent_enabled = $5,
+                                error_message = NULL,
+                                completed_at = NOW(),
+                                evaluation_duration_ms =
+                                    EXTRACT(EPOCH FROM (NOW() - COALESCE(started_at, scheduled_at))) * 1000
+                            WHERE id = $6
+                            "#,
+                        )
+                        .bind(EvaluationStatus::DryRunComplete.as_id())
+                        .bind(derivation_path)
+                        .bind(derivation_target)
+                        .bind(expected_store_path)
+                        .bind(cf_agent_enabled)
+                        .bind(id)
+                        .execute(&mut **tx)
+                        .await?;
+                        Ok(SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id: id })
+                    }
+                },
+                None => anyhow::bail!(
+                    "Concurrent race: row disappeared after INSERT ON CONFLICT DO NOTHING for {}",
+                    derivation_name
+                ),
+            }
+        }
+    }
+}
+
+/// Transaction-aware variant of `record_synthetic_eval_failure`.
+///
+/// Operates through a caller-owned transaction for atomic multi-system writes.
+pub async fn record_synthetic_eval_failure_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    commit_id: Option<i32>,
+    derivation_name: &str,
+    derivation_type: &str,
+    derivation_target: Option<&str>,
+    error_message: &str,
+) -> Result<SyntheticFailureWrite> {
+    let insert_result = sqlx::query_as::<_, (i32, i32)>(
+        r#"
+        INSERT INTO derivations (
+            commit_id,
+            derivation_type,
+            derivation_name,
+            derivation_target,
+            status_id,
+            attempt_count,
+            error_message,
+            completed_at
+        )
+        VALUES ($1, $2, $3, $4, $5, 0, $6, NOW())
+        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
+        DO NOTHING
+        RETURNING id, status_id
+        "#,
+    )
+    .bind(commit_id)
+    .bind(derivation_type)
+    .bind(derivation_name)
+    .bind(derivation_target)
+    .bind(EvaluationStatus::DryRunFailed.as_id())
+    .bind(error_message)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    match insert_result {
+        Some((id, _)) => Ok(SyntheticFailureWrite::Inserted { derivation_id: id }),
+        None => {
+            let existing = sqlx::query_as::<_, (i32, i32)>(
+                r#"
+                SELECT id, status_id
+                FROM derivations
+                WHERE COALESCE(commit_id, -1) = COALESCE($1, -1)
+                  AND derivation_name = $2
+                  AND derivation_type = $3
+                FOR UPDATE
+                "#,
+            )
+            .bind(commit_id)
+            .bind(derivation_name)
+            .bind(derivation_type)
+            .fetch_optional(&mut **tx)
+            .await?;
+
+            match existing {
+                Some((id, status_id)) => match status_id {
+                    3 | 4 => {
+                        sqlx::query(
+                            r#"
+                            UPDATE derivations
+                            SET status_id = $1,
+                                error_message = $2,
+                                completed_at = NOW(),
+                                derivation_path = NULL,
+                                store_path = NULL,
+                                expected_store_path = NULL,
+                                cf_agent_enabled = NULL
+                            WHERE id = $3
+                            "#,
+                        )
+                        .bind(EvaluationStatus::DryRunFailed.as_id())
+                        .bind(error_message)
+                        .bind(id)
+                        .execute(&mut **tx)
+                        .await?;
+                        Ok(SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id: id })
+                    }
+                    _ => Ok(SyntheticFailureWrite::PreservedExisting {
+                        derivation_id: id,
+                        status_id,
+                    }),
+                },
+                None => anyhow::bail!(
+                    "Concurrent race: row disappeared after INSERT ON CONFLICT DO NOTHING for {}",
+                    derivation_name
+                ),
+            }
+        }
+    }
 }
 
 // Convenience function for the common case with a commit
@@ -2423,7 +2623,9 @@ pub async fn get_derivation_id_by_store_path(
 
 #[cfg(test)]
 mod tests {
-    use super::{record_successful_eval_result, record_synthetic_eval_failure, SuccessfulEvalWrite};
+    use super::{
+        SuccessfulEvalWrite, record_successful_eval_result, record_synthetic_eval_failure,
+    };
     use sqlx::PgPool;
 
     fn test_database_url() -> String {
@@ -2444,10 +2646,7 @@ mod tests {
         sqlx::query_scalar::<_, i32>(
             "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
         )
-        .bind(format!(
-            "drv-test-flake-{}",
-            uuid::Uuid::new_v4().simple()
-        ))
+        .bind(format!("drv-test-flake-{}", uuid::Uuid::new_v4().simple()))
         .bind(format!(
             "https://git.example/drv-test-{}.git",
             uuid::Uuid::new_v4().simple()
@@ -2496,15 +2695,14 @@ mod tests {
             "first write must be Inserted"
         );
 
-        let status: i32 =
-            sqlx::query_scalar("SELECT status_id FROM derivations WHERE id = $1")
-                .bind(match result {
-                    SuccessfulEvalWrite::Inserted { derivation_id } => derivation_id,
-                    _ => unreachable!(),
-                })
-                .fetch_one(&pool)
-                .await
-                .expect("query should succeed");
+        let status: i32 = sqlx::query_scalar("SELECT status_id FROM derivations WHERE id = $1")
+            .bind(match result {
+                SuccessfulEvalWrite::Inserted { derivation_id } => derivation_id,
+                _ => unreachable!(),
+            })
+            .fetch_one(&pool)
+            .await
+            .expect("query should succeed");
         assert_eq!(status, 5, "new row must be DryRunComplete (5)");
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
@@ -2558,7 +2756,10 @@ mod tests {
         .expect("retry should not error");
 
         assert!(
-            matches!(result, SuccessfulEvalWrite::PreservedBuildState { status_id: 7, .. }),
+            matches!(
+                result,
+                SuccessfulEvalWrite::PreservedBuildState { status_id: 7, .. }
+            ),
             "BuildPending must be preserved on retry; got {:?}",
             result
         );
@@ -2622,7 +2823,10 @@ mod tests {
         .expect("retry should not error");
 
         assert!(
-            matches!(result, SuccessfulEvalWrite::PreservedBuildState { status_id: 8, .. }),
+            matches!(
+                result,
+                SuccessfulEvalWrite::PreservedBuildState { status_id: 8, .. }
+            ),
             "BuildInProgress must be preserved; got {:?}",
             result
         );
@@ -2696,7 +2900,10 @@ mod tests {
         .expect("query should succeed");
 
         assert_eq!(status, 5, "recovered row must be DryRunComplete (5)");
-        assert!(err.is_none(), "stale error_message must be cleared on recovery");
+        assert!(
+            err.is_none(),
+            "stale error_message must be cleared on recovery"
+        );
         assert_eq!(agent, Some(true), "cf_agent_enabled must be persisted");
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
