@@ -3,7 +3,7 @@ id: TASK-399
 title: >-
   Implement automatic retry controls and latest-per-flake filtering from design
   commit 51e5cee1
-status: In Progress
+status: Review
 assignee:
   - Matt Camp
 created_date: '2026-07-24 03:26'
