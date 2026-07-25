@@ -4,7 +4,7 @@ title: Evaluation errors silently drop systems from nixosConfigurations count
 status: In Progress
 assignee: []
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-25 21:49'
+updated_date: '2026-07-25 22:28'
 labels:
   - evaluator
   - reporting
@@ -186,4 +186,46 @@ Local verification (commit 5613786b):
 Not yet verified locally (requires clean CI DB):
 - Full state-machine-test process-compose run (port conflict with dev DB on port 3042).
 - queries::commits::tests::stale_cancellation_finalizer_does_not_affect_newer_attempt: pre-existing dev DB pollution (commit 697 stuck in_progress); unrelated to these changes; passes on clean CI DB.
+
+Commit fc7bdfba pushed to MR !309.
+
+## Three substantive fixes
+
+### 1. seen_systems bug — the actual nix-builder-1 root cause
+
+A system that emits a JSON error line from nix-eval-jobs was inserted into `seen_systems` unconditionally (line 1638-1639 pre-fix). This made it appear 'accounted for', preventing standalone fallback evaluation. The system silently disappeared from all accounting.
+
+Fix: only insert into `seen_systems` when `has_error == false && drv_path.is_some()`. Systems with eval errors now fall through to policy-aware standalone fallback, which will classify them as either `ConfirmedSystemFailure` (if standalone also fails) or recover them as successful systems with derivation+build-job.
+
+New pure-Rust test: `error_result_is_not_seen_so_falls_through_to_fallback`
+
+### 2. Migration 0184 terminal-status ordering corrected
+
+Previous: `building(1) > queued(2) > cancelling(3) > cancelled(4) > failed(5) > success(6)`. A stale failed row was kept over a successful one when both existed as duplicates.
+
+Fixed: `success(4)` now ranks above `cancelled(5)` and `failed(6)`, so the row with a valid output path is retained.
+
+New test: `migration_0184_keeps_success_over_failed` + updated `migration_0184_status_precedence_order`.
+
+### 3. enqueue_build_job_for_derivation race window eliminated
+
+Replaced racy `NOT EXISTS` subquery with `ON CONFLICT (derivation_id) DO NOTHING`. Concurrent callers can no longer produce a unique constraint violation. Also added `cf_agent_enabled = TRUE` guard (matching `create_build_job_for_derivation_tx`). SQLx metadata regenerated.
+
+### New DB regression tests (both pass)
+- `finalize_system_build_already_exists_does_not_re_queue`: second call returns non-Queued outcome, exactly one build_jobs row
+- `finalize_system_error_result_does_not_block_standalone_finalization`: simulates the standalone fallback path for a previously-errored system
+
+Local verification (commit fc7bdfba):
+- cargo check --all-targets: exit 0
+- cargo test …::tests --lib: 12 passed, 16 ignored
+- cargo test …::tests --lib -- --ignored --test-threads=1: 16 passed
+- cargo sqlx prepare --check -- --all-targets: exit 0
+- nix build .#packages.x86_64-linux.server --no-link: exit 0
+- nix build .#devScripts.state-machine-test --no-link: exit 0
+- git diff --check: exit 0
+
+Remaining for full task completion:
+- CI exact-head pipeline on fc7bdfba
+- Live reproduction with c0782ce6 (nix-builder-1 recovery confirmed via standalone fallback)
+- Workflow-level test: system A claimable build job while B still evaluating (requires mock evaluator hook or test harness extension)
 <!-- SECTION:NOTES:END -->
