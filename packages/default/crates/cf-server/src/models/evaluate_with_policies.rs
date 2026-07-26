@@ -158,31 +158,41 @@ fn closure_count_limiter() -> Arc<Semaphore> {
         .clone()
 }
 
-async fn run_incremental_system_side_effects(
-    pool: &PgPool,
+fn spawn_incremental_system_side_effects(
+    pool: PgPool,
     commit_id: i32,
-    flake_repo_url: &str,
-    commit_hash: &str,
-    finalized: &FinalizedDerivation,
+    flake_repo_url: String,
+    commit_hash: String,
+    finalized: FinalizedDerivation,
 ) {
-    match crate::builder::create_drv_gc_root(&finalized.drv_path, finalized.derivation_id).await {
-        Ok(true) => debug!(
-            "📌 Rooted evaluated drv (id={}, drv={})",
-            finalized.derivation_id, finalized.drv_path
-        ),
-        Ok(false) => warn!(
-            "⚠️  Evaluated drv (id={}, drv={}) is not valid in the server store; remote builders may not be able to import it",
-            finalized.derivation_id, finalized.drv_path
-        ),
-        Err(err) => warn!(
-            "⚠️  Failed to create GC root for evaluated drv {} (id={}): {}",
-            finalized.drv_path, finalized.derivation_id, err
-        ),
-    }
+    // GC root: prevent the derivation from being GC'd before a remote
+    // builder can claim and import it.  Runs nix-store --check-validity
+    // which may be slow on large stores, so spawn it.
+    let pool_gc = pool.clone();
+    let drv_path = finalized.drv_path.clone();
+    let deriv_id = finalized.derivation_id;
+    tokio::spawn(async move {
+        match crate::builder::create_drv_gc_root(&drv_path, deriv_id).await {
+            Ok(true) => debug!(
+                "📌 Rooted evaluated drv (id={}, drv={})",
+                deriv_id, drv_path
+            ),
+            Ok(false) => warn!(
+                "⚠️  Evaluated drv (id={}, drv={}) is not valid in the server store; \
+                 remote builders may not be able to import it",
+                deriv_id, drv_path
+            ),
+            Err(err) => warn!(
+                "⚠️  Failed to create GC root for evaluated drv {} (id={}): {}",
+                drv_path, deriv_id, err
+            ),
+        }
+    });
 
-    let pool2 = pool.clone();
-    let drv2 = finalized.drv_path.clone();
-    let derivation_id = finalized.derivation_id;
+    // Closure counting: bounded via semaphore, already spawned.
+    let pool_cc = pool.clone();
+    let drv_cc = finalized.drv_path.clone();
+    let derivation_id_cc = finalized.derivation_id;
     let limiter = closure_count_limiter();
     tokio::spawn(async move {
         let permit = match limiter.acquire_owned().await {
@@ -190,17 +200,17 @@ async fn run_incremental_system_side_effects(
             Err(err) => {
                 warn!(
                     "⚠️  Failed to acquire closure count permit for id={}: {}",
-                    derivation_id, err
+                    derivation_id_cc, err
                 );
                 return;
             }
         };
 
-        match count_closure_packages(&drv2).await {
+        match count_closure_packages(&drv_cc).await {
             Ok((total, cached)) => {
                 if let Err(err) = crate::queries::derivations::set_closure_counts(
-                    &pool2,
-                    derivation_id,
+                    &pool_cc,
+                    derivation_id_cc,
                     total,
                     cached,
                 )
@@ -208,26 +218,29 @@ async fn run_incremental_system_side_effects(
                 {
                     warn!(
                         "⚠️  Failed to store closure counts for id={}: {}",
-                        derivation_id, err
+                        derivation_id_cc, err
                     );
                 }
             }
             Err(err) => warn!(
                 "⚠️  Failed to count closure packages for id={}: {}",
-                derivation_id, err
+                derivation_id_cc, err
             ),
         }
         drop(permit);
     });
 
-    if let Err(err) =
-        trigger_commit_hardening_scans(pool.clone(), commit_id, flake_repo_url, commit_hash).await
-    {
-        warn!(
-            "Failed to queue hardening scans for commit {} after system {} finalized: {}",
-            commit_id, finalized.system_name, err
-        );
-    }
+    // Hardening scans: query DB targets + insert scan rows.
+    tokio::spawn(async move {
+        if let Err(err) =
+            trigger_commit_hardening_scans(pool, commit_id, &flake_repo_url, &commit_hash).await
+        {
+            warn!(
+                "Failed to queue hardening scans for commit {} after system {} finalized: {}",
+                commit_id, finalized.system_name, err
+            );
+        }
+    });
 }
 
 /// Helper function to broadcast eval log via WebSocket AND persist to database.
@@ -741,6 +754,10 @@ pub enum SystemFinalizeOutcome {
     BuildAlreadyExists {
         derivation_id: i32,
         build_job_id: uuid::Uuid,
+        /// Status of the existing build job at the time this outcome was
+        /// produced.  The caller should not broadcast QueuedForBuild if
+        /// the job is already building or in a terminal state.
+        build_job_status: String,
     },
     PreservedExistingBuild {
         derivation_id: i32,
@@ -890,23 +907,55 @@ pub async fn finalize_evaluated_system(
 
     let build_outcome = create_build_job_for_derivation_tx(&mut tx, derivation_id).await?;
     let outcome = match build_outcome {
-        Some(BuildJobInsertOutcome::Inserted { build_job_id }) => SystemFinalizeOutcome::Queued {
-            derivation_id,
-            build_job_id,
-        },
-        Some(BuildJobInsertOutcome::AlreadyExists { build_job_id }) => {
-            SystemFinalizeOutcome::BuildAlreadyExists {
+        Some(BuildJobInsertOutcome::Inserted { build_job_id }) => {
+            info!(
+                commit_id,
+                derivation_id,
+                %build_job_id,
+                system = %result.system_name,
+                "system_build_job_inserted"
+            );
+            SystemFinalizeOutcome::Queued {
                 derivation_id,
                 build_job_id,
             }
         }
-        None => SystemFinalizeOutcome::RecordedWithoutBuild {
-            derivation_id,
-            reason: SystemNotQueuedReason::BuildNotRequested,
-        },
+        Some(BuildJobInsertOutcome::AlreadyExists { build_job_id, status }) => {
+            info!(
+                commit_id,
+                derivation_id,
+                %build_job_id,
+                existing_status = %status,
+                system = %result.system_name,
+                "system_build_job_already_exists"
+            );
+            SystemFinalizeOutcome::BuildAlreadyExists {
+                derivation_id,
+                build_job_id,
+                build_job_status: status,
+            }
+        }
+        None => {
+            info!(
+                commit_id,
+                derivation_id,
+                system = %result.system_name,
+                "system_not_queued"
+            );
+            SystemFinalizeOutcome::RecordedWithoutBuild {
+                derivation_id,
+                reason: SystemNotQueuedReason::BuildNotRequested,
+            }
+        }
     };
 
     tx.commit().await?;
+    info!(
+        commit_id,
+        derivation_id,
+        system = %result.system_name,
+        "system_transaction_committed"
+    );
     Ok(outcome)
 }
 
@@ -1091,6 +1140,157 @@ pub async fn finalize_evaluation_attempt(
         derivations: Vec::new(),
         queued_builds: Vec::new(),
     })
+}
+
+/// Handle a `SystemFinalizeOutcome` after a system has been finalized.
+///
+/// Centralizes queue notification, WebSocket broadcast, log persistence,
+/// so the bulk stdout path and the standalone fallback path cannot diverge.
+/// Returns an action telling the caller whether to continue, cancel, or
+/// bail (superseded).  The caller is responsible for pushing the successful
+/// result to its tracking list and spawning background side effects.
+async fn handle_system_finalize_outcome(
+    pool: &PgPool,
+    cf_state: Option<&crate::handlers::agent_request::CFState>,
+    queue_notifier: Option<&QueueNotifier>,
+    commit_id: i32,
+    system_name: &str,
+    outcome: SystemFinalizeOutcome,
+    log_sequence: &mut i32,
+) -> Result<SystemFinalizeAction> {
+    match outcome {
+        SystemFinalizeOutcome::Queued {
+            derivation_id,
+            build_job_id,
+        } => {
+            if let Some(notifier) = queue_notifier {
+                notifier.notify_build_queue();
+            }
+            if let Some(state) = cf_state {
+                crate::handlers::api::commits::broadcast_system_status(
+                    state,
+                    commit_id,
+                    system_name.to_string(),
+                    crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
+                    None,
+                )
+                .await;
+                broadcast_and_persist_eval_log(
+                    pool,
+                    Some(state),
+                    commit_id,
+                    log_sequence,
+                    format!("🚀 {}: build job queued ({})", system_name, build_job_id),
+                )
+                .await;
+            }
+            info!(
+                commit_id,
+                system = system_name,
+                %build_job_id,
+                "incremental build job committed and queued"
+            );
+            Ok(SystemFinalizeAction::Queued {
+                derivation_id,
+                build_job_id,
+            })
+        }
+
+        SystemFinalizeOutcome::BuildAlreadyExists {
+            derivation_id,
+            build_job_id,
+            ref build_job_status,
+        } => {
+            // Only notify / broadcast if the existing job is still queued
+            // (not already building / terminal).
+            if build_job_status == "queued" {
+                if let Some(notifier) = queue_notifier {
+                    notifier.notify_build_queue();
+                }
+                if let Some(state) = cf_state {
+                    crate::handlers::api::commits::broadcast_system_status(
+                        state,
+                        commit_id,
+                        system_name.to_string(),
+                        crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
+                        None,
+                    )
+                    .await;
+                    broadcast_and_persist_eval_log(
+                        pool,
+                        Some(state),
+                        commit_id,
+                        log_sequence,
+                        format!(
+                            "🚀 {}: build job already queued ({})",
+                            system_name, build_job_id
+                        ),
+                    )
+                    .await;
+                }
+                info!(
+                    commit_id,
+                    system = system_name,
+                    %build_job_id,
+                    status = build_job_status,
+                    "existing queued build job reused"
+                );
+            } else {
+                debug!(
+                    "Build job {} for {} already exists with status {} (not re-queued)",
+                    build_job_id, system_name, build_job_status
+                );
+            }
+            Ok(SystemFinalizeAction::AlreadyExists {
+                derivation_id,
+                build_job_id,
+            })
+        }
+
+        SystemFinalizeOutcome::RecordedWithoutBuild {
+            ref reason,
+            ..
+        } => {
+            debug!("Recorded {} without build: {:?}", system_name, reason);
+            Ok(SystemFinalizeAction::Recorded)
+        }
+
+        SystemFinalizeOutcome::PreservedExistingBuild { .. } => {
+            debug!("Preserved existing build state for {}", system_name);
+            Ok(SystemFinalizeAction::Recorded)
+        }
+
+        SystemFinalizeOutcome::Cancelled => {
+            warn!("System {} finalization cancelled", system_name);
+            Ok(SystemFinalizeAction::Cancelled)
+        }
+
+        SystemFinalizeOutcome::Superseded => {
+            warn!("System {} finalization superseded", system_name);
+            Ok(SystemFinalizeAction::Superseded)
+        }
+    }
+}
+
+/// Internal outcome from `handle_system_finalize_outcome` telling the
+/// caller how to proceed and what data to pass to background side effects.
+enum SystemFinalizeAction {
+    /// New build job was inserted and queued.
+    Queued {
+        derivation_id: i32,
+        build_job_id: uuid::Uuid,
+    },
+    /// Build job already existed (possibly still queued or already building).
+    AlreadyExists {
+        derivation_id: i32,
+        build_job_id: uuid::Uuid,
+    },
+    /// Derivation recorded but no build job created (policy/scope).
+    Recorded,
+    /// Evaluation was cancelled; caller should stop.
+    Cancelled,
+    /// Evaluation was superseded; caller should bail.
+    Superseded,
 }
 
 /// FIXED: Now properly:
@@ -1387,18 +1587,27 @@ pub async fn evaluate_with_nix_eval_jobs(
                                 }
                                 let has_error = result.error.is_some();
                                 let drv_path = result.drv_path.clone();
+                                // Resolve the expected store path from nix-eval-jobs
+                                // JSON outputs (fast, no subprocess).  This avoids
+                                // blocking the stdout reader on a nix-store query
+                                // before the build job can be created.
                                 let expected_store_path = if !has_error {
-                                    if let Some(drv) = drv_path.as_deref() {
-                                        resolve_expected_store_path(drv, result.outputs.as_ref()).await
-                                    } else {
-                                        None
-                                    }
+                                    result
+                                        .outputs
+                                        .as_ref()
+                                        .and_then(parse_expected_store_path_from_outputs)
                                 } else {
                                     None
                                 };
 
-                                debug!("📦 Evaluated: {}, drv_path={:?}, has_error={:?}",
-                                    system_name, drv_path, has_error);
+                                info!(
+                                    commit_id = commit.id,
+                                    expected_attempt,
+                                    system = %system_name,
+                                    has_error,
+                                    has_drv = drv_path.is_some(),
+                                    "system_result_received"
+                                );
 
                                 // Broadcast system evaluation result to logs
                                 if let Some(state) = cf_state {
@@ -1581,68 +1790,60 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             }
                                         };
 
-                                        match finalize_evaluated_system(
+                                        let outcome = finalize_evaluated_system(
                                             pool,
                                             commit.id,
                                             expected_attempt,
                                             &successful,
                                             policy_check,
                                         )
+                                        .await?;
+
+                                        match handle_system_finalize_outcome(
+                                            pool,
+                                            cf_state,
+                                            _queue_notifier,
+                                            commit.id,
+                                            system_name,
+                                            outcome,
+                                            &mut log_sequence,
+                                        )
                                         .await?
                                         {
-                                            SystemFinalizeOutcome::Queued { derivation_id, build_job_id }
-                                            | SystemFinalizeOutcome::BuildAlreadyExists { derivation_id, build_job_id } => {
+                                            SystemFinalizeAction::Queued {
+                                                derivation_id,
+                                                ..
+                                            }
+                                            | SystemFinalizeAction::AlreadyExists {
+                                                derivation_id,
+                                                ..
+                                            } => {
+                                                successful_results.push(successful.clone());
                                                 let finalized = FinalizedDerivation {
                                                     derivation_id,
                                                     drv_path: successful.drv_path.clone(),
-                                                    system_name: successful.system_name.clone(),
+                                                    system_name: system_name.clone(),
                                                     cf_agent_enabled: successful.cf_agent_enabled,
                                                 };
-                                                successful_results.push(successful.clone());
-                                                if let Some(queue_notifier) = _queue_notifier {
-                                                    queue_notifier.notify_build_queue();
-                                                }
-                                                if let Some(state) = cf_state {
-                                                    crate::handlers::api::commits::broadcast_system_status(
-                                                        state,
-                                                        commit.id,
-                                                        finalized.system_name.clone(),
-                                                        crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
-                                                        None,
-                                                    ).await;
-                                                    broadcast_and_persist_eval_log(
-                                                        pool,
-                                                        Some(state),
-                                                        commit.id,
-                                                        &mut log_sequence,
-                                                        format!("🚀 {}: build job queued ({})", finalized.system_name, build_job_id),
-                                                    ).await;
-                                                }
-                                                run_incremental_system_side_effects(
-                                                    pool,
+                                                spawn_incremental_system_side_effects(
+                                                    pool.clone(),
                                                     commit.id,
-                                                    &flake.repo_url,
-                                                    &commit.git_commit_hash,
-                                                    &finalized,
-                                                ).await;
-                                            }
-                                            SystemFinalizeOutcome::RecordedWithoutBuild { derivation_id, reason } => {
-                                                debug!(
-                                                    "📋 Recorded {} as derivation {} without build: {:?}",
-                                                    system_name, derivation_id, reason
+                                                    flake.repo_url.clone(),
+                                                    commit.git_commit_hash.clone(),
+                                                    finalized,
                                                 );
+                                            }
+                                            SystemFinalizeAction::Recorded => {
                                                 successful_results.push(successful);
                                             }
-                                            SystemFinalizeOutcome::PreservedExistingBuild { derivation_id, status_id } => {
-                                                debug!(
-                                                    "📋 Preserved existing build state {} for {} derivation {}",
-                                                    status_id, system_name, derivation_id
-                                                );
-                                                successful_results.push(successful);
+                                            SystemFinalizeAction::Cancelled => {
+                                                return Err(EvaluationCancelled.into());
                                             }
-                                            SystemFinalizeOutcome::Cancelled => return Err(EvaluationCancelled.into()),
-                                            SystemFinalizeOutcome::Superseded => {
-                                                bail!("evaluation attempt was superseded while finalizing {}", system_name);
+                                            SystemFinalizeAction::Superseded => {
+                                                bail!(
+                                                    "evaluation attempt was superseded while finalizing {}",
+                                                    system_name
+                                                );
                                             }
                                         }
                                     } else {
@@ -1985,22 +2186,33 @@ pub async fn evaluate_with_nix_eval_jobs(
                         outputs: None,
                         meta: None,
                     };
-                    match finalize_evaluated_system(
+                    let finalize_outcome = finalize_evaluated_system(
                         pool,
                         commit.id,
                         expected_attempt,
                         &result,
                         &policy_check,
                     )
+                    .await?;
+
+                    match handle_system_finalize_outcome(
+                        pool,
+                        cf_state,
+                        _queue_notifier,
+                        commit.id,
+                        &result.system_name,
+                        finalize_outcome,
+                        &mut log_sequence,
+                    )
                     .await?
                     {
-                        SystemFinalizeOutcome::Queued {
+                        SystemFinalizeAction::Queued {
                             derivation_id,
-                            build_job_id,
+                            ..
                         }
-                        | SystemFinalizeOutcome::BuildAlreadyExists {
+                        | SystemFinalizeAction::AlreadyExists {
                             derivation_id,
-                            build_job_id,
+                            ..
                         } => {
                             let finalized = FinalizedDerivation {
                                 derivation_id,
@@ -2008,46 +2220,22 @@ pub async fn evaluate_with_nix_eval_jobs(
                                 system_name: result.system_name.clone(),
                                 cf_agent_enabled: result.cf_agent_enabled,
                             };
-                            if let Some(queue_notifier) = _queue_notifier {
-                                queue_notifier.notify_build_queue();
-                            }
-                            if let Some(state) = cf_state {
-                                crate::handlers::api::commits::broadcast_system_status(
-                                    state,
-                                    commit.id,
-                                    finalized.system_name.clone(),
-                                    crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
-                                    None,
-                                )
-                                .await;
-                                broadcast_and_persist_eval_log(
-                                    pool,
-                                    Some(state),
-                                    commit.id,
-                                    &mut log_sequence,
-                                    format!(
-                                        "🚀 {}: build job queued ({})",
-                                        finalized.system_name, build_job_id
-                                    ),
-                                )
-                                .await;
-                            }
-                            run_incremental_system_side_effects(
-                                pool,
+                            spawn_incremental_system_side_effects(
+                                pool.clone(),
                                 commit.id,
-                                &flake.repo_url,
-                                &commit.git_commit_hash,
-                                &finalized,
-                            )
-                            .await;
+                                flake.repo_url.clone(),
+                                commit.git_commit_hash.clone(),
+                                finalized,
+                            );
                         }
-                        SystemFinalizeOutcome::RecordedWithoutBuild { .. }
-                        | SystemFinalizeOutcome::PreservedExistingBuild { .. } => {}
-                        SystemFinalizeOutcome::Cancelled => return Err(EvaluationCancelled.into()),
-                        SystemFinalizeOutcome::Superseded => {
+                        SystemFinalizeAction::Recorded => {}
+                        SystemFinalizeAction::Cancelled => {
+                            return Err(EvaluationCancelled.into());
+                        }
+                        SystemFinalizeAction::Superseded => {
                             bail!(
                                 "evaluation attempt was superseded while finalizing fallback system"
-                            )
+                            );
                         }
                     }
                     successful_results.push(result);

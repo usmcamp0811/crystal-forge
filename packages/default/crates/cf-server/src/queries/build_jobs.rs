@@ -18,7 +18,12 @@ pub struct QueuedBuild {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildJobInsertOutcome {
     Inserted { build_job_id: Uuid },
-    AlreadyExists { build_job_id: Uuid },
+    AlreadyExists {
+        build_job_id: Uuid,
+        /// Status of the existing job (e.g. "queued", "building", "success").
+        /// The caller uses this to decide whether to announce a new queue event.
+        status: String,
+    },
 }
 
 /// Create build jobs for all derivations associated with a commit.
@@ -194,9 +199,9 @@ pub async fn create_build_job_for_derivation_tx(
         return Ok(Some(BuildJobInsertOutcome::Inserted { build_job_id }));
     }
 
-    let existing: Option<(Uuid,)> = sqlx::query_as(
+    let existing: Option<(Uuid, String)> = sqlx::query_as(
         r#"
-        SELECT id
+        SELECT id, status
         FROM build_jobs
         WHERE derivation_id = $1
         ORDER BY created_at ASC
@@ -208,7 +213,10 @@ pub async fn create_build_job_for_derivation_tx(
     .await
     .context("Failed to fetch existing build job for derivation")?;
 
-    Ok(existing.map(|(build_job_id,)| BuildJobInsertOutcome::AlreadyExists { build_job_id }))
+    Ok(existing.map(|(build_job_id, status)| BuildJobInsertOutcome::AlreadyExists {
+        build_job_id,
+        status,
+    }))
 }
 
 /// Incrementally enqueue a single derivation as a build job.
