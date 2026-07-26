@@ -1644,7 +1644,15 @@ pub async fn evaluate_with_nix_eval_jobs(
                                 if has_known_systems && !has_error && drv_path.is_some() {
                                     seen_systems.insert(system_name.clone());
                                 }
-                                results.push(result);
+
+                                // When we have an authoritative expected-system set, do NOT
+                                // add error results to `results` here — the fallback phase
+                                // will re-evaluate each missing system and add its outcome
+                                // (either a synthetic confirmed failure or a recovered success).
+                                // Adding it here would double-count the system in the summary.
+                                if !has_known_systems || !has_error {
+                                    results.push(result);
+                                }
                             }
                             Err(e) => {
                                 warn!("Failed to parse nix-eval-jobs output: {}\nLine: {}", e, line);
