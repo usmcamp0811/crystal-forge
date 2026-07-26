@@ -217,18 +217,10 @@ fn EvaluationsPage() -> Element {
         }
     });
 
-    // Keep "select all loaded" in sync with newly fetched history rows until
-    // the user manually changes the selection.
+    // Track cursor for attention acknowledgement.
     use_effect(move || {
-        if let Some(Ok(page_data)) = &*history_resource.read() {
+        if let Some(Ok(_page_data)) = &*history_resource.read() {
             history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
-            if history_select_all_loaded() {
-                let ids: std::collections::HashSet<i32> =
-                    page_data.items.iter().map(|item| item.commit_id).collect();
-                if !ids.is_empty() {
-                    history_selected_ids.set(ids);
-                }
-            }
         }
     });
 
@@ -660,31 +652,27 @@ fn EvaluationsPage() -> Element {
                                 button {
                                     class: "btn btn-ghost focus-ring xs",
                                     onclick: move |_| {
-                                        let selected_ids: Vec<i32> = history_selected_ids.read().iter().copied().collect();
-                                        let mut refresh_sig = history_refresh.clone();
-                                        let mut selected_sig = history_selected_ids.clone();
-                                        let mut select_all_sig = history_select_all_loaded.clone();
-                                        let mut toast = toast_msg.clone();
-                                        spawn(async move {
-                                            let mut success = 0u32;
-                                            let mut failed: Vec<i32> = Vec::new();
-                                            for commit_id in selected_ids {
-                                                match re_evaluate_commit(commit_id).await {
-                                                    Ok(_) => success += 1,
-                                                    Err(_) => failed.push(commit_id),
-                                                }
-                                            }
-                                            if success > 0 {
-                                                toast.set(Some(format!("Re-queued {} evaluation{}", success, if success == 1 { "" } else { "s" })));
-                                                selected_sig.set(failed.into_iter().collect());
-                                                // Disable auto-select so the next poll doesn't repopulate
-                                                // the selection with successful rows (review finding #3).
-                                                select_all_sig.set(false);
-                                            } else {
-                                                toast.set(Some("Re-evaluate failed — see server logs".to_string()));
-                                            }
-                                            refresh_sig.set(refresh_sig() + 1);
-                                        });
+                                         let selected_ids: Vec<i32> = history_selected_ids.read().iter().copied().collect();
+                                         let mut refresh_sig = history_refresh.clone();
+                                         let mut selected_sig = history_selected_ids.clone();
+                                         let mut toast = toast_msg.clone();
+                                         spawn(async move {
+                                             let mut success = 0u32;
+                                             let mut failed: Vec<i32> = Vec::new();
+                                             for commit_id in selected_ids {
+                                                 match re_evaluate_commit(commit_id).await {
+                                                     Ok(_) => success += 1,
+                                                     Err(_) => failed.push(commit_id),
+                                                 }
+                                             }
+                                             if success > 0 {
+                                                 toast.set(Some(format!("Re-queued {} evaluation{}", success, if success == 1 { "" } else { "s" })));
+                                                 selected_sig.set(failed.into_iter().collect());
+                                             } else {
+                                                 toast.set(Some("Re-evaluate failed — see server logs".to_string()));
+                                             }
+                                             refresh_sig.set(refresh_sig() + 1);
+                                         });
                                     },
                                     Icon { name: IconName::Sync, size: 11 }
                                     " Re-evaluate"
@@ -705,11 +693,10 @@ fn EvaluationsPage() -> Element {
                                     Icon { name: IconName::Download, size: 11 }
                                     " Download logs"
                                 }
-                                button {
+                                 button {
                                     class: "btn-icon focus-ring",
                                     onclick: move |_| {
                                         history_selected_ids.write().clear();
-                                        history_select_all_loaded.set(false);
                                     },
                                     title: "Clear",
                                     Icon { name: IconName::X, size: 14 }
@@ -731,6 +718,7 @@ fn EvaluationsPage() -> Element {
                             history_items_acc: history_items_acc,
                             history_total_acc: history_total_acc,
                             hist_paging: hist_paging,
+                            toast_msg: toast_msg,
                         }
                     }
                 }
@@ -1094,6 +1082,7 @@ fn EvalHistory(
     history_items_acc: Signal<Vec<EvalHistoryItem>>,
     history_total_acc: Signal<i64>,
     hist_paging: InfiniteScroll,
+    mut toast_msg: Signal<Option<String>>,
 ) -> Element {
     let history_snapshot = history_resource.read();
 
@@ -1186,39 +1175,11 @@ fn EvalHistory(
                         let hist_has_more = hist_paging.count() < all_loaded.len() || hist_server_has_more;
                         // Select-all operates on all loaded rows (not just the visible page)
                         // so check/uncheck is symmetric and consistent (fixes review finding #5).
-                        let all_loaded_ids: Vec<i32> = all_loaded.iter().map(|item| item.commit_id).collect();
-                        let all_checked = !all_loaded_ids.is_empty()
-                            && all_loaded_ids.iter().all(|id| history_selected_ids.read().contains(id));
                         rsx! {
                     table {
                         class: "sys-table",
                         thead {
                             tr {
-                                th { style: "width: 36px;",
-                                    input {
-                                        r#type: "checkbox",
-                                        class: "ed-checkbox",
-                                        checked: all_checked,
-                                        oninput: move |_| {
-                                            if all_checked {
-                                                // Uncheck: remove only the loaded IDs.
-                                                let mut next = history_selected_ids.read().clone();
-                                                for id in &all_loaded_ids {
-                                                    next.remove(id);
-                                                }
-                                                history_selected_ids.set(next);
-                                                history_select_all_loaded.set(false);
-                                            } else {
-                                                let mut next = history_selected_ids.read().clone();
-                                                for id in &all_loaded_ids {
-                                                    next.insert(*id);
-                                                }
-                                                history_selected_ids.set(next);
-                                                history_select_all_loaded.set(true);
-                                            }
-                                        }
-                                    }
-                                }
                                 th { "Flake · commit" }
                                 th { "Branch" }
                                 th { "Status" }
@@ -1226,6 +1187,7 @@ fn EvalHistory(
                                 th { "Policy" }
                                 th { "Duration" }
                                 th { "Completed" }
+                                th { style: "text-align: right;", " " }
                             }
                         }
                         tbody {
@@ -1266,19 +1228,10 @@ fn EvalHistory(
                                             key: "{commit_id}",
                                             class: "{row_class}",
                                             style: "cursor: pointer;",
-                                            onclick: move |_| {
-                                                if is_failed {
-                                                    dismiss_attention_item(
-                                                        "evals",
-                                                        &commit_id.to_string(),
-                                                        occurrence_id_for_subject("evals", &commit_id.to_string()).as_deref(),
-                                                    );
-                                                }
-                                                drawer_target.set(Some(EvalDrawerTarget::History(ev_for_row.clone())));
-                                            },
-                                            td {
-                                                onclick: move |evt| {
-                                                    evt.stop_propagation();
+                                            onclick: move |evt| {
+                                                // Shift-click toggles selection (design: no checkboxes,
+                                                // selection via row click).
+                                                if evt.modifiers().shift() {
                                                     let mut next = history_selected_ids.read().clone();
                                                     if next.contains(&commit_id) {
                                                         next.remove(&commit_id);
@@ -1287,17 +1240,21 @@ fn EvalHistory(
                                                     }
                                                     history_selected_ids.set(next);
                                                     history_select_all_loaded.set(false);
-                                                },
-                                                input {
-                                                    r#type: "checkbox",
-                                                    class: "ed-checkbox",
-                                                    checked: history_selected_ids.read().contains(&commit_id),
-                                                    readonly: true,
+                                                } else {
+                                                    if is_failed {
+                                                        dismiss_attention_item(
+                                                            "evals",
+                                                            &commit_id.to_string(),
+                                                            occurrence_id_for_subject("evals", &commit_id.to_string()).as_deref(),
+                                                        );
+                                                    }
+                                                    drawer_target.set(Some(EvalDrawerTarget::History(ev_for_row.clone())));
                                                 }
-                                            }
+                                            },
                                             td {
                                                 div {
-                                                    style: "font-weight: 600; font-size: 13px;",
+                                                    style: "font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px;",
+                                                    span { style: "color: var(--cf-text-muted);", Icon { name: IconName::Git, size: 12 } }
                                                     "{ev.flake_name}"
                                                 }
                                                 div {
@@ -1345,9 +1302,71 @@ fn EvalHistory(
                                                 style: "font-size: 12px; color: var(--cf-text-secondary);",
                                                 "{format_eval_duration(&ev)}"
                                             }
-                                             td {
+                                            td {
                                                 style: "font-size: 12px; color: var(--cf-text-muted);",
                                                 "{format_eval_completed_at(&ev)}"
+                                            }
+                                            td {
+                                                onclick: move |evt| evt.stop_propagation(),
+                                                div {
+                                                    class: "row-actions",
+                                                    // View logs
+                                                    button {
+                                                        class: "btn-icon focus-ring",
+                                                        title: "View logs",
+                                                        onclick: {
+                                                            let ev_log = ev.clone();
+                                                            move |_| {
+                                                                drawer_target.set(Some(EvalDrawerTarget::History(ev_log.clone())));
+                                                            }
+                                                        },
+                                                        Icon { name: IconName::Terminal, size: 14 }
+                                                    }
+                                                    // Re-evaluate
+                                                    button {
+                                                        class: "btn-icon focus-ring",
+                                                        title: "Re-evaluate",
+                                                        onclick: move |_| {
+                                                            let mut refresh_sig = refresh.clone();
+                                                            let mut toast = toast_msg.clone();
+                                                            spawn(async move {
+                                                                match re_evaluate_commit(commit_id).await {
+                                                                    Ok(_) => {
+                                                                        toast.set(Some("Re-queued evaluation".to_string()));
+                                                                        refresh_sig.set(refresh_sig() + 1);
+                                                                    }
+                                                                    Err(_) => {
+                                                                        toast.set(Some("Re-evaluate failed — see server logs".to_string()));
+                                                                    }
+                                                                }
+                                                            });
+                                                        },
+                                                        Icon { name: IconName::Sync, size: 14 }
+                                                    }
+                                                    // Retry (failed only)
+                                                    if is_failed {
+                                                        button {
+                                                            class: "btn-icon focus-ring",
+                                                            title: "Retry evaluation",
+                                                            onclick: move |_| {
+                                                                let mut refresh_sig = refresh.clone();
+                                                                let mut toast = toast_msg.clone();
+                                                                spawn(async move {
+                                                                    match re_evaluate_commit(commit_id).await {
+                                                                        Ok(_) => {
+                                                                            toast.set(Some("Retrying evaluation".to_string()));
+                                                                            refresh_sig.set(refresh_sig() + 1);
+                                                                        }
+                                                                        Err(_) => {
+                                                                            toast.set(Some("Retry failed — see server logs".to_string()));
+                                                                        }
+                                                                    }
+                                                                });
+                                                            },
+                                                            Icon { name: IconName::Rollback, size: 14 }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
