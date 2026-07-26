@@ -1249,7 +1249,7 @@ mod tests {
         .expect("derivation should be created");
 
         // Update to build-complete with a store path so the scan queries pick it up
-        sqlx::query!(
+        sqlx::query(
             r#"
             UPDATE derivations
             SET status_id = $1,
@@ -1258,14 +1258,14 @@ mod tests {
                 derivation_path = '/nix/store/00000000000000000000000000000000-test.drv'
             WHERE id = $2
             "#,
-            EvaluationStatus::BuildComplete.as_id(),
-            derivation.id,
         )
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(derivation.id)
         .execute(pool)
         .await
         .expect("derivation status should be updated");
         // Insert a scan_schedule_policy row so the rescan query doesn't fail.
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO scan_schedule_policy (id, on_build, deployed_interval, recent_interval, archived_interval, archived_enabled)
             VALUES (1, true, '24h', '24h', '168h', true)
@@ -1341,14 +1341,14 @@ mod tests {
             .expect("scan should be marked in_progress");
 
         // Artificially age the scan so it appears stale.
-        sqlx::query!(
+        sqlx::query(
             r#"
             UPDATE cve_scans
             SET created_at = NOW() - '2 hours'::INTERVAL
             WHERE id = $1
             "#,
-            scan_id,
         )
+        .bind(scan_id)
         .execute(&pool)
         .await
         .expect("scan should be aged");
@@ -1401,7 +1401,7 @@ mod tests {
             .await
             .expect("scan should be created")
             .id();
-        sqlx::query!(
+        sqlx::query(
             r#"
             UPDATE cve_scans
             SET status = 'completed',
@@ -1409,8 +1409,8 @@ mod tests {
                 created_at = NOW() - '48 hours'::INTERVAL
             WHERE id = $1
             "#,
-            scan_id,
         )
+        .bind(scan_id)
         .execute(&pool)
         .await
         .expect("scan should be aged as completed");

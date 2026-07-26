@@ -1062,7 +1062,7 @@ mod tests {
         let store_path = tempdir.path().join("task-396-scan-cycle-store-path");
         std::fs::create_dir_all(&store_path).expect("store path dir should be created");
 
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO scan_schedule_policy (id, on_build, deployed_interval, recent_interval, archived_interval, archived_enabled)
             VALUES (1, true, '24h', '24h', '168h', true)
@@ -1084,7 +1084,7 @@ mod tests {
             .await
             .expect("derivation should be inserted");
 
-        sqlx::query!(
+        sqlx::query(
             r#"
             UPDATE derivations
             SET status_id = $2,
@@ -1092,10 +1092,10 @@ mod tests {
                 store_path = $3
             WHERE id = $1
             "#,
-            derivation.id,
-            EvaluationStatus::BuildComplete.as_id(),
-            store_path.to_string_lossy().to_string(),
         )
+        .bind(derivation.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(store_path.to_string_lossy().to_string())
         .execute(&pool)
         .await
         .expect("derivation should be marked build-complete");
@@ -1131,22 +1131,23 @@ mod tests {
             "target should be processed exactly once"
         );
 
-        let scan = sqlx::query!(
-            r#"
+        let (status, completed_at): (Option<String>, Option<chrono::DateTime<chrono::Utc>>) =
+            sqlx::query_as(
+                r#"
             SELECT status, completed_at
             FROM cve_scans
             WHERE derivation_id = $1
             ORDER BY created_at DESC
             LIMIT 1
             "#,
-            derivation.id,
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("scan row should exist");
+            )
+            .bind(derivation.id)
+            .fetch_one(&pool)
+            .await
+            .expect("scan row should exist");
 
-        assert_eq!(scan.status, Some("completed".to_string()));
-        assert!(scan.completed_at.is_some(), "scan should be terminal");
+        assert_eq!(status, Some("completed".to_string()));
+        assert!(completed_at.is_some(), "scan should be terminal");
     }
 
     /// Confirms that [`BackgroundJobHandle`] state machine correctly reports
