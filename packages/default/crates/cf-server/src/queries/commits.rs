@@ -1720,8 +1720,9 @@ mod tests {
     }
 
     // ── Test 4: stale typed cancellation does not affect newer attempt ────
-    // Attempt 1 is force-cancelled. A new attempt 2 starts.
-    // The old finalizer (guarded by expected_attempt=1) must not cancel attempt 2.
+    // Attempt 1 is force-cancelled. Manual reset intentionally resets the
+    // attempt counter, then a new attempt starts. The old finalizer (still
+    // carrying expected_attempt=1) must not cancel the reset evaluation.
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn stale_cancellation_finalizer_does_not_affect_newer_attempt() {
@@ -1743,9 +1744,14 @@ mod tests {
             .await
             .expect("reset should not error");
 
-        // Attempt 2 starts.
+        // A new attempt starts. Because manual reset resets the attempt
+        // counter, this may reuse attempt number 1; stale cancellation is
+        // still prevented by status/cancellation_requested guards.
         let attempt2 = start_eval(&pool, commit_id).await;
-        assert_ne!(attempt1, attempt2, "attempt counter must have incremented");
+        assert_eq!(
+            attempt1, attempt2,
+            "manual reset intentionally resets attempts"
+        );
 
         // The stale worker for attempt 1 calls the finalizer with the old attempt.
         let outcome = finalize_requested_commit_evaluation_cancellation(

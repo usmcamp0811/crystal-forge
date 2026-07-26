@@ -2162,10 +2162,8 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                 // Spawn bounded preparation: GC root → activate → notify.
                                                 // This keeps the stdout pipe unblocked while the
                                                 // nix-store subprocess and second transaction run.
-                                                let permit = build_preparation_limit
-                                                    .clone()
-                                                    .acquire_owned()
-                                                    .await?;
+                                                let build_preparation_limit =
+                                                    build_preparation_limit.clone();
                                                 let pool = pool.clone();
                                                 let commit_id = commit.id;
                                                 let attempt = expected_attempt;
@@ -2183,7 +2181,12 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                 let queue_notifier_owned = _queue_notifier.cloned();
 
                                                 build_preparations.spawn(async move {
-                                                    let _permit = permit;
+                                                    let _permit = build_preparation_limit
+                                                        .acquire_owned()
+                                                        .await
+                                                        .context(
+                                                            "Build preparation semaphore closed",
+                                                        )?;
 
                                                     // Phase 2: GC root (required — bail on failure)
                                                     let rooted = crate::builder::create_drv_gc_root(
@@ -2652,8 +2655,7 @@ pub async fn evaluate_with_nix_eval_jobs(
         let deadline_sleep = tokio::time::sleep_until(deadline);
         tokio::pin!(deadline_sleep);
 
-        let mut outcome_stream =
-            stream::iter(fallback_futures).buffer_unordered(FALLBACK_CONCURRENCY);
+        let outcome_stream = stream::iter(fallback_futures).buffer_unordered(FALLBACK_CONCURRENCY);
         tokio::pin!(outcome_stream);
 
         // ── Classify fallback outcomes. Successful recovered systems are
@@ -3543,10 +3545,11 @@ fn summarize_commit_metadata(
 mod tests {
     use super::{
         ConfirmedSystemFailure, EvaluationFinalizeOutcome, EvaluationPlan, NixEvalJobResult,
-        SuccessfulSystemResult, SystemFinalizeOutcome, SystemNotQueuedReason,
-        SystemPersistenceOutcome, finalize_evaluated_system, finalize_evaluation_attempt,
-        mock_eval_stage_delay, persist_evaluated_system, resolve_mock_systems,
-        should_mock_policy_fail, summarize_commit_metadata,
+        SuccessfulSystemResult, SystemBuildActivationOutcome, SystemFinalizeOutcome,
+        SystemNotQueuedReason, SystemPersistenceOutcome, activate_evaluated_system_build,
+        finalize_evaluated_system, finalize_evaluation_attempt, mock_eval_stage_delay,
+        persist_evaluated_system, resolve_mock_systems, should_mock_policy_fail,
+        summarize_commit_metadata,
     };
     use crate::api::models::CancelEvalOutcome;
     use crate::models::deployment_policies::PolicyCheckResult;
@@ -4899,7 +4902,7 @@ mod tests {
             .await;
     }
 
-    // ── Build-job claimability immediately after finalization ────────
+    // ── Build-job claimability only after activation ─────────────────
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
@@ -4983,18 +4986,17 @@ mod tests {
             "no build job should be claimable before activation; got {before_activation:?}"
         );
 
-        // ── Phase 2 + 3: GC root + activate via combined wrapper ─────
-        // (GC root is exercised by finalize_evaluated_system)
-        let outcome = crate::models::evaluate_with_policies::finalize_evaluated_system(
-            &pool, commit_id, attempt, &system, &check,
-        )
-        .await
-        .expect("finalize should succeed");
+        // ── Phase 3: activate after Phase 2 has completed ─────────────
+        // In production the caller must create the GC root before this call.
+        // This test isolates the durable DB boundary: the build job is not
+        // claimable until activation commits.
+        let activation = activate_evaluated_system_build(&pool, commit_id, attempt, derivation_id)
+            .await
+            .expect("activate should succeed");
 
-        let build_job_id = match &outcome {
-            SystemFinalizeOutcome::Queued { build_job_id, .. } => *build_job_id,
-            SystemFinalizeOutcome::BuildAlreadyExists { build_job_id, .. } => *build_job_id,
-            other => panic!("expected Queued or BuildAlreadyExists, got {other:?}"),
+        let build_job_id = match &activation {
+            SystemBuildActivationOutcome::Queued { build_job_id } => *build_job_id,
+            other => panic!("expected Queued after activation, got {other:?}"),
         };
 
         // Commit still in_progress

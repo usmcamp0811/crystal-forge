@@ -595,7 +595,7 @@ let
 
       nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
         cd \"$REPO_ROOT/packages/default\"
-        DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source migrations
+        DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source crates/cf-server/migrations
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           -p cf-server --lib queries::commits::tests \
@@ -611,6 +611,10 @@ let
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           -p cf-server --lib models::evaluate_with_policies::tests::finalize_system_ \
+          -- --ignored --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib models::evaluate_with_policies::tests::system_build_ordering_persist_then_root_then_activate \
           -- --ignored --test-threads=1
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
@@ -631,7 +635,7 @@ let
 
       nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
         cd \"$REPO_ROOT/packages/default\"
-        DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source migrations
+        DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source crates/cf-server/migrations
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib builder::cve_worker::tests::scan_cycle_processes_target_with_fake_runner
