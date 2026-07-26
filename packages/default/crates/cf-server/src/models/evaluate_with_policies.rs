@@ -158,38 +158,19 @@ fn closure_count_limiter() -> Arc<Semaphore> {
         .clone()
 }
 
-fn spawn_incremental_system_side_effects(
+/// Spawn non-critical background work after a system has been queued for build.
+///
+/// GC root creation is intentionally NOT included here: it is performed
+/// *before* the queue notification so that a builder cannot claim a job
+/// before the derivation is safely rooted against Nix GC collection.
+fn spawn_closure_counting_and_hardening(
     pool: PgPool,
     commit_id: i32,
     flake_repo_url: String,
     commit_hash: String,
     finalized: FinalizedDerivation,
 ) {
-    // GC root: prevent the derivation from being GC'd before a remote
-    // builder can claim and import it.  Runs nix-store --check-validity
-    // which may be slow on large stores, so spawn it.
-    let pool_gc = pool.clone();
-    let drv_path = finalized.drv_path.clone();
-    let deriv_id = finalized.derivation_id;
-    tokio::spawn(async move {
-        match crate::builder::create_drv_gc_root(&drv_path, deriv_id).await {
-            Ok(true) => debug!(
-                "📌 Rooted evaluated drv (id={}, drv={})",
-                deriv_id, drv_path
-            ),
-            Ok(false) => warn!(
-                "⚠️  Evaluated drv (id={}, drv={}) is not valid in the server store; \
-                 remote builders may not be able to import it",
-                deriv_id, drv_path
-            ),
-            Err(err) => warn!(
-                "⚠️  Failed to create GC root for evaluated drv {} (id={}): {}",
-                drv_path, deriv_id, err
-            ),
-        }
-    });
-
-    // Closure counting: bounded via semaphore, already spawned.
+    // Closure counting: bounded via semaphore.
     let pool_cc = pool.clone();
     let drv_cc = finalized.drv_path.clone();
     let derivation_id_cc = finalized.derivation_id;
@@ -1799,6 +1780,43 @@ pub async fn evaluate_with_nix_eval_jobs(
                                         )
                                         .await?;
 
+                                        // ── Create GC root before queue notification ──
+                                        // This prevents a builder from claiming a job
+                                        // whose .drv could be GC'd in the meantime.
+                                        let deriv_id_for_gc = match &outcome {
+                                            SystemFinalizeOutcome::Queued {
+                                                derivation_id, ..
+                                            }
+                                            | SystemFinalizeOutcome::BuildAlreadyExists {
+                                                derivation_id, ..
+                                            } => Some(*derivation_id),
+                                            _ => None,
+                                        };
+                                        if let Some(deriv_id) = deriv_id_for_gc {
+                                            match crate::builder::create_drv_gc_root(
+                                                &successful.drv_path,
+                                                deriv_id,
+                                            )
+                                            .await
+                                            {
+                                                Ok(true) => debug!(
+                                                    "📌 Rooted evaluated drv (id={}, drv={})",
+                                                    deriv_id, successful.drv_path
+                                                ),
+                                                Ok(false) => warn!(
+                                                    "⚠️  Evaluated drv (id={}, drv={}) is not valid \
+                                                     in the server store; remote builders may \
+                                                     not be able to import it",
+                                                    deriv_id, successful.drv_path
+                                                ),
+                                                Err(err) => warn!(
+                                                    "⚠️  Failed to create GC root for evaluated \
+                                                     drv {} (id={}): {}",
+                                                    successful.drv_path, deriv_id, err
+                                                ),
+                                            }
+                                        }
+
                                         match handle_system_finalize_outcome(
                                             pool,
                                             cf_state,
@@ -1825,7 +1843,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                     system_name: system_name.clone(),
                                                     cf_agent_enabled: successful.cf_agent_enabled,
                                                 };
-                                                spawn_incremental_system_side_effects(
+                                                spawn_closure_counting_and_hardening(
                                                     pool.clone(),
                                                     commit.id,
                                                     flake.repo_url.clone(),
@@ -2107,13 +2125,6 @@ pub async fn evaluate_with_nix_eval_jobs(
             });
         }
 
-        // `collect` the entire stream so we can race the collected future
-        // against timeout and cancellation below (no per-item blocking
-        // inside the select! handler).
-        let fallback_work = stream::iter(fallback_futures)
-            .buffer_unordered(FALLBACK_CONCURRENCY)
-            .collect::<Vec<_>>();
-
         // Cancellation future: polls the DB flag every 2 seconds.
         let cancellation = async {
             let mut interval = tokio::time::interval(Duration::from_secs(2));
@@ -2131,123 +2142,171 @@ pub async fn evaluate_with_nix_eval_jobs(
 
         tokio::pin!(cancellation);
 
-        let outcomes = tokio::select! {
-            biased;
+        // Process fallback outcomes incrementally as each one completes,
+        // rather than collecting the entire batch first.  This means a
+        // fast-evaluating system's build job is committed and notified
+        // immediately, even if another fallback is still running.
+        let deadline = tokio::time::Instant::now() + FALLBACK_PHASE_TIMEOUT;
+        let deadline_sleep = tokio::time::sleep_until(deadline);
+        tokio::pin!(deadline_sleep);
 
-            cancellation_result = &mut cancellation => {
-                cancellation_result?;
-                return Err(EvaluationCancelled.into());
-            }
-
-            fallback_result = tokio::time::timeout(
-                FALLBACK_PHASE_TIMEOUT,
-                fallback_work,
-            ) => {
-                fallback_result.with_context(|| {
-                    format!(
-                        "Fallback evaluation phase timed out after {}s",
-                        FALLBACK_PHASE_TIMEOUT.as_secs()
-                    )
-                })?
-            }
-        };
+        let mut outcome_stream = stream::iter(fallback_futures)
+            .buffer_unordered(FALLBACK_CONCURRENCY);
+        tokio::pin!(outcome_stream);
 
         // ── Classify fallback outcomes. Successful recovered systems are
         // finalized immediately just like streaming bulk successes.
-        for outcome in outcomes {
-            match outcome {
-                StandaloneSystemOutcome::ConfirmedSystemFailure { system_name, error } => {
-                    warn!(
-                        "⚠️  System {} was expected but never appeared in nix-eval-jobs output (confirmed failure).",
-                        system_name
-                    );
-                    let derivation_target = build_agent_target(repo_url, commit_hash, &system_name);
-                    confirmed_failures.push(ConfirmedSystemFailure {
-                        system_name,
-                        derivation_target,
-                        error,
-                    });
-                }
-                StandaloneSystemOutcome::Success {
-                    result,
-                    policy_check,
-                } => {
-                    warn!(
-                        "⚠️  System {} was expected but never appeared; standalone policy eval succeeded and will be recorded.",
-                        result.system_name
-                    );
-                    let nix_result = NixEvalJobResult {
-                        attr: result.system_name.clone(),
-                        attr_path: vec![result.system_name.clone()],
-                        name: Some(result.system_name.clone()),
-                        drv_path: Some(result.drv_path.clone()),
-                        error: None,
-                        cache_status: None,
-                        outputs: None,
-                        meta: None,
-                    };
-                    let finalize_outcome = finalize_evaluated_system(
-                        pool,
-                        commit.id,
-                        expected_attempt,
-                        &result,
-                        &policy_check,
-                    )
-                    .await?;
+        loop {
+            tokio::select! {
+                biased;
 
-                    match handle_system_finalize_outcome(
-                        pool,
-                        cf_state,
-                        _queue_notifier,
-                        commit.id,
-                        &result.system_name,
-                        finalize_outcome,
-                        &mut log_sequence,
-                    )
-                    .await?
-                    {
-                        SystemFinalizeAction::Queued {
-                            derivation_id,
-                            ..
+                cancellation_result = &mut cancellation => {
+                    cancellation_result?;
+                    return Err(EvaluationCancelled.into());
+                }
+
+                _ = &mut deadline_sleep => {
+                    bail!(
+                        "Fallback evaluation phase timed out after {}s",
+                        FALLBACK_PHASE_TIMEOUT.as_secs()
+                    );
+                }
+
+                outcome = outcome_stream.next() => {
+                    let Some(outcome) = outcome else {
+                        break; // stream exhausted
+                    };
+
+                    match outcome {
+                        StandaloneSystemOutcome::ConfirmedSystemFailure { system_name, error } => {
+                            warn!(
+                                "⚠️  System {} was expected but never appeared in nix-eval-jobs output (confirmed failure).",
+                                system_name
+                            );
+                            let derivation_target = build_agent_target(repo_url, commit_hash, &system_name);
+                            confirmed_failures.push(ConfirmedSystemFailure {
+                                system_name,
+                                derivation_target,
+                                error,
+                            });
                         }
-                        | SystemFinalizeAction::AlreadyExists {
-                            derivation_id,
-                            ..
+                        StandaloneSystemOutcome::Success {
+                            result,
+                            policy_check,
                         } => {
-                            let finalized = FinalizedDerivation {
-                                derivation_id,
-                                drv_path: result.drv_path.clone(),
-                                system_name: result.system_name.clone(),
-                                cf_agent_enabled: result.cf_agent_enabled,
+                            warn!(
+                                "⚠️  System {} was expected but never appeared; standalone policy eval succeeded and will be recorded.",
+                                result.system_name
+                            );
+                            let nix_result = NixEvalJobResult {
+                                attr: result.system_name.clone(),
+                                attr_path: vec![result.system_name.clone()],
+                                name: Some(result.system_name.clone()),
+                                drv_path: Some(result.drv_path.clone()),
+                                error: None,
+                                cache_status: None,
+                                outputs: None,
+                                meta: None,
                             };
-                            spawn_incremental_system_side_effects(
-                                pool.clone(),
+                            let finalize_outcome = finalize_evaluated_system(
+                                pool,
                                 commit.id,
-                                flake.repo_url.clone(),
-                                commit.git_commit_hash.clone(),
-                                finalized,
-                            );
+                                expected_attempt,
+                                &result,
+                                &policy_check,
+                            )
+                            .await?;
+
+                            // ── Create GC root before queue notification ──
+                            let deriv_id_for_gc = match &finalize_outcome {
+                                SystemFinalizeOutcome::Queued {
+                                    derivation_id, ..
+                                }
+                                | SystemFinalizeOutcome::BuildAlreadyExists {
+                                    derivation_id, ..
+                                } => Some(*derivation_id),
+                                _ => None,
+                            };
+                            if let Some(deriv_id) = deriv_id_for_gc {
+                                match crate::builder::create_drv_gc_root(
+                                    &result.drv_path,
+                                    deriv_id,
+                                )
+                                .await
+                                {
+                                    Ok(true) => debug!(
+                                        "📌 Rooted evaluated drv (id={}, drv={})",
+                                        deriv_id, result.drv_path
+                                    ),
+                                    Ok(false) => warn!(
+                                        "⚠️  Evaluated drv (id={}, drv={}) is not valid \
+                                         in the server store; remote builders may \
+                                         not be able to import it",
+                                        deriv_id, result.drv_path
+                                    ),
+                                    Err(err) => warn!(
+                                        "⚠️  Failed to create GC root for evaluated \
+                                         drv {} (id={}): {}",
+                                        result.drv_path, deriv_id, err
+                                    ),
+                                }
+                            }
+
+                            match handle_system_finalize_outcome(
+                                pool,
+                                cf_state,
+                                _queue_notifier,
+                                commit.id,
+                                &result.system_name,
+                                finalize_outcome,
+                                &mut log_sequence,
+                            )
+                            .await?
+                            {
+                                SystemFinalizeAction::Queued {
+                                    derivation_id,
+                                    ..
+                                }
+                                | SystemFinalizeAction::AlreadyExists {
+                                    derivation_id,
+                                    ..
+                                } => {
+                                    let finalized = FinalizedDerivation {
+                                        derivation_id,
+                                        drv_path: result.drv_path.clone(),
+                                        system_name: result.system_name.clone(),
+                                        cf_agent_enabled: result.cf_agent_enabled,
+                                    };
+                                    spawn_closure_counting_and_hardening(
+                                        pool.clone(),
+                                        commit.id,
+                                        flake.repo_url.clone(),
+                                        commit.git_commit_hash.clone(),
+                                        finalized,
+                                    );
+                                }
+                                SystemFinalizeAction::Recorded => {}
+                                SystemFinalizeAction::Cancelled => {
+                                    return Err(EvaluationCancelled.into());
+                                }
+                                SystemFinalizeAction::Superseded => {
+                                    bail!(
+                                        "evaluation attempt was superseded while finalizing fallback system"
+                                    );
+                                }
+                            }
+                            successful_results.push(result);
+                            policy_checks.push(policy_check);
+                            results.push(nix_result);
                         }
-                        SystemFinalizeAction::Recorded => {}
-                        SystemFinalizeAction::Cancelled => {
-                            return Err(EvaluationCancelled.into());
-                        }
-                        SystemFinalizeAction::Superseded => {
-                            bail!(
-                                "evaluation attempt was superseded while finalizing fallback system"
+                        StandaloneSystemOutcome::InfrastructureFailure { system_name, error } => {
+                            warn!(
+                                "⚠️  Fallback eval for {} failed with infrastructure error: {}",
+                                system_name, error
                             );
+                            infra_failure_count += 1;
                         }
                     }
-                    successful_results.push(result);
-                    policy_checks.push(policy_check);
-                    results.push(nix_result);
-                }
-                StandaloneSystemOutcome::InfrastructureFailure { system_name, error } => {
-                    warn!(
-                        "⚠️  Fallback eval for {} failed with infrastructure error: {}",
-                        system_name, error
-                    );
-                    infra_failure_count += 1;
                 }
             }
         }
@@ -4193,5 +4252,220 @@ mod tests {
         assert_eq!(classify(true,  true),  "confirmed_failure");
         assert_eq!(classify(true,  false), "confirmed_failure");
         assert_eq!(classify(false, false), "missing");
+    }
+
+    // ── parse_expected_store_path_from_outputs unit tests ────────────
+
+    #[test]
+    fn parse_expected_store_path_from_outputs_standard_out_path() {
+        let j =
+            serde_json::json!({"out": {"path": "/nix/store/abc123-foo"}});
+        assert_eq!(
+            super::parse_expected_store_path_from_outputs(&j).as_deref(),
+            Some("/nix/store/abc123-foo")
+        );
+    }
+
+    #[test]
+    fn parse_expected_store_path_from_outputs_out_path_fallback() {
+        let j =
+            serde_json::json!({"out": {"outPath": "/nix/store/def456-bar"}});
+        assert_eq!(
+            super::parse_expected_store_path_from_outputs(&j).as_deref(),
+            Some("/nix/store/def456-bar")
+        );
+    }
+
+    #[test]
+    fn parse_expected_store_path_from_outputs_plain_string() {
+        let j = serde_json::json!({"out": "/nix/store/ghi789-baz"});
+        assert_eq!(
+            super::parse_expected_store_path_from_outputs(&j).as_deref(),
+            Some("/nix/store/ghi789-baz")
+        );
+    }
+
+    #[test]
+    fn parse_expected_store_path_from_outputs_top_level_out_path() {
+        let j = serde_json::json!({"outPath": "/nix/store/jkl012-qux"});
+        assert_eq!(
+            super::parse_expected_store_path_from_outputs(&j).as_deref(),
+            Some("/nix/store/jkl012-qux")
+        );
+    }
+
+    #[test]
+    fn parse_expected_store_path_from_outputs_rejects_non_store_path() {
+        let j = serde_json::json!({"out": {"path": "/tmp/foo"}});
+        assert!(super::parse_expected_store_path_from_outputs(&j).is_none());
+    }
+
+    #[test]
+    fn parse_expected_store_path_from_outputs_missing_out() {
+        let j = serde_json::json!({"foo": {"path": "/nix/store/abc123-foo"}});
+        assert!(super::parse_expected_store_path_from_outputs(&j).is_none());
+    }
+
+    #[test]
+    fn parse_expected_store_path_from_outputs_empty() {
+        let j = serde_json::json!({});
+        assert!(super::parse_expected_store_path_from_outputs(&j).is_none());
+    }
+
+    #[test]
+    fn parse_expected_store_path_from_outputs_no_path_field() {
+        let j = serde_json::json!({"out": {"foo": "bar"}});
+        assert!(super::parse_expected_store_path_from_outputs(&j).is_none());
+    }
+
+    // ── BuildAlreadyExists status propagation ────────────────────────
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalize_system_build_already_exists_reflects_current_status() {
+        // When a build_job exists with a non-"queued" status, the
+        // BuildAlreadyExists outcome must carry the actual DB status so the
+        // caller can decide whether to emit a queue notification.
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        let system = successful_system("kappa");
+        let check = passing_policy_check("kappa");
+
+        // First finalize → Queued
+        let first =
+            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+                .await
+                .expect("first finalize");
+        assert!(
+            matches!(first, SystemFinalizeOutcome::Queued { .. }),
+            "first must be Queued; got {first:?}"
+        );
+
+        let build_job_id = match &first {
+            SystemFinalizeOutcome::Queued { build_job_id, .. } => *build_job_id,
+            _ => unreachable!(),
+        };
+
+        // Manually advance the build_job to "building"
+        sqlx::query("UPDATE build_jobs SET status = 'building' WHERE id = $1")
+            .bind(build_job_id)
+            .execute(&pool)
+            .await
+            .expect("update to building");
+
+        // Second finalize → BuildAlreadyExists with status="building"
+        let second =
+            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+                .await
+                .expect("second finalize");
+        assert!(
+            matches!(&second, SystemFinalizeOutcome::BuildAlreadyExists { build_job_status, .. } if build_job_status == "building"),
+            "second must be BuildAlreadyExists with status 'building'; got {second:?}"
+        );
+        assert_eq!(build_job_count(&pool, commit_id).await, 1);
+
+        // Advance to "success"
+        sqlx::query("UPDATE build_jobs SET status = 'success' WHERE id = $1")
+            .bind(build_job_id)
+            .execute(&pool)
+            .await
+            .expect("update to success");
+
+        let third =
+            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+                .await
+                .expect("third finalize");
+        assert!(
+            matches!(&third, SystemFinalizeOutcome::BuildAlreadyExists { build_job_status, .. } if build_job_status == "success"),
+            "third must be BuildAlreadyExists with status 'success'; got {third:?}"
+        );
+        assert_eq!(build_job_count(&pool, commit_id).await, 1);
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Build-job claimability immediately after finalization ────────
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalize_system_build_job_immediately_claimable_by_builder() {
+        // A build_job created by finalize_evaluated_system must be visible
+        // to get_next_job_for_builder before the commit is marked complete.
+        // This is the core claimability property: no commit-completion gate
+        // must block builders from claiming ready work.
+        use base64::Engine;
+        use crate::models::builders::CreateBuilderRequest;
+        use crate::queries::build_jobs::get_next_job_for_builder;
+        use crate::queries::builders::create_builder;
+
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        // Create and activate a builder
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+        let pub_b64 =
+            base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes());
+        let builder_name = format!("claim-test-builder-{}", uuid::Uuid::new_v4());
+        let (builder, _) = create_builder(
+            &pool,
+            &CreateBuilderRequest {
+                name: builder_name,
+                host: Some("claim-test.local".to_string()),
+                arch: "x86_64-linux".to_string(),
+                public_key: Some(pub_b64),
+                max_cpu_cores: None,
+                max_memory_mb: None,
+                max_concurrent_jobs: Some(1),
+                enabled: Some(true),
+                environment_ids: vec![],
+            },
+        )
+        .await
+        .expect("create builder");
+        sqlx::query("UPDATE builders SET status = 'active' WHERE id = $1")
+            .bind(builder.id)
+            .execute(&pool)
+            .await
+            .expect("activate builder");
+
+        let system = successful_system("lambda");
+        let check = passing_policy_check("lambda");
+        let outcome =
+            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+                .await
+                .expect("finalize");
+
+        let build_job_id = match &outcome {
+            SystemFinalizeOutcome::Queued { build_job_id, .. } => *build_job_id,
+            _ => panic!("expected Queued, got {outcome:?}"),
+        };
+
+        // Claim the build job immediately — before any commit-complete call
+        let claimed = get_next_job_for_builder(&pool, builder.id)
+            .await
+            .expect("claim should not error");
+
+        assert_eq!(
+            claimed,
+            Some(build_job_id),
+            "builder must claim the build job immediately after finalization, \
+             before commit is marked complete; expected Some({build_job_id}), got {claimed:?}"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
     }
 }
