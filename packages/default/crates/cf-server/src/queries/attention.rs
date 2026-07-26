@@ -413,9 +413,7 @@ where
     .context("failed to insert transition occurrence")?;
 
     let id = row.get::<Uuid, _>("id");
-    tx.commit()
-        .await
-        .context("failed to commit transition")?;
+    tx.commit().await.context("failed to commit transition")?;
     Ok(id)
 }
 
@@ -487,14 +485,13 @@ pub(crate) async fn reconcile_cve_attention_subject_tx(
     // missing when this helper is invoked during startup duplicate repair over
     // legacy data, so use `fetch_optional`. The outer `Option` indicates row
     // presence; the inner `Option` is the nullable column value.
-    let persisted_since: Option<DateTime<Utc>> = sqlx::query_scalar(
-        "SELECT fleet_relevant_since FROM cves WHERE id = $1 FOR UPDATE",
-    )
-    .bind(cve_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .context("read cves.fleet_relevant_since")?
-    .flatten();
+    let persisted_since: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT fleet_relevant_since FROM cves WHERE id = $1 FOR UPDATE")
+            .bind(cve_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .context("read cves.fleet_relevant_since")?
+            .flatten();
 
     if relevant {
         let now = Utc::now();
@@ -515,9 +512,7 @@ pub(crate) async fn reconcile_cve_attention_subject_tx(
         .await
         .context("read existing CVE opened_at")?;
 
-        let episode_started_at = persisted_since
-            .or(existing_opened_at)
-            .unwrap_or(now);
+        let episode_started_at = persisted_since.or(existing_opened_at).unwrap_or(now);
 
         // Persist the episode start timestamp. If the cves row does not exist
         // yet (e.g. legacy attention rows without a corresponding CVE record),
@@ -778,11 +773,7 @@ where
 /// `attention_occurrence:{category}:{subject_id}` (matching
 /// [`transition_by_subject`]), then resolves all open occurrences for the
 /// subject, then commits.
-pub async fn resolve_under_lock(
-    pool: &PgPool,
-    category: &str,
-    subject_id: &str,
-) -> Result<usize> {
+pub async fn resolve_under_lock(pool: &PgPool, category: &str, subject_id: &str) -> Result<usize> {
     validate_category(category)?;
 
     let mut tx = pool
@@ -920,8 +911,14 @@ pub async fn dismiss_occurrences(
     validate_category(category)?;
 
     if occurrence_keys.is_empty() {
-        return count_attention_for_user(pool, user_id, observed_at, is_admin, member_environment_ids)
-            .await;
+        return count_attention_for_user(
+            pool,
+            user_id,
+            observed_at,
+            is_admin,
+            member_environment_ids,
+        )
+        .await;
     }
 
     let mut tx = pool
@@ -1960,7 +1957,9 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
                         .execute(&mut *tx)
                         .await
                         {
-                            warn!("failed to reconstruct error occurrence for flake {flake_id}: {e:#}");
+                            warn!(
+                                "failed to reconstruct error occurrence for flake {flake_id}: {e:#}"
+                            );
                         }
                     } else if sync_status == "syncing" {
                         if let Some(sync_at) = last_sync_at {
@@ -1989,7 +1988,9 @@ pub async fn dedupe_open_occurrences(pool: &PgPool) -> Result<usize> {
                                 .execute(&mut *tx)
                                 .await
                                 {
-                                    warn!("failed to reconstruct stale-sync occurrence for flake {flake_id}: {e:#}");
+                                    warn!(
+                                        "failed to reconstruct stale-sync occurrence for flake {flake_id}: {e:#}"
+                                    );
                                 }
                             }
                         }
@@ -2619,23 +2620,27 @@ mod tests {
         );
 
         // Both original malformed rows must now be resolved.
-        let older_resolved: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT resolved_at FROM attention_occurrences WHERE id = $1",
-        )
-        .bind(older_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(older_resolved.is_some(), "the older malformed row must be resolved");
+        let older_resolved: Option<chrono::DateTime<Utc>> =
+            sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
+                .bind(older_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            older_resolved.is_some(),
+            "the older malformed row must be resolved"
+        );
 
-        let newer_resolved: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT resolved_at FROM attention_occurrences WHERE id = $1",
-        )
-        .bind(newer_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(newer_resolved.is_some(), "the newer malformed row must be resolved");
+        let newer_resolved: Option<chrono::DateTime<Utc>> =
+            sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
+                .bind(newer_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            newer_resolved.is_some(),
+            "the newer malformed row must be resolved"
+        );
 
         // A NEW canonical-keyed row must now exist, open, using the
         // EARLIEST malformed row's opened_at.
@@ -2657,13 +2662,12 @@ mod tests {
         );
         // Round 12: the canonical row's opened_at uses build_jobs.completed_at
         // as the authoritative event timestamp, not the malformed row's opened_at.
-        let bj_completed_at: chrono::DateTime<Utc> = sqlx::query_scalar(
-            "SELECT completed_at FROM build_jobs WHERE id = $1",
-        )
-        .bind(job_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let bj_completed_at: chrono::DateTime<Utc> =
+            sqlx::query_scalar("SELECT completed_at FROM build_jobs WHERE id = $1")
+                .bind(job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             canonical_opened_at, bj_completed_at,
             "the canonical row's opened_at must match build_jobs.completed_at, \
@@ -2778,13 +2782,12 @@ mod tests {
             .expect("dedupe should succeed");
         assert_eq!(resolved, 1, "the single malformed row must be resolved");
 
-        let malformed_resolved: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT resolved_at FROM attention_occurrences WHERE id = $1",
-        )
-        .bind(malformed_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let malformed_resolved: Option<chrono::DateTime<Utc>> =
+            sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
+                .bind(malformed_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert!(malformed_resolved.is_some());
 
         let canonical_row: Option<(Uuid, Option<chrono::DateTime<Utc>>)> = sqlx::query_as(
@@ -2796,9 +2799,12 @@ mod tests {
         .fetch_optional(&pool)
         .await
         .unwrap();
-        let (canonical_id, canonical_resolved) =
-            canonical_row.expect("a canonical row must have been created from the single malformed row");
-        assert!(canonical_resolved.is_none(), "the canonical row must be open");
+        let (canonical_id, canonical_resolved) = canonical_row
+            .expect("a canonical row must have been created from the single malformed row");
+        assert!(
+            canonical_resolved.is_none(),
+            "the canonical row must be open"
+        );
 
         let migrated: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
@@ -2808,7 +2814,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(migrated, 1, "dismissal must be migrated to the canonical row");
+        assert_eq!(
+            migrated, 1,
+            "dismissal must be migrated to the canonical row"
+        );
 
         let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
             .bind(&subject_id)
@@ -2864,13 +2873,12 @@ mod tests {
         .unwrap();
         // Read back completed_at at database precision (microseconds) for
         // exact assertion against the canonical occurrence's opened_at.
-        let bj_completed_at: chrono::DateTime<Utc> = sqlx::query_scalar(
-            "SELECT completed_at FROM build_jobs WHERE id = $1",
-        )
-        .bind(job_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let bj_completed_at: chrono::DateTime<Utc> =
+            sqlx::query_scalar("SELECT completed_at FROM build_jobs WHERE id = $1")
+                .bind(job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
 
         let malformed_key = format!("builds_malformed_test:{subject_id}");
 
@@ -2903,13 +2911,12 @@ mod tests {
             .expect("dedupe should succeed");
         assert_eq!(resolved, 1, "the malformed row must be resolved");
 
-        let canonical_resolved: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT resolved_at FROM attention_occurrences WHERE id = $1",
-        )
-        .bind(canonical_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let canonical_resolved: Option<chrono::DateTime<Utc>> =
+            sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
+                .bind(canonical_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert!(
             canonical_resolved.is_none(),
             "the canonical row must be reopened, not left resolved"
@@ -2917,26 +2924,27 @@ mod tests {
 
         // Round 13: the reopened canonical row's opened_at must equal
         // build_jobs.completed_at (not the old 3-hours-ago timestamp).
-        let canonical_opened_at: chrono::DateTime<Utc> = sqlx::query_scalar(
-            "SELECT opened_at FROM attention_occurrences WHERE id = $1",
-        )
-        .bind(canonical_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let canonical_opened_at: chrono::DateTime<Utc> =
+            sqlx::query_scalar("SELECT opened_at FROM attention_occurrences WHERE id = $1")
+                .bind(canonical_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             canonical_opened_at, bj_completed_at,
             "the reopened canonical row's opened_at must equal build_jobs.completed_at"
         );
 
-        let malformed_resolved: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT resolved_at FROM attention_occurrences WHERE id = $1",
-        )
-        .bind(malformed_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(malformed_resolved.is_some(), "the malformed row must be resolved");
+        let malformed_resolved: Option<chrono::DateTime<Utc>> =
+            sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
+                .bind(malformed_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            malformed_resolved.is_some(),
+            "the malformed row must be resolved"
+        );
 
         let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
             .bind(&subject_id)
@@ -3028,7 +3036,10 @@ mod tests {
         let resolved = dedupe_open_occurrences(&pool)
             .await
             .expect("dedupe should succeed");
-        assert_eq!(resolved, 1, "exactly one of the two exact duplicates must be resolved");
+        assert_eq!(
+            resolved, 1,
+            "exactly one of the two exact duplicates must be resolved"
+        );
 
         let open_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM attention_occurrences WHERE subject_id = $1 AND resolved_at IS NULL",
@@ -3161,7 +3172,10 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert!(o2_open.is_none(), "the current failure's occurrence must remain open");
+        assert!(
+            o2_open.is_none(),
+            "the current failure's occurrence must remain open"
+        );
 
         let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = $1")
             .bind(&subject_id)
@@ -3334,7 +3348,10 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert!(new_resolved.is_some(), "both episodes are duplicates and must be resolved");
+        assert!(
+            new_resolved.is_some(),
+            "both episodes are duplicates and must be resolved"
+        );
 
         let new_dismissed: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
@@ -3504,7 +3521,10 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert!(s2_resolved.is_some(), "both episodes are duplicates and must be resolved");
+        assert!(
+            s2_resolved.is_some(),
+            "both episodes are duplicates and must be resolved"
+        );
 
         let s2_dismissed: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM user_attention_dismissals WHERE user_id = $1 AND occurrence_id = $2",
@@ -3618,12 +3638,11 @@ mod tests {
         let env_id = insert_throwaway_environment(&pool, "cve-reconstruct").await;
         let system_id = insert_throwaway_system(&pool, env_id).await;
         let short = system_id.simple().to_string()[..12].to_string();
-        let hostname: String =
-            sqlx::query_scalar("SELECT hostname FROM systems WHERE id = $1")
-                .bind(system_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let hostname: String = sqlx::query_scalar("SELECT hostname FROM systems WHERE id = $1")
+            .bind(system_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         // cves.id is varchar(20) -- keep well under that limit.
         let cve_id = format!("CVE24-{}", &short[..8]);
 
@@ -3729,7 +3748,10 @@ mod tests {
         let resolved = dedupe_open_occurrences(&pool)
             .await
             .expect("dedupe should succeed");
-        assert_eq!(resolved, 1, "the non-canonical duplicate CVE occurrence must be resolved");
+        assert_eq!(
+            resolved, 1,
+            "the non-canonical duplicate CVE occurrence must be resolved"
+        );
 
         let open_rows: Vec<(Uuid, chrono::DateTime<Utc>)> = sqlx::query_as(
             "SELECT id, opened_at FROM attention_occurrences \
@@ -3903,12 +3925,11 @@ mod tests {
         let env_id = insert_throwaway_environment(&pool, "cve-dedupe-episode").await;
         let system_id = insert_throwaway_system(&pool, env_id).await;
         let short = system_id.simple().to_string()[..12].to_string();
-        let hostname: String =
-            sqlx::query_scalar("SELECT hostname FROM systems WHERE id = $1")
-                .bind(system_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let hostname: String = sqlx::query_scalar("SELECT hostname FROM systems WHERE id = $1")
+            .bind(system_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         let cve_id = format!("CVE24-DEDUP-{}", &short[..8]);
         let user_id = insert_throwaway_user(&pool).await;
         let other_user_id = insert_throwaway_user(&pool).await;
@@ -3955,12 +3976,14 @@ mod tests {
         let duplicate_opened_at = episode_start + chrono::Duration::minutes(5);
         let old_episode_opened_at = episode_start - chrono::Duration::hours(2);
 
-        sqlx::query("INSERT INTO cves (id, cvss_v3_score, fleet_relevant_since) VALUES ($1, 9.8, $2)")
-            .bind(&cve_id)
-            .bind(episode_start)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO cves (id, cvss_v3_score, fleet_relevant_since) VALUES ($1, 9.8, $2)",
+        )
+        .bind(&cve_id)
+        .bind(episode_start)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         sqlx::query(
             "INSERT INTO package_vulnerabilities (derivation_id, cve_id, is_whitelisted) \
@@ -3970,7 +3993,7 @@ mod tests {
         .bind(&cve_id)
         .execute(&pool)
         .await
-            .unwrap();
+        .unwrap();
 
         // Sanity: the CVE is critical and fleet-relevant.
         let (severity, affected_count): (String, i64) = sqlx::query_as(

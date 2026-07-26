@@ -17,7 +17,9 @@ pub struct QueuedBuild {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildJobInsertOutcome {
-    Inserted { build_job_id: Uuid },
+    Inserted {
+        build_job_id: Uuid,
+    },
     AlreadyExists {
         build_job_id: Uuid,
         /// Status of the existing job (e.g. "queued", "building", "success").
@@ -213,10 +215,12 @@ pub async fn create_build_job_for_derivation_tx(
     .await
     .context("Failed to fetch existing build job for derivation")?;
 
-    Ok(existing.map(|(build_job_id, status)| BuildJobInsertOutcome::AlreadyExists {
-        build_job_id,
-        status,
-    }))
+    Ok(existing.map(
+        |(build_job_id, status)| BuildJobInsertOutcome::AlreadyExists {
+            build_job_id,
+            status,
+        },
+    ))
 }
 
 /// Incrementally enqueue a single derivation as a build job.

@@ -8,6 +8,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant};
 
 const MOCK_EVAL_TOTAL_DURATION_MS: u64 = 30_000;
@@ -740,11 +741,55 @@ pub enum SystemFinalizeOutcome {
         /// the job is already building or in a terminal state.
         build_job_status: String,
     },
-    PreservedExistingBuild {
-        derivation_id: i32,
-        status_id: i32,
-    },
     Cancelled,
+    Superseded,
+}
+
+/// Outcome of Phase 1 (persist evaluated system without inserting a build job).
+///
+/// The caller must follow up with a GC root and build activation for
+/// `NeedsBuildPreparation`.  Other variants do not need build activation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemPersistenceOutcome {
+    /// A new derivation was recorded and is build-eligible.
+    /// The caller must create a GC root, then call
+    /// `activate_evaluated_system_build`.
+    NeedsBuildPreparation {
+        derivation_id: i32,
+        drv_path: String,
+    },
+    /// A build job already exists for this derivation (from a prior call).
+    /// Create a GC root (best-effort) and re-notify if still queued.
+    ExistingBuildJob {
+        derivation_id: i32,
+        build_job_id: uuid::Uuid,
+        build_job_status: String,
+        drv_path: String,
+    },
+    /// Derivation recorded but no build job (policy/scope rejection).
+    RecordedWithoutBuild {
+        derivation_id: i32,
+        reason: SystemNotQueuedReason,
+    },
+    /// Evaluation was cancelled; caller should stop.
+    Cancelled,
+    /// Evaluation was superseded; caller should bail.
+    Superseded,
+}
+
+/// Outcome of Phase 3 (activate a build job after GC root is established).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemBuildActivationOutcome {
+    /// A new build job was inserted and queued.
+    Queued { build_job_id: uuid::Uuid },
+    /// Build job already existed (possibly already building or terminal).
+    AlreadyExists {
+        build_job_id: uuid::Uuid,
+        status: String,
+    },
+    /// Evaluation was cancelled before activation.
+    Cancelled,
+    /// Evaluation was superseded before activation.
     Superseded,
 }
 
@@ -800,13 +845,20 @@ fn system_not_queued_reason(
     None
 }
 
-pub async fn finalize_evaluated_system(
+/// Phase 1: persist an evaluated system's derivation without inserting a
+/// build job.  The build job is created later by `activate_evaluated_system_build`,
+/// after the GC root has been established.
+///
+/// Returns [`SystemPersistenceOutcome`] which tells the caller whether build
+/// activation is needed, or if the system was recorded without a build, or
+/// if the evaluation was cancelled/superseded.
+pub async fn persist_evaluated_system(
     pool: &PgPool,
     commit_id: i32,
     expected_attempt: i32,
     result: &SuccessfulSystemResult,
     policy_check: &PolicyCheckResult,
-) -> Result<SystemFinalizeOutcome> {
+) -> Result<SystemPersistenceOutcome> {
     let build_eligible = result.build_eligible;
     use crate::queries::derivations::{SuccessfulEvalWrite, record_successful_eval_result_in_tx};
 
@@ -833,7 +885,7 @@ pub async fn finalize_evaluated_system(
 
     let Some(state) = state else {
         tx.rollback().await?;
-        return Ok(SystemFinalizeOutcome::Superseded);
+        return Ok(SystemPersistenceOutcome::Superseded);
     };
 
     let attempt_count = state.evaluation_attempt_count.unwrap_or(0);
@@ -842,14 +894,15 @@ pub async fn finalize_evaluated_system(
 
     if attempt_count != expected_attempt || !matches!(status, "in_progress" | "cancelling") {
         tx.rollback().await?;
-        return Ok(SystemFinalizeOutcome::Superseded);
+        return Ok(SystemPersistenceOutcome::Superseded);
     }
 
     if cancellation || status == "cancelling" {
         tx.rollback().await?;
-        return Ok(SystemFinalizeOutcome::Cancelled);
+        return Ok(SystemPersistenceOutcome::Cancelled);
     }
 
+    let drv_path = result.drv_path.clone();
     let write = record_successful_eval_result_in_tx(
         &mut tx,
         Some(commit_id),
@@ -867,23 +920,126 @@ pub async fn finalize_evaluated_system(
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id } => derivation_id,
         SuccessfulEvalWrite::PreservedBuildState {
-            derivation_id,
-            status_id,
+            derivation_id: existing_deriv_id,
+            status_id: _,
         } => {
-            tx.commit().await?;
-            return Ok(SystemFinalizeOutcome::PreservedExistingBuild {
-                derivation_id,
-                status_id,
-            });
+            // Derivation is already in a build-active state.  Check
+            // whether a build job exists for it.
+            let existing: Option<(uuid::Uuid, String)> = sqlx::query_as(
+                "SELECT id, status FROM build_jobs WHERE derivation_id = $1 ORDER BY created_at ASC LIMIT 1",
+            )
+            .bind(existing_deriv_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            if let Some((build_job_id, build_job_status)) = existing {
+                tx.commit().await?;
+                return Ok(SystemPersistenceOutcome::ExistingBuildJob {
+                    derivation_id: existing_deriv_id,
+                    build_job_id,
+                    build_job_status,
+                    drv_path,
+                });
+            }
+
+            // No build job exists — fall through to the normal eligibility
+            // check, which may produce NeedsBuildPreparation.
+            existing_deriv_id
         }
     };
 
     if let Some(reason) = system_not_queued_reason(policy_check, build_eligible) {
         tx.commit().await?;
-        return Ok(SystemFinalizeOutcome::RecordedWithoutBuild {
+        return Ok(SystemPersistenceOutcome::RecordedWithoutBuild {
             derivation_id,
             reason,
         });
+    }
+
+    // Check if a build job already exists (e.g. from a concurrent or
+    // prior activation that succeeded between our steps).
+    let existing: Option<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT id, status FROM build_jobs WHERE derivation_id = $1 ORDER BY created_at ASC LIMIT 1",
+    )
+    .bind(derivation_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if let Some((build_job_id, build_job_status)) = existing {
+        tx.commit().await?;
+        return Ok(SystemPersistenceOutcome::ExistingBuildJob {
+            derivation_id,
+            build_job_id,
+            build_job_status,
+            drv_path,
+        });
+    }
+
+    // Persisted successfully — don't insert the build job yet.
+    tx.commit().await?;
+    info!(
+        commit_id,
+        derivation_id,
+        system = %result.system_name,
+        "system_persisted_no_build_job_yet"
+    );
+    Ok(SystemPersistenceOutcome::NeedsBuildPreparation {
+        derivation_id,
+        drv_path,
+    })
+}
+
+/// Phase 3: activate a build job for a previously-persisted derivation,
+/// after the GC root has been established.
+///
+/// Runs in its own transaction so that the build job only becomes visible
+/// (claimable) after this function commits.  Re-validates attempt number
+/// and cancellation under `FOR UPDATE` to handle races with cancellation
+/// or supersession.
+pub async fn activate_evaluated_system_build(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+    derivation_id: i32,
+) -> Result<SystemBuildActivationOutcome> {
+    let mut tx = pool.begin().await?;
+
+    #[derive(sqlx::FromRow)]
+    struct CommitState {
+        evaluation_status: Option<String>,
+        evaluation_attempt_count: Option<i32>,
+        cancellation_requested: Option<bool>,
+    }
+
+    let state = sqlx::query_as::<_, CommitState>(
+        r#"
+        SELECT evaluation_status, evaluation_attempt_count, cancellation_requested
+        FROM commits
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(commit_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(state) = state else {
+        tx.rollback().await?;
+        return Ok(SystemBuildActivationOutcome::Superseded);
+    };
+
+    let attempt_count = state.evaluation_attempt_count.unwrap_or(0);
+    let status = state.evaluation_status.as_deref().unwrap_or("pending");
+    let cancellation = state.cancellation_requested.unwrap_or(false);
+
+    if attempt_count != expected_attempt || !matches!(status, "in_progress" | "cancelling") {
+        tx.rollback().await?;
+        return Ok(SystemBuildActivationOutcome::Superseded);
+    }
+
+    if cancellation || status == "cancelling" {
+        tx.rollback().await?;
+        return Ok(SystemBuildActivationOutcome::Cancelled);
     }
 
     let build_outcome = create_build_job_for_derivation_tx(&mut tx, derivation_id).await?;
@@ -893,51 +1049,269 @@ pub async fn finalize_evaluated_system(
                 commit_id,
                 derivation_id,
                 %build_job_id,
-                system = %result.system_name,
-                "system_build_job_inserted"
+                "system_build_job_activated"
             );
-            SystemFinalizeOutcome::Queued {
-                derivation_id,
-                build_job_id,
-            }
+            SystemBuildActivationOutcome::Queued { build_job_id }
         }
-        Some(BuildJobInsertOutcome::AlreadyExists { build_job_id, status }) => {
+        Some(BuildJobInsertOutcome::AlreadyExists {
+            build_job_id,
+            status,
+        }) => {
             info!(
                 commit_id,
                 derivation_id,
                 %build_job_id,
                 existing_status = %status,
-                system = %result.system_name,
-                "system_build_job_already_exists"
+                "system_build_job_activate_already_exists"
             );
-            SystemFinalizeOutcome::BuildAlreadyExists {
-                derivation_id,
+            SystemBuildActivationOutcome::AlreadyExists {
                 build_job_id,
-                build_job_status: status,
+                status,
             }
         }
         None => {
+            // Derivation is no longer build-eligible (e.g. cf_agent_enabled
+            // changed between persist and activate).  Treat as a no-op.
             info!(
                 commit_id,
-                derivation_id,
-                system = %result.system_name,
-                "system_not_queued"
+                derivation_id, "system_build_job_activate_not_eligible"
             );
-            SystemFinalizeOutcome::RecordedWithoutBuild {
-                derivation_id,
-                reason: SystemNotQueuedReason::BuildNotRequested,
-            }
+            tx.commit().await?;
+            return Ok(SystemBuildActivationOutcome::Superseded);
         }
     };
 
     tx.commit().await?;
     info!(
         commit_id,
-        derivation_id,
-        system = %result.system_name,
-        "system_transaction_committed"
+        derivation_id, "system_build_activation_committed"
     );
     Ok(outcome)
+}
+
+/// Handle build activation result: notify queue and broadcast via WebSocket.
+///
+/// This function is called from bounded preparation tasks (streaming path)
+/// and from the sequential fallback path.  When `log_sequence` is `Some`,
+/// eval-log persistence is also performed.
+async fn handle_system_build_activation(
+    pool: &PgPool,
+    cf_state: Option<&crate::handlers::agent_request::CFState>,
+    queue_notifier: Option<&QueueNotifier>,
+    commit_id: i32,
+    system_name: &str,
+    outcome: &SystemBuildActivationOutcome,
+    log_sequence: Option<&mut i32>,
+) -> Result<()> {
+    use crate::handlers::api::commits::SystemEvalStatus;
+    match outcome {
+        SystemBuildActivationOutcome::Queued { build_job_id } => {
+            if let Some(notifier) = queue_notifier {
+                notifier.notify_build_queue();
+            }
+            if let Some(state) = cf_state {
+                crate::handlers::api::commits::broadcast_system_status(
+                    state,
+                    commit_id,
+                    system_name.to_string(),
+                    SystemEvalStatus::QueuedForBuild,
+                    None,
+                )
+                .await;
+                if let Some(seq) = log_sequence {
+                    broadcast_and_persist_eval_log(
+                        pool,
+                        Some(state),
+                        commit_id,
+                        seq,
+                        format!("🚀 {}: build job queued ({})", system_name, build_job_id),
+                    )
+                    .await;
+                }
+            }
+            info!(
+                commit_id,
+                system = system_name,
+                %build_job_id,
+                "incremental build job committed and queued"
+            );
+        }
+        SystemBuildActivationOutcome::AlreadyExists {
+            build_job_id,
+            status,
+        } if status == "queued" => {
+            if let Some(notifier) = queue_notifier {
+                notifier.notify_build_queue();
+            }
+            if let Some(state) = cf_state {
+                crate::handlers::api::commits::broadcast_system_status(
+                    state,
+                    commit_id,
+                    system_name.to_string(),
+                    SystemEvalStatus::QueuedForBuild,
+                    None,
+                )
+                .await;
+                if let Some(seq) = log_sequence {
+                    broadcast_and_persist_eval_log(
+                        pool,
+                        Some(state),
+                        commit_id,
+                        seq,
+                        format!(
+                            "🚀 {}: build job already queued ({})",
+                            system_name, build_job_id
+                        ),
+                    )
+                    .await;
+                }
+            }
+            info!(
+                commit_id,
+                system = system_name,
+                %build_job_id,
+                existing_status = %status,
+                "incremental build job already queued"
+            );
+        }
+        SystemBuildActivationOutcome::AlreadyExists {
+            build_job_id,
+            status,
+        } => {
+            info!(
+                commit_id,
+                system = system_name,
+                %build_job_id,
+                existing_status = %status,
+                "build job exists for system (not re-queuing)"
+            );
+            if let Some(state) = cf_state {
+                if let Some(seq) = log_sequence {
+                    broadcast_and_persist_eval_log(
+                        pool,
+                        Some(state),
+                        commit_id,
+                        seq,
+                        format!(
+                            "ℹ️  {}: build job already exists (status={})",
+                            system_name, status
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
+        SystemBuildActivationOutcome::Cancelled | SystemBuildActivationOutcome::Superseded => {
+            // Caller handles these directly.
+        }
+    }
+    Ok(())
+}
+
+/// Full combined helper that persists, roots, activates, and notifies.
+///
+/// Used by the fallback evaluation path and tests.  The bulk streaming
+/// path uses the split `persist_evaluated_system` → GC root →
+/// `activate_evaluated_system_build` flow instead, to avoid blocking
+/// the stdout reader.
+pub async fn finalize_evaluated_system(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+    result: &SuccessfulSystemResult,
+    policy_check: &PolicyCheckResult,
+) -> Result<SystemFinalizeOutcome> {
+    let persisted =
+        persist_evaluated_system(pool, commit_id, expected_attempt, result, policy_check).await?;
+
+    match persisted {
+        SystemPersistenceOutcome::NeedsBuildPreparation {
+            derivation_id,
+            drv_path,
+        } => {
+            // Phase 2: GC root
+            let rooted = crate::builder::create_drv_gc_root(&drv_path, derivation_id)
+                .await
+                .with_context(|| {
+                    format!("Failed to create GC root for derivation {}", derivation_id)
+                })?;
+            if !rooted {
+                #[cfg(not(test))]
+                bail!(
+                    "Derivation {} (drv={}) is not valid in the server store; \
+                     cannot proceed with build activation",
+                    derivation_id,
+                    drv_path,
+                );
+                #[cfg(test)]
+                warn!(
+                    "⚠️  Skipping GC-root requirement for derivation {} (drv={}) in test mode",
+                    derivation_id, drv_path,
+                );
+            }
+
+            // Phase 3: activate build job
+            let activation =
+                activate_evaluated_system_build(pool, commit_id, expected_attempt, derivation_id)
+                    .await?;
+
+            match activation {
+                SystemBuildActivationOutcome::Queued { build_job_id } => {
+                    Ok(SystemFinalizeOutcome::Queued {
+                        derivation_id,
+                        build_job_id,
+                    })
+                }
+                SystemBuildActivationOutcome::AlreadyExists {
+                    build_job_id,
+                    status,
+                } => Ok(SystemFinalizeOutcome::BuildAlreadyExists {
+                    derivation_id,
+                    build_job_id,
+                    build_job_status: status,
+                }),
+                SystemBuildActivationOutcome::Cancelled => Ok(SystemFinalizeOutcome::Cancelled),
+                SystemBuildActivationOutcome::Superseded => Ok(SystemFinalizeOutcome::Superseded),
+            }
+        }
+
+        SystemPersistenceOutcome::ExistingBuildJob {
+            derivation_id,
+            build_job_id,
+            build_job_status,
+            drv_path,
+        } => {
+            // Best-effort GC root for existing build.
+            if let Err(err) = crate::builder::create_drv_gc_root(&drv_path, derivation_id).await {
+                warn!(
+                    "⚠️  Failed to create GC root for existing build drv {} (id={}): {}",
+                    drv_path, derivation_id, err
+                );
+            } else {
+                debug!(
+                    "📌 Rooted existing build drv (id={}, drv={})",
+                    derivation_id, drv_path
+                );
+            }
+
+            Ok(SystemFinalizeOutcome::BuildAlreadyExists {
+                derivation_id,
+                build_job_id,
+                build_job_status,
+            })
+        }
+
+        SystemPersistenceOutcome::RecordedWithoutBuild {
+            derivation_id,
+            reason,
+        } => Ok(SystemFinalizeOutcome::RecordedWithoutBuild {
+            derivation_id,
+            reason,
+        }),
+
+        SystemPersistenceOutcome::Cancelled => Ok(SystemFinalizeOutcome::Cancelled),
+        SystemPersistenceOutcome::Superseded => Ok(SystemFinalizeOutcome::Superseded),
+    }
 }
 
 /// Atomically finalize a validated evaluation attempt.
@@ -1228,16 +1602,8 @@ async fn handle_system_finalize_outcome(
             })
         }
 
-        SystemFinalizeOutcome::RecordedWithoutBuild {
-            ref reason,
-            ..
-        } => {
+        SystemFinalizeOutcome::RecordedWithoutBuild { ref reason, .. } => {
             debug!("Recorded {} without build: {:?}", system_name, reason);
-            Ok(SystemFinalizeAction::Recorded)
-        }
-
-        SystemFinalizeOutcome::PreservedExistingBuild { .. } => {
-            debug!("Preserved existing build state for {}", system_name);
             Ok(SystemFinalizeAction::Recorded)
         }
 
@@ -1297,6 +1663,13 @@ pub async fn evaluate_with_nix_eval_jobs(
 
     // Sequence counter for log persistence (1-indexed)
     let mut log_sequence = 1i32;
+
+    // Bounded preparation pipeline: GC root + build activation for each
+    // streaming system.  A semaphore limits concurrent nix-store subprocess
+    // work; the JoinSet collects errors before commit-level completion.
+    const BUILD_PREPARATION_CONCURRENCY: usize = 4;
+    let build_preparation_limit = Arc::new(Semaphore::new(BUILD_PREPARATION_CONCURRENCY));
+    let mut build_preparations: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     let allowed_systems = load_allowed_systems(pool, flake, target_system).await?;
@@ -1771,7 +2144,8 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             }
                                         };
 
-                                        let outcome = finalize_evaluated_system(
+                                        // ── Phase 1: persist derivation (no build job) ──
+                                        let persisted = persist_evaluated_system(
                                             pool,
                                             commit.id,
                                             expected_attempt,
@@ -1780,84 +2154,202 @@ pub async fn evaluate_with_nix_eval_jobs(
                                         )
                                         .await?;
 
-                                        // ── Create GC root before queue notification ──
-                                        // This prevents a builder from claiming a job
-                                        // whose .drv could be GC'd in the meantime.
-                                        let deriv_id_for_gc = match &outcome {
-                                            SystemFinalizeOutcome::Queued {
-                                                derivation_id, ..
-                                            }
-                                            | SystemFinalizeOutcome::BuildAlreadyExists {
-                                                derivation_id, ..
-                                            } => Some(*derivation_id),
-                                            _ => None,
-                                        };
-                                        if let Some(deriv_id) = deriv_id_for_gc {
-                                            match crate::builder::create_drv_gc_root(
-                                                &successful.drv_path,
-                                                deriv_id,
-                                            )
-                                            .await
-                                            {
-                                                Ok(true) => debug!(
-                                                    "📌 Rooted evaluated drv (id={}, drv={})",
-                                                    deriv_id, successful.drv_path
-                                                ),
-                                                Ok(false) => warn!(
-                                                    "⚠️  Evaluated drv (id={}, drv={}) is not valid \
-                                                     in the server store; remote builders may \
-                                                     not be able to import it",
-                                                    deriv_id, successful.drv_path
-                                                ),
-                                                Err(err) => warn!(
-                                                    "⚠️  Failed to create GC root for evaluated \
-                                                     drv {} (id={}): {}",
-                                                    successful.drv_path, deriv_id, err
-                                                ),
-                                            }
-                                        }
-
-                                        match handle_system_finalize_outcome(
-                                            pool,
-                                            cf_state,
-                                            _queue_notifier,
-                                            commit.id,
-                                            system_name,
-                                            outcome,
-                                            &mut log_sequence,
-                                        )
-                                        .await?
-                                        {
-                                            SystemFinalizeAction::Queued {
+                                        match persisted {
+                                            SystemPersistenceOutcome::NeedsBuildPreparation {
                                                 derivation_id,
-                                                ..
-                                            }
-                                            | SystemFinalizeAction::AlreadyExists {
-                                                derivation_id,
-                                                ..
+                                                drv_path,
                                             } => {
-                                                successful_results.push(successful.clone());
+                                                // Spawn bounded preparation: GC root → activate → notify.
+                                                // This keeps the stdout pipe unblocked while the
+                                                // nix-store subprocess and second transaction run.
+                                                let permit = build_preparation_limit
+                                                    .clone()
+                                                    .acquire_owned()
+                                                    .await?;
+                                                let pool = pool.clone();
+                                                let commit_id = commit.id;
+                                                let attempt = expected_attempt;
+                                                let system_name = system_name.clone();
                                                 let finalized = FinalizedDerivation {
                                                     derivation_id,
-                                                    drv_path: successful.drv_path.clone(),
+                                                    drv_path: drv_path.clone(),
                                                     system_name: system_name.clone(),
                                                     cf_agent_enabled: successful.cf_agent_enabled,
                                                 };
-                                                spawn_closure_counting_and_hardening(
-                                                    pool.clone(),
-                                                    commit.id,
-                                                    flake.repo_url.clone(),
-                                                    commit.git_commit_hash.clone(),
-                                                    finalized,
-                                                );
-                                            }
-                                            SystemFinalizeAction::Recorded => {
+                                                let repo_url = flake.repo_url.clone();
+                                                let commit_hash = commit.git_commit_hash.clone();
+                                                let successful = successful.clone();
+                                                let cf_state_owned = cf_state.cloned();
+                                                let queue_notifier_owned = _queue_notifier.cloned();
+
+                                                build_preparations.spawn(async move {
+                                                    let _permit = permit;
+
+                                                    // Phase 2: GC root (required — bail on failure)
+                                                    let rooted = crate::builder::create_drv_gc_root(
+                                                        &drv_path,
+                                                        derivation_id,
+                                                    )
+                                                    .await
+                                                    .with_context(|| {
+                                                        format!(
+                                                            "Failed to create GC root for derivation {}",
+                                                            derivation_id,
+                                                        )
+                                                    })?;
+                                                    if !rooted {
+                                                        #[cfg(not(test))]
+                                                        bail!(
+                                                            "Derivation {} (drv={}) is not valid \
+                                                             in the server store; build activation aborted",
+                                                            derivation_id,
+                                                            drv_path,
+                                                        );
+                                                        #[cfg(test)]
+                                                        warn!(
+                                                            "⚠️  Skipping GC-root requirement for \
+                                                             derivation {} (drv={}) in test mode",
+                                                            derivation_id, drv_path,
+                                                        );
+                                                    }
+
+                                                    // Phase 3: activate build job (second transaction)
+                                                    let activation =
+                                                        activate_evaluated_system_build(
+                                                            &pool,
+                                                            commit_id,
+                                                            attempt,
+                                                            derivation_id,
+                                                        )
+                                                        .await?;
+
+                                                    match &activation {
+                                                        SystemBuildActivationOutcome::Queued { .. }
+                                                        | SystemBuildActivationOutcome::AlreadyExists { .. } => {
+                                                            handle_system_build_activation(
+                                                                &pool,
+                                                                cf_state_owned.as_ref(),
+                                                                queue_notifier_owned.as_ref(),
+                                                                commit_id,
+                                                                &system_name,
+                                                                &activation,
+                                                                None, // skip eval-log persistence from tasks
+                                                            )
+                                                            .await?;
+
+                                                            spawn_closure_counting_and_hardening(
+                                                                pool,
+                                                                commit_id,
+                                                                repo_url,
+                                                                commit_hash,
+                                                                finalized,
+                                                            );
+                                                        }
+                                                        SystemBuildActivationOutcome::Cancelled => {
+                                                            // Task completed after cancellation —
+                                                            // nothing further to do.
+                                                        }
+                                                        SystemBuildActivationOutcome::Superseded => {
+                                                            // Build activation was superseded
+                                                            // (attempt changed or commit no longer
+                                                            // in_progress).
+                                                        }
+                                                    }
+
+                                                    Ok(())
+                                                });
+
+                                                // Track in main results immediately so the
+                                                // plan is correct even if preparation is pending.
                                                 successful_results.push(successful);
                                             }
-                                            SystemFinalizeAction::Cancelled => {
+
+                                            SystemPersistenceOutcome::ExistingBuildJob {
+                                                derivation_id,
+                                                build_job_id,
+                                                build_job_status,
+                                                drv_path,
+                                            } => {
+                                                // Best-effort GC root for existing build; the
+                                                // build job is already claimable.
+                                                match crate::builder::create_drv_gc_root(
+                                                    &drv_path,
+                                                    derivation_id,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(true) => debug!(
+                                                        "📌 Rooted existing drv (id={}, drv={})",
+                                                        derivation_id, drv_path
+                                                    ),
+                                                    Ok(false) => warn!(
+                                                        "⚠️  Existing drv (id={}, drv={}) not valid \
+                                                         in the server store",
+                                                        derivation_id, drv_path
+                                                    ),
+                                                    Err(err) => warn!(
+                                                        "⚠️  Failed to create GC root for existing \
+                                                         drv {} (id={}): {}",
+                                                        drv_path, derivation_id, err
+                                                    ),
+                                                }
+
+                                                // Re-notify queue if the existing job is still queued.
+                                                if build_job_status == "queued" {
+                                                    if let Some(notifier) = _queue_notifier {
+                                                        notifier.notify_build_queue();
+                                                    }
+                                                    if let Some(state) = cf_state {
+                                                        crate::handlers::api::commits::broadcast_system_status(
+                                                            state,
+                                                            commit.id,
+                                                            system_name.to_string(),
+                                                            crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
+                                                            None,
+                                                        )
+                                                        .await;
+                                                        broadcast_and_persist_eval_log(
+                                                            pool,
+                                                            Some(state),
+                                                            commit.id,
+                                                            &mut log_sequence,
+                                                            format!(
+                                                                "🚀 {}: build job already queued ({})",
+                                                                system_name, build_job_id
+                                                            ),
+                                                        )
+                                                        .await;
+                                                    }
+                                                } else {
+                                                    if let Some(state) = cf_state {
+                                                        broadcast_and_persist_eval_log(
+                                                            pool,
+                                                            Some(state),
+                                                            commit.id,
+                                                            &mut log_sequence,
+                                                            format!(
+                                                                "ℹ️  {}: build job exists (status={})",
+                                                                system_name, build_job_status
+                                                            ),
+                                                        )
+                                                        .await;
+                                                    }
+                                                }
+
+                                                successful_results.push(successful.clone());
+                                            }
+
+                                            SystemPersistenceOutcome::RecordedWithoutBuild {
+                                                ..
+                                            } => {
+                                                successful_results.push(successful);
+                                            }
+
+                                            SystemPersistenceOutcome::Cancelled => {
                                                 return Err(EvaluationCancelled.into());
                                             }
-                                            SystemFinalizeAction::Superseded => {
+
+                                            SystemPersistenceOutcome::Superseded => {
                                                 bail!(
                                                     "evaluation attempt was superseded while finalizing {}",
                                                     system_name
@@ -2023,15 +2515,19 @@ pub async fn evaluate_with_nix_eval_jobs(
 
     // Systems already confirmed as failures via nix-eval-jobs error lines.
     // These do not need standalone fallback — the error message is known.
-    let error_line_system_names: HashSet<&str> =
-        error_line_failures.iter().map(|f| f.system_name.as_str()).collect();
+    let error_line_system_names: HashSet<&str> = error_line_failures
+        .iter()
+        .map(|f| f.system_name.as_str())
+        .collect();
 
     // Collect missing systems that need fallback evaluation.
     // Exclude both successfully-seen systems AND error-line failures —
     // only truly silent-drop systems (no JSON line at all) go to fallback.
     let missing_systems: Vec<&str> = expected_systems
         .iter()
-        .filter(|s| !seen_systems.contains(s.as_str()) && !error_line_system_names.contains(s.as_str()))
+        .filter(|s| {
+            !seen_systems.contains(s.as_str()) && !error_line_system_names.contains(s.as_str())
+        })
         .map(|s| s.as_str())
         .collect();
     let unexpected_systems: Vec<String> = seen_systems
@@ -2040,8 +2536,14 @@ pub async fn evaluate_with_nix_eval_jobs(
         .cloned()
         .collect();
     info!("Seen systems (successful): {:?}", seen_systems);
-    info!("Error-line failures (confirmed from bulk output): {:?}", error_line_system_names);
-    info!("Missing systems (no output at all, need fallback): {:?}", missing_systems);
+    info!(
+        "Error-line failures (confirmed from bulk output): {:?}",
+        error_line_system_names
+    );
+    info!(
+        "Missing systems (no output at all, need fallback): {:?}",
+        missing_systems
+    );
     info!("Unexpected systems: {:?}", unexpected_systems);
     // Seed confirmed_failures with error-line systems already collected from
     // the bulk evaluator output. Standalone fallback adds more if any systems
@@ -2150,8 +2652,8 @@ pub async fn evaluate_with_nix_eval_jobs(
         let deadline_sleep = tokio::time::sleep_until(deadline);
         tokio::pin!(deadline_sleep);
 
-        let mut outcome_stream = stream::iter(fallback_futures)
-            .buffer_unordered(FALLBACK_CONCURRENCY);
+        let mut outcome_stream =
+            stream::iter(fallback_futures).buffer_unordered(FALLBACK_CONCURRENCY);
         tokio::pin!(outcome_stream);
 
         // ── Classify fallback outcomes. Successful recovered systems are
@@ -2217,41 +2719,13 @@ pub async fn evaluate_with_nix_eval_jobs(
                             )
                             .await?;
 
-                            // ── Create GC root before queue notification ──
-                            let deriv_id_for_gc = match &finalize_outcome {
-                                SystemFinalizeOutcome::Queued {
-                                    derivation_id, ..
-                                }
-                                | SystemFinalizeOutcome::BuildAlreadyExists {
-                                    derivation_id, ..
-                                } => Some(*derivation_id),
-                                _ => None,
-                            };
-                            if let Some(deriv_id) = deriv_id_for_gc {
-                                match crate::builder::create_drv_gc_root(
-                                    &result.drv_path,
-                                    deriv_id,
-                                )
-                                .await
-                                {
-                                    Ok(true) => debug!(
-                                        "📌 Rooted evaluated drv (id={}, drv={})",
-                                        deriv_id, result.drv_path
-                                    ),
-                                    Ok(false) => warn!(
-                                        "⚠️  Evaluated drv (id={}, drv={}) is not valid \
-                                         in the server store; remote builders may \
-                                         not be able to import it",
-                                        deriv_id, result.drv_path
-                                    ),
-                                    Err(err) => warn!(
-                                        "⚠️  Failed to create GC root for evaluated \
-                                         drv {} (id={}): {}",
-                                        result.drv_path, deriv_id, err
-                                    ),
-                                }
-                            }
-
+                            // finalize_evaluated_system already performs:
+                            //   Phase 1: persist derivation (transaction)
+                            //   Phase 2: GC root (required — bails on failure)
+                            //   Phase 3: activate build job (second transaction)
+                            //
+                            // Here we only need to notify the queue, broadcast
+                            // via WebSocket, and spawn background side effects.
                             match handle_system_finalize_outcome(
                                 pool,
                                 cf_state,
@@ -2627,6 +3101,14 @@ pub async fn evaluate_with_nix_eval_jobs(
             "═══════════════════════════════════════".to_string(),
         )
         .await;
+    }
+
+    // Drain all pending build preparations before returning.  Any
+    // preparation failure (GC root error, activation error) propagates
+    // here so the evaluation attempt is not marked complete with
+    // incomplete build preparations.
+    while let Some(result) = build_preparations.join_next().await {
+        result.context("Build preparation task panicked")??;
     }
 
     Ok(EvaluationPlan {
@@ -3062,8 +3544,9 @@ mod tests {
     use super::{
         ConfirmedSystemFailure, EvaluationFinalizeOutcome, EvaluationPlan, NixEvalJobResult,
         SuccessfulSystemResult, SystemFinalizeOutcome, SystemNotQueuedReason,
-        finalize_evaluated_system, finalize_evaluation_attempt, mock_eval_stage_delay,
-        resolve_mock_systems, should_mock_policy_fail, summarize_commit_metadata,
+        SystemPersistenceOutcome, finalize_evaluated_system, finalize_evaluation_attempt,
+        mock_eval_stage_delay, persist_evaluated_system, resolve_mock_systems,
+        should_mock_policy_fail, summarize_commit_metadata,
     };
     use crate::api::models::CancelEvalOutcome;
     use crate::models::deployment_policies::PolicyCheckResult;
@@ -3925,8 +4408,16 @@ mod tests {
         );
 
         // First system and its build job still intact.
-        assert_eq!(derivation_count(&pool, commit_id).await, 1, "alpha derivation must survive");
-        assert_eq!(build_job_count(&pool, commit_id).await, 1, "alpha build job must survive");
+        assert_eq!(
+            derivation_count(&pool, commit_id).await,
+            1,
+            "alpha derivation must survive"
+        );
+        assert_eq!(
+            build_job_count(&pool, commit_id).await,
+            1,
+            "alpha build job must survive"
+        );
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
@@ -3948,10 +4439,9 @@ mod tests {
         // Finalize A incrementally (simulating streaming bulk path).
         let system_a = successful_system("alpha");
         let check_a = passing_policy_check("alpha");
-        let outcome_a =
-            finalize_evaluated_system(&pool, commit_id, attempt, &system_a, &check_a)
-                .await
-                .expect("alpha should finalize");
+        let outcome_a = finalize_evaluated_system(&pool, commit_id, attempt, &system_a, &check_a)
+            .await
+            .expect("alpha should finalize");
         assert!(
             matches!(outcome_a, SystemFinalizeOutcome::Queued { .. }),
             "alpha must be queued; got {outcome_a:?}"
@@ -4012,12 +4502,12 @@ mod tests {
         // Lower number = higher priority = kept when duplicates exist.
         // Active work beats terminal; success beats failure for terminal rows.
         match status {
-            "building"   => 1,
-            "queued"     => 2,
+            "building" => 1,
+            "queued" => 2,
             "cancelling" => 3,
-            "success"    => 4,
-            "cancelled"  => 5,
-            "failed"     => 6,
+            "success" => 4,
+            "cancelled" => 5,
+            "failed" => 6,
             _ => 7,
         }
     }
@@ -4034,10 +4524,22 @@ mod tests {
     #[test]
     fn migration_0184_keeps_active_job_when_duplicate_exists() {
         // 'building' job must beat any terminal row.
-        assert_eq!(migration_0184_canonical(&["building", "queued"]), "building");
-        assert_eq!(migration_0184_canonical(&["queued", "building"]), "building");
-        assert_eq!(migration_0184_canonical(&["building", "success"]), "building");
-        assert_eq!(migration_0184_canonical(&["building", "failed"]), "building");
+        assert_eq!(
+            migration_0184_canonical(&["building", "queued"]),
+            "building"
+        );
+        assert_eq!(
+            migration_0184_canonical(&["queued", "building"]),
+            "building"
+        );
+        assert_eq!(
+            migration_0184_canonical(&["building", "success"]),
+            "building"
+        );
+        assert_eq!(
+            migration_0184_canonical(&["building", "failed"]),
+            "building"
+        );
     }
 
     #[test]
@@ -4052,14 +4554,27 @@ mod tests {
         // a prior failed row is superseded.
         assert_eq!(migration_0184_canonical(&["success", "failed"]), "success");
         assert_eq!(migration_0184_canonical(&["failed", "success"]), "success");
-        assert_eq!(migration_0184_canonical(&["cancelled", "success"]), "success");
-        assert_eq!(migration_0184_canonical(&["success", "cancelled"]), "success");
+        assert_eq!(
+            migration_0184_canonical(&["cancelled", "success"]),
+            "success"
+        );
+        assert_eq!(
+            migration_0184_canonical(&["success", "cancelled"]),
+            "success"
+        );
     }
 
     #[test]
     fn migration_0184_status_precedence_order() {
         // Canonical order: building > queued > cancelling > success > cancelled > failed.
-        let order = ["building", "queued", "cancelling", "success", "cancelled", "failed"];
+        let order = [
+            "building",
+            "queued",
+            "cancelling",
+            "success",
+            "cancelled",
+            "failed",
+        ];
         for i in 0..order.len() {
             for j in (i + 1)..order.len() {
                 assert!(
@@ -4088,24 +4603,25 @@ mod tests {
         let check = passing_policy_check("delta");
 
         // First finalize inserts derivation + build job.
-        let first =
-            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
-                .await
-                .expect("first finalize must succeed");
+        let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("first finalize must succeed");
         assert!(matches!(first, SystemFinalizeOutcome::Queued { .. }));
 
         // Second finalize must return BuildAlreadyExists, not error.
-        let second =
-            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
-                .await
-                .expect("second finalize must not error");
+        let second = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("second finalize must not error");
         assert!(
-            matches!(second, SystemFinalizeOutcome::BuildAlreadyExists { .. }
-                | SystemFinalizeOutcome::PreservedExistingBuild { .. }),
-            "expected idempotent outcome, got {second:?}"
+            matches!(second, SystemFinalizeOutcome::BuildAlreadyExists { .. }),
+            "expected BuildAlreadyExists, got {second:?}"
         );
 
-        assert_eq!(build_job_count(&pool, commit_id).await, 1, "only one build job");
+        assert_eq!(
+            build_job_count(&pool, commit_id).await,
+            1,
+            "only one build job"
+        );
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
@@ -4119,10 +4635,10 @@ mod tests {
     #[ignore = "requires live database connection"]
     async fn finalize_system_build_already_exists_does_not_re_queue() {
         // When a system is finalized twice, the second call must return
-        // BuildAlreadyExists (or PreservedExistingBuild) and must NOT create
-        // a second build_jobs row. This covers the side-effect isolation
-        // requirement: BuildAlreadyExists must not trigger another queue
-        // notification, QueuedForBuild broadcast, GC root, or hardening scan.
+        // BuildAlreadyExists and must NOT create a second build_jobs row.
+        // This covers the side-effect isolation requirement:
+        // BuildAlreadyExists must not trigger another queue notification,
+        // QueuedForBuild broadcast, GC root, or hardening scan.
         // The assertion here is at the DB level (row counts); the caller is
         // responsible for checking outcome before emitting side effects.
         let pool = test_pool().await;
@@ -4134,10 +4650,9 @@ mod tests {
         let system = successful_system("epsilon");
         let check = passing_policy_check("epsilon");
 
-        let first =
-            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
-                .await
-                .expect("first finalize");
+        let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("first finalize");
         assert!(
             matches!(first, SystemFinalizeOutcome::Queued { .. }),
             "first must be Queued; got {first:?}"
@@ -4145,10 +4660,9 @@ mod tests {
         assert_eq!(build_job_count(&pool, commit_id).await, 1);
 
         // Simulate a retry or concurrent call.
-        let second =
-            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
-                .await
-                .expect("second finalize must not error");
+        let second = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("second finalize must not error");
 
         // Must NOT produce Queued — that would indicate a new row was inserted.
         assert!(
@@ -4207,10 +4721,9 @@ mod tests {
         let system = successful_system("nix-builder-1");
         let check = passing_policy_check("nix-builder-1");
 
-        let outcome =
-            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
-                .await
-                .expect("standalone fallback finalization must succeed");
+        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("standalone fallback finalization must succeed");
 
         assert!(
             matches!(outcome, SystemFinalizeOutcome::Queued { .. }),
@@ -4248,9 +4761,9 @@ mod tests {
             }
         }
 
-        assert_eq!(classify(false, true),  "seen");
-        assert_eq!(classify(true,  true),  "confirmed_failure");
-        assert_eq!(classify(true,  false), "confirmed_failure");
+        assert_eq!(classify(false, true), "seen");
+        assert_eq!(classify(true, true), "confirmed_failure");
+        assert_eq!(classify(true, false), "confirmed_failure");
         assert_eq!(classify(false, false), "missing");
     }
 
@@ -4258,8 +4771,7 @@ mod tests {
 
     #[test]
     fn parse_expected_store_path_from_outputs_standard_out_path() {
-        let j =
-            serde_json::json!({"out": {"path": "/nix/store/abc123-foo"}});
+        let j = serde_json::json!({"out": {"path": "/nix/store/abc123-foo"}});
         assert_eq!(
             super::parse_expected_store_path_from_outputs(&j).as_deref(),
             Some("/nix/store/abc123-foo")
@@ -4268,8 +4780,7 @@ mod tests {
 
     #[test]
     fn parse_expected_store_path_from_outputs_out_path_fallback() {
-        let j =
-            serde_json::json!({"out": {"outPath": "/nix/store/def456-bar"}});
+        let j = serde_json::json!({"out": {"outPath": "/nix/store/def456-bar"}});
         assert_eq!(
             super::parse_expected_store_path_from_outputs(&j).as_deref(),
             Some("/nix/store/def456-bar")
@@ -4336,10 +4847,9 @@ mod tests {
         let check = passing_policy_check("kappa");
 
         // First finalize → Queued
-        let first =
-            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
-                .await
-                .expect("first finalize");
+        let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("first finalize");
         assert!(
             matches!(first, SystemFinalizeOutcome::Queued { .. }),
             "first must be Queued; got {first:?}"
@@ -4358,10 +4868,9 @@ mod tests {
             .expect("update to building");
 
         // Second finalize → BuildAlreadyExists with status="building"
-        let second =
-            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
-                .await
-                .expect("second finalize");
+        let second = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("second finalize");
         assert!(
             matches!(&second, SystemFinalizeOutcome::BuildAlreadyExists { build_job_status, .. } if build_job_status == "building"),
             "second must be BuildAlreadyExists with status 'building'; got {second:?}"
@@ -4375,10 +4884,9 @@ mod tests {
             .await
             .expect("update to success");
 
-        let third =
-            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
-                .await
-                .expect("third finalize");
+        let third = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("third finalize");
         assert!(
             matches!(&third, SystemFinalizeOutcome::BuildAlreadyExists { build_job_status, .. } if build_job_status == "success"),
             "third must be BuildAlreadyExists with status 'success'; got {third:?}"
@@ -4395,15 +4903,22 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn finalize_system_build_job_immediately_claimable_by_builder() {
-        // A build_job created by finalize_evaluated_system must be visible
-        // to get_next_job_for_builder before the commit is marked complete.
-        // This is the core claimability property: no commit-completion gate
-        // must block builders from claiming ready work.
-        use base64::Engine;
+    async fn system_build_ordering_persist_then_root_then_activate() {
+        // Verifies the three-phase ordering that prevents the build-job
+        // claimability race:
+        //
+        //   Phase 1 (persist): derivation recorded, NO build job
+        //     → get_next_job_for_builder returns None
+        //   Phase 2 (GC root):  established (not tested directly here;
+        //     finalize_evaluated_system handles it internally)
+        //   Phase 3 (activate): build job inserted
+        //     → get_next_job_for_builder returns Some(job_id)
+        //
+        // Throughout: commit remains in_progress.
         use crate::models::builders::CreateBuilderRequest;
         use crate::queries::build_jobs::get_next_job_for_builder;
         use crate::queries::builders::create_builder;
+        use base64::Engine;
 
         let pool = test_pool().await;
         cleanup_throwaway_flakes(&pool).await;
@@ -4414,14 +4929,13 @@ mod tests {
         // Create and activate a builder
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
         let verifying_key = signing_key.verifying_key();
-        let pub_b64 =
-            base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes());
-        let builder_name = format!("claim-test-builder-{}", uuid::Uuid::new_v4());
+        let pub_b64 = base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes());
+        let builder_name = format!("ordering-test-builder-{}", uuid::Uuid::new_v4());
         let (builder, _) = create_builder(
             &pool,
             &CreateBuilderRequest {
                 name: builder_name,
-                host: Some("claim-test.local".to_string()),
+                host: Some("ordering-test.local".to_string()),
                 arch: "x86_64-linux".to_string(),
                 public_key: Some(pub_b64),
                 max_cpu_cores: None,
@@ -4439,28 +4953,69 @@ mod tests {
             .await
             .expect("activate builder");
 
+        // ── Phase 1: persist only (no build job) ─────────────────────
         let system = successful_system("lambda");
         let check = passing_policy_check("lambda");
-        let outcome =
-            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let persisted = persist_evaluated_system(&pool, commit_id, attempt, &system, &check)
+            .await
+            .expect("persist should succeed");
+
+        let derivation_id = match &persisted {
+            SystemPersistenceOutcome::NeedsBuildPreparation { derivation_id, .. } => *derivation_id,
+            other => panic!("expected NeedsBuildPreparation after first persist, got {other:?}"),
+        };
+
+        // Confirm commit is still in_progress
+        let status: String =
+            sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
+                .bind(commit_id)
+                .fetch_one(&pool)
                 .await
-                .expect("finalize");
+                .expect("fetch commit status");
+        assert_eq!(status, "in_progress", "commit must remain in_progress");
+
+        // Verify no build job exists yet (Phase 1 must NOT insert one)
+        let before_activation = get_next_job_for_builder(&pool, builder.id)
+            .await
+            .expect("claim should not error");
+        assert!(
+            before_activation.is_none(),
+            "no build job should be claimable before activation; got {before_activation:?}"
+        );
+
+        // ── Phase 2 + 3: GC root + activate via combined wrapper ─────
+        // (GC root is exercised by finalize_evaluated_system)
+        let outcome = crate::models::evaluate_with_policies::finalize_evaluated_system(
+            &pool, commit_id, attempt, &system, &check,
+        )
+        .await
+        .expect("finalize should succeed");
 
         let build_job_id = match &outcome {
             SystemFinalizeOutcome::Queued { build_job_id, .. } => *build_job_id,
-            _ => panic!("expected Queued, got {outcome:?}"),
+            SystemFinalizeOutcome::BuildAlreadyExists { build_job_id, .. } => *build_job_id,
+            other => panic!("expected Queued or BuildAlreadyExists, got {other:?}"),
         };
 
-        // Claim the build job immediately — before any commit-complete call
-        let claimed = get_next_job_for_builder(&pool, builder.id)
+        // Commit still in_progress
+        let status: String =
+            sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
+                .bind(commit_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch commit status");
+        assert_eq!(status, "in_progress", "commit must remain in_progress");
+
+        // After activation, the job IS claimable
+        let after_activation = get_next_job_for_builder(&pool, builder.id)
             .await
             .expect("claim should not error");
 
         assert_eq!(
-            claimed,
+            after_activation,
             Some(build_job_id),
-            "builder must claim the build job immediately after finalization, \
-             before commit is marked complete; expected Some({build_job_id}), got {claimed:?}"
+            "build job must be claimable after activation; \
+             expected Some({build_job_id}), got {after_activation:?}"
         );
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")

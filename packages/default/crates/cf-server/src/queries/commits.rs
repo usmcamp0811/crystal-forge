@@ -1446,10 +1446,12 @@ mod tests {
             "a delayed failure handler must not open an occurrence for a reset commit"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
-            .bind(commit_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1",
+        )
+        .bind(commit_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -1480,10 +1482,12 @@ mod tests {
             "a still-current failure must open its attention occurrence"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
-            .bind(commit_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1",
+        )
+        .bind(commit_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -1519,10 +1523,12 @@ mod tests {
             "resolve must not clear a newer failure's occurrence"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
-            .bind(commit_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1",
+        )
+        .bind(commit_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -1562,10 +1568,12 @@ mod tests {
             "resolve must clear the occurrence once the commit is no longer failed"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
-            .bind(commit_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1",
+        )
+        .bind(commit_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -1582,11 +1590,11 @@ mod tests {
     //     -- --ignored --test-threads=1
 
     use super::{
-        cancel_commit_evaluation, finalize_requested_commit_evaluation_cancellation,
-        force_cancel_commit_evaluation, mark_commit_evaluation_complete,
-        mark_commit_evaluation_failed, mark_commit_evaluation_started,
-        reset_commit_evaluation, CancelEvalOutcome, EvalCancellationOutcome,
-        EvalCompleteOutcome, EvalFailureOutcome, EvalStartOutcome,
+        CancelEvalOutcome, EvalCancellationOutcome, EvalCompleteOutcome, EvalFailureOutcome,
+        EvalStartOutcome, cancel_commit_evaluation,
+        finalize_requested_commit_evaluation_cancellation, force_cancel_commit_evaluation,
+        mark_commit_evaluation_complete, mark_commit_evaluation_failed,
+        mark_commit_evaluation_started, reset_commit_evaluation,
     };
 
     async fn start_eval(pool: &PgPool, commit_id: i32) -> i32 {
@@ -1741,9 +1749,7 @@ mod tests {
 
         // The stale worker for attempt 1 calls the finalizer with the old attempt.
         let outcome = finalize_requested_commit_evaluation_cancellation(
-            &pool,
-            commit_id,
-            attempt1, // stale expected_attempt
+            &pool, commit_id, attempt1, // stale expected_attempt
         )
         .await
         .expect("finalizer should not error");
@@ -2019,10 +2025,9 @@ mod tests {
             .expect("complete should not error");
 
         // Stale finalizer should see Superseded (not Cancelled).
-        let outcome =
-            finalize_requested_commit_evaluation_cancellation(&pool, commit_id, attempt)
-                .await
-                .expect("finalizer should not error");
+        let outcome = finalize_requested_commit_evaluation_cancellation(&pool, commit_id, attempt)
+            .await
+            .expect("finalizer should not error");
         assert_eq!(
             outcome,
             EvalCancellationOutcome::Superseded,
