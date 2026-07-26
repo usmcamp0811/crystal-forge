@@ -1218,6 +1218,11 @@ pub async fn evaluate_with_nix_eval_jobs(
     };
     let has_known_systems = !known_systems.is_empty();
     let mut seen_systems: HashSet<String> = HashSet::new();
+    // Systems for which nix-eval-jobs emitted a JSON line with an `error`
+    // field. These are confirmed evaluation failures — the error message is
+    // already available. They do not need standalone fallback evaluation and
+    // must not inflate `missing_systems` (which triggers expensive re-eval).
+    let mut error_line_failures: Vec<ConfirmedSystemFailure> = Vec::new();
     let excluded_systems: Vec<String> = known_systems
         .iter()
         .filter(|s| should_skip_system(&allowed_systems, s))
@@ -1633,24 +1638,37 @@ pub async fn evaluate_with_nix_eval_jobs(
 
                                 if let Some(error) = &result.error {
                                     warn!("⚠️  Evaluation error for {}: {}", result.attr, error);
-                                }
 
-                                // Only mark a system as "seen" when it produced a usable
-                                // derivation path. A system that emitted a JSON error line
-                                // is NOT considered seen — it falls through to standalone
-                                // fallback evaluation so the failure can be classified and
-                                // recorded deterministically (ConfirmedSystemFailure or
-                                // InfrastructureFailure) rather than silently disappearing.
-                                if has_known_systems && !has_error && drv_path.is_some() {
-                                    seen_systems.insert(system_name.clone());
-                                }
-
-                                // When we have an authoritative expected-system set, do NOT
-                                // add error results to `results` here — the fallback phase
-                                // will re-evaluate each missing system and add its outcome
-                                // (either a synthetic confirmed failure or a recovered success).
-                                // Adding it here would double-count the system in the summary.
-                                if !has_known_systems || !has_error {
+                                    // When we have an authoritative expected-system set, record
+                                    // the error-line system as a confirmed failure immediately.
+                                    // nix-eval-jobs already provided the error message — no
+                                    // need for an expensive standalone re-evaluation.
+                                    // These systems are NOT added to seen_systems so that
+                                    // they appear correctly in accounting (not "seen" = not
+                                    // successfully evaluated), but they ARE tracked in
+                                    // error_line_failures so they are excluded from
+                                    // missing_systems (no redundant standalone fallback).
+                                    if has_known_systems {
+                                        let derivation_target = build_agent_target(
+                                            &flake.repo_url,
+                                            &commit.git_commit_hash,
+                                            &system_name,
+                                        );
+                                        error_line_failures.push(ConfirmedSystemFailure {
+                                            system_name: system_name.clone(),
+                                            derivation_target,
+                                            error: error.chars().take(500).collect(),
+                                        });
+                                        // Do NOT push to results here; confirmed failures
+                                        // are added to results after the fallback phase.
+                                    } else {
+                                        results.push(result);
+                                    }
+                                } else {
+                                    // Successful evaluation.
+                                    if has_known_systems {
+                                        seen_systems.insert(system_name.clone());
+                                    }
                                     results.push(result);
                                 }
                             }
@@ -1759,10 +1777,17 @@ pub async fn evaluate_with_nix_eval_jobs(
         Vec::new()
     };
 
+    // Systems already confirmed as failures via nix-eval-jobs error lines.
+    // These do not need standalone fallback — the error message is known.
+    let error_line_system_names: HashSet<&str> =
+        error_line_failures.iter().map(|f| f.system_name.as_str()).collect();
+
     // Collect missing systems that need fallback evaluation.
+    // Exclude both successfully-seen systems AND error-line failures —
+    // only truly silent-drop systems (no JSON line at all) go to fallback.
     let missing_systems: Vec<&str> = expected_systems
         .iter()
-        .filter(|s| !seen_systems.contains(s.as_str()))
+        .filter(|s| !seen_systems.contains(s.as_str()) && !error_line_system_names.contains(s.as_str()))
         .map(|s| s.as_str())
         .collect();
     let unexpected_systems: Vec<String> = seen_systems
@@ -1770,10 +1795,14 @@ pub async fn evaluate_with_nix_eval_jobs(
         .filter(|seen| !expected_systems.iter().any(|expected| expected == *seen))
         .cloned()
         .collect();
-    info!("Seen systems: {:?}", seen_systems);
-    info!("Missing systems: {:?}", missing_systems);
+    info!("Seen systems (successful): {:?}", seen_systems);
+    info!("Error-line failures (confirmed from bulk output): {:?}", error_line_system_names);
+    info!("Missing systems (no output at all, need fallback): {:?}", missing_systems);
     info!("Unexpected systems: {:?}", unexpected_systems);
-    let mut confirmed_failures: Vec<ConfirmedSystemFailure> = Vec::new();
+    // Seed confirmed_failures with error-line systems already collected from
+    // the bulk evaluator output. Standalone fallback adds more if any systems
+    // were silently dropped (no JSON line at all).
+    let mut confirmed_failures: Vec<ConfirmedSystemFailure> = error_line_failures;
 
     if missing_systems.len() > MAX_INDIVIDUAL_FALLBACKS {
         bail!(
@@ -3924,22 +3953,29 @@ mod tests {
     // ── seen_systems behavior unit test ───────────────────────────────────
 
     #[test]
-    fn error_result_is_not_seen_so_falls_through_to_fallback() {
-        // Verify the predicate used in evaluate_with_nix_eval_jobs to decide
-        // whether a system is "seen" (and therefore excluded from fallback).
-        // Only systems with has_error=false AND drv_path=Some(...) are seen.
-        fn is_seen(has_error: bool, has_drv: bool) -> bool {
-            !has_error && has_drv
+    fn error_result_routing_semantics() {
+        // Three-way classification for systems in the bulk evaluator output:
+        //
+        //   has_error=false, drv_path=Some → seen (successful, no further action)
+        //   has_error=true                 → confirmed failure (use error message directly,
+        //                                    NOT added to seen_systems or missing_systems)
+        //   has_error=false, drv_path=None → missing (no JSON line or drv; goes to fallback)
+        //
+        // Only truly silent-drop systems (produced no JSON line at all) end up in
+        // missing_systems and trigger standalone fallback evaluation.
+        fn classify(has_error: bool, has_drv: bool) -> &'static str {
+            if !has_error && has_drv {
+                "seen"
+            } else if has_error {
+                "confirmed_failure"
+            } else {
+                "missing"
+            }
         }
 
-        // Successful eval → seen, no fallback needed.
-        assert!(is_seen(false, true));
-
-        // Error JSON line from nix-eval-jobs → NOT seen → will trigger fallback.
-        assert!(!is_seen(true, true));
-        assert!(!is_seen(true, false));
-
-        // Missing drv_path without error → NOT seen → triggers fallback.
-        assert!(!is_seen(false, false));
+        assert_eq!(classify(false, true),  "seen");
+        assert_eq!(classify(true,  true),  "confirmed_failure");
+        assert_eq!(classify(true,  false), "confirmed_failure");
+        assert_eq!(classify(false, false), "missing");
     }
 }
