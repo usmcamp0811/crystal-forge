@@ -475,6 +475,7 @@ pub async fn evaluate_single_system_with_policies(
             drv_path: parsed.drv_path,
             expected_store_path,
             cf_agent_enabled: policy_check.cf_agent_enabled,
+            build_eligible: true,
         },
         policy_check,
     })
@@ -670,6 +671,11 @@ pub struct SuccessfulSystemResult {
     pub drv_path: String,
     pub expected_store_path: Option<String>,
     pub cf_agent_enabled: Option<bool>,
+    /// Whether this system is eligible to receive build jobs under the
+    /// flake's build_scope policy (e.g. cf_systems_only).  When false,
+    /// the derivation is still recorded for accounting purposes, but no
+    /// build job is created.
+    pub build_eligible: bool,
 }
 
 /// A confirmed system failure from the fallback phase, collected before
@@ -749,9 +755,25 @@ pub enum SystemNotQueuedReason {
     StrictPolicyFailure,
     AgentPolicyFailure,
     BuildNotRequested,
+    /// System is not eligible for build jobs under the flake's build_scope
+    /// policy (e.g. cf_systems_only when this system is not a registered
+    /// active Crystal Forge system).  The derivation is still recorded
+    /// for accounting and total-system-count accuracy.
+    BuildScopeExcluded,
 }
 
-fn system_not_queued_reason(policy_check: &PolicyCheckResult) -> Option<SystemNotQueuedReason> {
+fn system_not_queued_reason(
+    policy_check: &PolicyCheckResult,
+    build_eligible: bool,
+) -> Option<SystemNotQueuedReason> {
+    // build_scope filtering: if the system is not eligible under the flake's
+    // build_scope policy, still record the derivation but do not create a
+    // build job.  This check comes first because it is a deployment-policy
+    // gate independent of per-system agent/policy results.
+    if !build_eligible {
+        return Some(SystemNotQueuedReason::BuildScopeExcluded);
+    }
+
     if policy_check.cf_agent_enabled == Some(false) {
         return Some(SystemNotQueuedReason::AgentPolicyFailure);
     }
@@ -787,6 +809,7 @@ pub async fn finalize_evaluated_system(
     result: &SuccessfulSystemResult,
     policy_check: &PolicyCheckResult,
 ) -> Result<SystemFinalizeOutcome> {
+    let build_eligible = result.build_eligible;
     use crate::queries::derivations::{SuccessfulEvalWrite, record_successful_eval_result_in_tx};
 
     let mut tx = pool.begin().await?;
@@ -857,7 +880,7 @@ pub async fn finalize_evaluated_system(
         }
     };
 
-    if let Some(reason) = system_not_queued_reason(policy_check) {
+    if let Some(reason) = system_not_queued_reason(policy_check, build_eligible) {
         tx.commit().await?;
         return Ok(SystemFinalizeOutcome::RecordedWithoutBuild {
             derivation_id,
@@ -1351,14 +1374,16 @@ pub async fn evaluate_with_nix_eval_jobs(
                         match serde_json::from_str::<NixEvalJobResult>(&line) {
                             Ok(result) => {
                                 let system_name = result.attr.clone();
-                                if should_skip_system(&allowed_systems, &system_name) {
+                                let build_eligible = match &allowed_systems {
+                                    Some(systems) => systems.iter().any(|c| c == &system_name),
+                                    None => true,
+                                };
+                                if !build_eligible {
                                     debug!(
-                                        "Skipping evaluated system {} due to flake build_scope={} and target_system={}",
+                                        "System {} is not eligible for build jobs under flake build_scope={} (will be recorded but not queued)",
                                         system_name,
                                         flake.build_scope,
-                                        target_system
                                     );
-                                    continue;
                                 }
                                 let has_error = result.error.is_some();
                                 let drv_path = result.drv_path.clone();
@@ -1535,6 +1560,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             drv_path: drv,
                                             expected_store_path: expected_store_path.clone(),
                                             cf_agent_enabled,
+                                            build_eligible,
                                         };
 
                                         let default_check;
@@ -1765,14 +1791,13 @@ pub async fn evaluate_with_nix_eval_jobs(
     // evaluator crash still creates persisted failure records for all
     // expected-but-unseen systems.
     let expected_systems: Vec<String> = if has_known_systems {
-        // Only consider known systems that are NOT intentionally skipped by
-        // the build_scope filter. Systems excluded by cf_systems_only should
-        // never be reported as failures.
-        known_systems
-            .iter()
-            .filter(|s| !should_skip_system(&allowed_systems, s))
-            .cloned()
-            .collect()
+        // Include every discovered system as "expected" regardless of
+        // build_scope filtering.  Systems excluded by cf_systems_only
+        // must still be accounted for in expected/missing/fallback logic
+        // so the total count is accurate and silent drops are detected.
+        // Build-eligibility filtering now happens at finalization time
+        // (see build_eligible in SuccessfulSystemResult).
+        known_systems.clone()
     } else {
         Vec::new()
     };
@@ -2489,6 +2514,7 @@ pub async fn evaluate_with_mock_eval_jobs(
             drv_path: drv_path.clone(),
             expected_store_path: None,
             cf_agent_enabled,
+            build_eligible: true,
         });
 
         let check = PolicyCheckResult {
@@ -2870,6 +2896,7 @@ mod tests {
             ),
             expected_store_path: None,
             cf_agent_enabled: Some(true),
+            build_eligible: true,
         }
     }
 
@@ -3533,6 +3560,7 @@ mod tests {
             ),
             expected_store_path: None,
             cf_agent_enabled: Some(false),
+            build_eligible: true,
         }
     }
 
