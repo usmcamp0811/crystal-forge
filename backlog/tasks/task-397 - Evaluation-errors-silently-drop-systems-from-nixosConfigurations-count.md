@@ -4,7 +4,7 @@ title: Evaluation errors silently drop systems from nixosConfigurations count
 status: In Progress
 assignee: []
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-25 22:28'
+updated_date: '2026-07-27 20:24'
 labels:
   - evaluator
   - reporting
@@ -96,6 +96,13 @@ Two separate fixes are needed:
 
 <!-- SECTION:PLAN:BEGIN -->
 Reviewer-directed architecture correction for MR !309: replace commit-wide successful-result persistence/queueing with incremental per-system transactional finalization. Add `finalize_evaluated_system` that locks the commit attempt, records one successful derivation with existing state-preserving rules, gates build eligibility on strict policy semantics plus CF-agent requirement, and inserts/fetches an idempotent build job in the same transaction. During stdout and standalone fallback success processing, call this finalizer immediately, then only after commit run queue notification, `QueuedForBuild` broadcast, GC root, closure-count scheduling, and hardening-scan trigger. Keep commit-level finalization limited to summary/status transition and synthetic confirmed failures. Preserve fallback after nonzero `nix-eval-jobs` exit, add authoritative expected/seen/missing logging, and add focused regression tests for strict vs non-strict policy queue gating, fallback success queueing, deterministic missing failure recording, retry idempotency, and cancellation/duplicate finalize races where practical within the existing DB test harness.
+
+1. Emit cfAgentEnabled unconditionally in build_nix_eval_expression for every nixosConfiguration.
+2. Emit cfAgentEnabled unconditionally in build_single_system_eval_expression.
+3. Parse cfAgentEnabled unconditionally in PolicyCheckResult::from_assigned.
+4. Update unit tests: test_build_expression_no_policies and no_policy_configuration_passes_evaluation.
+5. Improve evaluator log to distinguish total registered configurations from configs with policies.
+6. Run cargo check, targeted tests, sqlx prepare --check, and nix build verification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -228,4 +235,6 @@ Remaining for full task completion:
 - CI exact-head pipeline on fc7bdfba
 - Live reproduction with c0782ce6 (nix-builder-1 recovery confirmed via standalone fallback)
 - Workflow-level test: system A claimable build job while B still evaluating (requires mock evaluator hook or test harness extension)
+
+Continuing investigation in worktree TASK-397-eval-errors-silently-drop (HEAD f4865c44). Root cause identified: commit f4865c44 scoped policies per configuration but lost the unconditional cfAgentEnabled emission introduced in 8a9d0b78. Configurations with zero assigned policies now produce an empty policies attrset, so PolicyCheckResult::from_assigned leaves cf_agent_enabled = None. The build-job insert predicate `derivations.cf_agent_enabled = TRUE` then rejects those derivations, producing a successful eval but empty build queue. Fix: always emit cfAgentEnabled in both bulk and standalone Nix expressions, always read it in from_assigned, and update tests/log messaging accordingly.
 <!-- SECTION:NOTES:END -->
