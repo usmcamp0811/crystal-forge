@@ -297,30 +297,33 @@ Remaining: runtime acceptance with the `campground` commit `3ea42835959d49fab431
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Continued MR !309 fix in worktree `TASK-397-eval-errors-silently-drop`.
+Continued MR !309 fixes in worktree `TASK-397-eval-errors-silently-drop`.
 
-## Problem found
-Commit `f4865c44` scoped deployment policies per NixOS configuration but lost the unconditional `cfAgentEnabled` emission introduced in `8a9d0b78`. Configurations with zero assigned policies produced an empty `policies` attrset, so `PolicyCheckResult::from_assigned` left `cf_agent_enabled = None`. The build-job insert predicate `derivations.cf_agent_enabled = TRUE` then rejected those derivations, producing successful evaluations with an empty build queue (observed as "Loaded 0 unique enabled policies across 0 registered configurations" on the `campground` flake).
+## First fix (commit dab3b5b7)
+Commit `f4865c44` scoped deployment policies per NixOS configuration but lost the unconditional `cfAgentEnabled` emission from `8a9d0b78`. Systems without an assigned `require_cf_agent` policy produced an empty `policies` attrset, leaving `cf_agent_enabled = None`. The build-job insert predicate `derivations.cf_agent_enabled = TRUE` then rejected those derivations, producing successful evaluations with an empty build queue.
 
-## Fix
-- `build_nix_eval_expression` now emits `cfAgentEnabled` unconditionally for every `nixosConfiguration`.
-- `build_single_system_eval_expression` emits `cfAgentEnabled` unconditionally in `policyResults`.
-- `PolicyCheckResult::from_assigned` parses `cfAgentEnabled` unconditionally and treats a missing key as an infrastructure/parser mismatch.
-- Standalone and streaming fallback paths no longer default to `cf_agent_enabled = None` when no policies are assigned.
-- Improved log/broadcast wording to say "configurations with assigned policies" instead of "registered configurations".
-- Updated unit tests for the new semantics.
+Fix: emit `cfAgentEnabled` unconditionally in bulk and standalone Nix expressions, parse it unconditionally, stop defaulting to `None` in fallback paths, and clarify log wording.
+
+## Second fix (commit 40ab94f2)
+The per-configuration bulk checker bound its argument as `config` and passed only `cfg.config`, while built-in policy fragments (`RequirePackages`, `RequireCrystalForgeAgent`) are generated against the full `cfg` object. Production evaluation failed with `undefined variable 'cfg'` for any configuration with an assigned package or agent policy.
+
+Fix: unify all Nix-evaluated policy fragments on the `cfg` lexical contract, where the checker receives the full `nixosConfigurations.<name>` object as `cfg` and accesses options via `cfg.config.*`.
 
 ## Verification
+- `cargo fmt --check` exit 0
 - `env SQLX_OFFLINE=true cargo check -p cf-server --all-targets` exit 0
-- `env SQLX_OFFLINE=true cargo test -p cf-server --lib` exit 0; 651 passed, 195 ignored
-- `cargo test -p cf-server models::evaluate_with_policies::tests::finalize_system_ --lib -- --ignored --test-threads=1` against dev DB: 11 passed
-- `cargo sqlx prepare --check -- --all-targets` against dev DB: exit 0
+- `env SQLX_OFFLINE=true cargo test -p cf-server --lib` exit 0; 658 passed, 196 ignored
+- `cargo test -p cf-server models::deployment_policies::tests::generated_policy_fields_evaluate_without_undefined_variables --lib -- --ignored` (Nix evaluator): 1 passed
+- `cargo test -p cf-server models::evaluate_with_policies::tests::finalize_system_ --lib -- --ignored --test-threads=1` (dev DB): 11 passed
+- `cargo sqlx prepare --check -- --all-targets` (dev DB): exit 0
 - `nix build .#packages.x86_64-linux.server --no-link` exit 0
 - `nix build .#devScripts.state-machine-test --no-link` exit 0
 - `git diff --check` exit 0
 
 ## Commit / MR
-- Commit: `dab3b5b7`
 - Branch: `TASK-397-eval-errors-silently-drop`
+- Commits: `dab3b5b7`, `40ab94f2`
 - MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/309
+
+Remaining: runtime acceptance with the `campground` commit `3ea42835959d49fab431f07470dfc93fb7f7a52d` to confirm no `undefined variable 'cfg'` and that `gray` evaluates/queues correctly.
 <!-- SECTION:FINAL_SUMMARY:END -->
