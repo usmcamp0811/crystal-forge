@@ -408,7 +408,7 @@ fn build_single_system_eval_expression(
     let policy_fields = if field_lines.is_empty() {
         String::new()
     } else {
-        field_lines.join("\n")
+        format!("\n{}", field_lines.join("\n"))
     };
 
     format!(
@@ -418,7 +418,9 @@ let
   cfg = builtins.getAttr {system_name} flake.nixosConfigurations;
   drv = cfg.config.system.build.toplevel;
   policyResults = {{
-{policy_fields}
+    cfAgentEnabled = (cfg.config.systemd.services.crystal-forge-agent.enable or false)
+      || ((cfg.config.services.crystal-forge.enable or false)
+          && (cfg.config.services.crystal-forge.client.enable or false));{policy_fields}
   }};
 in {{
   drvPath = drv.drvPath;
@@ -571,18 +573,10 @@ pub async fn evaluate_single_system_with_policies(
 
     let expected_store_path =
         resolve_expected_store_path(&parsed.drv_path, Some(&parsed.outputs)).await;
-    let policy_check = if assigned.is_empty() {
-        PolicyCheckResult {
-            system_name: system_name.to_string(),
-            cf_agent_enabled: None,
-            has_required_packages: None,
-            custom_checks: HashMap::new(),
-            meets_requirements: true,
-            warnings: Vec::new(),
-            failed_policies: Vec::new(),
-            cve_checks: Vec::new(),
-        }
-    } else {
+    // The standalone evaluator always emits cfAgentEnabled, so parse it
+    // unconditionally even when no deployment policies are assigned. A missing
+    // key is an infrastructure/parser mismatch rather than a silent pass.
+    let policy_check =
         match PolicyCheckResult::from_assigned(system_name.to_string(), &parsed.policies, assigned)
         {
             Ok(check) => check,
@@ -595,8 +589,7 @@ pub async fn evaluate_single_system_with_policies(
                     ),
                 });
             }
-        }
-    };
+        };
 
     Ok(StandaloneSystemOutcome::Success {
         result: SuccessfulSystemResult {
@@ -1923,13 +1916,13 @@ pub async fn evaluate_with_nix_eval_jobs(
         .values()
         .flat_map(|v| v.iter().map(|ap| ap.policy_id))
         .collect();
-    let registered_configs_with_policies = policies_by_configuration.len();
+    let configs_with_policies = policies_by_configuration.len();
 
     info!(
-        "🚀 Running: nix-eval-jobs for {} — {} unique enabled policies across {} registered configurations",
+        "🚀 Running: nix-eval-jobs for {} — {} unique enabled policies across {} configurations with assigned policies",
         target_system,
         unique_policy_count.len(),
-        registered_configs_with_policies,
+        configs_with_policies,
     );
 
     // Broadcast detailed start information
@@ -1945,9 +1938,9 @@ pub async fn evaluate_with_nix_eval_jobs(
             .await;
 
         let policy_msg = format!(
-            "📋 Loaded {} unique enabled policies across {} registered configurations",
+            "📋 Loaded {} unique enabled policies across {} configurations with assigned policies",
             unique_policy_count.len(),
-            registered_configs_with_policies,
+            configs_with_policies,
         );
         broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, policy_msg)
             .await;
@@ -2280,15 +2273,32 @@ pub async fn evaluate_with_nix_eval_jobs(
                                     debug!("⚠️  No meta field for {}", system_name);
                                 }
 
-                                // Configurations with no assigned policies pass policy evaluation.
+                                // Configurations with no assigned policies still receive
+                                // unconditional cfAgentEnabled metadata from the evaluator.
+                                // Synthesize a passing check only when that metadata is present;
+                                // otherwise leave policy_check_for_system as None so the system
+                                // is not incorrectly persisted with a null cf_agent_enabled.
                                 if policy_check_for_system.is_none() && assigned_policies.is_empty() {
+                                    let cf_agent_enabled = result
+                                        .meta
+                                        .as_ref()
+                                        .and_then(|m| m.get("policies"))
+                                        .and_then(|p| p.get("cfAgentEnabled"))
+                                        .and_then(|v| v.as_bool());
                                     let check = PolicyCheckResult {
                                         system_name: system_name.clone(),
-                                        cf_agent_enabled: None,
+                                        cf_agent_enabled,
                                         has_required_packages: None,
                                         custom_checks: HashMap::new(),
-                                        meets_requirements: true,
-                                        warnings: Vec::new(),
+                                        meets_requirements: cf_agent_enabled.is_some(),
+                                        warnings: if cf_agent_enabled.is_none() {
+                                            vec![format!(
+                                                "{}: evaluator did not emit cfAgentEnabled metadata",
+                                                system_name
+                                            )]
+                                        } else {
+                                            Vec::new()
+                                        },
                                         failed_policies: Vec::new(),
                                         cve_checks: Vec::new(),
                                     };
@@ -5390,8 +5400,9 @@ mod tests {
         let key_grafana = crate::models::deployment_policies::policy_result_key(&id_grafana);
         let key_neovim = crate::models::deployment_policies::policy_result_key(&id_neovim);
 
-        // alpha: grafana check fails, neovim key not present (not assigned)
-        let alpha_json = serde_json::json!({ &key_grafana: false });
+        // alpha: grafana check fails, neovim key not present (not assigned),
+        // cfAgentEnabled emitted unconditionally.
+        let alpha_json = serde_json::json!({ "cfAgentEnabled": true, &key_grafana: false });
         let alpha_check = PolicyCheckResult::from_assigned(
             "alpha".to_string(),
             &alpha_json,
@@ -5405,8 +5416,9 @@ mod tests {
         );
         assert!(!alpha_check.failed_policies.is_empty());
 
-        // beta: neovim check passes, grafana key not present (not assigned)
-        let beta_json = serde_json::json!({ &key_neovim: true });
+        // beta: neovim check passes, grafana key not present (not assigned),
+        // cfAgentEnabled emitted unconditionally.
+        let beta_json = serde_json::json!({ "cfAgentEnabled": true, &key_neovim: true });
         let beta_check = PolicyCheckResult::from_assigned(
             "beta".to_string(),
             &beta_json,
@@ -5423,7 +5435,7 @@ mod tests {
         // Prove isolation: beta's result is unaffected by alpha's failure.
         // (If a flake-wide policy union were applied, beta would also check grafana
         // and would also fail if grafana key is absent from its JSON.)
-        let beta_json_no_grafana = serde_json::json!({ &key_neovim: true });
+        let beta_json_no_grafana = serde_json::json!({ "cfAgentEnabled": true, &key_neovim: true });
         let beta_check2 = PolicyCheckResult::from_assigned(
             "beta".to_string(),
             &beta_json_no_grafana,
@@ -5458,8 +5470,9 @@ mod tests {
             }],
         );
 
-        // beta: no assigned policies → empty slice → should produce Ok pass result
-        let beta_json = serde_json::json!({});
+        // beta: no assigned policies → empty slice, but evaluator still emits
+        // cfAgentEnabled unconditionally so build-job eligibility is known.
+        let beta_json = serde_json::json!({ "cfAgentEnabled": true });
         let beta_check = PolicyCheckResult::from_assigned("beta".to_string(), &beta_json, &[])
             .expect("from_assigned with empty assigned must not error");
 
@@ -5469,8 +5482,18 @@ mod tests {
         );
         assert!(beta_check.failed_policies.is_empty());
         assert_eq!(
-            beta_check.cf_agent_enabled, None,
-            "cf_agent_enabled must be None when no agent policy assigned"
+            beta_check.cf_agent_enabled,
+            Some(true),
+            "cf_agent_enabled must be read from unconditional evaluator metadata"
+        );
+
+        // Missing cfAgentEnabled is an infrastructure/parser mismatch.
+        let missing_json = serde_json::json!({});
+        let missing_result =
+            PolicyCheckResult::from_assigned("beta".to_string(), &missing_json, &[]);
+        assert!(
+            missing_result.is_err(),
+            "absent cfAgentEnabled must be treated as an infrastructure error"
         );
     }
 }

@@ -517,10 +517,28 @@ impl PolicyCheckResult {
         assigned: &[AssignedPolicy],
     ) -> Result<Self, String> {
         let mut warnings = Vec::new();
-        let mut cf_agent_enabled: Option<bool> = None;
         let mut has_required_packages: Option<bool> = None;
         let mut custom_checks = HashMap::new();
         let mut failed_policies = Vec::new();
+
+        // cfAgentEnabled is emitted unconditionally by the evaluator for every
+        // configuration, even when no require_cf_agent policy is assigned. The
+        // build-job insert predicate depends on this value being present, so a
+        // missing key is treated as an infrastructure/parser mismatch rather
+        // than silently defaulting to None (which would silently drop builds).
+        let mut cf_agent_enabled = match policies_json.get("cfAgentEnabled") {
+            Some(v) => v.as_bool(),
+            None => {
+                return Err(format!(
+                    "Configuration {:?}: expected unconditional Nix metadata key \"cfAgentEnabled\" \
+                     but key was absent (available: {:?})",
+                    system_name,
+                    policies_json
+                        .as_object()
+                        .map(|o| o.keys().collect::<Vec<_>>()),
+                ));
+            }
+        };
 
         for (idx, ap) in assigned.iter().enumerate() {
             if !ap.policy.is_nix_evaluated() {
@@ -960,6 +978,10 @@ pub fn build_nix_eval_expression(
 let
   flake = builtins.getFlake {flake_ref};
   policyCheckers = {checkers};
+  cfAgentEnabledExpr = config:
+    (config.systemd.services.crystal-forge-agent.enable or false)
+    || ((config.services.crystal-forge.enable or false)
+        && (config.services.crystal-forge.client.enable or false));
 in
   builtins.mapAttrs (name: cfg:
     let
@@ -968,7 +990,7 @@ in
     in
       drv // {{
         meta = (drv.meta or {{}}) // {{
-          policies = checker cfg.config;
+          policies = {{ cfAgentEnabled = cfAgentEnabledExpr cfg.config; }} // (checker cfg.config);
         }};
       }}
   ) flake.nixosConfigurations
@@ -1085,8 +1107,11 @@ mod tests {
         let map = PoliciesByConfiguration::new();
         let expr = build_nix_eval_expression("github:user/repo", &map);
         assert!(expr.contains("builtins.getFlake"));
-        // Empty map → no configuration-specific checkers → policyCheckers = {}
+        // Empty map → no configuration-specific checkers, but cfAgentEnabled
+        // must still be emitted unconditionally so builds can be queued.
         assert!(expr.contains("policyCheckers"));
+        assert!(expr.contains("cfAgentEnabled"));
+        assert!(expr.contains("cfAgentEnabledExpr"));
     }
 
     #[test]
