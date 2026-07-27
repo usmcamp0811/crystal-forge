@@ -19,13 +19,28 @@ const EVAL_PROGRESS_HEARTBEAT_SECS: u64 = 30;
 /// Maximum number of missing systems to attempt individual fallback evaluation
 /// for. Beyond this threshold, treat as a likely process-wide evaluator failure
 /// and retry the commit rather than spawning dozens of standalone evaluations.
-const MAX_INDIVIDUAL_FALLBACKS: usize = 8;
+const MAX_INDIVIDUAL_FALLBACKS: usize = 4;
+/// If nix-eval-jobs silently drops more than this percentage of expected
+/// systems, abort instead of launching individual fallbacks.
+const MAX_FALLBACK_MISSING_PERCENT: usize = 25;
 /// Maximum concurrent fallback evaluations.
 const FALLBACK_CONCURRENCY: usize = 2;
 /// Overall deadline for the fallback phase.
 const FALLBACK_PHASE_TIMEOUT: Duration = Duration::from_secs(180);
 const CLOSURE_COUNT_MAX_CONCURRENT: usize = 2;
 static CLOSURE_COUNT_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+/// Process-wide limit on concurrent standalone `nix eval` subprocesses.
+/// Each full Nix evaluation of a large flake can use 4–6 GiB of memory;
+/// this semaphore prevents runaway fan-out when multiple commits evaluate
+/// concurrently or when the fallback phase fires for many systems.
+const MAX_CONCURRENT_STANDALONE_NIX_EVALS: usize = 2;
+static STANDALONE_NIX_EVAL_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn standalone_nix_eval_limiter() -> Arc<Semaphore> {
+    STANDALONE_NIX_EVAL_LIMITER
+        .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_STANDALONE_NIX_EVALS)))
+        .clone()
+}
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BuildConfig, ServerConfig};
@@ -407,29 +422,100 @@ pub async fn evaluate_single_system_with_policies(
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     let nix_expr = build_single_system_eval_expression(&flake_ref, system_name, policies);
 
+    // Acquire the process-wide standalone eval slot before spawning.
+    // This semaphore caps total concurrent `nix eval` processes across all
+    // commits and fallback phases, preventing memory exhaustion on large flakes.
+    let _nix_permit = match standalone_nix_eval_limiter().acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => {
+            return Ok(StandaloneSystemOutcome::InfrastructureFailure {
+                system_name: system_name.to_string(),
+                error: "standalone Nix eval limiter was closed".to_string(),
+            });
+        }
+    };
+
     let mut cmd = tokio::process::Command::new("nix");
-    cmd.kill_on_drop(true);
     cmd.args(["eval", "--impure", "--json", "--expr", &nix_expr]);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     build_config.apply_to_command(&mut cmd);
     if let Some(c) = creds {
         c.apply_to_nix_command(&mut cmd);
     }
 
-    let output = match tokio::time::timeout(Duration::from_secs(120), cmd.output()).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
             return Ok(StandaloneSystemOutcome::InfrastructureFailure {
                 system_name: system_name.to_string(),
-                error: format!("Failed to run standalone eval: {}", e),
+                error: format!("Failed to spawn standalone eval: {}", e),
             });
         }
-        Err(_) => {
+    };
+
+    // Collect stdout/stderr via background tasks so `child` stays owned here
+    // and we can explicitly kill+reap on timeout without a borrow-after-move.
+    let mut stdout_buf = child.stdout.take().map(|s| {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            let mut r = s;
+            let _ = r.read_to_end(&mut buf).await;
+            buf
+        })
+    });
+    let mut stderr_buf = child.stderr.take().map(|s| {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            let mut r = s;
+            let _ = r.read_to_end(&mut buf).await;
+            buf
+        })
+    });
+
+    let status = tokio::select! {
+        result = child.wait() => {
+            match result {
+                Ok(s) => s,
+                Err(e) => {
+                    return Ok(StandaloneSystemOutcome::InfrastructureFailure {
+                        system_name: system_name.to_string(),
+                        error: format!("Failed to wait on standalone eval: {}", e),
+                    });
+                }
+            }
+        }
+        _ = tokio::time::sleep(Duration::from_secs(120)) => {
+            // Timeout: kill the child explicitly and reap it.
+            let pid = child.id();
+            if let Err(kill_err) = child.kill().await {
+                warn!(
+                    system = %system_name,
+                    pid,
+                    "failed to kill timed-out standalone nix eval: {kill_err}"
+                );
+            }
+            let _ = child.wait().await;
+            // Abort the I/O tasks so they don't linger.
+            if let Some(t) = stdout_buf.take() { t.abort(); }
+            if let Some(t) = stderr_buf.take() { t.abort(); }
             return Ok(StandaloneSystemOutcome::InfrastructureFailure {
                 system_name: system_name.to_string(),
                 error: format!("Standalone eval timed out for {}", system_name),
             });
         }
     };
+
+    let stdout = match stdout_buf.take() {
+        Some(t) => t.await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let stderr = match stderr_buf.take() {
+        Some(t) => t.await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let output = std::process::Output { status, stdout, stderr };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -526,29 +612,92 @@ in
     // substitute behaviour, Nix timeouts, sandbox settings, etc.).
     build_config.apply_to_command(&mut cmd);
 
-    // Kill the nix process if the future is dropped (e.g. timeout or
-    // cancellation during the buffer_unordered fallback phase).
-    cmd.kill_on_drop(true);
-
     if let Some(c) = creds {
         c.apply_to_nix_command(&mut cmd);
     }
 
-    let output = match tokio::time::timeout(Duration::from_secs(120), cmd.output()).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
+    // Acquire the process-wide standalone eval slot.
+    let _nix_permit = match standalone_nix_eval_limiter().acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => {
             return FallbackEvalOutcome::InfrastructureFailure {
                 system_name: system_name.to_string(),
-                error: format!("Failed to run fallback eval: {}", e),
+                error: "standalone Nix eval limiter was closed".to_string(),
             };
         }
-        Err(_) => {
+    };
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return FallbackEvalOutcome::InfrastructureFailure {
+                system_name: system_name.to_string(),
+                error: format!("Failed to spawn fallback eval: {}", e),
+            };
+        }
+    };
+
+    let mut stdout_buf = child.stdout.take().map(|s| {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            let mut r = s;
+            let _ = r.read_to_end(&mut buf).await;
+            buf
+        })
+    });
+    let mut stderr_buf = child.stderr.take().map(|s| {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            let mut r = s;
+            let _ = r.read_to_end(&mut buf).await;
+            buf
+        })
+    });
+
+    let status = tokio::select! {
+        result = child.wait() => {
+            match result {
+                Ok(s) => s,
+                Err(e) => {
+                    return FallbackEvalOutcome::InfrastructureFailure {
+                        system_name: system_name.to_string(),
+                        error: format!("Failed to wait on fallback eval: {}", e),
+                    };
+                }
+            }
+        }
+        _ = tokio::time::sleep(Duration::from_secs(120)) => {
+            let pid = child.id();
+            if let Err(kill_err) = child.kill().await {
+                warn!(
+                    system = %system_name,
+                    pid,
+                    "failed to kill timed-out fallback nix eval: {kill_err}"
+                );
+            }
+            let _ = child.wait().await;
+            if let Some(t) = stdout_buf.take() { t.abort(); }
+            if let Some(t) = stderr_buf.take() { t.abort(); }
             return FallbackEvalOutcome::InfrastructureFailure {
                 system_name: system_name.to_string(),
                 error: format!("Fallback eval timed out for {}", system_name),
             };
         }
     };
+
+    let stdout = match stdout_buf.take() {
+        Some(t) => t.await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let stderr_bytes = match stderr_buf.take() {
+        Some(t) => t.await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let output = std::process::Output { status, stdout, stderr: stderr_bytes };
 
     if output.status.success() {
         // The system actually evaluates fine — this is an evaluator omission,
@@ -2622,6 +2771,23 @@ pub async fn evaluate_with_nix_eval_jobs(
             missing_systems.len(),
             MAX_INDIVIDUAL_FALLBACKS,
         );
+    }
+
+    // Also bail if a large *fraction* of expected systems are missing — even
+    // if the absolute count is within MAX_INDIVIDUAL_FALLBACKS — because
+    // launching multiple full-flake Nix evaluations when most systems are
+    // missing indicates a systemic evaluator failure, not individual breakage.
+    if !expected_systems.is_empty() && !missing_systems.is_empty() {
+        let missing_pct = missing_systems.len() * 100 / expected_systems.len();
+        if missing_pct > MAX_FALLBACK_MISSING_PERCENT {
+            bail!(
+                "nix-eval-jobs silently dropped {}% of expected systems ({} of {}); \
+                 refusing standalone fallback — likely process-wide evaluator failure",
+                missing_pct,
+                missing_systems.len(),
+                expected_systems.len(),
+            );
+        }
     }
 
     info!(
