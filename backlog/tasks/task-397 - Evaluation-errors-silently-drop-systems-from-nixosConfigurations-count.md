@@ -1,7 +1,7 @@
 ---
 id: TASK-397
 title: Evaluation errors silently drop systems from nixosConfigurations count
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-07-24 00:29'
 updated_date: '2026-07-27 20:47'
@@ -263,3 +263,34 @@ Verification (worktree TASK-397-eval-errors-silently-drop):
 
 Remaining: commit, push to MR !309, and run CI exact-head pipeline.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Continued MR !309 fix in worktree `TASK-397-eval-errors-silently-drop`.
+
+## Problem found
+Commit `f4865c44` scoped deployment policies per NixOS configuration but lost the unconditional `cfAgentEnabled` emission introduced in `8a9d0b78`. Configurations with zero assigned policies produced an empty `policies` attrset, so `PolicyCheckResult::from_assigned` left `cf_agent_enabled = None`. The build-job insert predicate `derivations.cf_agent_enabled = TRUE` then rejected those derivations, producing successful evaluations with an empty build queue (observed as "Loaded 0 unique enabled policies across 0 registered configurations" on the `campground` flake).
+
+## Fix
+- `build_nix_eval_expression` now emits `cfAgentEnabled` unconditionally for every `nixosConfiguration`.
+- `build_single_system_eval_expression` emits `cfAgentEnabled` unconditionally in `policyResults`.
+- `PolicyCheckResult::from_assigned` parses `cfAgentEnabled` unconditionally and treats a missing key as an infrastructure/parser mismatch.
+- Standalone and streaming fallback paths no longer default to `cf_agent_enabled = None` when no policies are assigned.
+- Improved log/broadcast wording to say "configurations with assigned policies" instead of "registered configurations".
+- Updated unit tests for the new semantics.
+
+## Verification
+- `env SQLX_OFFLINE=true cargo check -p cf-server --all-targets` exit 0
+- `env SQLX_OFFLINE=true cargo test -p cf-server --lib` exit 0; 651 passed, 195 ignored
+- `cargo test -p cf-server models::evaluate_with_policies::tests::finalize_system_ --lib -- --ignored --test-threads=1` against dev DB: 11 passed
+- `cargo sqlx prepare --check -- --all-targets` against dev DB: exit 0
+- `nix build .#packages.x86_64-linux.server --no-link` exit 0
+- `nix build .#devScripts.state-machine-test --no-link` exit 0
+- `git diff --check` exit 0
+
+## Commit / MR
+- Commit: `dab3b5b7`
+- Branch: `TASK-397-eval-errors-silently-drop`
+- MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/309
+<!-- SECTION:FINAL_SUMMARY:END -->
