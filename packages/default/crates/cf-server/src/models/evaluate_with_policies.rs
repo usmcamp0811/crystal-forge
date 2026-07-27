@@ -346,13 +346,15 @@ fn build_single_system_eval_expression(
     let nix_policies: Vec<&DeploymentPolicy> =
         policies.iter().filter(|p| p.is_nix_evaluated()).collect();
 
-    let policy_fields = if nix_policies.is_empty() {
-        "        # No policies configured".to_string()
-    } else {
+    let cf_agent_field = "        cfAgentEnabled = (cfg.config.systemd.services.crystal-forge-agent.enable or false) || ((cfg.config.services.crystal-forge.enable or false) && (cfg.config.services.crystal-forge.client.enable or false));";
+
+    let mut policy_lines = vec![cf_agent_field.to_string()];
+    policy_lines.extend(
         nix_policies
             .iter()
             .enumerate()
             .flat_map(|(policy_idx, policy)| match policy {
+                DeploymentPolicy::RequireCrystalForgeAgent { .. } => Vec::new(),
                 DeploymentPolicy::CustomCheck { rules, .. } if !rules.is_empty() => rules
                     .iter()
                     .map(|rule| format!("        {} = {};", rule.field_name, rule.expression))
@@ -361,10 +363,9 @@ fn build_single_system_eval_expression(
                     let (field_name, expr) = policy.to_nix_expression_with_index(policy_idx);
                     vec![format!("        {} = {};", field_name, expr)]
                 }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
+            }),
+    );
+    let policy_fields = policy_lines.join("\n");
 
     format!(
         r#"
@@ -1070,21 +1071,51 @@ pub async fn activate_evaluated_system_build(
             }
         }
         None => {
-            // Derivation is no longer build-eligible (e.g. cf_agent_enabled
-            // changed between persist and activate).  Treat as a no-op.
-            info!(
-                commit_id,
-                derivation_id, "system_build_job_activate_not_eligible"
+            #[derive(sqlx::FromRow)]
+            struct DerivationActivationState {
+                derivation_name: String,
+                status_id: i32,
+                cf_agent_enabled: Option<bool>,
+                derivation_path: Option<String>,
+            }
+
+            let state = sqlx::query_as::<_, DerivationActivationState>(
+                r#"
+                SELECT derivation_name, status_id, cf_agent_enabled, derivation_path
+                FROM derivations
+                WHERE id = $1
+                "#,
+            )
+            .bind(derivation_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            tx.rollback().await?;
+
+            let Some(state) = state else {
+                bail!(
+                    "Build activation could not create a build job because derivation {} no longer exists",
+                    derivation_id,
+                );
+            };
+
+            bail!(
+                "Build activation could not create a build job for derivation {} ({}) with status_id={}, cf_agent_enabled={:?}, derivation_path={:?}",
+                derivation_id,
+                state.derivation_name,
+                state.status_id,
+                state.cf_agent_enabled,
+                state.derivation_path,
             );
-            tx.commit().await?;
-            return Ok(SystemBuildActivationOutcome::Superseded);
         }
     };
 
     tx.commit().await?;
     info!(
         commit_id,
-        derivation_id, "system_build_activation_committed"
+        derivation_id,
+        ?outcome,
+        "build_activation_committed"
     );
     Ok(outcome)
 }
@@ -2180,6 +2211,14 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                 let cf_state_owned = cf_state.cloned();
                                                 let queue_notifier_owned = _queue_notifier.cloned();
 
+                                                info!(
+                                                    commit_id,
+                                                    expected_attempt,
+                                                    derivation_id,
+                                                    system = %system_name,
+                                                    "build_preparation_spawned"
+                                                );
+
                                                 build_preparations.spawn(async move {
                                                     let _permit = build_preparation_limit
                                                         .acquire_owned()
@@ -2187,6 +2226,14 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                         .context(
                                                             "Build preparation semaphore closed",
                                                         )?;
+
+                                                    info!(
+                                                        commit_id,
+                                                        expected_attempt = attempt,
+                                                        derivation_id,
+                                                        system = %system_name,
+                                                        "build_preparation_started"
+                                                    );
 
                                                     // Phase 2: GC root (required — bail on failure)
                                                     let rooted = crate::builder::create_drv_gc_root(
@@ -2215,6 +2262,14 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                             derivation_id, drv_path,
                                                         );
                                                     }
+
+                                                    info!(
+                                                        commit_id,
+                                                        expected_attempt = attempt,
+                                                        derivation_id,
+                                                        system = %system_name,
+                                                        "build_gc_root_created"
+                                                    );
 
                                                     // Phase 3: activate build job (second transaction)
                                                     let activation =
@@ -2258,6 +2313,14 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                             // in_progress).
                                                         }
                                                     }
+
+                                                    info!(
+                                                        commit_id,
+                                                        expected_attempt = attempt,
+                                                        derivation_id,
+                                                        system = %system_name,
+                                                        "build_preparation_completed"
+                                                    );
 
                                                     Ok(())
                                                 });
@@ -3105,6 +3168,10 @@ pub async fn evaluate_with_nix_eval_jobs(
         .await;
     }
 
+    info!(
+        commit_id = commit.id,
+        expected_attempt, "build_preparation_drain_started"
+    );
     // Drain all pending build preparations before returning.  Any
     // preparation failure (GC root error, activation error) propagates
     // here so the evaluation attempt is not marked complete with
@@ -3112,6 +3179,10 @@ pub async fn evaluate_with_nix_eval_jobs(
     while let Some(result) = build_preparations.join_next().await {
         result.context("Build preparation task panicked")??;
     }
+    info!(
+        commit_id = commit.id,
+        expected_attempt, "build_preparation_drain_completed"
+    );
 
     Ok(EvaluationPlan {
         results,

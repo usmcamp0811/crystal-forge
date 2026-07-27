@@ -472,7 +472,13 @@ impl PolicyCheckResult {
         policies: &[DeploymentPolicy],
     ) -> Self {
         let mut warnings = Vec::new();
-        let mut cf_agent_enabled = None;
+        // Always read cfAgentEnabled when present. The evaluator emits this
+        // metadata even when require_cf_agent is not configured as an active
+        // deployment policy, because build-job eligibility still depends on
+        // whether the target can run the Crystal Forge agent.
+        let mut cf_agent_enabled = policies_json
+            .get("cfAgentEnabled")
+            .and_then(|v| v.as_bool());
         let mut has_required_packages = None;
         let mut custom_checks = HashMap::new();
         let mut failed_policies = Vec::new();
@@ -638,32 +644,30 @@ pub fn build_nix_eval_expression(flake_ref: &str, policies: &[DeploymentPolicy])
     let nix_policies: Vec<&DeploymentPolicy> =
         policies.iter().filter(|p| p.is_nix_evaluated()).collect();
 
-    let policy_fields = if nix_policies.is_empty() {
-        "        # No policies configured".to_string()
-    } else {
-        nix_policies
-            .iter()
-            .enumerate()
-            .flat_map(|(policy_idx, policy)| {
-                match policy {
-                    DeploymentPolicy::CustomCheck { rules, .. } if !rules.is_empty() => {
-                        // Multi-rule: emit one field per rule
-                        rules
-                            .iter()
-                            .map(|rule| {
-                                format!("        {} = {};", rule.field_name, rule.expression)
-                            })
-                            .collect::<Vec<_>>()
-                    }
-                    _ => {
-                        let (field_name, expr) = policy.to_nix_expression_with_index(policy_idx);
-                        vec![format!("        {} = {};", field_name, expr)]
-                    }
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
+    let cf_agent_field = "        cfAgentEnabled = (cfg.config.systemd.services.crystal-forge-agent.enable or false) || ((cfg.config.services.crystal-forge.enable or false) && (cfg.config.services.crystal-forge.client.enable or false));";
+
+    let mut policy_lines = vec![cf_agent_field.to_string()];
+    policy_lines.extend(nix_policies.iter().enumerate().flat_map(
+        |(policy_idx, policy)| match policy {
+            // cfAgentEnabled is emitted unconditionally above. Keep this
+            // policy in the enumeration so later indexed policy field names
+            // still match PolicyCheckResult::from_json, but do not emit a
+            // duplicate attrset key.
+            DeploymentPolicy::RequireCrystalForgeAgent { .. } => Vec::new(),
+            DeploymentPolicy::CustomCheck { rules, .. } if !rules.is_empty() => {
+                // Multi-rule: emit one field per rule
+                rules
+                    .iter()
+                    .map(|rule| format!("        {} = {};", rule.field_name, rule.expression))
+                    .collect::<Vec<_>>()
+            }
+            _ => {
+                let (field_name, expr) = policy.to_nix_expression_with_index(policy_idx);
+                vec![format!("        {} = {};", field_name, expr)]
+            }
+        },
+    ));
+    let policy_fields = policy_lines.join("\n");
 
     format!(
         r#"
@@ -783,7 +787,20 @@ mod tests {
     fn test_build_expression_no_policies() {
         let expr = build_nix_eval_expression("github:user/repo", &[]);
         assert!(expr.contains("builtins.getFlake"));
-        assert!(expr.contains("No policies configured"));
+        assert!(expr.contains("cfAgentEnabled"));
+    }
+
+    #[test]
+    fn policy_check_result_reads_cf_agent_metadata_without_policy() {
+        let policies_json = serde_json::json!({
+            "cfAgentEnabled": true,
+        });
+
+        let result = PolicyCheckResult::from_json("host-a".to_string(), &policies_json, &[]);
+
+        assert_eq!(result.cf_agent_enabled, Some(true));
+        assert!(result.meets_requirements);
+        assert!(result.failed_policies.is_empty());
     }
 
     #[test]

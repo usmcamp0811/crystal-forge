@@ -1110,6 +1110,11 @@ async fn process_pending_commits(
                 let results = plan.results.clone();
                 let policy_checks = plan.policy_checks.clone();
 
+                info!(
+                    commit_id = commit.id,
+                    expected_attempt = attempt,
+                    "commit_evaluation_finalization_started"
+                );
                 match finalize_evaluation_attempt(pool, commit.id, attempt, &plan).await {
                     Err(e) => {
                         let error = e.context(format!(
