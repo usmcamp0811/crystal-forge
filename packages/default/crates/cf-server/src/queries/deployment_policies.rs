@@ -102,6 +102,141 @@ pub async fn list_enabled_policies_for_flake(
     Ok(policies)
 }
 
+/// A raw row returned by [`list_policy_rows_by_configuration_for_flake`].
+/// Each row associates one enabled policy record with the NixOS configuration
+/// name of the system that holds the assignment (via environment or directly).
+#[derive(Debug, sqlx::FromRow)]
+pub struct ConfigPolicyRow {
+    /// NixOS configuration name: `COALESCE(NULLIF(BTRIM(system_configuration_name), ''), hostname)`.
+    pub configuration_name: String,
+    /// Stable policy UUID — used as the sort/deduplicate key.
+    pub policy_id: Uuid,
+    /// Policy name.
+    pub name: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Policy type string (e.g. `"require_cf_agent"`, `"require_packages"`).
+    pub policy_type: String,
+    /// Policy configuration JSON.
+    pub config: serde_json::Value,
+    /// Whether the policy is enabled (always `true` here due to the WHERE clause).
+    pub enabled: bool,
+    /// Creation timestamp.
+    pub created_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
+    /// Last-updated timestamp.
+    pub updated_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
+}
+
+impl ConfigPolicyRow {
+    /// Convert this row into a `DeploymentPolicyRecord` for use with the
+    /// existing `parse_deployment_policy_record` helper.
+    pub fn as_policy_record(&self) -> DeploymentPolicyRecord {
+        DeploymentPolicyRecord {
+            id: self.policy_id,
+            name: self.name.clone(),
+            description: self.description.clone(),
+            policy_type: self.policy_type.clone(),
+            config: self.config.clone(),
+            enabled: self.enabled,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+/// Load enabled deployment policies scoped to the active systems in `flake_id`,
+/// returning one row per (configuration_name, policy) pair.
+///
+/// This is the data source for building a [`PoliciesByConfiguration`] map.
+/// Converting the rows to parsed `DeploymentPolicy` values and handling
+/// conflict detection is done in the calling layer (`server/mod.rs`) which
+/// has access to `parse_deployment_policy_record`.
+///
+/// The UNION of `environment_policies` and `system_policies` is intentional:
+/// assigning the same policy through both sources must not produce two rows.
+/// Rows are ordered by `(configuration_name, policy_id)` for deterministic
+/// processing.
+///
+/// Inactive systems (`is_active = FALSE`) are excluded so that stale
+/// registrations cannot pollute the policy set for current evaluations.
+pub async fn list_policy_rows_by_configuration_for_flake(
+    pool: &PgPool,
+    flake_id: i32,
+) -> Result<Vec<ConfigPolicyRow>> {
+    let rows = sqlx::query_as::<_, ConfigPolicyRow>(
+        r#"
+        WITH scoped_systems AS (
+            SELECT
+                s.id AS system_id,
+                s.environment_id,
+                COALESCE(
+                    NULLIF(BTRIM(s.system_configuration_name), ''),
+                    s.hostname
+                ) AS configuration_name
+            FROM systems s
+            WHERE s.flake_id = $1
+              AND s.is_active = TRUE
+        ),
+        assigned_policy_ids AS (
+            -- Via environment assignment
+            SELECT ss.configuration_name, ep.policy_id
+            FROM scoped_systems ss
+            JOIN environment_policies ep ON ep.environment_id = ss.environment_id
+
+            UNION
+
+            -- Via direct system assignment
+            SELECT ss.configuration_name, sp.policy_id
+            FROM scoped_systems ss
+            JOIN system_policies sp ON sp.system_id = ss.system_id
+        )
+        SELECT
+            api.configuration_name,
+            dp.id          AS policy_id,
+            dp.name,
+            dp.description,
+            dp.policy_type,
+            dp.config,
+            dp.enabled,
+            dp.created_at,
+            dp.updated_at
+        FROM assigned_policy_ids api
+        JOIN deployment_policies dp ON dp.id = api.policy_id
+        WHERE dp.enabled = TRUE
+        ORDER BY api.configuration_name, dp.id
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to list per-configuration policy rows for flake")?;
+
+    Ok(rows)
+}
+
+/// Load the active configuration names for a flake (whether or not they have
+/// assigned policies).  Used alongside `list_policy_rows_by_configuration_for_flake`
+/// so we can detect registered configurations with zero policies.
+pub async fn list_registered_configuration_names_for_flake(
+    pool: &PgPool,
+    flake_id: i32,
+) -> Result<Vec<String>> {
+    let names = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT COALESCE(NULLIF(BTRIM(system_configuration_name), ''), hostname)
+        FROM systems
+        WHERE flake_id = $1 AND is_active = TRUE
+        ORDER BY 1
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to list registered configuration names for flake")?;
+
+    Ok(names)
+}
+
 /// Count total deployment policies (for pagination metadata)
 pub async fn count_deployment_policies(pool: &PgPool) -> Result<i64> {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies")
@@ -348,5 +483,464 @@ mod tests {
     fn test_query_compilation() {
         // This test ensures the SQL queries compile correctly
         // Actual database tests would require sqlx test fixtures
+    }
+
+    // ── DB-level tests for list_policy_rows_by_configuration_for_flake ────
+    //
+    // These tests require a live database and are marked #[ignore].
+    // Run with:
+    //   CRYSTAL_FORGE_TEST_DATABASE_URL=... cargo test -p cf-server --lib \
+    //     policies_by_configuration -- --ignored --test-threads=1
+
+    async fn get_test_pool() -> sqlx::PgPool {
+        let url = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+            .expect("CRYSTAL_FORGE_TEST_DATABASE_URL must be set");
+        sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect to test DB")
+    }
+
+    /// Insert a minimal flake, environment, system, policy, and assignment row,
+    /// returning (flake_id, system_id, environment_id, policy_id).
+    async fn insert_test_fixture(
+        pool: &sqlx::PgPool,
+        flake_name: &str,
+        env_name: &str,
+        system_hostname: &str,
+        system_config_name: Option<&str>,
+        policy_name: &str,
+        policy_via_env: bool, // true = env assignment, false = direct system assignment
+    ) -> (i32, uuid::Uuid, uuid::Uuid, uuid::Uuid) {
+        // Flake
+        let flake_id: i32 =
+            sqlx::query_scalar("INSERT INTO flakes (name, repo_url) VALUES ($1, $2) RETURNING id")
+                .bind(flake_name)
+                .bind(format!("https://example.com/{}.git", flake_name))
+                .fetch_one(pool)
+                .await
+                .expect("insert flake");
+
+        // Environment
+        let env_id: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+                .bind(env_name)
+                .fetch_one(pool)
+                .await
+                .expect("insert environment");
+
+        // System
+        let sys_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO systems (hostname, system_configuration_name, flake_id, environment_id, is_active) \
+             VALUES ($1, $2, $3, $4, TRUE) RETURNING id",
+        )
+        .bind(system_hostname)
+        .bind(system_config_name)
+        .bind(flake_id)
+        .bind(env_id)
+        .fetch_one(pool)
+        .await
+        .expect("insert system");
+
+        // Policy
+        let pol_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
+             VALUES ($1, 'require_cf_agent', '{}', TRUE) RETURNING id",
+        )
+        .bind(policy_name)
+        .fetch_one(pool)
+        .await
+        .expect("insert policy");
+
+        if policy_via_env {
+            sqlx::query(
+                "INSERT INTO environment_policies (environment_id, policy_id) VALUES ($1, $2)",
+            )
+            .bind(env_id)
+            .bind(pol_id)
+            .execute(pool)
+            .await
+            .expect("insert env policy");
+        } else {
+            sqlx::query("INSERT INTO system_policies (system_id, policy_id) VALUES ($1, $2)")
+                .bind(sys_id)
+                .bind(pol_id)
+                .execute(pool)
+                .await
+                .expect("insert system policy");
+        }
+
+        (flake_id, sys_id, env_id, pol_id)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn policies_by_configuration_different_flakes_do_not_leak() {
+        let pool = get_test_pool().await;
+        let mut tx = pool.begin().await.unwrap();
+
+        // Flake A: policy "require-grafana"
+        let fid_a: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url) VALUES ('flake-a', 'https://a.example') RETURNING id",
+        ).fetch_one(&mut *tx).await.unwrap();
+        let env_a: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ('env-a') RETURNING id")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        let sys_a: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO systems (hostname, flake_id, environment_id, is_active) \
+             VALUES ('alpha', $1, $2, TRUE) RETURNING id",
+        )
+        .bind(fid_a)
+        .bind(env_a)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        let pol_a: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
+             VALUES ('require-grafana', 'require_packages', '{\"packages\":[\"grafana\"]}', TRUE) RETURNING id",
+        ).fetch_one(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO environment_policies (environment_id, policy_id) VALUES ($1, $2)")
+            .bind(env_a)
+            .bind(pol_a)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        // Flake B: policy "require-neovim"
+        let fid_b: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url) VALUES ('flake-b', 'https://b.example') RETURNING id",
+        ).fetch_one(&mut *tx).await.unwrap();
+        let env_b: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ('env-b') RETURNING id")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        let sys_b: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO systems (hostname, flake_id, environment_id, is_active) \
+             VALUES ('beta', $1, $2, TRUE) RETURNING id",
+        )
+        .bind(fid_b)
+        .bind(env_b)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        let pol_b: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
+             VALUES ('require-neovim', 'require_packages', '{\"packages\":[\"neovim\"]}', TRUE) RETURNING id",
+        ).fetch_one(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO environment_policies (environment_id, policy_id) VALUES ($1, $2)")
+            .bind(env_b)
+            .bind(pol_b)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        let _ = (sys_a, sys_b); // suppress unused warnings
+
+        // Flake A's rows must contain only pol_a
+        let rows_a = list_policy_rows_by_configuration_for_flake(&pool, fid_a)
+            .await
+            .unwrap();
+        assert_eq!(rows_a.len(), 1, "flake A must have exactly 1 policy row");
+        assert_eq!(
+            rows_a[0].policy_id, pol_a,
+            "flake A row must be grafana policy"
+        );
+
+        // Flake B's rows must contain only pol_b
+        let rows_b = list_policy_rows_by_configuration_for_flake(&pool, fid_b)
+            .await
+            .unwrap();
+        assert_eq!(rows_b.len(), 1, "flake B must have exactly 1 policy row");
+        assert_eq!(
+            rows_b[0].policy_id, pol_b,
+            "flake B row must be neovim policy"
+        );
+
+        tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn policies_by_configuration_two_environments_same_flake() {
+        let pool = get_test_pool().await;
+        let mut tx = pool.begin().await.unwrap();
+
+        let fid: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url) VALUES ('multi-env-flake', 'https://multi.example') RETURNING id",
+        ).fetch_one(&mut *tx).await.unwrap();
+
+        // Environment A: alpha, policy grafana
+        let env_a: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ('env-alpha') RETURNING id")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO systems (hostname, system_configuration_name, flake_id, environment_id, is_active) \
+             VALUES ('alpha-host', 'alpha', $1, $2, TRUE)",
+        ).bind(fid).bind(env_a).execute(&mut *tx).await.unwrap();
+        let pol_grafana: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
+             VALUES ('grafana-policy', 'require_packages', '{\"packages\":[\"grafana\"]}', TRUE) RETURNING id",
+        ).fetch_one(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO environment_policies (environment_id, policy_id) VALUES ($1, $2)")
+            .bind(env_a)
+            .bind(pol_grafana)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        // Environment B: beta, policy neovim
+        let env_b: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ('env-beta') RETURNING id")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO systems (hostname, system_configuration_name, flake_id, environment_id, is_active) \
+             VALUES ('beta-host', 'beta', $1, $2, TRUE)",
+        ).bind(fid).bind(env_b).execute(&mut *tx).await.unwrap();
+        let pol_neovim: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
+             VALUES ('neovim-policy', 'require_packages', '{\"packages\":[\"neovim\"]}', TRUE) RETURNING id",
+        ).fetch_one(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO environment_policies (environment_id, policy_id) VALUES ($1, $2)")
+            .bind(env_b)
+            .bind(pol_neovim)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        let rows = list_policy_rows_by_configuration_for_flake(&pool, fid)
+            .await
+            .unwrap();
+
+        let alpha_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.configuration_name == "alpha")
+            .collect();
+        let beta_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.configuration_name == "beta")
+            .collect();
+
+        assert_eq!(alpha_rows.len(), 1);
+        assert_eq!(
+            alpha_rows[0].policy_id, pol_grafana,
+            "alpha must have grafana policy"
+        );
+
+        assert_eq!(beta_rows.len(), 1);
+        assert_eq!(
+            beta_rows[0].policy_id, pol_neovim,
+            "beta must have neovim policy"
+        );
+
+        // Cross-check: alpha must NOT have neovim, beta must NOT have grafana
+        assert!(
+            !alpha_rows.iter().any(|r| r.policy_id == pol_neovim),
+            "alpha must not see beta's policy"
+        );
+        assert!(
+            !beta_rows.iter().any(|r| r.policy_id == pol_grafana),
+            "beta must not see alpha's policy"
+        );
+
+        tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn policies_by_configuration_duplicate_assignment_deduplicated() {
+        let pool = get_test_pool().await;
+        let mut tx = pool.begin().await.unwrap();
+
+        let fid: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url) VALUES ('dedup-flake', 'https://dedup.example') RETURNING id",
+        ).fetch_one(&mut *tx).await.unwrap();
+        let env: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ('dedup-env') RETURNING id")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        let sys: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO systems (hostname, flake_id, environment_id, is_active) \
+             VALUES ('dedup-host', $1, $2, TRUE) RETURNING id",
+        )
+        .bind(fid)
+        .bind(env)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        let pol: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
+             VALUES ('shared-policy', 'require_cf_agent', '{}', TRUE) RETURNING id",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+
+        // Assign same policy BOTH via environment AND directly to system
+        sqlx::query("INSERT INTO environment_policies (environment_id, policy_id) VALUES ($1, $2)")
+            .bind(env)
+            .bind(pol)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO system_policies (system_id, policy_id) VALUES ($1, $2)")
+            .bind(sys)
+            .bind(pol)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        let rows = list_policy_rows_by_configuration_for_flake(&pool, fid)
+            .await
+            .unwrap();
+
+        // UNION in SQL must produce exactly 1 row (not 2)
+        assert_eq!(
+            rows.len(),
+            1,
+            "duplicate assignment must produce exactly one row (UNION deduplication)"
+        );
+        assert_eq!(rows[0].policy_id, pol);
+
+        tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn policies_by_configuration_disabled_policy_excluded() {
+        let pool = get_test_pool().await;
+        let mut tx = pool.begin().await.unwrap();
+
+        let fid: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url) VALUES ('disabled-flake', 'https://disabled.example') RETURNING id",
+        ).fetch_one(&mut *tx).await.unwrap();
+        let env: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO environments (name) VALUES ('disabled-env') RETURNING id",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO systems (hostname, flake_id, environment_id, is_active) VALUES ('host', $1, $2, TRUE)",
+        ).bind(fid).bind(env).execute(&mut *tx).await.unwrap();
+        let pol: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
+             VALUES ('disabled-policy', 'require_cf_agent', '{}', FALSE) RETURNING id",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO environment_policies (environment_id, policy_id) VALUES ($1, $2)")
+            .bind(env)
+            .bind(pol)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        let rows = list_policy_rows_by_configuration_for_flake(&pool, fid)
+            .await
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "disabled policy must not appear in results"
+        );
+
+        tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn policies_by_configuration_inactive_system_excluded() {
+        let pool = get_test_pool().await;
+        let mut tx = pool.begin().await.unwrap();
+
+        let fid: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url) VALUES ('inactive-flake', 'https://inactive.example') RETURNING id",
+        ).fetch_one(&mut *tx).await.unwrap();
+        let env: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO environments (name) VALUES ('inactive-env') RETURNING id",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        // is_active = FALSE
+        sqlx::query(
+            "INSERT INTO systems (hostname, flake_id, environment_id, is_active) VALUES ('inactive-host', $1, $2, FALSE)",
+        ).bind(fid).bind(env).execute(&mut *tx).await.unwrap();
+        let pol: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
+             VALUES ('inactive-policy', 'require_cf_agent', '{}', TRUE) RETURNING id",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO environment_policies (environment_id, policy_id) VALUES ($1, $2)")
+            .bind(env)
+            .bind(pol)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        let rows = list_policy_rows_by_configuration_for_flake(&pool, fid)
+            .await
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "inactive system's policies must not appear"
+        );
+
+        tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn policies_by_configuration_hostname_fallback() {
+        let pool = get_test_pool().await;
+        let mut tx = pool.begin().await.unwrap();
+
+        let fid: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url) VALUES ('hostname-flake', 'https://hostname.example') RETURNING id",
+        ).fetch_one(&mut *tx).await.unwrap();
+        let env: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO environments (name) VALUES ('hostname-env') RETURNING id",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        // system_configuration_name is NULL → key should be hostname
+        let sys: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO systems (hostname, system_configuration_name, flake_id, environment_id, is_active) \
+             VALUES ('my-hostname', NULL, $1, $2, TRUE) RETURNING id",
+        ).bind(fid).bind(env).fetch_one(&mut *tx).await.unwrap();
+        let pol: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
+             VALUES ('hostname-policy', 'require_cf_agent', '{}', TRUE) RETURNING id",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO system_policies (system_id, policy_id) VALUES ($1, $2)")
+            .bind(sys)
+            .bind(pol)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        let rows = list_policy_rows_by_configuration_for_flake(&pool, fid)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].configuration_name, "my-hostname",
+            "key must fall back to hostname"
+        );
+
+        tx.rollback().await.unwrap();
     }
 }

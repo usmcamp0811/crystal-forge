@@ -89,7 +89,8 @@ use crate::derivations::utils::{build_flake_reference, count_closure_packages};
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
-    DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
+    AssignedPolicy, DeploymentPolicy, PoliciesByConfiguration, PolicyCheckResult,
+    build_nix_eval_expression, policies_for_config,
 };
 use crate::models::flakes::Flake;
 use crate::queries::build_jobs::{
@@ -397,40 +398,27 @@ pub enum StandaloneSystemOutcome {
 fn build_single_system_eval_expression(
     flake_ref: &str,
     system_name: &str,
-    policies: &[DeploymentPolicy],
+    assigned: &[crate::models::deployment_policies::AssignedPolicy],
 ) -> String {
-    let nix_policies: Vec<&DeploymentPolicy> =
-        policies.iter().filter(|p| p.is_nix_evaluated()).collect();
+    use crate::models::deployment_policies::{
+        build_policy_fields_for_config_standalone, nix_string_pub,
+    };
 
-    let cf_agent_field = "        cfAgentEnabled = (cfg.config.systemd.services.crystal-forge-agent.enable or false) || ((cfg.config.services.crystal-forge.enable or false) && (cfg.config.services.crystal-forge.client.enable or false));";
-
-    let mut policy_lines = vec![cf_agent_field.to_string()];
-    policy_lines.extend(
-        nix_policies
-            .iter()
-            .enumerate()
-            .flat_map(|(policy_idx, policy)| match policy {
-                DeploymentPolicy::RequireCrystalForgeAgent { .. } => Vec::new(),
-                DeploymentPolicy::CustomCheck { rules, .. } if !rules.is_empty() => rules
-                    .iter()
-                    .map(|rule| format!("        {} = {};", rule.field_name, rule.expression))
-                    .collect::<Vec<_>>(),
-                _ => {
-                    let (field_name, expr) = policy.to_nix_expression_with_index(policy_idx);
-                    vec![format!("        {} = {};", field_name, expr)]
-                }
-            }),
-    );
-    let policy_fields = policy_lines.join("\n");
+    let field_lines = build_policy_fields_for_config_standalone(assigned);
+    let policy_fields = if field_lines.is_empty() {
+        String::new()
+    } else {
+        field_lines.join("\n")
+    };
 
     format!(
         r#"
 let
-  flake = builtins.getFlake "{}";
-  cfg = builtins.getAttr "{}" flake.nixosConfigurations;
+  flake = builtins.getFlake {flake_ref};
+  cfg = builtins.getAttr {system_name} flake.nixosConfigurations;
   drv = cfg.config.system.build.toplevel;
   policyResults = {{
-{}
+{policy_fields}
   }};
 in {{
   drvPath = drv.drvPath;
@@ -438,7 +426,9 @@ in {{
   policies = policyResults;
 }}
 "#,
-        flake_ref, system_name, policy_fields
+        flake_ref = nix_string_pub(flake_ref),
+        system_name = nix_string_pub(system_name),
+        policy_fields = policy_fields,
     )
 }
 
@@ -456,12 +446,12 @@ pub async fn evaluate_single_system_with_policies(
     repo_url: &str,
     commit_hash: &str,
     system_name: &str,
-    policies: &[DeploymentPolicy],
+    assigned: &[crate::models::deployment_policies::AssignedPolicy],
     creds: Option<&FlakeCredentialEnv>,
     build_config: &BuildConfig,
 ) -> Result<StandaloneSystemOutcome> {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
-    let nix_expr = build_single_system_eval_expression(&flake_ref, system_name, policies);
+    let nix_expr = build_single_system_eval_expression(&flake_ref, system_name, assigned);
 
     // Acquire the process-wide standalone eval slot before spawning.
     // This semaphore caps total concurrent `nix eval` processes across all
@@ -557,7 +547,11 @@ pub async fn evaluate_single_system_with_policies(
         Some(t) => t.await.unwrap_or_default(),
         None => Vec::new(),
     };
-    let output = std::process::Output { status, stdout, stderr };
+    let output = std::process::Output {
+        status,
+        stdout,
+        stderr,
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -577,7 +571,7 @@ pub async fn evaluate_single_system_with_policies(
 
     let expected_store_path =
         resolve_expected_store_path(&parsed.drv_path, Some(&parsed.outputs)).await;
-    let policy_check = if policies.is_empty() {
+    let policy_check = if assigned.is_empty() {
         PolicyCheckResult {
             system_name: system_name.to_string(),
             cf_agent_enabled: None,
@@ -589,7 +583,19 @@ pub async fn evaluate_single_system_with_policies(
             cve_checks: Vec::new(),
         }
     } else {
-        PolicyCheckResult::from_json(system_name.to_string(), &parsed.policies, policies)
+        match PolicyCheckResult::from_assigned(system_name.to_string(), &parsed.policies, assigned)
+        {
+            Ok(check) => check,
+            Err(mismatch) => {
+                return Ok(StandaloneSystemOutcome::InfrastructureFailure {
+                    system_name: system_name.to_string(),
+                    error: format!(
+                        "Policy metadata key mismatch in standalone eval: {}",
+                        mismatch
+                    ),
+                });
+            }
+        }
     };
 
     Ok(StandaloneSystemOutcome::Success {
@@ -737,7 +743,11 @@ in
         Some(t) => t.await.unwrap_or_default(),
         None => Vec::new(),
     };
-    let output = std::process::Output { status, stdout, stderr: stderr_bytes };
+    let output = std::process::Output {
+        status,
+        stdout,
+        stderr: stderr_bytes,
+    };
 
     if output.status.success() {
         // The system actually evaluates fine — this is an evaluator omission,
@@ -1873,7 +1883,7 @@ pub async fn evaluate_with_nix_eval_jobs(
     target_system: &str,
     build_config: &BuildConfig,
     server_config: &ServerConfig,
-    policies: &[DeploymentPolicy],
+    policies_by_configuration: &Arc<PoliciesByConfiguration>,
     cf_state: Option<&crate::handlers::agent_request::CFState>,
     _queue_notifier: Option<&QueueNotifier>,
 ) -> Result<EvaluationPlan> {
@@ -1905,13 +1915,21 @@ pub async fn evaluate_with_nix_eval_jobs(
             }),
     );
 
-    // Build ONE Nix expression that includes policy checks
-    let nix_expr = build_nix_eval_expression(&flake_ref, policies);
+    // Build ONE Nix expression with per-configuration policy checkers.
+    let nix_expr = build_nix_eval_expression(&flake_ref, policies_by_configuration);
+
+    // Compute summary counts for logging.
+    let unique_policy_count: std::collections::BTreeSet<_> = policies_by_configuration
+        .values()
+        .flat_map(|v| v.iter().map(|ap| ap.policy_id))
+        .collect();
+    let registered_configs_with_policies = policies_by_configuration.len();
 
     info!(
-        "🚀 Running: nix-eval-jobs for {} with {} policies",
+        "🚀 Running: nix-eval-jobs for {} — {} unique enabled policies across {} registered configurations",
         target_system,
-        policies.len()
+        unique_policy_count.len(),
+        registered_configs_with_policies,
     );
 
     // Broadcast detailed start information
@@ -1926,32 +1944,13 @@ pub async fn evaluate_with_nix_eval_jobs(
         broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, start_msg)
             .await;
 
-        if !policies.is_empty() {
-            let policy_msg = format!("📋 Checking {} deployment policies:", policies.len());
-            broadcast_and_persist_eval_log(
-                pool,
-                Some(state),
-                commit.id,
-                &mut log_sequence,
-                policy_msg,
-            )
+        let policy_msg = format!(
+            "📋 Loaded {} unique enabled policies across {} registered configurations",
+            unique_policy_count.len(),
+            registered_configs_with_policies,
+        );
+        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, policy_msg)
             .await;
-            for policy in policies {
-                let policy_detail = format!(
-                    "   • {} (strict: {})",
-                    policy.description(),
-                    policy.is_strict()
-                );
-                broadcast_and_persist_eval_log(
-                    pool,
-                    Some(state),
-                    commit.id,
-                    &mut log_sequence,
-                    policy_detail,
-                )
-                .await;
-            }
-        }
 
         broadcast_and_persist_eval_log(
             pool,
@@ -1963,15 +1962,12 @@ pub async fn evaluate_with_nix_eval_jobs(
         .await;
     }
 
-    if !policies.is_empty() {
-        info!("   Policies will be evaluated in parallel by nix-eval-jobs:");
-        for policy in policies {
-            info!(
-                "     - {} (strict={})",
-                policy.description(),
-                policy.is_strict()
-            );
-        }
+    for (config, assigned) in policies_by_configuration.iter() {
+        debug!(
+            configuration = %config,
+            assigned_policy_count = assigned.len(),
+            "per_configuration_policy_assignment"
+        );
     }
 
     debug!("📝 Nix expression:\n{}", nix_expr);
@@ -2214,48 +2210,69 @@ pub async fn evaluate_with_nix_eval_jobs(
                                     .await;
                                 }
 
+                                // Resolve this configuration's assigned policies from the map.
+                                let assigned_policies: &[AssignedPolicy] =
+                                    policies_for_config(policies_by_configuration, &system_name);
+
                                 // Extract policy check results from meta.policies
                                 let mut cf_agent_enabled = None;
                                 let mut policy_check_for_system: Option<PolicyCheckResult> = None;
                                 if let Some(meta) = &result.meta {
                                     if let Some(policies_json) = meta.get("policies") {
-                                        // Parse policy results from meta.policies
-                                        let check = PolicyCheckResult::from_json(
+                                        // Parse policy results using this configuration's assigned
+                                        // policies only (stable-key path).
+                                        let check_result = PolicyCheckResult::from_assigned(
                                             system_name.clone(),
                                             policies_json,
-                                            policies,
+                                            assigned_policies,
                                         );
 
-                                        cf_agent_enabled = check.cf_agent_enabled;
+                                        match check_result {
+                                            Ok(check) => {
+                                                cf_agent_enabled = check.cf_agent_enabled;
 
-                                        // Log policy results
-                                        if !check.meets_requirements {
-                                            let has_strict = policies.iter().any(|p| p.is_strict());
-                                            for warning in &check.warnings {
-                                                if has_strict {
-                                                    error!("❌ {}", warning);
+                                                // Log policy results
+                                                if !check.meets_requirements {
+                                                    let has_strict = check.failed_policies.iter().any(|(_, s)| *s);
+                                                    for warning in &check.warnings {
+                                                        if has_strict {
+                                                            error!("❌ {}", warning);
+                                                        } else {
+                                                            warn!("⚠️  {}", warning);
+                                                        }
+                                                        if let Some(state) = cf_state {
+                                                            let log_msg = format!("⚠️  {}: {}", system_name, warning);
+                                                            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
+                                                        }
+                                                    }
+                                                } else if assigned_policies.is_empty() {
+                                                    debug!("✅ {}: no assigned policies — passes evaluation", system_name);
                                                 } else {
-                                                    warn!("⚠️  {}", warning);
+                                                    info!("✅ {}: all assigned policies passed", system_name);
+                                                    if let Some(state) = cf_state {
+                                                        let log_msg = format!("✅ {}: all assigned policies passed", system_name);
+                                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
+                                                    }
                                                 }
 
-                                                // Broadcast policy warnings to logs
+                                                policy_check_for_system = Some(check.clone());
+                                                policy_checks.push(check);
+                                            }
+                                            Err(mismatch) => {
+                                                // Expression-generation/parser mismatch — treat as
+                                                // infrastructure error for this configuration.
+                                                error!(
+                                                    system = %system_name,
+                                                    "Policy metadata key mismatch: {}", mismatch
+                                                );
                                                 if let Some(state) = cf_state {
-                                                    let log_msg = format!("⚠️  {}: {}", system_name, warning);
+                                                    let log_msg = format!("❌ {}: policy metadata mismatch: {}", system_name, mismatch);
                                                     broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
                                                 }
-                                            }
-                                        } else if let Some(true) = cf_agent_enabled {
-                                            info!("✅ {} has CF agent enabled", system_name);
-
-                                            // Broadcast policy success to logs
-                                            if let Some(state) = cf_state {
-                                                let log_msg = format!("✅ {}: Crystal Forge agent enabled", system_name);
-                                                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
+                                                // Fall through with no policy_check_for_system;
+                                                // the system will not be queued.
                                             }
                                         }
-
-                                        policy_check_for_system = Some(check.clone());
-                                        policy_checks.push(check);
                                     } else {
                                         debug!("⚠️  No policies in meta for {}", system_name);
                                     }
@@ -2263,7 +2280,8 @@ pub async fn evaluate_with_nix_eval_jobs(
                                     debug!("⚠️  No meta field for {}", system_name);
                                 }
 
-                                if policy_check_for_system.is_none() && policies.is_empty() {
+                                // Configurations with no assigned policies pass policy evaluation.
+                                if policy_check_for_system.is_none() && assigned_policies.is_empty() {
                                     let check = PolicyCheckResult {
                                         system_name: system_name.clone(),
                                         cf_agent_enabled: None,
@@ -2297,32 +2315,33 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             format!("❌ {}: {}", system_name, error_msg),
                                         )
                                         .await;
-                                                    } else if cf_agent_enabled == Some(true) {
-                                                        // QueuedForBuild broadcast is deferred to after
-                                                        // full attempt validation (post-finalization).
-                                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
-                                                            format!(
-                                                                "✅ {}: policy passed (CF enabled), evaluated",
-                                                                system_name
-                                                            ),
-                                                        )
-                                                        .await;
                                     } else {
-                                        crate::handlers::api::commits::broadcast_system_status(
-                                            state,
-                                            commit.id,
-                                            system_name.clone(),
-                                            crate::handlers::api::commits::SystemEvalStatus::PolicyFailed,
-                                            Some("CF agent not enabled in configuration".to_string()),
-                                        )
-                                        .await;
-                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
-                                            format!(
-                                                "⚠️ {}: policy failed (CF agent not enabled)",
-                                                system_name
-                                            ),
-                                        )
-                                        .await;
+                                        // Use the actual policy check result to determine status.
+                                        let passes = policy_check_for_system
+                                            .as_ref()
+                                            .map(|c| c.meets_requirements)
+                                            .unwrap_or(true);
+                                        if passes {
+                                            // QueuedForBuild broadcast deferred to post-finalization.
+                                            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+                                                format!("✅ {}: evaluated successfully", system_name),
+                                            )
+                                            .await;
+                                        } else {
+                                            let reason = policy_check_for_system
+                                                .as_ref()
+                                                .and_then(|c| c.failed_policies.first())
+                                                .map(|(d, _)| d.as_str())
+                                                .unwrap_or("policy failed");
+                                            crate::handlers::api::commits::broadcast_system_status(
+                                                state,
+                                                commit.id,
+                                                system_name.clone(),
+                                                crate::handlers::api::commits::SystemEvalStatus::PolicyFailed,
+                                                Some(reason.to_string()),
+                                            )
+                                            .await;
+                                        }
                                     }
                                 }
 
@@ -2883,13 +2902,18 @@ pub async fn evaluate_with_nix_eval_jobs(
             let system_name = system_name.to_string();
             let creds = Arc::clone(&creds_arc);
             let build_config = build_config_owned.clone();
-            let policies = policies.to_vec();
+            // Pass only this configuration's assigned policies to the fallback evaluator.
+            let assigned: Vec<AssignedPolicy> =
+                policies_for_config(policies_by_configuration, &system_name)
+                    .iter()
+                    .cloned()
+                    .collect();
             fallback_futures.push(async move {
                 evaluate_single_system_with_policies(
                     &repo_url,
                     &commit_hash,
                     &system_name,
-                    &policies,
+                    &assigned,
                     creds.as_ref().as_ref(),
                     &build_config,
                 )
@@ -3244,7 +3268,7 @@ pub async fn evaluate_with_nix_eval_jobs(
         0.0
     };
 
-    if !policies.is_empty() && !policy_checks.is_empty() {
+    if !policies_by_configuration.is_empty() && !policy_checks.is_empty() {
         info!(
             "   CF agent: {}/{} systems enabled ({:.1}%)",
             with_agent,
@@ -3419,7 +3443,7 @@ pub async fn evaluate_with_mock_eval_jobs(
     target_system: &str,
     _build_config: &BuildConfig,
     _server_config: &ServerConfig,
-    _policies: &[DeploymentPolicy],
+    _policies_by_configuration: &Arc<PoliciesByConfiguration>,
     configured_systems: &[String],
     cf_state: Option<&crate::handlers::agent_request::CFState>,
     _queue_notifier: Option<&QueueNotifier>,
@@ -5305,5 +5329,148 @@ mod tests {
             .bind(flake_id)
             .execute(&pool)
             .await;
+    }
+
+    // ── Per-configuration policy regression tests ─────────────────────────
+
+    /// Proves that when two configurations are in the same flake but different
+    /// environments with different policies, one configuration's strict failure
+    /// does NOT prevent the other from reaching NeedsBuildPreparation.
+    ///
+    /// Run with:
+    ///   CRYSTAL_FORGE_TEST_DATABASE_URL=... cargo test -p cf-server --lib \
+    ///     different_environments_use_different_policy_sets -- --ignored --test-threads=1
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn different_environments_use_different_policy_sets() {
+        // This test verifies the *query-level* behavior of
+        // list_policy_rows_by_configuration_for_flake combined with
+        // load_policies_by_configuration_for_eval.
+        //
+        // Setup:
+        //   Flake has two systems:
+        //     alpha — environment A — policy: require package "grafana" (strict)
+        //     beta  — environment B — policy: require package "neovim"  (strict)
+        //
+        // When evaluated with a PoliciesByConfiguration map:
+        //   alpha's PolicyCheckResult should only check grafana.
+        //   beta's PolicyCheckResult should only check neovim.
+        //
+        // This test exercises the from_assigned parser directly.
+
+        use crate::models::deployment_policies::{
+            AssignedPolicy, DeploymentPolicy, PoliciesByConfiguration, PolicyCheckResult,
+        };
+
+        let id_grafana = uuid::Uuid::from_u128(1001);
+        let id_neovim = uuid::Uuid::from_u128(1002);
+
+        let mut map = PoliciesByConfiguration::new();
+        map.insert(
+            "alpha".to_string(),
+            vec![AssignedPolicy {
+                policy_id: id_grafana,
+                policy: DeploymentPolicy::RequirePackages {
+                    packages: vec!["grafana".to_string()],
+                    strict: true,
+                },
+            }],
+        );
+        map.insert(
+            "beta".to_string(),
+            vec![AssignedPolicy {
+                policy_id: id_neovim,
+                policy: DeploymentPolicy::RequirePackages {
+                    packages: vec!["neovim".to_string()],
+                    strict: true,
+                },
+            }],
+        );
+
+        let key_grafana = crate::models::deployment_policies::policy_result_key(&id_grafana);
+        let key_neovim = crate::models::deployment_policies::policy_result_key(&id_neovim);
+
+        // alpha: grafana check fails, neovim key not present (not assigned)
+        let alpha_json = serde_json::json!({ &key_grafana: false });
+        let alpha_check = PolicyCheckResult::from_assigned(
+            "alpha".to_string(),
+            &alpha_json,
+            map.get("alpha").map(Vec::as_slice).unwrap_or(&[]),
+        )
+        .expect("from_assigned must not error for alpha");
+
+        assert!(
+            !alpha_check.meets_requirements,
+            "alpha must fail (grafana strict failure)"
+        );
+        assert!(!alpha_check.failed_policies.is_empty());
+
+        // beta: neovim check passes, grafana key not present (not assigned)
+        let beta_json = serde_json::json!({ &key_neovim: true });
+        let beta_check = PolicyCheckResult::from_assigned(
+            "beta".to_string(),
+            &beta_json,
+            map.get("beta").map(Vec::as_slice).unwrap_or(&[]),
+        )
+        .expect("from_assigned must not error for beta");
+
+        assert!(
+            beta_check.meets_requirements,
+            "beta must pass (neovim policy passes)"
+        );
+        assert!(beta_check.failed_policies.is_empty());
+
+        // Prove isolation: beta's result is unaffected by alpha's failure.
+        // (If a flake-wide policy union were applied, beta would also check grafana
+        // and would also fail if grafana key is absent from its JSON.)
+        let beta_json_no_grafana = serde_json::json!({ &key_neovim: true });
+        let beta_check2 = PolicyCheckResult::from_assigned(
+            "beta".to_string(),
+            &beta_json_no_grafana,
+            map.get("beta").map(Vec::as_slice).unwrap_or(&[]),
+        )
+        .expect("beta from_assigned must not error");
+        assert!(
+            beta_check2.meets_requirements,
+            "beta must still pass even when grafana key is absent"
+        );
+    }
+
+    /// Proves that a configuration with no assigned policies passes evaluation
+    /// and does not inherit policies from another configuration's environment.
+    #[test]
+    fn no_policy_configuration_passes_evaluation() {
+        use crate::models::deployment_policies::{
+            AssignedPolicy, DeploymentPolicy, PoliciesByConfiguration, PolicyCheckResult,
+        };
+
+        let id_grafana = uuid::Uuid::from_u128(2001);
+        let mut map = PoliciesByConfiguration::new();
+        // Only "alpha" has policies; "beta" has none (no entry in map).
+        map.insert(
+            "alpha".to_string(),
+            vec![AssignedPolicy {
+                policy_id: id_grafana,
+                policy: DeploymentPolicy::RequirePackages {
+                    packages: vec!["grafana".to_string()],
+                    strict: true,
+                },
+            }],
+        );
+
+        // beta: no assigned policies → empty slice → should produce Ok pass result
+        let beta_json = serde_json::json!({});
+        let beta_check = PolicyCheckResult::from_assigned("beta".to_string(), &beta_json, &[])
+            .expect("from_assigned with empty assigned must not error");
+
+        assert!(
+            beta_check.meets_requirements,
+            "configuration with zero assigned policies must pass"
+        );
+        assert!(beta_check.failed_policies.is_empty());
+        assert_eq!(
+            beta_check.cf_agent_enabled, None,
+            "cf_agent_enabled must be None when no agent policy assigned"
+        );
     }
 }

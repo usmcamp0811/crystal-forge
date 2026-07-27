@@ -28,6 +28,7 @@ use tracing::{debug, error, info, warn};
 
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
 use crate::derivations::utils::count_closure_packages;
+use crate::models::deployment_policies::{AssignedPolicy, PoliciesByConfiguration};
 use crate::queries::build_jobs::QueuedBuild;
 use crate::queries::builders::{
     cleanup_expired_build_logs, mark_stale_builders_offline,
@@ -39,6 +40,7 @@ use crate::queries::commits::{
 };
 use crate::queries::deployment_policies::{
     list_enabled_deployment_policies, list_enabled_policies_for_flake,
+    list_policy_rows_by_configuration_for_flake, list_registered_configuration_names_for_flake,
 };
 use crate::queries::derivations::{
     cleanup_partial_derivations, reset_stuck_builds, set_closure_counts,
@@ -616,6 +618,199 @@ async fn load_deployment_policies_for_eval(pool: &PgPool, flake_id: i32) -> Vec<
     }
 }
 
+/// Build a per-configuration policy map for a flake's evaluation run.
+///
+/// For each active Crystal Forge system in the flake, the effective policy set
+/// is the union of:
+/// - Policies assigned directly through `system_policies`
+/// - Policies inherited from the system's environment through `environment_policies`
+///
+/// If two active systems share the same NixOS configuration name but have
+/// *different* effective policy ID sets, this function returns an error with
+/// an actionable message — silently unioning the sets would re-introduce the
+/// cross-environment policy leak we are trying to eliminate.
+///
+/// Systems with zero assigned policies produce *no entry* in the returned map.
+/// Use `policies_for_config(map, name)` to safely get an empty slice for those.
+async fn load_policies_by_configuration_for_eval(
+    pool: &PgPool,
+    flake_id: i32,
+) -> anyhow::Result<PoliciesByConfiguration> {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+    let rows = list_policy_rows_by_configuration_for_flake(pool, flake_id).await?;
+
+    // Group raw rows by configuration name, collecting (policy_id, record) pairs.
+    // The SQL already orders by (configuration_name, policy_id) so insertion order
+    // is deterministic; using a BTreeMap preserves that order in the output.
+    let mut raw: BTreeMap<
+        String,
+        Vec<(
+            uuid::Uuid,
+            crate::queries::deployment_policies::ConfigPolicyRow,
+        )>,
+    > = BTreeMap::new();
+    for row in rows {
+        raw.entry(row.configuration_name.clone())
+            .or_default()
+            .push((row.policy_id, row));
+    }
+
+    let mut map: PoliciesByConfiguration = BTreeMap::new();
+
+    for (config_name, policy_rows) in raw {
+        // Deduplicate by policy_id (the UNION in SQL handles most cases but
+        // two systems in different environments can both reference the same
+        // environment if environment membership changes mid-request).
+        let mut seen_ids: BTreeSet<uuid::Uuid> = BTreeSet::new();
+        let mut assigned: Vec<AssignedPolicy> = Vec::new();
+
+        for (policy_id, row) in policy_rows {
+            if !seen_ids.insert(policy_id) {
+                continue; // duplicate — skip
+            }
+            let record = row.as_policy_record();
+            if let Some(parsed) = parse_deployment_policy_record(&record) {
+                if parsed.is_nix_evaluated() {
+                    assigned.push(AssignedPolicy {
+                        policy_id,
+                        policy: parsed,
+                    });
+                }
+            }
+        }
+
+        if !assigned.is_empty() {
+            map.insert(config_name, assigned);
+        }
+    }
+
+    // Conflict detection: multiple *active* systems sharing a configuration
+    // name but with different effective policy sets.
+    // We re-query registered names to detect systems that were collapsed above.
+    // The per-config deduplication already merged identical sets; we only need
+    // to check whether two systems independently produced *different* sets.
+    // Since the SQL UNION already merged rows from multiple systems with the
+    // same config name, a conflict manifests as a discrepancy between what
+    // one system would have contributed vs. another. We detect this by checking
+    // whether any two `scoped_systems` rows with the same config name have
+    // different effective policy-ID collections — which requires a second query.
+    // For now we detect only the case where the merged set cannot be
+    // unambiguously attributed to a single environment. A future enhancement
+    // can query system-level breakdowns.
+    //
+    // NOTE: The UNION of environment_policies and system_policies with the
+    // same config name is intentional when two systems in the same environment
+    // have different DIRECT assignments — that's the dedup case above. A
+    // genuine conflict (different environments, different required policies)
+    // is caught by a separate verification pass below.
+    {
+        // Build a map: config_name → set of unique policy-id sets contributed
+        // by individual systems (i.e. per-system effective policy sets).
+        // This requires per-system breakdown.
+        #[derive(Debug)]
+        struct SystemPolicySet {
+            system_id: uuid::Uuid,
+            policy_ids: BTreeSet<uuid::Uuid>,
+        }
+
+        let system_rows = sqlx::query_as::<_, (uuid::Uuid, String, Option<uuid::Uuid>)>(
+            r#"
+            SELECT s.id, COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname),
+                   s.environment_id
+            FROM systems s
+            WHERE s.flake_id = $1 AND s.is_active = TRUE
+            "#,
+        )
+        .bind(flake_id)
+        .fetch_all(pool)
+        .await
+        .context("Failed to load systems for conflict detection")?;
+
+        // For each system, load its effective policy IDs.
+        let mut per_config_systems: HashMap<String, Vec<SystemPolicySet>> = HashMap::new();
+        for (system_id, config_name, env_id) in &system_rows {
+            let direct_ids: BTreeSet<uuid::Uuid> = sqlx::query_scalar::<_, uuid::Uuid>(
+                "SELECT policy_id FROM system_policies WHERE system_id = $1",
+            )
+            .bind(system_id)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+            let env_ids: BTreeSet<uuid::Uuid> = if let Some(eid) = env_id {
+                sqlx::query_scalar::<_, uuid::Uuid>(
+                    "SELECT policy_id FROM environment_policies WHERE environment_id = $1",
+                )
+                .bind(eid)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+            } else {
+                BTreeSet::new()
+            };
+
+            let mut all_ids: BTreeSet<uuid::Uuid> = direct_ids;
+            all_ids.extend(env_ids);
+
+            per_config_systems
+                .entry(config_name.clone())
+                .or_default()
+                .push(SystemPolicySet {
+                    system_id: *system_id,
+                    policy_ids: all_ids,
+                });
+        }
+
+        for (config_name, systems) in &per_config_systems {
+            if systems.len() < 2 {
+                continue;
+            }
+            // Check whether all systems have the same effective policy set.
+            let first_set = &systems[0].policy_ids;
+            for other in &systems[1..] {
+                if &other.policy_ids != first_set {
+                    anyhow::bail!(
+                        "Configuration {:?} is assigned to active systems with different policy sets: \
+                         system {} has policies {:?}, while system {} has policies {:?}. \
+                         Use distinct system_configuration_name values or align their assigned policies.",
+                        config_name,
+                        systems[0].system_id,
+                        first_set.iter().collect::<Vec<_>>(),
+                        other.system_id,
+                        other.policy_ids.iter().collect::<Vec<_>>(),
+                    );
+                }
+            }
+        }
+    }
+
+    info!(
+        flake_id,
+        unique_policies = map
+            .values()
+            .flat_map(|v| v.iter())
+            .map(|a| a.policy_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        registered_configurations_with_policies = map.len(),
+        "policies_by_configuration_loaded"
+    );
+    for (config, policies) in &map {
+        debug!(
+            configuration = %config,
+            assigned_policy_count = policies.len(),
+            "per_configuration_policy_assignment"
+        );
+    }
+
+    Ok(map)
+}
+
 /// Load enabled `require_cve_check` policies from the database.
 /// Called by the deployment manager to evaluate post-build CVE gates.
 pub async fn load_cve_policies(pool: &PgPool) -> Vec<DeploymentPolicy> {
@@ -1042,10 +1237,25 @@ async fn process_pending_commits(
             .map(|s| s.hostname.clone())
             .collect::<Vec<_>>();
 
-        // Load enabled deployment policies from DB for nix-eval-jobs policy checks.
-        // Scoped to policies assigned to environments that contain systems from
-        // this flake, so policies for unrelated environments do not block builds.
-        let policies = load_deployment_policies_for_eval(pool, flake.id).await;
+        // Load per-configuration policies: each active system's effective policy set
+        // (environment + direct assignments), returned as a BTreeMap keyed by
+        // NixOS configuration name. Configurations with zero assigned policies
+        // produce no entry and are evaluated without policy gates.
+        let policies_by_configuration =
+            match load_policies_by_configuration_for_eval(pool, flake.id).await {
+                Ok(m) => std::sync::Arc::new(m),
+                Err(e) => {
+                    // Conflict or query failure — fail the attempt so the operator can resolve it.
+                    let e = e.context(format!(
+                        "Failed to load per-configuration policies for flake {} (commit {})",
+                        flake.id, commit.git_commit_hash,
+                    ));
+                    error!("{:#}", e);
+                    let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt)
+                        .await;
+                    return Ok(());
+                }
+            };
 
         // CRITICAL: Create broadcast channel BEFORE eval starts
         // This ensures WebSocket clients can subscribe before messages are sent
@@ -1114,7 +1324,7 @@ async fn process_pending_commits(
                 "all",
                 &build_config,
                 &server_config,
-                &policies,
+                &policies_by_configuration,
                 &mock_systems,
                 Some(&cf_state),
                 Some(&queue_notifier),
@@ -1131,7 +1341,7 @@ async fn process_pending_commits(
                 "all", // Evaluate all systems
                 &build_config,
                 &server_config,
-                &policies,
+                &policies_by_configuration,
                 Some(&cf_state), // Pass CFState for WebSocket broadcasting
                 Some(&queue_notifier),
             )
