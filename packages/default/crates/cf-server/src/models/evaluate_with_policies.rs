@@ -23,6 +23,10 @@ const MAX_INDIVIDUAL_FALLBACKS: usize = 4;
 /// If nix-eval-jobs silently drops more than this percentage of expected
 /// systems, abort instead of launching individual fallbacks.
 const MAX_FALLBACK_MISSING_PERCENT: usize = 25;
+/// Minimum number of missing systems before the percentage guard fires.
+/// Prevents 1-of-3 (33%) from triggering the abort when only one system
+/// genuinely broke and the rest are fine.
+const MIN_MISSING_FOR_PERCENT_GUARD: usize = 2;
 /// Maximum concurrent fallback evaluations.
 const FALLBACK_CONCURRENCY: usize = 2;
 /// Overall deadline for the fallback phase.
@@ -41,6 +45,43 @@ fn standalone_nix_eval_limiter() -> Arc<Semaphore> {
         .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_STANDALONE_NIX_EVALS)))
         .clone()
 }
+
+/// Terminate an entire Nix evaluator process *group* (direct child + all
+/// descendants) then reap the direct child.
+///
+/// On Linux/macOS the child is spawned as the leader of a new process group
+/// (`cmd.process_group(0)` before `spawn()`).  Its PGID equals its PID, so
+/// `killpg(pgid, SIGKILL)` reaches every process in the subtree atomically,
+/// including sub-evaluators and helper processes that `nix eval` may fork.
+///
+/// After signalling the group, `child.wait()` reaps the direct child so that
+/// no zombie lingers.  Descendants that are not direct children of the server
+/// are reparented to init/systemd and reaped by it after SIGKILL.
+///
+/// On non-Unix targets falls back to killing only the direct child (same as
+/// before), which is safe because those platforms do not fork the way Nix
+/// does on Linux.
+#[cfg(unix)]
+async fn kill_nix_process_tree(child: &mut tokio::process::Child, pgid: libc::pid_t) {
+    // SAFETY: killpg is a pure syscall with no memory-safety requirements.
+    // ESRCH means the group already exited — treat as success.
+    let kill_result = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+    if kill_result != 0 {
+        let errno = std::io::Error::last_os_error();
+        if errno.raw_os_error() != Some(libc::ESRCH) {
+            warn!(pgid, "killpg(SIGKILL) failed: {errno}");
+        }
+    }
+    // Reap the direct child.  Grandchildren are reaped by init after SIGKILL.
+    let _ = child.wait().await;
+}
+
+#[cfg(not(unix))]
+async fn kill_nix_process_tree(child: &mut tokio::process::Child, _pgid: i32) {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BuildConfig, ServerConfig};
@@ -438,6 +479,12 @@ pub async fn evaluate_single_system_with_policies(
     let mut cmd = tokio::process::Command::new("nix");
     cmd.args(["eval", "--impure", "--json", "--expr", &nix_expr]);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Spawn the evaluator in a new process group so that a SIGKILL on timeout
+    // reaches nix and every subprocess it forks (sub-evaluators, builders,
+    // helpers).  The group ID equals the child's PID when process_group(0)
+    // is used.
+    #[cfg(unix)]
+    cmd.process_group(0);
     build_config.apply_to_command(&mut cmd);
     if let Some(c) = creds {
         c.apply_to_nix_command(&mut cmd);
@@ -453,23 +500,27 @@ pub async fn evaluate_single_system_with_policies(
         }
     };
 
+    // PGID == PID when spawned with process_group(0).
+    #[cfg(unix)]
+    let pgid = child.id().unwrap_or(0) as libc::pid_t;
+    #[cfg(not(unix))]
+    let pgid = 0i32;
+
     // Collect stdout/stderr via background tasks so `child` stays owned here
-    // and we can explicitly kill+reap on timeout without a borrow-after-move.
-    let mut stdout_buf = child.stdout.take().map(|s| {
+    // and we can explicitly kill the process group on timeout.
+    let mut stdout_buf = child.stdout.take().map(|mut s| {
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
             let mut buf = Vec::new();
-            let mut r = s;
-            let _ = r.read_to_end(&mut buf).await;
+            let _ = s.read_to_end(&mut buf).await;
             buf
         })
     });
-    let mut stderr_buf = child.stderr.take().map(|s| {
+    let mut stderr_buf = child.stderr.take().map(|mut s| {
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
             let mut buf = Vec::new();
-            let mut r = s;
-            let _ = r.read_to_end(&mut buf).await;
+            let _ = s.read_to_end(&mut buf).await;
             buf
         })
     });
@@ -487,17 +538,8 @@ pub async fn evaluate_single_system_with_policies(
             }
         }
         _ = tokio::time::sleep(Duration::from_secs(120)) => {
-            // Timeout: kill the child explicitly and reap it.
-            let pid = child.id();
-            if let Err(kill_err) = child.kill().await {
-                warn!(
-                    system = %system_name,
-                    pid,
-                    "failed to kill timed-out standalone nix eval: {kill_err}"
-                );
-            }
-            let _ = child.wait().await;
-            // Abort the I/O tasks so they don't linger.
+            warn!(system = %system_name, pgid, "standalone nix eval timed out; killing process group");
+            kill_nix_process_tree(&mut child, pgid).await;
             if let Some(t) = stdout_buf.take() { t.abort(); }
             if let Some(t) = stderr_buf.take() { t.abort(); }
             return Ok(StandaloneSystemOutcome::InfrastructureFailure {
@@ -608,15 +650,14 @@ in
         system_name,
     ]);
 
-    // Apply the same Nix configuration as the main evaluator (offline mode,
-    // substitute behaviour, Nix timeouts, sandbox settings, etc.).
+    // Apply the same Nix configuration as the main evaluator.
     build_config.apply_to_command(&mut cmd);
 
     if let Some(c) = creds {
         c.apply_to_nix_command(&mut cmd);
     }
 
-    // Acquire the process-wide standalone eval slot.
+    // Acquire the process-wide standalone eval slot before spawning.
     let _nix_permit = match standalone_nix_eval_limiter().acquire_owned().await {
         Ok(p) => p,
         Err(_) => {
@@ -628,6 +669,9 @@ in
     };
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // New process group so killpg on timeout reaches the entire Nix subtree.
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -639,21 +683,24 @@ in
         }
     };
 
-    let mut stdout_buf = child.stdout.take().map(|s| {
+    #[cfg(unix)]
+    let pgid = child.id().unwrap_or(0) as libc::pid_t;
+    #[cfg(not(unix))]
+    let pgid = 0i32;
+
+    let mut stdout_buf = child.stdout.take().map(|mut s| {
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
             let mut buf = Vec::new();
-            let mut r = s;
-            let _ = r.read_to_end(&mut buf).await;
+            let _ = s.read_to_end(&mut buf).await;
             buf
         })
     });
-    let mut stderr_buf = child.stderr.take().map(|s| {
+    let mut stderr_buf = child.stderr.take().map(|mut s| {
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
             let mut buf = Vec::new();
-            let mut r = s;
-            let _ = r.read_to_end(&mut buf).await;
+            let _ = s.read_to_end(&mut buf).await;
             buf
         })
     });
@@ -671,15 +718,8 @@ in
             }
         }
         _ = tokio::time::sleep(Duration::from_secs(120)) => {
-            let pid = child.id();
-            if let Err(kill_err) = child.kill().await {
-                warn!(
-                    system = %system_name,
-                    pid,
-                    "failed to kill timed-out fallback nix eval: {kill_err}"
-                );
-            }
-            let _ = child.wait().await;
+            warn!(system = %system_name, pgid, "fallback nix eval timed out; killing process group");
+            kill_nix_process_tree(&mut child, pgid).await;
             if let Some(t) = stdout_buf.take() { t.abort(); }
             if let Some(t) = stderr_buf.take() { t.abort(); }
             return FallbackEvalOutcome::InfrastructureFailure {
@@ -2777,17 +2817,21 @@ pub async fn evaluate_with_nix_eval_jobs(
     // if the absolute count is within MAX_INDIVIDUAL_FALLBACKS — because
     // launching multiple full-flake Nix evaluations when most systems are
     // missing indicates a systemic evaluator failure, not individual breakage.
-    if !expected_systems.is_empty() && !missing_systems.is_empty() {
-        let missing_pct = missing_systems.len() * 100 / expected_systems.len();
-        if missing_pct > MAX_FALLBACK_MISSING_PERCENT {
-            bail!(
-                "nix-eval-jobs silently dropped {}% of expected systems ({} of {}); \
-                 refusing standalone fallback — likely process-wide evaluator failure",
-                missing_pct,
-                missing_systems.len(),
-                expected_systems.len(),
-            );
-        }
+    // The percent guard only fires when >= MIN_MISSING_FOR_PERCENT_GUARD
+    // systems are absent, so a single broken config in a small flake (e.g.
+    // 1 of 3) does not disable fallback for the healthy systems.
+    // Use multiplication to avoid integer-division rounding surprises.
+    if missing_systems.len() >= MIN_MISSING_FOR_PERCENT_GUARD
+        && !expected_systems.is_empty()
+        && missing_systems.len() * 100 > expected_systems.len() * MAX_FALLBACK_MISSING_PERCENT
+    {
+        bail!(
+            "nix-eval-jobs silently dropped {} of {} expected systems (>{:.0}%); \
+             refusing standalone fallback — likely process-wide evaluator failure",
+            missing_systems.len(),
+            expected_systems.len(),
+            MAX_FALLBACK_MISSING_PERCENT,
+        );
     }
 
     info!(

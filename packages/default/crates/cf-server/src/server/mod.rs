@@ -48,6 +48,20 @@ use crate::services::hardening_scans::trigger_commit_hardening_scans;
 const CLOSURE_COUNT_MAX_CONCURRENT: usize = 2;
 static CLOSURE_COUNT_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
+/// Maximum number of commit evaluations (nix-eval-jobs + fallback phase)
+/// that may run concurrently across the entire server process.
+/// Each bulk evaluation loads and evaluates a large flake and can use
+/// several GiB of memory; running more than one at a time on this host
+/// risks memory exhaustion when combined with the standalone fallback evals.
+const MAX_CONCURRENT_COMMIT_EVALUATIONS: usize = 1;
+static COMMIT_EVALUATION_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn commit_evaluation_limiter() -> Arc<Semaphore> {
+    COMMIT_EVALUATION_LIMITER
+        .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_COMMIT_EVALUATIONS)))
+        .clone()
+}
+
 fn closure_count_limiter() -> Arc<Semaphore> {
     CLOSURE_COUNT_LIMITER
         .get_or_init(|| Arc::new(Semaphore::new(CLOSURE_COUNT_MAX_CONCURRENT)))
@@ -1057,6 +1071,28 @@ async fn process_pending_commits(
             ),
         )
         .await;
+
+        // Acquire the process-wide commit-evaluation slot before launching
+        // nix-eval-jobs.  Only MAX_CONCURRENT_COMMIT_EVALUATIONS bulk evals
+        // (plus their fallback phases) may run simultaneously.  This prevents
+        // a burst of incoming commits from each spawning their own full-flake
+        // Nix evaluation concurrently and exhausting host memory.
+        let _eval_permit = match commit_evaluation_limiter().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                error!(
+                    commit_id = commit.id,
+                    "commit evaluation limiter was closed; cannot evaluate"
+                );
+                return Ok(());
+            }
+        };
+        info!(
+            commit_id = commit.id,
+            expected_attempt = attempt,
+            max_concurrent = MAX_CONCURRENT_COMMIT_EVALUATIONS,
+            "commit_evaluation_permit_acquired"
+        );
 
         // Use nix-eval-jobs to discover AND evaluate all nixosConfigurations
         // This will:
