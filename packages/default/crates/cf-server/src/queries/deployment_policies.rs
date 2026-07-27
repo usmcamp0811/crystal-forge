@@ -32,6 +32,9 @@ pub async fn list_deployment_policies(
 }
 
 /// List all enabled deployment policies for evaluator execution.
+/// Deprecated in favour of [`list_enabled_policies_for_flake`] which scopes
+/// results to the environments that actually contain systems from the flake
+/// being evaluated. Kept for CVE-policy loading (no flake context needed).
 pub async fn list_enabled_deployment_policies(
     pool: &PgPool,
 ) -> Result<Vec<DeploymentPolicyRecord>> {
@@ -46,6 +49,55 @@ pub async fn list_enabled_deployment_policies(
     .fetch_all(pool)
     .await
     .context("Failed to list enabled deployment policies")?;
+
+    Ok(policies)
+}
+
+/// List enabled deployment policies that are assigned to at least one
+/// environment which contains an active system belonging to `flake_id`.
+///
+/// This is the correct scope for Nix-eval policy checks: a policy that is
+/// only assigned to environments unrelated to this flake should not block
+/// builds for systems in other environments.
+pub async fn list_enabled_policies_for_flake(
+    pool: &PgPool,
+    flake_id: i32,
+) -> Result<Vec<DeploymentPolicyRecord>> {
+    let policies = sqlx::query_as::<_, DeploymentPolicyRecord>(
+        r#"
+        SELECT DISTINCT dp.id, dp.name, dp.description, dp.policy_type,
+                        dp.config, dp.enabled, dp.created_at, dp.updated_at
+        FROM deployment_policies dp
+        WHERE dp.enabled = true
+          AND (
+              -- Policy is attached to an environment that has at least one
+              -- active system from this flake.
+              EXISTS (
+                  SELECT 1
+                  FROM environment_policies ep
+                  JOIN systems s ON s.environment_id = ep.environment_id
+                  WHERE ep.policy_id = dp.id
+                    AND s.flake_id   = $1
+                    AND s.is_active  = TRUE
+              )
+              OR
+              -- Policy is attached directly to an active system from this flake.
+              EXISTS (
+                  SELECT 1
+                  FROM system_policies sp
+                  JOIN systems s ON s.id = sp.system_id
+                  WHERE sp.policy_id = dp.id
+                    AND s.flake_id   = $1
+                    AND s.is_active  = TRUE
+              )
+          )
+        ORDER BY dp.name ASC
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to list enabled deployment policies for flake")?;
 
     Ok(policies)
 }

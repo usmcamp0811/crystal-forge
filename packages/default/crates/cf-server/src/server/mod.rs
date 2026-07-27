@@ -37,7 +37,9 @@ use crate::queries::commits::{
     EvalCancellationOutcome, EvalFailureOutcome, EvalStartOutcome, get_commits_pending_evaluation,
     mark_commit_evaluation_failed, mark_commit_evaluation_started, reset_stuck_commit_evaluations,
 };
-use crate::queries::deployment_policies::list_enabled_deployment_policies;
+use crate::queries::deployment_policies::{
+    list_enabled_deployment_policies, list_enabled_policies_for_flake,
+};
 use crate::queries::derivations::{
     cleanup_partial_derivations, reset_stuck_builds, set_closure_counts,
 };
@@ -560,8 +562,8 @@ fn parse_deployment_policy_record(
     }
 }
 
-async fn load_deployment_policies_for_eval(pool: &PgPool) -> Vec<DeploymentPolicy> {
-    match list_enabled_deployment_policies(pool).await {
+async fn load_deployment_policies_for_eval(pool: &PgPool, flake_id: i32) -> Vec<DeploymentPolicy> {
+    match list_enabled_policies_for_flake(pool, flake_id).await {
         Ok(records) => {
             let all_policies = records
                 .iter()
@@ -1027,7 +1029,9 @@ async fn process_pending_commits(
             .collect::<Vec<_>>();
 
         // Load enabled deployment policies from DB for nix-eval-jobs policy checks.
-        let policies = load_deployment_policies_for_eval(pool).await;
+        // Scoped to policies assigned to environments that contain systems from
+        // this flake, so policies for unrelated environments do not block builds.
+        let policies = load_deployment_policies_for_eval(pool, flake.id).await;
 
         // CRITICAL: Create broadcast channel BEFORE eval starts
         // This ensures WebSocket clients can subscribe before messages are sent
