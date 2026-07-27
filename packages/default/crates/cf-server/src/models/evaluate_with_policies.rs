@@ -395,7 +395,7 @@ pub enum StandaloneSystemOutcome {
     },
 }
 
-fn build_single_system_eval_expression(
+pub(crate) fn build_single_system_eval_expression(
     flake_ref: &str,
     system_name: &str,
     assigned: &[crate::models::deployment_policies::AssignedPolicy],

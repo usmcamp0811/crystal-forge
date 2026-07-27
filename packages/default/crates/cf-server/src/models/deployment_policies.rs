@@ -523,15 +523,21 @@ impl PolicyCheckResult {
 
         // cfAgentEnabled is emitted unconditionally by the evaluator for every
         // configuration, even when no require_cf_agent policy is assigned. The
-        // build-job insert predicate depends on this value being present, so a
-        // missing key is treated as an infrastructure/parser mismatch rather
-        // than silently defaulting to None (which would silently drop builds).
-        let mut cf_agent_enabled = match policies_json.get("cfAgentEnabled") {
-            Some(v) => v.as_bool(),
+        // build-job insert predicate depends on this value being present and
+        // boolean, so a missing or non-boolean key is treated as an
+        // infrastructure/parser mismatch rather than silently defaulting to None
+        // (which would drop builds).
+        let mut cf_agent_enabled: Option<bool> = match policies_json.get("cfAgentEnabled") {
+            Some(v) => Some(v.as_bool().ok_or_else(|| {
+                format!(
+                    "Configuration {:?}: metadata key \"cfAgentEnabled\" must be boolean, got {}",
+                    system_name, v
+                )
+            })?),
             None => {
                 return Err(format!(
-                    "Configuration {:?}: expected unconditional Nix metadata key \"cfAgentEnabled\" \
-                     but key was absent (available: {:?})",
+                    "Configuration {:?}: expected unconditional metadata key \"cfAgentEnabled\" \
+                     but it was absent (available: {:?})",
                     system_name,
                     policies_json
                         .as_object()
@@ -550,7 +556,13 @@ impl PolicyCheckResult {
             match &ap.policy {
                 DeploymentPolicy::RequireCrystalForgeAgent { .. } => {
                     let value = match policies_json.get(&key) {
-                        Some(v) => v.as_bool(),
+                        Some(v) => v.as_bool().ok_or_else(|| {
+                            format!(
+                                "Configuration {:?}: metadata key {:?} for CF-agent policy \
+                                 (id={}) must be boolean, got {}",
+                                system_name, key, ap.policy_id, v
+                            )
+                        })?,
                         None => {
                             return Err(format!(
                                 "Configuration {:?}: expected Nix metadata key {:?} for \
@@ -564,8 +576,8 @@ impl PolicyCheckResult {
                             ));
                         }
                     };
-                    cf_agent_enabled = value;
-                    if value != Some(true) {
+                    cf_agent_enabled = Some(value);
+                    if !value {
                         warnings.push(format!(
                             "Crystal Forge agent not enabled for {}",
                             system_name
@@ -575,7 +587,13 @@ impl PolicyCheckResult {
                 }
                 DeploymentPolicy::RequirePackages { packages, .. } => {
                     let value = match policies_json.get(&key) {
-                        Some(v) => v.as_bool(),
+                        Some(v) => v.as_bool().ok_or_else(|| {
+                            format!(
+                                "Configuration {:?}: metadata key {:?} for require_packages \
+                                 policy (id={}) must be boolean, got {}",
+                                system_name, key, ap.policy_id, v
+                            )
+                        })?,
                         None => {
                             return Err(format!(
                                 "Configuration {:?}: expected Nix metadata key {:?} for \
@@ -589,8 +607,8 @@ impl PolicyCheckResult {
                             ));
                         }
                     };
-                    has_required_packages = value;
-                    if value != Some(true) {
+                    has_required_packages = Some(value);
+                    if !value {
                         warnings.push(format!(
                             "Missing required packages for {}: {}",
                             system_name,
@@ -609,28 +627,43 @@ impl PolicyCheckResult {
                 } => {
                     if rules.is_empty() {
                         // Legacy single-expression: use field_name from config.
-                        let value = policies_json.get(field_name).and_then(|v| v.as_bool());
-                        if let Some(v) = value {
-                            custom_checks.insert(field_name.clone(), v);
-                            if !v {
-                                warnings.push(format!("{}: {}", system_name, description));
+                        match policies_json.get(field_name) {
+                            Some(v) => {
+                                let v = v.as_bool().ok_or_else(|| {
+                                    format!(
+                                        "Configuration {:?}: custom check {:?} must evaluate \
+                                         to boolean, got {}",
+                                        system_name, field_name, v
+                                    )
+                                })?;
+                                custom_checks.insert(field_name.clone(), v);
+                                if !v {
+                                    warnings.push(format!("{}: {}", system_name, description));
+                                    failed_policies.push((description.clone(), *strict));
+                                }
+                            }
+                            None => {
+                                warnings.push(format!(
+                                    "{}: Could not evaluate custom check '{}'",
+                                    system_name, description
+                                ));
                                 failed_policies.push((description.clone(), *strict));
                             }
-                        } else {
-                            warnings.push(format!(
-                                "{}: Could not evaluate custom check '{}'",
-                                system_name, description
-                            ));
-                            failed_policies.push((description.clone(), *strict));
                         }
                     } else {
                         // Multi-rule: use per-rule field_name (existing convention).
                         let mut rule_results: Vec<(bool, &PolicyRule)> = Vec::new();
                         for rule in rules {
-                            let passed = policies_json
-                                .get(&rule.field_name)
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
+                            let passed = match policies_json.get(&rule.field_name) {
+                                Some(v) => v.as_bool().ok_or_else(|| {
+                                    format!(
+                                        "Configuration {:?}: custom-check rule {:?} must \
+                                         evaluate to boolean, got {}",
+                                        system_name, rule.field_name, v
+                                    )
+                                })?,
+                                None => false,
+                            };
                             custom_checks.insert(rule.field_name.clone(), passed);
                             rule_results.push((passed, rule));
                         }
@@ -897,18 +930,11 @@ fn build_policy_fields_for_config_indented(
         }
         let key = policy_result_key(&ap.policy_id);
         match &ap.policy {
-            DeploymentPolicy::RequireCrystalForgeAgent { .. } => {
-                // CF-agent check: emit under the stable policy_id key.
-                // The standalone path uses `config.` directly; the bulk path
-                // (mapAttrs) passes `cfg.config` as `config`.
-                let expr = "(config.systemd.services.crystal-forge-agent.enable or false) || \
-                            ((config.services.crystal-forge.enable or false) && \
-                             (config.services.crystal-forge.client.enable or false))";
-                lines.push(format!("{}{} = {};", indent, key, expr));
-            }
             DeploymentPolicy::CustomCheck { rules, .. } if !rules.is_empty() => {
                 // Multi-rule: emit one line per rule using the rule's own field_name
                 // (existing convention; rules predate stable-ID keys).
+                // Expressions are expected to use `cfg.config.*` per the documented
+                // policy fragment lexical contract.
                 for rule in rules {
                     lines.push(format!(
                         "{}{} = {};",
@@ -917,6 +943,10 @@ fn build_policy_fields_for_config_indented(
                 }
             }
             _ => {
+                // All built-in Nix-evaluated policies (require_cf_agent,
+                // require_packages) use `cfg.config.*` in their expression
+                // fragments because the checker function receives the full
+                // nixosConfigurations.<name> object as `cfg`.
                 let (_, expr) = ap.policy.to_nix_expression_with_index(idx);
                 lines.push(format!("{}{} = {};", indent, key, expr));
             }
@@ -932,21 +962,21 @@ fn build_policy_fields_for_config_indented(
 /// Each `nixosConfigurations.<name>` output is checked only against the
 /// policies assigned to the Crystal Forge system(s) for that configuration.
 /// Configurations that are unregistered or have no assigned policies receive
-/// an empty `policies` attribute set.
+/// only the unconditional `cfAgentEnabled` metadata.
 ///
 /// The expression structure:
 /// ```nix
 /// let
 ///   flake = builtins.getFlake "<flakeRef>";
 ///   policyCheckers = {
-///     "<config>" = config: { policy_<id> = <expr>; ... };
+///     "<config>" = cfg: { policy_<id> = <expr>; ... };
 ///     ...
 ///   };
 /// in builtins.mapAttrs (name: cfg:
 ///   let
 ///     drv = cfg.config.system.build.toplevel;
 ///     checker = policyCheckers.${name} or (_: {});
-///   in drv // { meta = (drv.meta or {}) // { policies = checker cfg.config; }; }
+///   in drv // { meta = (drv.meta or {}) // { policies = { cfAgentEnabled = cfAgentEnabledExpr cfg; } // (checker cfg); }; }
 /// ) flake.nixosConfigurations
 /// ```
 pub fn build_nix_eval_expression(
@@ -963,7 +993,7 @@ pub fn build_nix_eval_expression(
             } else {
                 format!("{{\n{}\n          }}", field_lines.join("\n"))
             };
-            format!("        {} = config: {};", nix_string(config_name), body)
+            format!("        {} = cfg: {};", nix_string(config_name), body)
         })
         .collect();
 
@@ -978,10 +1008,10 @@ pub fn build_nix_eval_expression(
 let
   flake = builtins.getFlake {flake_ref};
   policyCheckers = {checkers};
-  cfAgentEnabledExpr = config:
-    (config.systemd.services.crystal-forge-agent.enable or false)
-    || ((config.services.crystal-forge.enable or false)
-        && (config.services.crystal-forge.client.enable or false));
+  cfAgentEnabledExpr = cfg:
+    (cfg.config.systemd.services.crystal-forge-agent.enable or false)
+    || ((cfg.config.services.crystal-forge.enable or false)
+        && (cfg.config.services.crystal-forge.client.enable or false));
 in
   builtins.mapAttrs (name: cfg:
     let
@@ -990,7 +1020,7 @@ in
     in
       drv // {{
         meta = (drv.meta or {{}}) // {{
-          policies = {{ cfAgentEnabled = cfAgentEnabledExpr cfg.config; }} // (checker cfg.config);
+          policies = {{ cfAgentEnabled = cfAgentEnabledExpr cfg; }} // (checker cfg);
         }};
       }}
   ) flake.nixosConfigurations
@@ -1383,5 +1413,347 @@ mod tests {
         let result = PolicyCheckResult::from_json("test-host".to_string(), &json, &policies);
         assert!(!result.meets_requirements);
         assert!(!result.failed_policies.is_empty());
+    }
+
+    // ── Regression tests for policy expression cfg scope ───────────────────
+
+    #[test]
+    fn bulk_package_checker_binds_full_cfg_object() {
+        let mut map = PoliciesByConfiguration::new();
+        map.insert(
+            "gray".to_string(),
+            vec![AssignedPolicy {
+                policy_id: uuid::Uuid::from_u128(1),
+                policy: DeploymentPolicy::RequirePackages {
+                    packages: vec!["grafana".to_string()],
+                    strict: true,
+                },
+            }],
+        );
+
+        let expr = build_nix_eval_expression("github:user/repo", &map);
+
+        // Checker must bind the full nixosConfiguration object as `cfg`.
+        assert!(
+            expr.contains("\"gray\" = cfg:"),
+            "bulk checker must bind full cfg object, got:\n{expr}"
+        );
+        // The package policy must reference the full cfg object.
+        assert!(
+            expr.contains("cfg.config.environment.systemPackages"),
+            "package policy must use cfg.config scope, got:\n{expr}"
+        );
+        // The checker must be invoked with the full cfg object.
+        assert!(
+            expr.contains("checker cfg") && !expr.contains("checker cfg.config"),
+            "checker must receive full cfg object, got:\n{expr}"
+        );
+        // Sanity: must not mix a `config` binding with a `cfg` expression.
+        assert!(
+            !expr.contains("\"gray\" = config:"),
+            "checker must not bind `config` while expressions reference `cfg`, got:\n{expr}"
+        );
+    }
+
+    #[test]
+    fn standalone_agent_policy_uses_full_cfg_object() {
+        let assigned = vec![AssignedPolicy {
+            policy_id: uuid::Uuid::from_u128(1),
+            policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
+        }];
+
+        let expr = crate::models::evaluate_with_policies::build_single_system_eval_expression(
+            "github:user/repo",
+            "gray",
+            &assigned,
+        );
+
+        // Both the unconditional cfAgentEnabled and the assigned-policy stable
+        // key must use cfg.config.
+        assert!(
+            expr.contains("cfg.config.systemd.services.crystal-forge-agent.enable"),
+            "standalone agent check must use cfg.config scope, got:\n{expr}"
+        );
+        // Every occurrence of `config.systemd.services` must be prefixed with `cfg.`;
+        // otherwise the expression references an unbound `config` variable.
+        let cfg_count = expr.matches("cfg.config.systemd.services").count();
+        let config_count = expr.matches("config.systemd.services").count();
+        assert_eq!(
+            cfg_count, config_count,
+            "standalone expression must not reference unbound `config`, got:\n{expr}"
+        );
+    }
+
+    #[test]
+    fn bulk_custom_check_preserves_documented_cfg_scope() {
+        let mut map = PoliciesByConfiguration::new();
+        map.insert(
+            "gray".to_string(),
+            vec![AssignedPolicy {
+                policy_id: uuid::Uuid::from_u128(1),
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: "cfg.config.networking.firewall.enable".to_string(),
+                    description: "firewall".to_string(),
+                    field_name: "firewallEnabled".to_string(),
+                    strict: true,
+                    rules: Vec::new(),
+                    mode: RuleMode::All,
+                },
+            }],
+        );
+
+        let expr = build_nix_eval_expression("github:user/repo", &map);
+
+        assert!(
+            expr.contains("\"gray\" = cfg:"),
+            "bulk checker must bind full cfg object, got:\n{expr}"
+        );
+        assert!(
+            expr.contains("cfg.config.networking.firewall.enable"),
+            "custom check expression must be emitted verbatim with cfg scope, got:\n{expr}"
+        );
+    }
+
+    #[test]
+    fn bulk_multi_rule_custom_check_preserves_cfg_scope() {
+        let mut map = PoliciesByConfiguration::new();
+        map.insert(
+            "gray".to_string(),
+            vec![AssignedPolicy {
+                policy_id: uuid::Uuid::from_u128(1),
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: String::new(),
+                    description: "ssh-and-firewall".to_string(),
+                    field_name: "parent".to_string(),
+                    strict: true,
+                    rules: vec![
+                        PolicyRule {
+                            expression: "cfg.config.services.openssh.enable".to_string(),
+                            description: "ssh".to_string(),
+                            field_name: "sshEnabled".to_string(),
+                            strict: true,
+                        },
+                        PolicyRule {
+                            expression: "cfg.config.networking.firewall.enable".to_string(),
+                            description: "firewall".to_string(),
+                            field_name: "firewallEnabled".to_string(),
+                            strict: true,
+                        },
+                    ],
+                    mode: RuleMode::All,
+                },
+            }],
+        );
+
+        let expr = build_nix_eval_expression("github:user/repo", &map);
+
+        assert!(
+            expr.contains("\"gray\" = cfg:"),
+            "bulk checker must bind full cfg object, got:\n{expr}"
+        );
+        assert!(
+            expr.contains("cfg.config.services.openssh.enable"),
+            "multi-rule expression must be emitted with cfg scope, got:\n{expr}"
+        );
+        assert!(
+            expr.contains("cfg.config.networking.firewall.enable"),
+            "multi-rule expression must be emitted with cfg scope, got:\n{expr}"
+        );
+    }
+
+    /// Build a synthetic Nix expression that evaluates the policy fields
+    /// produced for a single configuration without touching the network or a
+    /// real flake, then run `nix eval --json` and assert the results.
+    ///
+    /// This is the critical regression test: it fails when the generated
+    /// expression references an unbound variable (`cfg` vs `config`).
+    #[test]
+    #[ignore = "requires Nix evaluator in PATH"]
+    fn generated_policy_fields_evaluate_without_undefined_variables() {
+        let assigned = vec![
+            AssignedPolicy {
+                policy_id: uuid::Uuid::from_u128(1),
+                policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
+            },
+            AssignedPolicy {
+                policy_id: uuid::Uuid::from_u128(2),
+                policy: DeploymentPolicy::RequirePackages {
+                    packages: vec!["grafana".to_string()],
+                    strict: true,
+                },
+            },
+            AssignedPolicy {
+                policy_id: uuid::Uuid::from_u128(3),
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: String::new(),
+                    description: "ssh-and-firewall".to_string(),
+                    field_name: "parent".to_string(),
+                    strict: true,
+                    rules: vec![
+                        PolicyRule {
+                            expression: "cfg.config.services.openssh.enable".to_string(),
+                            description: "ssh".to_string(),
+                            field_name: "sshEnabled".to_string(),
+                            strict: true,
+                        },
+                        PolicyRule {
+                            expression: "cfg.config.networking.firewall.enable".to_string(),
+                            description: "firewall".to_string(),
+                            field_name: "firewallEnabled".to_string(),
+                            strict: true,
+                        },
+                    ],
+                    mode: RuleMode::All,
+                },
+            },
+        ];
+
+        let field_lines = build_policy_fields_for_config(&assigned);
+        assert!(!field_lines.is_empty());
+
+        let fields = field_lines.join("\n");
+        let agent_key = policy_result_key(&uuid::Uuid::from_u128(1));
+        let package_key = policy_result_key(&uuid::Uuid::from_u128(2));
+
+        let expr = format!(
+            r#"
+let
+  cfg = {{
+    config = {{
+      systemd.services.crystal-forge-agent.enable = true;
+      services.crystal-forge.enable = true;
+      services.crystal-forge.client.enable = true;
+      services.openssh.enable = true;
+      environment.systemPackages = [
+        {{ pname = "grafana"; name = "grafana"; }}
+      ];
+      networking.firewall.enable = true;
+    }};
+  }};
+in {{
+  {fields}
+}}
+"#
+        );
+
+        let output = std::process::Command::new("nix")
+            .args(["eval", "--json", "--expr", &expr])
+            .output()
+            .expect("failed to spawn nix eval");
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            panic!(
+                "nix eval failed:\n{}\nGenerated expression:\n{}",
+                stderr, expr
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("nix eval output must be valid JSON");
+
+        assert_eq!(
+            parsed.get(&agent_key).and_then(|v| v.as_bool()),
+            Some(true),
+            "agent policy must evaluate to true; got {parsed}"
+        );
+        assert_eq!(
+            parsed.get(&package_key).and_then(|v| v.as_bool()),
+            Some(true),
+            "package policy must evaluate to true; got {parsed}"
+        );
+        assert_eq!(
+            parsed.get("sshEnabled").and_then(|v| v.as_bool()),
+            Some(true),
+            "custom ssh check must evaluate to true; got {parsed}"
+        );
+        assert_eq!(
+            parsed.get("firewallEnabled").and_then(|v| v.as_bool()),
+            Some(true),
+            "custom firewall check must evaluate to true; got {parsed}"
+        );
+    }
+
+    #[test]
+    fn cf_agent_metadata_non_boolean_is_parser_error() {
+        let policies_json = serde_json::json!({
+            "cfAgentEnabled": "true",
+        });
+
+        let result = PolicyCheckResult::from_assigned("gray".to_string(), &policies_json, &[]);
+
+        assert!(
+            result.is_err(),
+            "non-boolean cfAgentEnabled must be treated as an infrastructure error"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("must be boolean"),
+            "error should mention boolean requirement: {err}"
+        );
+    }
+
+    #[test]
+    fn assigned_boolean_policy_non_boolean_is_parser_error() {
+        let policy_id = uuid::Uuid::from_u128(1);
+        let assigned = vec![AssignedPolicy {
+            policy_id,
+            policy: DeploymentPolicy::RequirePackages {
+                packages: vec!["grafana".to_string()],
+                strict: true,
+            },
+        }];
+        let key = policy_result_key(&policy_id);
+        let policies_json = serde_json::json!({
+            "cfAgentEnabled": true,
+            key: "true",
+        });
+
+        let result =
+            PolicyCheckResult::from_assigned("gray".to_string(), &policies_json, &assigned);
+
+        assert!(
+            result.is_err(),
+            "non-boolean assigned policy value must be treated as an infrastructure error"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("must be boolean"),
+            "error should mention boolean requirement: {err}"
+        );
+    }
+
+    #[test]
+    fn custom_check_non_boolean_value_is_parser_error() {
+        let policy_id = uuid::Uuid::from_u128(1);
+        let assigned = vec![AssignedPolicy {
+            policy_id,
+            policy: DeploymentPolicy::CustomCheck {
+                expression: "cfg.config.networking.firewall.enable".to_string(),
+                description: "firewall".to_string(),
+                field_name: "firewallEnabled".to_string(),
+                strict: true,
+                rules: Vec::new(),
+                mode: RuleMode::All,
+            },
+        }];
+        let policies_json = serde_json::json!({
+            "cfAgentEnabled": true,
+            "firewallEnabled": "true",
+        });
+
+        let result =
+            PolicyCheckResult::from_assigned("gray".to_string(), &policies_json, &assigned);
+
+        assert!(
+            result.is_err(),
+            "non-boolean custom check value must be treated as an infrastructure error"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("must evaluate to boolean"),
+            "error should mention boolean requirement: {err}"
+        );
     }
 }
