@@ -4,7 +4,7 @@ title: Evaluation errors silently drop systems from nixosConfigurations count
 status: In Progress
 assignee: []
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-27 20:24'
+updated_date: '2026-07-27 20:47'
 labels:
   - evaluator
   - reporting
@@ -237,4 +237,29 @@ Remaining for full task completion:
 - Workflow-level test: system A claimable build job while B still evaluating (requires mock evaluator hook or test harness extension)
 
 Continuing investigation in worktree TASK-397-eval-errors-silently-drop (HEAD f4865c44). Root cause identified: commit f4865c44 scoped policies per configuration but lost the unconditional cfAgentEnabled emission introduced in 8a9d0b78. Configurations with zero assigned policies now produce an empty policies attrset, so PolicyCheckResult::from_assigned leaves cf_agent_enabled = None. The build-job insert predicate `derivations.cf_agent_enabled = TRUE` then rejects those derivations, producing a successful eval but empty build queue. Fix: always emit cfAgentEnabled in both bulk and standalone Nix expressions, always read it in from_assigned, and update tests/log messaging accordingly.
+
+Fix implemented and verified. Changes:
+
+1. `models/deployment_policies.rs`:
+   - `build_nix_eval_expression` now emits `cfAgentEnabled` unconditionally for every nixosConfiguration via a `cfAgentEnabledExpr` helper merged into each configuration's `policies` attrset.
+   - `PolicyCheckResult::from_assigned` now parses `cfAgentEnabled` unconditionally and returns an infrastructure error if the key is missing, preventing silent `cf_agent_enabled = None` that blocks build-job insertion.
+   - Updated `test_build_expression_no_policies` to assert `cfAgentEnabled` and `cfAgentEnabledExpr` are present.
+
+2. `models/evaluate_with_policies.rs`:
+   - `build_single_system_eval_expression` now emits `cfAgentEnabled` unconditionally in `policyResults`.
+   - Standalone fallback path no longer short-circuits to a `cf_agent_enabled: None` result when no policies are assigned; it always parses the unconditional metadata.
+   - Streaming fallback for configurations with no assigned policies now reads `cfAgentEnabled` from `meta.policies` and only synthesizes a passing result when the metadata is present.
+   - Updated log/broadcast messages to say "configurations with assigned policies" instead of "registered configurations" to avoid implying zero systems are registered.
+   - Updated unit tests (`different_environments_use_different_policy_sets`, `no_policy_configuration_passes_evaluation`) to include unconditional `cfAgentEnabled` JSON and assert missing-key behavior.
+
+Verification (worktree TASK-397-eval-errors-silently-drop):
+- `env SQLX_OFFLINE=true cargo check -p cf-server --all-targets` exit 0
+- `env SQLX_OFFLINE=true cargo test -p cf-server --lib` exit 0; 651 passed, 195 ignored
+- `cargo test -p cf-server models::evaluate_with_policies::tests::finalize_system_ --lib -- --ignored --test-threads=1` against dev DB: 11 passed
+- `cargo sqlx prepare --check -- --all-targets` against dev DB: exit 0
+- `nix build .#packages.x86_64-linux.server --no-link` exit 0
+- `nix build .#devScripts.state-machine-test --no-link` exit 0
+- `git diff --check` exit 0
+
+Remaining: commit, push to MR !309, and run CI exact-head pipeline.
 <!-- SECTION:NOTES:END -->
