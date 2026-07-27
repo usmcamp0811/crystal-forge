@@ -4,7 +4,7 @@ title: Evaluation errors silently drop systems from nixosConfigurations count
 status: Review
 assignee: []
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-27 20:47'
+updated_date: '2026-07-27 21:30'
 labels:
   - evaluator
   - reporting
@@ -262,6 +262,36 @@ Verification (worktree TASK-397-eval-errors-silently-drop):
 - `git diff --check` exit 0
 
 Remaining: commit, push to MR !309, and run CI exact-head pipeline.
+
+Second fix pushed: unified policy expression `cfg` scope.
+
+## Problem
+The per-configuration bulk checker from `dab3b5b7` / `f4865c44` bound its checker argument as `config` and passed only `cfg.config`, while built-in policy fragments (`RequirePackages`, `RequireCrystalForgeAgent`) are generated against the full `cfg` object. Production evaluation failed immediately with `undefined variable 'cfg'` for any configuration with an assigned package or agent policy (e.g. the `gray` configuration in the `campground` flake).
+
+## Fix
+- `build_policy_fields_for_config_indented` now routes every built-in Nix-evaluated policy through `to_nix_expression_with_index`, so all fragments use the documented `cfg.config.*` scope.
+- Bulk checker binds `cfg` and is invoked with the full `nixosConfigurations.<name>` object.
+- Unconditional `cfAgentEnabled` helper uses `cfg:` and `cfg.config.*` consistently.
+- `PolicyCheckResult::from_assigned` rejects non-boolean values for `cfAgentEnabled` and every assigned boolean policy field, treating them as infrastructure/parser mismatches.
+- Added regression tests for bulk/standalone `cfg` scope and synthetic `nix eval` execution.
+
+## Verification
+- `cargo fmt --check` exit 0
+- `env SQLX_OFFLINE=true cargo check -p cf-server --all-targets` exit 0
+- `env SQLX_OFFLINE=true cargo test -p cf-server --lib` exit 0; 658 passed, 196 ignored
+- `cargo test -p cf-server models::deployment_policies::tests::generated_policy_fields_evaluate_without_undefined_variables --lib -- --ignored` (Nix evaluator): 1 passed
+- `cargo test -p cf-server models::evaluate_with_policies::tests::finalize_system_ --lib -- --ignored --test-threads=1` (dev DB): 11 passed
+- `cargo sqlx prepare --check -- --all-targets` (dev DB): exit 0
+- `nix build .#packages.x86_64-linux.server --no-link` exit 0
+- `nix build .#devScripts.state-machine-test --no-link` exit 0
+- `git diff --check` exit 0
+
+## Commit / MR
+- Commit: `40ab94f2`
+- Branch: `TASK-397-eval-errors-silently-drop`
+- MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/309
+
+Remaining: runtime acceptance with the `campground` commit `3ea42835959d49fab431f07470dfc93fb7f7a52d` to confirm no `undefined variable 'cfg'` and that `gray` evaluates/queues correctly.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
