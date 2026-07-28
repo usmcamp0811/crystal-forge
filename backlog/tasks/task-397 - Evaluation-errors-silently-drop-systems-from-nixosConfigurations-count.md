@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-28 19:22'
+updated_date: '2026-07-28 20:10'
 labels:
   - evaluator
   - reporting
@@ -96,17 +96,31 @@ Two separate fixes are needed:
 - [ ] #5 Evaluator subprocess groups are terminated when bulk or standalone evaluation futures time out are cancelled or are dropped
 - [ ] #6 The server service has default hard memory and bounded swap containment so evaluator descendants cannot trigger a host-wide OOM
 - [ ] #7 Evaluator diagnostics are drained without retaining unbounded stderr in server memory
+- [ ] #8 The dotfiles nixos branch configures reckless with one evaluator worker a 24G high watermark a 32G hard server limit a 1G server swap limit and no local Crystal Forge builder
+- [ ] #9 The vendored downstream module exposes configurable server MemoryHigh MemoryMax MemorySwapMax and TasksMax and places Crystal Forge services beneath a bounded aggregate parent slice
+- [ ] #10 The downstream server uses control-group cleanup OOMPolicy stop on-failure restart and rate limiting
+- [ ] #11 Nix evaluator guards reject invalid PGIDs and remain armed until bounded pipe readers finish
+- [ ] #12 Evaluator stdout stderr WebSocket and persisted records are bounded before allocating an oversized line or JSON record
+- [ ] #13 Active Nix subprocesses and service cgroup memory composition are observable with process kind ownership timing and concurrency fields
+- [ ] #14 A NixOS VM test proves Crystal Forge cgroup OOM containment leaves an outside sentinel and the VM responsive
+- [ ] #15 Remote derivation materialization preserves a complete actionable error chain and changes transport mode for one eligible retry without falling back on authorization failures
+- [ ] #16 A real campground evaluation under the deployed reckless limits causes no global OOM no unrelated process kill no unbounded swap and no orphan evaluator descendants
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-OOM-containment follow-up for MR !309:
-1. Reuse NixEvalProcessGuard for standalone and fallback `nix eval` children so dropping an in-flight future synchronously kills its full process group.
-2. Replace unbounded evaluator stdout/stderr retention with capped buffers that continue draining child pipes and report truncation.
-3. Make evaluator defaults conservative (`eval_workers = 2`) and add default systemd cgroup containment (`MemoryHigh = 60%`, `MemoryMax = 75%`, `MemorySwapMax = 2G`) with overridable NixOS options and accurate documentation that nix-eval-jobs `--max-memory-size` is only a post-attribute worker restart threshold.
-4. Add focused unit tests for process-group cleanup and capped diagnostics plus Nix module evaluation coverage where practical.
-5. Run targeted Rust tests/checks and Nix module/package verification. Runtime acceptance on reckless remains a separate deployment check; do not modify or restart the live service from this worktree.
+P0 OOM and remote-materialization follow-up requested for MR !309 and dotfiles:nixos.
+
+1. Downstream first: update `/config/modules/nixos/services/crystal-forge/default.nix` with configurable server MemoryHigh/MemoryMax/MemorySwapMax/TasksMax, aggregate `crystal-forge.slice`, server slice assignment, OOM-safe restart policy, conservative evaluator defaults, and correct threshold documentation. Update `/config/systems/x86_64-linux/reckless/default.nix` to one evaluator worker, 24G/32G/1G limits, and disable the local builder. Preserve the existing committed containment block while replacing it with configurable settings.
+2. Verify downstream evaluation from the dotfiles `nixos` branch without deploying or using sudo. Record exact intended rendered properties.
+3. Collect previous-boot and current OOM evidence on reckless using unprivileged journal/cgroup access; do not assume cgroup peak equals Rust heap.
+4. Upstream guard correction: centralize nonzero PID/PGID validation, keep cleanup armed until bounded pipe drain finishes, add bounded record readers that cap before allocation, and add regression tests for leader-exits/descendant-holds-pipe behavior.
+5. Add a shared Nix subprocess registry and cgroup telemetry, conservative shared concurrency, overlap prevention, and memory-aware evaluator cancellation. Add a NixOS VM containment test with a sentinel outside the Crystal Forge slice.
+6. Diagnose the daly/webb delta materialization failure and preserve the full error chain. Authorization failures must not fall back; retryable transport failures switch once from delta to full closure. Add chunk/cross-reference/truncation/import tests before changing transport architecture.
+7. Run targeted Rust/SQLx/Nix checks, commit and push both requested branches, then perform only unprivileged runtime verification. Do not merge MR !309. Do not claim real-host acceptance until a campground evaluation has run with the deployed downstream limits.
+
+Scope note: TASK-390 currently records a lock in a separate worktree for remote-builder transport. Complete P0 downstream/OOM work first; before editing overlapping transport files, resolve that active-task/worktree ownership conflict rather than duplicating changes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -313,6 +327,8 @@ Verification:
 - `git diff --check`: passed.
 
 A full `cargo test -p cf-server --lib` run was not clean: 684 passed, 200 ignored, and 3 unrelated runtime-database CVE tests failed with `PoolTimedOut` because the available DATABASE_URL did not accept connections. Runtime acceptance remains pending: reckless currently still reports infinity for MemoryHigh/MemoryMax/MemorySwapMax because this branch has not been deployed or the service restarted. Its last observed service instance peak remains 30,853,607,424 bytes.
+
+User explicitly prohibited merging MR !309 until both OOM containment and remote materialization runtime gates pass. Immediate downstream work targets `usmcamp0811/dotfiles` branch `nixos`; upstream remains `TASK-397-eval-errors-silently-drop`. No sudo or destructive deployment commands will be run by the agent.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
