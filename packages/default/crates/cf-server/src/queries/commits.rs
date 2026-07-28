@@ -1230,7 +1230,7 @@ pub async fn fetch_eval_policy_matrix(
         SELECT
             d.derivation_name AS system_name,
             CASE
-                WHEN d.status_id = 6 OR d.error_message IS NOT NULL THEN 'eval_failed'
+                WHEN d.status_id = 6 THEN 'eval_failed'
                 ELSE 'evaluated'
             END AS eval_status,
             d.error_message,

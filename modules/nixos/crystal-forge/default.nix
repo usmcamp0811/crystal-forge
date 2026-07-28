@@ -1679,6 +1679,39 @@ in {
           Example: `{ "Admins" = "admin"; "Developers" = "user"; }`
         '';
       };
+
+      systemd_memory_max = lib.mkOption {
+        type = lib.types.nullOr (lib.types.either lib.types.int lib.types.str);
+        default = null;
+        example = "8G";
+        description = lib.mdDoc ''
+          Maximum memory limit for the server systemd unit (MemoryMax).
+          Passed as a systemd `MemoryMax` value (e.g. `"8G"` for 8 gibibytes).
+          Default is `null` (no limit).
+        '';
+      };
+
+      systemd_memory_high = lib.mkOption {
+        type = lib.types.nullOr (lib.types.either lib.types.int lib.types.str);
+        default = null;
+        example = "6G";
+        description = lib.mdDoc ''
+          Memory throttling threshold (MemoryHigh).
+          Once exceeded, the unit is aggressively reclaimed.
+          Default is `null` (no throttling).
+        '';
+      };
+
+      systemd_cpu_quota = lib.mkOption {
+        type = lib.types.nullOr lib.types.int;
+        default = null;
+        example = 400;
+        description = lib.mdDoc ''
+          CPU quota percentage for the server systemd unit (CPUQuota).
+          Example: `400` means up to 4 CPU cores.
+          Default is `null` (no limit).
+        '';
+      };
     };
 
     client = {
@@ -2355,6 +2388,24 @@ in {
 
         Restart = "always";
         RestartSec = 5;
+
+        # Resource limits — nix-eval-jobs workers are memory-intensive and
+        # the server must not exhaust the host under concurrent evaluation,
+        # build preparation, and closure counting. Adjust these in the
+        # consuming configuration; the defaults are conservative for a
+        # desktop-class host.
+        MemoryHigh = lib.mkIf (cfg.server.systemd_memory_high != null)
+          (toString cfg.server.systemd_memory_high);
+        MemoryMax = lib.mkIf (cfg.server.systemd_memory_max != null)
+          (toString cfg.server.systemd_memory_max);
+        CPUQuota = lib.mkIf (cfg.server.systemd_cpu_quota != null)
+          (toString cfg.server.systemd_cpu_quota) + "%";
+
+        # Kill the entire control group (including descendant nix-eval-jobs
+        # workers) when the service stops or restarts, preventing orphaned
+        # evaluator processes from accumulating.
+        KillMode = "control-group";
+        OOMPolicy = "stop";
       };
     };
 

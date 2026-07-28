@@ -2040,6 +2040,13 @@ pub async fn evaluate_with_nix_eval_jobs(
     // discovery failure would no longer trigger this, but it is still a
     // valuable safety net for any other early-return path).
     cmd.kill_on_drop(true);
+    // Spawn nix-eval-jobs in a new process group so that a SIGKILL on
+    // cancellation, timeout, or error reaches every process in the
+    // evaluator subtree (workers, sub-evaluators, helpers), not just
+    // the direct nix-eval-jobs process. Without this, orphan worker
+    // processes can accumulate and progressively degrade host RAM/CPU.
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd.args([
         "--expr",
         &nix_expr,
@@ -2065,6 +2072,12 @@ pub async fn evaluate_with_nix_eval_jobs(
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd.spawn()?;
+    // PGID == PID when spawned with process_group(0).  Used by
+    // kill_nix_process_tree to SIGKILL the entire evaluator subtree.
+    #[cfg(unix)]
+    let bulk_pgid = child.id().unwrap_or(0) as libc::pid_t;
+    #[cfg(not(unix))]
+    let bulk_pgid = 0i32;
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
 
@@ -2099,10 +2112,8 @@ pub async fn evaluate_with_nix_eval_jobs(
             _ = cancel_ticker.tick() => {
                 match crate::queries::commits::check_cancellation_requested(pool, commit.id).await {
                     Ok(true) => {
-                        warn!("🚫 Cancellation requested for commit {} — killing nix-eval-jobs", commit.id);
-                        if let Err(kill_err) = child.kill().await {
-                            warn!("Failed to kill nix-eval-jobs for cancelled commit {}: {kill_err}", commit.id);
-                        }
+                        warn!("🚫 Cancellation requested for commit {} — killing nix-eval-jobs process group", commit.id);
+                        kill_nix_process_tree(&mut child, bulk_pgid).await;
                         // Do NOT call force_cancel_commit_evaluation here — the
                         // outer handler (process_pending_commits) is the single
                         // authority that atomically transitions the state and
@@ -2130,7 +2141,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                             .await;
                     }
 
-                    let _ = child.kill().await;
+                    kill_nix_process_tree(&mut child, bulk_pgid).await;
                     bail!(
                         "evaluation timed out after {}s without nix-eval-jobs output",
                         EVAL_OUTPUT_IDLE_TIMEOUT_SECS

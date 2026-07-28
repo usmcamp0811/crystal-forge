@@ -458,11 +458,34 @@ pub async fn record_successful_eval_result(
 
             match existing {
                 Some((id, status_id)) => match status_id {
-                    // Build-active or build-terminal: preserve everything.
-                    7 | 8 | 10 | 12 => SuccessfulEvalWrite::PreservedBuildState {
-                        derivation_id: id,
-                        status_id,
-                    },
+                    // Build-active or build-terminal: preserve the build
+                    // status but still refresh policy metadata so that
+                    // re-evaluation after a policy change produces
+                    // up-to-date matrix results.
+                    7 | 8 | 10 | 12 => {
+                        sqlx::query(
+                            r#"
+                            UPDATE derivations
+                            SET cf_agent_enabled = $1,
+                                policy_requirements_met = $2,
+                                policy_results = $3,
+                                expected_store_path = COALESCE($4, expected_store_path),
+                                completed_at = NOW()
+                            WHERE id = $5
+                            "#,
+                        )
+                        .bind(cf_agent_enabled)
+                        .bind(policy_requirements_met)
+                        .bind(policy_results)
+                        .bind(expected_store_path)
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await?;
+                        SuccessfulEvalWrite::PreservedBuildState {
+                            derivation_id: id,
+                            status_id,
+                        }
+                    }
                     // DryRunPending (3), DryRunInProgress (4), DryRunFailed (6),
                     // DryRunComplete (5): update to DryRunComplete with fresh data,
                     // clearing any stale error.
@@ -591,10 +614,36 @@ pub async fn record_successful_eval_result_in_tx(
 
             match existing {
                 Some((id, status_id)) => match status_id {
-                    7 | 8 | 10 | 12 => Ok(SuccessfulEvalWrite::PreservedBuildState {
-                        derivation_id: id,
-                        status_id,
-                    }),
+                    // Build-active or build-terminal: preserve the build
+                    // status but still refresh policy metadata so that
+                    // re-evaluation after a policy change produces
+                    // up-to-date matrix results. Without this, a build
+                    // that was queued under old policy assignments would
+                    // retain stale policy_results forever.
+                    7 | 8 | 10 | 12 => {
+                        sqlx::query(
+                            r#"
+                            UPDATE derivations
+                            SET cf_agent_enabled = $1,
+                                policy_requirements_met = $2,
+                                policy_results = $3,
+                                expected_store_path = COALESCE($4, expected_store_path),
+                                completed_at = NOW()
+                            WHERE id = $5
+                            "#,
+                        )
+                        .bind(cf_agent_enabled)
+                        .bind(policy_requirements_met)
+                        .bind(policy_results)
+                        .bind(expected_store_path)
+                        .bind(id)
+                        .execute(&mut **tx)
+                        .await?;
+                        Ok(SuccessfulEvalWrite::PreservedBuildState {
+                            derivation_id: id,
+                            status_id,
+                        })
+                    }
                     _ => {
                         sqlx::query(
                             r#"

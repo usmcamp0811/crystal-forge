@@ -1140,4 +1140,42 @@ mod tests {
 
         assert_eq!(matrix.policies, vec!["CF agent", "failme"]);
     }
+
+    /// A derivation with status_id = 12 (BuildFailed) and a non-NULL
+    /// error_message must NOT render as eval_failed in the matrix. The
+    /// error_message may be set by a later build failure that occurred
+    /// after the system successfully passed evaluation and policies.
+    /// Only status_id = 6 (DryRunFailed) proves evaluation failure.
+    #[test]
+    fn build_failed_derivation_not_eval_failed() {
+        for status in [7u32, 8, 10, 12] {
+            let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+                system_name: format!("sys-status-{status}"),
+                eval_status: "evaluated".to_string(),
+                error_message: Some("Build failed: gcc segfault".to_string()),
+                policy_results: serde_json::json!({
+                    "global": { "cfAgentEnabled": { "passed": true, "strict": true, "details": null } },
+                    "assigned": {}
+                }),
+                policy_requirements_met: Some(true),
+            }];
+
+            let matrix = build_eval_policy_matrix_response(1, rows);
+
+            assert_eq!(
+                matrix.systems[0].results,
+                vec!["pass"],
+                "status_id={status}: build state must not produce nix_eval_failure"
+            );
+
+            // Even with error_message set to something plausible, the
+            // matrix must not show it as detail for the CF-agent cell
+            // because the error is a build error, not an eval error.
+            assert_eq!(
+                matrix.systems[0].details,
+                vec![None],
+                "status_id={status}: build error detail must not appear in eval matrix"
+            );
+        }
+    }
 }
