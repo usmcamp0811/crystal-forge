@@ -305,7 +305,7 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
 /// # Returns
 /// Optional job UUID if work is available
 pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result<Option<Uuid>> {
-    let job = sqlx::query_scalar!(
+    let job = sqlx::query_scalar::<_, Uuid>(
         r#"
         WITH builder_environments AS (
             SELECT environment_id 
@@ -315,8 +315,11 @@ pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result
         available_jobs AS (
             SELECT bj.id
             FROM build_jobs bj
+            JOIN derivations d ON d.id = bj.derivation_id
             WHERE bj.status = 'queued'
                 AND bj.retry_count < bj.max_retries
+                AND d.cf_agent_enabled IS TRUE
+                AND d.policy_requirements_met IS TRUE
                 AND (
                     -- No environment restrictions (wildcard builder)
                     NOT EXISTS (SELECT 1 FROM builder_environments)
@@ -339,10 +342,10 @@ pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result
             updated_at = NOW()
         FROM available_jobs
         WHERE build_jobs.id = available_jobs.id
-        RETURNING build_jobs.id as "id!"
+        RETURNING build_jobs.id
         "#,
-        builder_id
     )
+    .bind(builder_id)
     .fetch_optional(pool)
     .await
     .context("Failed to claim next build job")?;

@@ -27,14 +27,16 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
     WHERE id = (
         SELECT build_jobs.id
         FROM build_jobs
+        JOIN derivations d ON d.id = build_jobs.derivation_id
         WHERE build_jobs.status = 'queued'
+          AND d.cf_agent_enabled IS TRUE
+          AND d.policy_requirements_met IS TRUE
         ORDER BY
             build_jobs.priority_weight DESC,
             (
                 SELECT c.commit_timestamp
-                FROM derivations d
-                LEFT JOIN commits c ON c.id = d.commit_id
-                WHERE d.id = build_jobs.derivation_id
+                FROM commits c
+                WHERE c.id = d.commit_id
             ) DESC NULLS LAST,
             build_jobs.created_at ASC
         LIMIT 1
@@ -53,15 +55,17 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
     WHERE id = (
         SELECT build_jobs.id
         FROM build_jobs
+        JOIN derivations d ON d.id = build_jobs.derivation_id
         WHERE build_jobs.status = 'queued'
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
+          AND d.cf_agent_enabled IS TRUE
+          AND d.policy_requirements_met IS TRUE
         ORDER BY
             build_jobs.priority_weight DESC,
             (
                 SELECT c.commit_timestamp
-                FROM derivations d
-                LEFT JOIN commits c ON c.id = d.commit_id
-                WHERE d.id = build_jobs.derivation_id
+                FROM commits c
+                WHERE c.id = d.commit_id
             ) DESC NULLS LAST,
             build_jobs.created_at ASC
         LIMIT 1
@@ -84,6 +88,8 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL: &str = r#"
         LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
         WHERE build_jobs.status = 'queued'
+          AND d.cf_agent_enabled IS TRUE
+          AND d.policy_requirements_met IS TRUE
           AND (
               NOT $2
               OR (
@@ -118,6 +124,8 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
         LEFT JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
         WHERE build_jobs.status = 'queued'
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
+          AND d.cf_agent_enabled IS TRUE
+          AND d.policy_requirements_met IS TRUE
           AND (
               NOT $3
               OR (

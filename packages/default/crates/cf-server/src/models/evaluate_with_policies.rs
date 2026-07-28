@@ -82,6 +82,63 @@ async fn kill_nix_process_tree(child: &mut tokio::process::Child, _pgid: i32) {
     let _ = child.wait().await;
 }
 
+/// RAII guard that kills the nix-eval-jobs process group when dropped,
+/// unless disarmed.  Used by the bulk evaluation path to ensure the
+/// entire evaluator subtree is terminated on any abnormal return
+/// (bail!, `?`, or panic) without requiring an explicit kill call at
+/// every error path.
+///
+/// Because `Drop` is synchronous, the guard wraps the pgid only and
+/// spawns a fire-and-forget tokio task that sends SIGKILL to the entire
+/// process group.  The child handle is stored separately and accessed
+/// through this guard via `child_mut()`.
+///
+/// Call `disarm()` after `child.wait()` succeeds (at which point the
+/// child has already exited and no cleanup is needed).  Failing to
+/// disarm means the process group is killed when the guard goes out of
+/// scope — which is the intended safety net for abnormal returns.
+struct NixEvalProcessGuard {
+    child: Option<tokio::process::Child>,
+    #[cfg(unix)]
+    pgid: libc::pid_t,
+    #[cfg(not(unix))]
+    pgid: i32,
+}
+
+impl NixEvalProcessGuard {
+    fn new(child: tokio::process::Child, pgid: i32) -> Self {
+        NixEvalProcessGuard {
+            child: Some(child),
+            pgid,
+        }
+    }
+
+    fn child_mut(&mut self) -> &mut tokio::process::Child {
+        self.child
+            .as_mut()
+            .expect("NixEvalProcessGuard: child already taken")
+    }
+
+    /// Take ownership of the child for explicit waiting/reaping.
+    /// Disarms the guard (drop will not kill the process group).
+    fn disarm(mut self) -> tokio::process::Child {
+        self.child
+            .take()
+            .expect("NixEvalProcessGuard: child already taken")
+    }
+}
+
+impl Drop for NixEvalProcessGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let pgid = self.pgid;
+            tokio::spawn(async move {
+                kill_nix_process_tree(&mut child, pgid).await;
+            });
+        }
+    }
+}
+
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BuildConfig, ServerConfig};
@@ -1131,13 +1188,43 @@ pub async fn persist_evaluated_system(
             .await?;
 
             if let Some((build_job_id, build_job_status)) = existing {
-                tx.commit().await?;
-                return Ok(SystemPersistenceOutcome::ExistingBuildJob {
-                    derivation_id: existing_deriv_id,
-                    build_job_id,
-                    build_job_status,
-                    drv_path,
-                });
+                if policy_requirements_met {
+                    // Policy still passes — existing build job is fine.
+                    tx.commit().await?;
+                    return Ok(SystemPersistenceOutcome::ExistingBuildJob {
+                        derivation_id: existing_deriv_id,
+                        build_job_id,
+                        build_job_status,
+                        drv_path,
+                    });
+                } else {
+                    // Policy now fails — cancel the queued job so it
+                    // cannot be claimed by a builder.  The job's status
+                    // is set to 'failed' so the builder claim query
+                    // (which filters on status = 'queued') will skip it.
+                    if build_job_status == "queued" {
+                        sqlx::query(
+                            "UPDATE build_jobs SET status = 'failed', error_message = $1 WHERE id = $2",
+                        )
+                        .bind(format!(
+                            "Policy no longer satisfied for {}",
+                            result.system_name,
+                        ))
+                        .bind(build_job_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    // For already-building jobs, leave them in place but
+                    // do NOT return ExistingBuildJob (which would
+                    // re-notify the queue and keep the job alive).
+                    // Instead fall through to RecordedWithoutBuild so
+                    // the system is recorded but no build is queued.
+                    tx.commit().await?;
+                    return Ok(SystemPersistenceOutcome::RecordedWithoutBuild {
+                        derivation_id: existing_deriv_id,
+                        reason: SystemNotQueuedReason::StrictPolicyFailure,
+                    });
+                }
             }
 
             // No build job exists — fall through to the normal eligibility
@@ -2071,15 +2158,27 @@ pub async fn evaluate_with_nix_eval_jobs(
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let mut child = cmd.spawn()?;
+    let mut child = cmd
+        .spawn()
+        .with_context(|| "Failed to spawn nix-eval-jobs")?;
     // PGID == PID when spawned with process_group(0).  Used by
     // kill_nix_process_tree to SIGKILL the entire evaluator subtree.
+    // Use context() rather than unwrap_or(0) because killpg with PGID 0
+    // would kill the caller's own process group (the server itself),
+    // which is catastrophic. A missing PID right after spawn is an
+    // infrastructure-level failure that must halt evaluation.
     #[cfg(unix)]
-    let bulk_pgid = child.id().unwrap_or(0) as libc::pid_t;
+    let bulk_pgid = child.id().context("spawned nix-eval-jobs without PID")? as libc::pid_t;
     #[cfg(not(unix))]
     let bulk_pgid = 0i32;
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
+
+    // Wrap the child in an RAII guard that will kill the entire process
+    // group when dropped unless disarmed (normal exit after child.wait()).
+    // This ensures cleanup on any abnormal return path (bail!, ?, panic).
+    let mut guard = NixEvalProcessGuard::new(child, bulk_pgid);
+    // Access the child through the guard for the remainder of this function.
+    let stdout = guard.child_mut().stdout.take().unwrap();
+    let stderr = guard.child_mut().stderr.take().unwrap();
 
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
@@ -2113,7 +2212,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                 match crate::queries::commits::check_cancellation_requested(pool, commit.id).await {
                     Ok(true) => {
                         warn!("🚫 Cancellation requested for commit {} — killing nix-eval-jobs process group", commit.id);
-                        kill_nix_process_tree(&mut child, bulk_pgid).await;
+                        kill_nix_process_tree(guard.child_mut(), bulk_pgid).await;
                         // Do NOT call force_cancel_commit_evaluation here — the
                         // outer handler (process_pending_commits) is the single
                         // authority that atomically transitions the state and
@@ -2141,7 +2240,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                             .await;
                     }
 
-                    kill_nix_process_tree(&mut child, bulk_pgid).await;
+                    kill_nix_process_tree(guard.child_mut(), bulk_pgid).await;
                     bail!(
                         "evaluation timed out after {}s without nix-eval-jobs output",
                         EVAL_OUTPUT_IDLE_TIMEOUT_SECS
@@ -2885,6 +2984,9 @@ pub async fn evaluate_with_nix_eval_jobs(
     // ── Capture child exit status after consuming both streams ─────────
     // Important: do NOT bail before synthesis — we must account for every
     // expected system even when nix-eval-jobs crashed partway through.
+    // Disarm the guard so that dropping it on the success path does not
+    // kill the (already-exited) process group.
+    let mut child = guard.disarm();
     let child_status = child.wait().await?;
 
     // ── Detect systems that nix-eval-jobs silently dropped ─────────────────

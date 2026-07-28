@@ -2391,9 +2391,12 @@ in {
 
         # Resource limits — nix-eval-jobs workers are memory-intensive and
         # the server must not exhaust the host under concurrent evaluation,
-        # build preparation, and closure counting. Adjust these in the
-        # consuming configuration; the defaults are conservative for a
-        # desktop-class host.
+        # build preparation, and closure counting. These are set to null
+        # (no limit) by default; configure them explicitly in your
+        # consuming configuration. Example for a 16 GB desktop host:
+        #   systemd_memory_high = "6G";
+        #   systemd_memory_max = "8G";
+        #   systemd_cpu_quota = 400;
         MemoryHigh = lib.mkIf (cfg.server.systemd_memory_high != null)
           (toString cfg.server.systemd_memory_high);
         MemoryMax = lib.mkIf (cfg.server.systemd_memory_max != null)

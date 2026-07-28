@@ -1318,7 +1318,7 @@ pub async fn fetch_eval_dependency_breakdown(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_eval_queue_reorder_payload;
+    use super::{fetch_eval_policy_matrix, validate_eval_queue_reorder_payload};
 
     #[test]
     fn reorder_validation_rejects_duplicates() {
@@ -2118,6 +2118,75 @@ mod tests {
             .await
             .expect("complete should not error");
         assert_eq!(correct, EvalCompleteOutcome::Completed);
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    /// Verify that the eval_status CASE expression in
+    /// fetch_eval_policy_matrix distinguishes DryRunFailed (status_id = 6)
+    /// from all build-state statuses (7, 8, 10, 12) regardless of
+    /// error_message content.  Only status_id = 6 proves evaluation
+    /// failure; build errors must not render as nix_eval_failure.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn fetch_policy_matrix_distinguishes_eval_failure_from_build_errors() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        // Insert derivations with varying status_id and error_message combinations.
+        async fn insert_deriv(
+            pool: &PgPool, commit_id: i32, name: &str, status: i32, err: Option<&str>,
+        ) {
+            sqlx::query(
+                r#"
+                INSERT INTO derivations (
+                    commit_id, derivation_type, derivation_name, derivation_target,
+                    status_id, attempt_count, cf_agent_enabled, policy_requirements_met,
+                    policy_results, error_message
+                ) VALUES ($1, 'nixos', $2, $2, $3, 0, TRUE, TRUE, '{}'::jsonb, $4)
+                "#,
+            )
+            .bind(commit_id)
+            .bind(name)
+            .bind(status)
+            .bind(err)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+
+        insert_deriv(&pool, commit_id, "eval-failed", 6, Some("undefined variable 'foobar'")).await;
+        insert_deriv(&pool, commit_id, "build-queued", 7, None).await;
+        insert_deriv(&pool, commit_id, "build-building", 8, None).await;
+        insert_deriv(&pool, commit_id, "build-complete", 10, None).await;
+        insert_deriv(&pool, commit_id, "build-failed", 12, Some("gcc segfault")).await;
+        insert_deriv(&pool, commit_id, "build-failed-witherr", 12, Some("out of disk space")).await;
+        insert_deriv(&pool, commit_id, "build-complete-noerr", 10, None).await;
+
+        let rows = fetch_eval_policy_matrix(&pool, commit_id)
+            .await
+            .expect("fetch should succeed");
+
+        for row in &rows {
+            match row.system_name.as_str() {
+                "eval-failed" => {
+                    assert_eq!(
+                        row.eval_status, "eval_failed",
+                        "status_id=6 must produce eval_failed"
+                    );
+                }
+                other => {
+                    assert_eq!(
+                        row.eval_status, "evaluated",
+                        "status_id for {other} must produce 'evaluated', not 'eval_failed'"
+                    );
+                }
+            }
+        }
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)

@@ -468,16 +468,13 @@ pub async fn record_successful_eval_result(
                             UPDATE derivations
                             SET cf_agent_enabled = $1,
                                 policy_requirements_met = $2,
-                                policy_results = $3,
-                                expected_store_path = COALESCE($4, expected_store_path),
-                                completed_at = NOW()
-                            WHERE id = $5
+                                policy_results = $3
+                            WHERE id = $4
                             "#,
                         )
                         .bind(cf_agent_enabled)
                         .bind(policy_requirements_met)
                         .bind(policy_results)
-                        .bind(expected_store_path)
                         .bind(id)
                         .execute(&mut *tx)
                         .await?;
@@ -626,16 +623,19 @@ pub async fn record_successful_eval_result_in_tx(
                             UPDATE derivations
                             SET cf_agent_enabled = $1,
                                 policy_requirements_met = $2,
-                                policy_results = $3,
-                                expected_store_path = COALESCE($4, expected_store_path),
-                                completed_at = NOW()
-                            WHERE id = $5
+                                policy_results = $3
+                                -- Do NOT update completed_at, derivation_path,
+                                -- expected_store_path, or store_path: the build
+                                -- (or potential build) associated with this row
+                                -- already has its own state and timestamps, and
+                                -- overwriting completed_at would distort elapsed-
+                                -- time reporting and history ordering.
+                            WHERE id = $4
                             "#,
                         )
                         .bind(cf_agent_enabled)
                         .bind(policy_requirements_met)
                         .bind(policy_results)
-                        .bind(expected_store_path)
                         .bind(id)
                         .execute(&mut **tx)
                         .await?;
