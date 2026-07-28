@@ -773,48 +773,67 @@ pub async fn set_environment_required_policies(
     policy_ids: &[Uuid],
     user_id: Option<Uuid>,
 ) -> Result<Vec<Uuid>> {
-    // Reject any attempt to assign require_cf_agent — this policy type
-    // is handled by the unconditional global invariant and cannot be
-    // assigned as a deployment policy.
-    let legacy_count: i64 = sqlx::query_scalar(
+    // Deduplicate before validation.
+    let unique_ids: Vec<Uuid> = policy_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    // Validate the entire requested set inside a single transaction
+    // BEFORE any mutation.  This ensures that a partial failure does
+    // not leave the environment without its previous assignments.
+    let mut tx = pool.begin().await?;
+
+    // Count how many of the requested IDs are valid: they exist,
+    // are enabled, and are NOT require_cf_agent (built-in invariant).
+    let valid_count: i64 = sqlx::query_scalar(
         r#"
-        SELECT COUNT(*) FROM deployment_policies
+        SELECT COUNT(*)
+        FROM deployment_policies
         WHERE id = ANY($1)
-          AND policy_type = 'require_cf_agent'
+          AND enabled IS TRUE
+          AND policy_type <> 'require_cf_agent'
         "#,
     )
-    .bind(policy_ids)
-    .fetch_one(pool)
+    .bind(&unique_ids)
+    .fetch_one(&mut *tx)
     .await?;
-    if legacy_count > 0 {
+
+    if valid_count != unique_ids.len() as i64 {
+        tx.rollback().await?;
         anyhow::bail!(
-            "require_cf_agent is a built-in invariant and cannot be assigned \
-             as a deployment policy (requested {} legacy policy(es))",
-            legacy_count,
+            "One or more policies do not exist, are disabled, \
+             or cannot be assigned (require_cf_agent is a built-in invariant)"
         );
     }
 
-    // Delete existing environment policies
-    sqlx::query!(
+    // Atomically replace: delete existing, then insert the validated set.
+    // All operations share one transaction so a failure at any point
+    // rolls back the entire replacement, preserving the previous
+    // assignment set.
+    sqlx::query(
         "DELETE FROM environment_policies WHERE environment_id = $1",
-        environment_id
     )
-    .execute(pool)
+    .bind(environment_id)
+    .execute(&mut *tx)
     .await?;
 
-    // Insert new policies
-    for policy_id in policy_ids {
-        sqlx::query!(
-            "INSERT INTO environment_policies (environment_id, policy_id, created_by) VALUES ($1, $2, $3)",
-            environment_id,
-            policy_id,
-            user_id
+    for policy_id in &unique_ids {
+        sqlx::query(
+            "INSERT INTO environment_policies (environment_id, policy_id, created_by) \
+             VALUES ($1, $2, $3)",
         )
-        .execute(pool)
+        .bind(environment_id)
+        .bind(policy_id)
+        .bind(user_id)
+        .execute(&mut *tx)
         .await?;
     }
 
-    Ok(policy_ids.to_vec())
+    tx.commit().await?;
+    Ok(unique_ids)
 }
 
 /// Get system policies: includes both environment baseline AND system-specific additional policies.
