@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-28 18:45'
+updated_date: '2026-07-28 19:22'
 labels:
   - evaluator
   - reporting
@@ -24,6 +24,8 @@ modified_files:
   - packages/default/crates/cf-server/src/queries/derivations.rs
   - packages/default/crates/cf-server/src/server/mod.rs
   - packages/default/crates/cf-server/src/flake/commits.rs
+  - modules/nixos/crystal-forge/default.nix
+  - checks/integration/default.nix
 priority: high
 type: bug
 ordinal: 396000
@@ -296,6 +298,21 @@ The per-configuration bulk checker from `dab3b5b7` / `f4865c44` bound its checke
 Remaining: runtime acceptance with the `campground` commit `3ea42835959d49fab431f07470dfc93fb7f7a52d` to confirm no `undefined variable 'cfg'` and that `gray` evaluates/queues correctly.
 
 2026-07-28 OOM follow-up investigation on reckless was read-only and used no sudo. Current unit settings report MemoryHigh/MemoryMax/MemorySwapMax=infinity. A recent real evaluation instance reached a 28.7G service-cgroup peak in 1m53s; previous supplied incident evidence recorded 115.1G memory and 14.9G swap. Kernel OOM entries were not readable from the current user journal. Code review found standalone fallback children had process groups but no RAII drop guard, bulk stderr was retained without a bound and duplicated on failure, standalone stdout/stderr used unbounded read_to_end, NixOS eval_workers default remained 4, and server cgroup limits remained opt-in.
+
+Implemented the OOM-containment follow-up without changing the running reckless service: standalone and fallback evaluators now use NixEvalProcessGuard, evaluator stderr retention is capped at 256 KiB while pipes continue draining, standalone stdout is capped at 8 MiB, and truncated diagnostics are labeled. NixOS defaults now use two eval workers plus MemoryHigh=60%, MemoryMax=75%, and MemorySwapMax=2G; all remain overridable. Integration coverage asserts that the service starts with finite memory/swap limits.
+
+Verification:
+- `nix develop -c cargo fmt --check`: passed.
+- `nix develop -c env SQLX_OFFLINE=true cargo check -p cf-server --all-targets`: passed with existing warnings.
+- Targeted capped-output tests: 2 passed.
+- Targeted process-guard tests: 3 passed.
+- `nix develop -c env SQLX_OFFLINE=true cargo test -p cf-server models::evaluate_with_policies::tests --lib`: 26 passed, 20 ignored.
+- `nix build .#packages.x86_64-linux.server --no-link`: passed.
+- `nix build .#checks.x86_64-linux.integration --no-link`: passed, including finite MemoryHigh/MemoryMax and 2 GiB MemorySwapMax assertions.
+- `nix flake check --keep-going`: all checks passed for x86_64-linux.
+- `git diff --check`: passed.
+
+A full `cargo test -p cf-server --lib` run was not clean: 684 passed, 200 ignored, and 3 unrelated runtime-database CVE tests failed with `PoolTimedOut` because the available DATABASE_URL did not accept connections. Runtime acceptance remains pending: reckless currently still reports infinity for MemoryHigh/MemoryMax/MemorySwapMax because this branch has not been deployed or the service restarted. Its last observed service instance peak remains 30,853,607,424 bytes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
