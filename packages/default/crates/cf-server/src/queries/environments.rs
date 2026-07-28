@@ -773,6 +773,27 @@ pub async fn set_environment_required_policies(
     policy_ids: &[Uuid],
     user_id: Option<Uuid>,
 ) -> Result<Vec<Uuid>> {
+    // Reject any attempt to assign require_cf_agent — this policy type
+    // is handled by the unconditional global invariant and cannot be
+    // assigned as a deployment policy.
+    let legacy_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM deployment_policies
+        WHERE id = ANY($1)
+          AND policy_type = 'require_cf_agent'
+        "#,
+    )
+    .bind(policy_ids)
+    .fetch_one(pool)
+    .await?;
+    if legacy_count > 0 {
+        anyhow::bail!(
+            "require_cf_agent is a built-in invariant and cannot be assigned \
+             as a deployment policy (requested {} legacy policy(es))",
+            legacy_count,
+        );
+    }
+
     // Delete existing environment policies
     sqlx::query!(
         "DELETE FROM environment_policies WHERE environment_id = $1",

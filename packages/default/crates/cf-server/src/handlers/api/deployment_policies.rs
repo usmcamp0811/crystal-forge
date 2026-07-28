@@ -566,6 +566,30 @@ pub async fn get_deployment_policy(
 ///
 /// Returns 400 for validation errors.
 /// Returns 409 if a policy with the same name already exists.
+
+/// The Crystal Forge agent requirement is a built-in invariant and cannot
+/// be created, converted into, enabled, or assigned as a deployment policy.
+/// Legacy historical records are preserved by migration 0187 but are
+/// permanently disabled and read-only.
+const BUILTIN_CF_AGENT_POLICY_MESSAGE: &str = "The Crystal Forge agent requirement is a built-in invariant \
+     and cannot be created, converted, or assigned as a deployment policy.";
+
+/// Reject `require_cf_agent` as a policy type in create/update operations.
+/// This is intentionally checked BEFORE config validation, name-conflict
+/// lookup, and duplicate-content lookup so the caller gets the correct
+/// "built-in invariant" message rather than a misleading 409 from the
+/// duplicate-content check (migration 0187 preserves the historical
+/// record, which can match an attempted creation).
+fn reject_builtin_policy_type(policy_type: &str) -> Result<(), (StatusCode, String)> {
+    if policy_type == "require_cf_agent" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            BUILTIN_CF_AGENT_POLICY_MESSAGE.to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn create_deployment_policy(
     RequireOperator(_user): RequireOperator,
     State(state): State<CFState>,
@@ -587,9 +611,17 @@ pub async fn create_deployment_policy(
         ));
     }
 
+    // The Crystal Forge agent requirement is a built-in invariant that
+    // cannot be created as a deployment policy.  This check comes FIRST
+    // — before config validation, name-conflict lookup, and duplicate-
+    // content lookup — so the caller gets a clear "built-in invariant"
+    // message rather than a misleading 409 returned because migration
+    // 0187 preserved the historical record (which would match a
+    // duplicate-content check).
+    reject_builtin_policy_type(&request.policy_type)?;
+
     // Validate policy_type
     let valid_types = [
-        "require_cf_agent",
         "require_packages",
         "custom_check",
         "require_cve_check",
@@ -654,20 +686,6 @@ pub async fn create_deployment_policy(
         ));
     }
 
-    // The Crystal Forge agent requirement is a built-in invariant that
-    // cannot be created or assigned as a deployment policy.  Existing
-    // legacy require_cf_agent records are preserved for audit/history
-    // and automatically disabled by migration 0187, but no new ones
-    // can be created through the API.
-    if request.policy_type == "require_cf_agent" {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "The Crystal Forge agent requirement is a built-in invariant \
-             and cannot be created as a deployment policy."
-                .to_string(),
-        ));
-    }
-
     // Create policy
     let policy = deployment_policies::create_deployment_policy(&state.pool, &request)
         .await
@@ -722,29 +740,27 @@ pub async fn update_deployment_policy(
             "Deployment policy not found".to_string(),
         ))?;
 
-    // Core require_cf_agent policy is immutable except name/description updates.
+    // The Crystal Forge agent requirement is a built-in invariant.
+    // If the existing record is a require_cf_agent policy, it is a
+    // legacy historical record preserved by migration 0187.  It is
+    // permanently disabled, read-only, and cannot be renamed, edited,
+    // re-enabled, or changed in any way — doing so would contradict
+    // the migration invariant (which disabled it) and could make it
+    // reappear as an assignable policy in the UI.
     if existing.policy_type == "require_cf_agent" {
-        if let Some(ref policy_type) = request.policy_type {
-            if policy_type != "require_cf_agent" {
-                return Err((
-                    StatusCode::CONFLICT,
-                    "Core require_cf_agent policy type cannot be changed".to_string(),
-                ));
-            }
-        }
-        if request.enabled == Some(false) {
-            return Err((
-                StatusCode::CONFLICT,
-                "Core require_cf_agent policy is always enabled".to_string(),
-            ));
-        }
-        if request.config.is_some() {
-            return Err((
-                StatusCode::CONFLICT,
-                "Core require_cf_agent policy config cannot be changed".to_string(),
-            ));
-        }
-        request.enabled = Some(true);
+        return Err((
+            StatusCode::CONFLICT,
+            "The Crystal Forge agent requirement is a built-in invariant. \
+             Legacy policy records preserved by migration 0187 are read-only \
+             and cannot be modified."
+                .to_string(),
+        ));
+    }
+
+    // Also reject any attempt to convert a non-CF-agent policy into
+    // require_cf_agent.
+    if let Some(ref policy_type) = request.policy_type {
+        reject_builtin_policy_type(policy_type)?;
     }
 
     // Validate name if provided
@@ -785,7 +801,6 @@ pub async fn update_deployment_policy(
     // Validate policy_type if provided
     if let Some(ref policy_type) = request.policy_type {
         let valid_types = [
-            "require_cf_agent",
             "require_packages",
             "custom_check",
             "require_cve_check",
