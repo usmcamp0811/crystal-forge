@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-28 20:28'
+updated_date: '2026-07-28 21:11'
 labels:
   - evaluator
   - reporting
@@ -18,12 +18,13 @@ references:
   - packages/default/crates/cf-server/src/models/evaluate_with_policies.rs
   - packages/default/crates/cf-server/src/queries/commits_artifacts.rs
 modified_files:
+  - packages/default/crates/cf-config/src/config/server.rs
+  - packages/default/crates/cf-server/src/hardening/scanner.rs
+  - packages/default/crates/cf-server/src/services/hardening_scans.rs
+  - packages/default/crates/cf-server/src/queries/hardening_scans.rs
   - packages/default/crates/cf-server/src/models/evaluate_with_policies.rs
-  - packages/default/crates/cf-server/src/queries/commits_artifacts.rs
-  - packages/default/crates/cf-server/src/queries/commits.rs
-  - packages/default/crates/cf-server/src/queries/derivations.rs
   - packages/default/crates/cf-server/src/server/mod.rs
-  - packages/default/crates/cf-server/src/flake/commits.rs
+  - packages/default/crates/cf-server/migrations/0188_queue_hardening_scans.sql
   - modules/nixos/crystal-forge/default.nix
   - checks/integration/default.nix
 priority: high
@@ -105,22 +106,30 @@ Two separate fixes are needed:
 - [ ] #14 A NixOS VM test proves Crystal Forge cgroup OOM containment leaves an outside sentinel and the VM responsive
 - [ ] #15 Remote derivation materialization preserves a complete actionable error chain and changes transport mode for one eligible retry without falling back on authorization failures
 - [ ] #16 A real campground evaluation under the deployed reckless limits causes no global OOM no unrelated process kill no unbounded swap and no orphan evaluator descendants
+- [ ] #17 Automatic hardening scans are disabled by default and successful commit finalization only enqueues them when server.auto_hardening_scans is explicitly enabled
+- [ ] #18 Hardening scan triggers only enqueue durable database jobs and never spawn one detached Tokio task per derivation
+- [ ] #19 A persistent hardening worker atomically claims no more than one scan at a time and recovers stale or abandoned scans without duplicate execution or startup fan-out
+- [ ] #20 Hardening Nix evaluations use the shared heavy-Nix permit process-group cleanup a five-minute timeout a 64 MiB stdout cap and a 256 KiB stderr diagnostic cap
+- [ ] #21 Hardening scan results are bulk-persisted with scan completion in one transaction and persistence failure leaves no partial result set
+- [ ] #22 Hardening queue and evaluator structured telemetry reports queue depth active scans PID PGID duration stdout bytes service count and persistence duration
+- [ ] #23 Hardening execution is isolated from the API in crystal-forge-hardening.service and crystal-forge-hardening.slice beneath crystal-forge.slice with conservative resource limits
+- [ ] #24 Regression coverage proves thirty queued hardening targets execute serially hardening never overlaps bulk evaluation overflow and timeout leave no descendants restart does not duplicate jobs and status remains responsive
+- [ ] #25 Memory pressure prevents optional Nix work from starting and terminates hardening or evaluation groups at configured thresholds as retryable infrastructure failures
+- [ ] #26 Real-host verification confirms one bulk process group no overlapping hardening evaluator no local builder bounded swap responsive status and no surviving descendants
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-P0 OOM and remote-materialization follow-up requested for MR !309 and dotfiles:nixos.
+P0 hardening-scan resource exhaustion correction requested after reckless reached 58.5G memory approximately 1.9G swap and 0B available while nine hardening nix eval processes overlapped bulk evaluation.
 
-1. Downstream first: update `/config/modules/nixos/services/crystal-forge/default.nix` with configurable server MemoryHigh/MemoryMax/MemorySwapMax/TasksMax, aggregate `crystal-forge.slice`, server slice assignment, OOM-safe restart policy, conservative evaluator defaults, and correct threshold documentation. Update `/config/systems/x86_64-linux/reckless/default.nix` to one evaluator worker, 24G/32G/1G limits, and disable the local builder. Preserve the existing committed containment block while replacing it with configurable settings.
-2. Verify downstream evaluation from the dotfiles `nixos` branch without deploying or using sudo. Record exact intended rendered properties.
-3. Collect previous-boot and current OOM evidence on reckless using unprivileged journal/cgroup access; do not assume cgroup peak equals Rust heap.
-4. Upstream guard correction: centralize nonzero PID/PGID validation, keep cleanup armed until bounded pipe drain finishes, add bounded record readers that cap before allocation, and add regression tests for leader-exits/descendant-holds-pipe behavior.
-5. Add a shared Nix subprocess registry and cgroup telemetry, conservative shared concurrency, overlap prevention, and memory-aware evaluator cancellation. Add a NixOS VM containment test with a sentinel outside the Crystal Forge slice.
-6. Diagnose the daly/webb delta materialization failure and preserve the full error chain. Authorization failures must not fall back; retryable transport failures switch once from delta to full closure. Add chunk/cross-reference/truncation/import tests before changing transport architecture.
-7. Run targeted Rust/SQLx/Nix checks, commit and push both requested branches, then perform only unprivileged runtime verification. Do not merge MR !309. Do not claim real-host acceptance until a campground evaluation has run with the deployed downstream limits.
-
-Scope note: TASK-390 currently records a lock in a separate worktree for remote-builder transport. Complete P0 downstream/OOM work first; before editing overlapping transport files, resolve that active-task/worktree ownership conflict rather than duplicating changes.
+1. Immediate safety: add canonical server.auto_hardening_scans with default false and matching NixOS option; remove duplicate per-system hardening triggers; gate the sole post-finalization automatic enqueue. Manual API requests continue to enqueue.
+2. Durable queue: migration 0188 reconciles duplicate active rows requeues abandoned in_progress rows and adds active-per-derivation plus one-global-in-progress constraints. Replace check-then-spawn with idempotent enqueue atomic FOR UPDATE SKIP LOCKED claim and stale recovery. Run one long-lived worker with no per-scan Tokio fan-out.
+3. Process safety and overlap prevention: extract/share the evaluator process guard capped readers and one process-wide heavy-Nix semaphore. Bulk standalone fallback hardening discovery and applicable closure analysis acquire the same permit. Hardening uses process groups kill-on-drop five-minute timeout 64 MiB stdout cap and 256 KiB stderr retention; permit release occurs only after child reap pipe drain and group cleanup.
+4. Persistence and observability: persist each scan in one transaction using a batched insert and complete in that transaction. Add stable structured events/metrics for queue depth active count PID PGID duration stdout bytes service count and DB persistence time. Add cgroup memory-pressure gates that classify pressure termination as retryable infrastructure failure.
+5. Service isolation: add a crystal-forge-hardening worker binary/service and crystal-forge-hardening.slice beneath crystal-forge.slice with 8G high 12G max 512M swap 200% CPU and 512 tasks. The API only enqueues/reads PostgreSQL jobs. Preserve control-group cleanup on restart and add restart/descendant integration coverage.
+6. Verification: add queue concurrency/restart tests guarded subprocess overflow/timeout/descendant tests shared-limiter overlap tests transactional persistence tests default-disabled config tests and NixOS VM assertions including an outside sentinel and responsive /status. Refresh SQLx metadata and run targeted Rust SQLx Nix builds and integration checks.
+7. Downstream remains at pushed dotfiles commit f5224caeb with reckless eval_workers=1 24G/32G/1G limits and local builder disabled. Do not deploy or use sudo. Do not merge MR !309 until real campground verification passes and TASK-390 transport ownership is resolved.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
