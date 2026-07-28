@@ -358,6 +358,38 @@ pub async fn get_eval_policy_matrix(
     Json(body).into_response()
 }
 
+/// Classify a persisted policy-result object (`{"passed": .., "strict": ..,
+/// "details": ..}`, either the global `cfAgentEnabled` entry or an assigned
+/// policy entry) into a matrix cell status and detail text.
+///
+/// A non-strict failure (`passed=false, strict=false`) does not block
+/// deployment — `policy_requirements_met` only gates on strict failures —
+/// so it must render as `warn`, not `fail`, or the matrix would contradict
+/// the actual queue-gating decision. Missing/non-boolean `passed`, or a
+/// `passed=false` result whose strictness is unknown, fails closed as
+/// `fail`/`infrastructure_error` rather than risking a hidden strict
+/// failure being displayed as harmless.
+fn classify_policy_result(policy_result: &serde_json::Value) -> (&'static str, Option<String>) {
+    let passed = policy_result.get("passed").and_then(|v| v.as_bool());
+    let strict = policy_result.get("strict").and_then(|v| v.as_bool());
+    let detail = || {
+        policy_result
+            .get("details")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+
+    match (passed, strict) {
+        (Some(true), _) => ("pass", None),
+        (Some(false), Some(false)) => ("warn", detail()),
+        (Some(false), Some(true) | None) => ("fail", detail()),
+        _ => (
+            "infrastructure_error",
+            Some("policy result missing or invalid".to_string()),
+        ),
+    }
+}
+
 fn build_eval_policy_matrix_response(
     commit_id: i32,
     rows: Vec<crate::queries::commits::EvalPolicySystemRow>,
@@ -423,22 +455,16 @@ fn build_eval_policy_matrix_response(
                     .policy_results
                     .get("global")
                     .and_then(|global| global.get("cfAgentEnabled"));
-                match cf_agent.and_then(|result| result.get("passed")) {
-                    Some(value) if value.as_bool() == Some(true) => {
-                        results.push("pass".to_string());
-                        details.push(None);
+                match cf_agent {
+                    Some(result) => {
+                        let (status, mut detail) = classify_policy_result(result);
+                        if status == "fail" && detail.is_none() {
+                            detail = Some("Crystal Forge agent is disabled".to_string());
+                        }
+                        results.push(status.to_string());
+                        details.push(detail);
                     }
-                    Some(value) if value.as_bool() == Some(false) => {
-                        results.push("fail".to_string());
-                        details.push(
-                            cf_agent
-                                .and_then(|result| result.get("details"))
-                                .and_then(|value| value.as_str())
-                                .map(str::to_string)
-                                .or_else(|| Some("Crystal Forge agent is disabled".to_string())),
-                        );
-                    }
-                    _ => {
+                    None => {
                         results.push("infrastructure_error".to_string());
                         details.push(Some(
                             "cfAgentEnabled metadata missing or invalid".to_string(),
@@ -466,25 +492,9 @@ fn build_eval_policy_matrix_response(
                     continue;
                 };
 
-                match policy_result.get("passed") {
-                    Some(value) if value.as_bool() == Some(true) => {
-                        results.push("pass".to_string());
-                        details.push(None);
-                    }
-                    Some(value) if value.as_bool() == Some(false) => {
-                        results.push("fail".to_string());
-                        details.push(
-                            policy_result
-                                .get("details")
-                                .and_then(|value| value.as_str())
-                                .map(str::to_string),
-                        );
-                    }
-                    _ => {
-                        results.push("infrastructure_error".to_string());
-                        details.push(Some("policy result missing or invalid".to_string()));
-                    }
-                }
+                let (status, detail) = classify_policy_result(policy_result);
+                results.push(status.to_string());
+                details.push(detail);
             }
 
             EvalPolicySystemRow {
@@ -1028,5 +1038,106 @@ mod tests {
         let matrix = build_eval_policy_matrix_response(1, rows);
 
         assert_eq!(matrix.systems[0].results, vec!["pass"]);
+    }
+
+    /// A non-strict failed policy must render as `warn`, not `fail` — a
+    /// non-strict failure does not block deployment
+    /// (`policy_requirements_met` only gates on strict failures), so
+    /// displaying it as `fail` ("blocks deployment until resolved" in the
+    /// UI) would contradict what actually happens to the build.
+    #[test]
+    fn non_strict_failed_policy_renders_as_warn_not_fail() {
+        let policy_id = "f2752e95-40f5-4cb7-9211-7ac8fd98334f";
+        let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+            system_name: "gray".to_string(),
+            eval_status: "evaluated".to_string(),
+            error_message: None,
+            policy_results: serde_json::json!({
+                "global": {
+                    "cfAgentEnabled": { "passed": true, "strict": true, "details": null }
+                },
+                "assigned": {
+                    policy_id: {
+                        "name": "soft-check",
+                        "type": "require_packages",
+                        "strict": false,
+                        "passed": false,
+                        "details": "Missing optional package: htop"
+                    }
+                }
+            }),
+            policy_requirements_met: Some(true),
+        }];
+
+        let matrix = build_eval_policy_matrix_response(1, rows);
+
+        assert_eq!(matrix.systems[0].results, vec!["pass", "warn"]);
+        assert_eq!(
+            matrix.systems[0].details,
+            vec![None, Some("Missing optional package: htop".to_string())]
+        );
+    }
+
+    /// A strict failed policy must still render as `fail`.
+    #[test]
+    fn strict_failed_policy_still_renders_as_fail() {
+        let policy_id = "f2752e95-40f5-4cb7-9211-7ac8fd98334f";
+        let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+            system_name: "gray".to_string(),
+            eval_status: "evaluated".to_string(),
+            error_message: None,
+            policy_results: serde_json::json!({
+                "global": {
+                    "cfAgentEnabled": { "passed": true, "strict": true, "details": null }
+                },
+                "assigned": {
+                    policy_id: {
+                        "name": "failme",
+                        "type": "require_packages",
+                        "strict": true,
+                        "passed": false,
+                        "details": "Missing required packages: grafana"
+                    }
+                }
+            }),
+            policy_requirements_met: Some(false),
+        }];
+
+        let matrix = build_eval_policy_matrix_response(1, rows);
+
+        assert_eq!(matrix.systems[0].results, vec!["pass", "fail"]);
+    }
+
+    /// The persisted matrix column label and "View policy definition"
+    /// navigation must use the real DB policy name, not a generated
+    /// description string.
+    #[test]
+    fn policy_matrix_column_uses_db_name_not_description() {
+        let policy_id = "f2752e95-40f5-4cb7-9211-7ac8fd98334f";
+        let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+            system_name: "gray".to_string(),
+            eval_status: "evaluated".to_string(),
+            error_message: None,
+            policy_results: serde_json::json!({
+                "global": {
+                    "cfAgentEnabled": { "passed": true, "strict": true, "details": null }
+                },
+                "assigned": {
+                    policy_id: {
+                        "name": "failme",
+                        "description": "Required packages: grafana",
+                        "type": "require_packages",
+                        "strict": true,
+                        "passed": false,
+                        "details": "Missing required packages: grafana"
+                    }
+                }
+            }),
+            policy_requirements_met: Some(false),
+        }];
+
+        let matrix = build_eval_policy_matrix_response(1, rows);
+
+        assert_eq!(matrix.policies, vec!["CF agent", "failme"]);
     }
 }

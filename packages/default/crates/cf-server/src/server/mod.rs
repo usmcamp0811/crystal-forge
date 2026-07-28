@@ -674,6 +674,7 @@ async fn load_policies_by_configuration_for_eval(
                 if parsed.is_nix_evaluated() {
                     assigned.push(AssignedPolicy {
                         policy_id,
+                        policy_name: row.name.clone(),
                         policy: parsed,
                     });
                 }

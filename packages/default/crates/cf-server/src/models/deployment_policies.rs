@@ -448,6 +448,13 @@ impl DeploymentPolicy {
 pub struct AssignedPolicy {
     /// Stable database UUID for deterministic ordering and deduplication.
     pub policy_id: Uuid,
+    /// The policy's real database name (`deployment_policies.name`), as
+    /// distinct from `policy.description()` (a human-readable summary of
+    /// the policy's configured behavior). The matrix and "View policy
+    /// definition" navigation must use this field — the Policies page
+    /// looks up definitions by their DB name, not by a generated
+    /// description string.
+    pub policy_name: String,
     /// The parsed deployment policy.
     pub policy: DeploymentPolicy,
 }
@@ -577,7 +584,12 @@ pub fn policy_results_json(
         assigned_results.insert(
             assigned_policy.policy_id.to_string(),
             serde_json::json!({
-                "name": assigned_policy.policy.description(),
+                // The real database name (`deployment_policies.name`) — this
+                // is what the matrix column header and "View policy
+                // definition" navigation must use, since the Policies page
+                // looks up definitions by DB name, not by description.
+                "name": assigned_policy.policy_name,
+                "description": assigned_policy.policy.description(),
                 "type": policy_kind(&assigned_policy.policy),
                 "strict": assigned_policy.policy.is_strict(),
                 "passed": passed,
@@ -741,6 +753,23 @@ impl PolicyCheckResult {
                             ));
                         }
                     };
+                    // The assigned require_cf_agent policy's stable-key
+                    // result and the unconditional cfAgentEnabled metadata
+                    // are generated from the same underlying expression and
+                    // must always agree. A generator regression that lets
+                    // them diverge must not silently let the assigned
+                    // result overwrite the unconditional signal — treat the
+                    // mismatch as an infrastructure error instead.
+                    if let Some(unconditional) = cf_agent_enabled {
+                        if unconditional != value {
+                            return Err(format!(
+                                "Configuration {:?}: assigned CF-agent policy result \
+                                 (id={}, key={:?}, value={}) disagrees with unconditional \
+                                 cfAgentEnabled metadata (value={}); these must always agree",
+                                system_name, ap.policy_id, key, value, unconditional,
+                            ));
+                        }
+                    }
                     cf_agent_enabled = Some(value);
                     assigned_results.insert(
                         ap.policy_id,
@@ -1346,6 +1375,7 @@ mod tests {
             .enumerate()
             .map(|(i, policy)| AssignedPolicy {
                 policy_id: uuid::Uuid::from_u128(i as u128 + 1),
+                policy_name: format!("test-policy-{i}"),
                 policy,
             })
             .collect();
@@ -1448,6 +1478,7 @@ mod tests {
             vec![
                 AssignedPolicy {
                     policy_id: id1,
+                    policy_name: "require-grafana".to_string(),
                     policy: DeploymentPolicy::RequirePackages {
                         packages: vec!["grafana".to_string()],
                         strict: true,
@@ -1455,6 +1486,7 @@ mod tests {
                 },
                 AssignedPolicy {
                     policy_id: id2,
+                    policy_name: "require-neovim".to_string(),
                     policy: DeploymentPolicy::RequirePackages {
                         packages: vec!["neovim".to_string()],
                         strict: true,
@@ -1507,10 +1539,12 @@ mod tests {
             vec![
                 AssignedPolicy {
                     policy_id: id1,
+                    policy_name: "require-cf-agent".to_string(),
                     policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
                 },
                 AssignedPolicy {
                     policy_id: id2,
+                    policy_name: "require-cve-check".to_string(),
                     policy: DeploymentPolicy::RequireCveCheck {
                         config: CveCheckConfig::default(),
                     },
@@ -1684,6 +1718,7 @@ mod tests {
             "gray".to_string(),
             vec![AssignedPolicy {
                 policy_id: uuid::Uuid::from_u128(1),
+                policy_name: "require-grafana".to_string(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["grafana".to_string()],
                     strict: true,
@@ -1719,6 +1754,7 @@ mod tests {
     fn standalone_agent_policy_uses_full_cfg_object() {
         let assigned = vec![AssignedPolicy {
             policy_id: uuid::Uuid::from_u128(1),
+            policy_name: "require-cf-agent".to_string(),
             policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
         }];
 
@@ -1751,6 +1787,7 @@ mod tests {
             "gray".to_string(),
             vec![AssignedPolicy {
                 policy_id: uuid::Uuid::from_u128(1),
+                policy_name: "firewall-enabled".to_string(),
                 policy: DeploymentPolicy::CustomCheck {
                     expression: "cfg.config.networking.firewall.enable".to_string(),
                     description: "firewall".to_string(),
@@ -1781,6 +1818,7 @@ mod tests {
             "gray".to_string(),
             vec![AssignedPolicy {
                 policy_id: uuid::Uuid::from_u128(1),
+                policy_name: "ssh-and-firewall".to_string(),
                 policy: DeploymentPolicy::CustomCheck {
                     expression: String::new(),
                     description: "ssh-and-firewall".to_string(),
@@ -1833,10 +1871,12 @@ mod tests {
         let assigned = vec![
             AssignedPolicy {
                 policy_id: uuid::Uuid::from_u128(1),
+                policy_name: "require-cf-agent".to_string(),
                 policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
             },
             AssignedPolicy {
                 policy_id: uuid::Uuid::from_u128(2),
+                policy_name: "require-grafana".to_string(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["grafana".to_string()],
                     strict: true,
@@ -1844,6 +1884,7 @@ mod tests {
             },
             AssignedPolicy {
                 policy_id: uuid::Uuid::from_u128(3),
+                policy_name: "ssh-and-firewall".to_string(),
                 policy: DeploymentPolicy::CustomCheck {
                     expression: String::new(),
                     description: "ssh-and-firewall".to_string(),
@@ -1959,6 +2000,7 @@ in {{
         let policy_id = uuid::Uuid::from_u128(1);
         let assigned = vec![AssignedPolicy {
             policy_id,
+            policy_name: "require-grafana".to_string(),
             policy: DeploymentPolicy::RequirePackages {
                 packages: vec!["grafana".to_string()],
                 strict: true,
@@ -1989,6 +2031,7 @@ in {{
         let policy_id = uuid::Uuid::from_u128(1);
         let assigned = vec![AssignedPolicy {
             policy_id,
+            policy_name: "firewall-enabled".to_string(),
             policy: DeploymentPolicy::CustomCheck {
                 expression: "cfg.config.networking.firewall.enable".to_string(),
                 description: "firewall".to_string(),
@@ -2030,6 +2073,7 @@ in {{
     fn build_policy_fields_skips_legacy_custom_check_with_reserved_field_name() {
         let assigned = vec![AssignedPolicy {
             policy_id: uuid::Uuid::from_u128(1),
+            policy_name: "spoof-agent".to_string(),
             policy: DeploymentPolicy::CustomCheck {
                 expression: "true".to_string(),
                 description: "spoof agent".to_string(),
@@ -2054,6 +2098,7 @@ in {{
     fn build_policy_fields_skips_multi_rule_with_reserved_field_name() {
         let assigned = vec![AssignedPolicy {
             policy_id: uuid::Uuid::from_u128(1),
+            policy_name: "mixed-rules".to_string(),
             policy: DeploymentPolicy::CustomCheck {
                 expression: String::new(),
                 description: "mixed rules".to_string(),
@@ -2098,6 +2143,7 @@ in {{
         let policy_id = uuid::Uuid::from_u128(1);
         let assigned = vec![AssignedPolicy {
             policy_id,
+            policy_name: "failme".to_string(),
             policy: DeploymentPolicy::RequirePackages {
                 packages: vec!["grafana".to_string()],
                 strict: true,
@@ -2120,6 +2166,17 @@ in {{
             .get("assigned")
             .and_then(|assigned| assigned.get(policy_id.to_string()))
             .expect("assigned policy result should be persisted");
+        // The persisted "name" must be the real DB policy name (used for the
+        // matrix column header and "View policy definition" navigation),
+        // not the generated description string.
+        assert_eq!(
+            result.get("name").and_then(|value| value.as_str()),
+            Some("failme")
+        );
+        assert_eq!(
+            result.get("description").and_then(|value| value.as_str()),
+            Some("Required packages: grafana")
+        );
         assert_eq!(
             result.get("type").and_then(|value| value.as_str()),
             Some("require_packages")
@@ -2170,6 +2227,7 @@ in {{
         let policy_id = uuid::Uuid::from_u128(1);
         let assigned = vec![AssignedPolicy {
             policy_id,
+            policy_name: "require-cf-agent".to_string(),
             policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
         }];
         let check = PolicyCheckResult::from_assigned(
@@ -2206,6 +2264,7 @@ in {{
         let assigned = vec![
             AssignedPolicy {
                 policy_id: policy_a,
+                policy_name: "require-grafana".to_string(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["grafana".to_string()],
                     strict: true,
@@ -2213,6 +2272,7 @@ in {{
             },
             AssignedPolicy {
                 policy_id: policy_b,
+                policy_name: "require-neovim".to_string(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["neovim".to_string()],
                     strict: true,
@@ -2267,5 +2327,61 @@ in {{
         // Queue gate must reflect the strict failure from policy A even
         // though policy B independently passed.
         assert!(!policy_requirements_met(&check));
+    }
+
+    // ── CF-agent mismatch hardening ───────────────────────────────────────
+    //
+    // The assigned require_cf_agent policy's stable-key result and the
+    // unconditional cfAgentEnabled metadata are generated from the same
+    // underlying Nix expression and must always agree. A future generator
+    // regression that lets them diverge must be treated as an
+    // infrastructure error, not silently resolved by letting one value
+    // overwrite the other.
+    #[test]
+    fn assigned_cf_agent_result_disagreeing_with_unconditional_is_infrastructure_error() {
+        let policy_id = uuid::Uuid::from_u128(1);
+        let assigned = vec![AssignedPolicy {
+            policy_id,
+            policy_name: "require-cf-agent".to_string(),
+            policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
+        }];
+        let policies_json = serde_json::json!({
+            "cfAgentEnabled": true,
+            policy_result_key(&policy_id): false,
+        });
+
+        let result =
+            PolicyCheckResult::from_assigned("gray".to_string(), &policies_json, &assigned);
+
+        assert!(
+            result.is_err(),
+            "disagreement between unconditional and assigned CF-agent results \
+             must be treated as an infrastructure error"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("disagrees"),
+            "error should describe the disagreement: {err}"
+        );
+    }
+
+    #[test]
+    fn assigned_cf_agent_result_agreeing_with_unconditional_parses_normally() {
+        let policy_id = uuid::Uuid::from_u128(1);
+        let assigned = vec![AssignedPolicy {
+            policy_id,
+            policy_name: "require-cf-agent".to_string(),
+            policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
+        }];
+        let policies_json = serde_json::json!({
+            "cfAgentEnabled": true,
+            policy_result_key(&policy_id): true,
+        });
+
+        let check = PolicyCheckResult::from_assigned("gray".to_string(), &policies_json, &assigned)
+            .expect("agreeing values should parse normally");
+
+        assert_eq!(check.cf_agent_enabled, Some(true));
+        assert!(check.meets_requirements);
     }
 }

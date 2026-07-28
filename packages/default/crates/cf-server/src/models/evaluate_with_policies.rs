@@ -4536,6 +4536,7 @@ mod tests {
         let policy_id = uuid::Uuid::from_u128(0xF00D);
         let assigned = vec![AssignedPolicy {
             policy_id,
+            policy_name: "failme".to_string(),
             policy: DeploymentPolicy::RequirePackages {
                 packages: vec!["grafana".to_string()],
                 strict: true,
@@ -4594,6 +4595,12 @@ mod tests {
         assert_eq!(
             assigned_entry.get("passed").and_then(|v| v.as_bool()),
             Some(false)
+        );
+        // The real DB policy name must be persisted (not a generated
+        // description), so "View policy definition" navigation resolves.
+        assert_eq!(
+            assigned_entry.get("name").and_then(|v| v.as_str()),
+            Some("failme")
         );
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
@@ -5592,6 +5599,7 @@ mod tests {
             "alpha".to_string(),
             vec![AssignedPolicy {
                 policy_id: id_grafana,
+                policy_name: "require-grafana".to_string(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["grafana".to_string()],
                     strict: true,
@@ -5602,6 +5610,7 @@ mod tests {
             "beta".to_string(),
             vec![AssignedPolicy {
                 policy_id: id_neovim,
+                policy_name: "require-neovim".to_string(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["neovim".to_string()],
                     strict: true,
@@ -5675,6 +5684,7 @@ mod tests {
             "alpha".to_string(),
             vec![AssignedPolicy {
                 policy_id: id_grafana,
+                policy_name: "require-grafana".to_string(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["grafana".to_string()],
                     strict: true,
