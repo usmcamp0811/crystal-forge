@@ -141,12 +141,10 @@ async fn kill_nix_process_tree(child: &mut tokio::process::Child, _pgid: i32) {
 /// on any abnormal return (`bail!`, `?`, or panic) without requiring an
 /// explicit kill call at every error path.
 ///
-/// Exactly one of `wait()` or `terminate()` should be called to conclude
-/// the guard's lifetime on every path:
-///   - `wait()` reaps the child after it has exited on its own (the
-///     normal/success path). The guard is disarmed ONLY if reaping
-///     succeeds, so an error from `wait()` still leaves the guard armed
-///     and `Drop` still cleans up the process group.
+/// The normal path calls `wait()`, drains inherited stdout/stderr pipes, then
+/// calls `disarm_after_output_drained()`. `wait()` deliberately leaves the
+/// guard armed because descendants can outlive the direct child while holding
+/// those pipes open.
 ///   - `terminate()` is for explicit cancellation/timeout: it kills the
 ///     process group and reaps the child, then disarms the guard so
 ///     `Drop` does not attempt a second (redundant) `killpg` — process
@@ -166,14 +164,40 @@ struct NixEvalProcessGuard {
     pgid: libc::pid_t,
     #[cfg(not(unix))]
     pgid: i32,
+    child_reaped: bool,
+    armed: bool,
 }
 
 impl NixEvalProcessGuard {
-    fn new(child: tokio::process::Child, pgid: i32) -> Self {
-        NixEvalProcessGuard {
+    fn new(child: tokio::process::Child, pgid: i32) -> Result<Self> {
+        #[cfg(unix)]
+        if pgid <= 0 {
+            bail!("refusing to guard invalid Nix evaluator process group ID {pgid}");
+        }
+
+        Ok(NixEvalProcessGuard {
             child: Some(child),
             pgid,
-        }
+            child_reaped: false,
+            armed: true,
+        })
+    }
+
+    fn from_spawned_child(child: tokio::process::Child, process_name: &str) -> Result<Self> {
+        #[cfg(unix)]
+        let pgid = child
+            .id()
+            .with_context(|| format!("spawned {process_name} without PID"))?
+            .try_into()
+            .with_context(|| format!("spawned {process_name} PID does not fit in pid_t"))?;
+        #[cfg(not(unix))]
+        let pgid = 0i32;
+
+        Self::new(child, pgid)
+    }
+
+    fn pgid(&self) -> i32 {
+        self.pgid
     }
 
     fn child_mut(&mut self) -> &mut tokio::process::Child {
@@ -182,17 +206,21 @@ impl NixEvalProcessGuard {
             .expect("NixEvalProcessGuard: child already taken")
     }
 
-    /// Wait for the child to exit on its own (the success path). The
-    /// guard is disarmed only if reaping succeeds — if `wait()` errors,
-    /// the guard remains armed and `Drop` still attempts cleanup.
+    /// Wait for the child to exit on its own. The guard remains armed after
+    /// reaping so descendants that inherited stdout/stderr pipes are still
+    /// cleaned up if draining those pipes fails or the future is cancelled.
     async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child_mut().wait().await;
         if status.is_ok() {
-            // Disarm: the child has exited and been reaped; there is
-            // nothing left for Drop to clean up.
-            self.child.take();
+            self.child_reaped = true;
         }
         status
+    }
+
+    fn disarm_after_output_drained(&mut self) {
+        debug_assert!(self.child_reaped, "cannot disarm before child is reaped");
+        self.armed = false;
+        self.child.take();
     }
 
     /// Explicitly terminate the process group (cancellation, timeout).
@@ -200,6 +228,7 @@ impl NixEvalProcessGuard {
     /// not perform a second, potentially-unsafe `killpg` on a
     /// possibly-reused PGID.
     async fn terminate(&mut self) {
+        self.armed = false;
         if let Some(mut child) = self.child.take() {
             kill_nix_process_tree(&mut child, self.pgid).await;
         }
@@ -208,6 +237,10 @@ impl NixEvalProcessGuard {
 
 impl Drop for NixEvalProcessGuard {
     fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
         let Some(mut child) = self.child.take() else {
             return;
         };
@@ -241,6 +274,10 @@ impl Drop for NixEvalProcessGuard {
         // Reaping the direct child (waitpid) is not safety-critical —
         // the group has already been signalled — so it is fine to defer
         // this to a background task when a runtime is available.
+        if self.child_reaped {
+            return;
+        }
+
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let _ = child.wait().await;
@@ -665,17 +702,20 @@ pub async fn evaluate_single_system_with_policies(
         }
     };
 
-    // PGID == PID when spawned with process_group(0).
-    #[cfg(unix)]
-    let pgid = child.id().unwrap_or(0) as libc::pid_t;
-    #[cfg(not(unix))]
-    let pgid = 0i32;
-
     // Keep a drop guard armed for the entire standalone evaluation. If the
     // outer fallback phase is cancelled or times out and drops this future,
     // the guard synchronously kills the whole process group before releasing
     // the standalone-evaluation semaphore.
-    let mut guard = NixEvalProcessGuard::new(child, pgid);
+    let mut guard = match NixEvalProcessGuard::from_spawned_child(child, "standalone nix eval") {
+        Ok(guard) => guard,
+        Err(error) => {
+            return Ok(StandaloneSystemOutcome::InfrastructureFailure {
+                system_name: system_name.to_string(),
+                error: error.to_string(),
+            });
+        }
+    };
+    let pgid = guard.pgid();
     let mut stdout_buf = guard
         .child_mut()
         .stdout
@@ -725,6 +765,7 @@ pub async fn evaluate_single_system_with_policies(
             .unwrap_or_default(),
         None => CappedOutput::default(),
     };
+    guard.disarm_after_output_drained();
 
     if !status.success() {
         let stderr = stderr.diagnostic_excerpt(500);
@@ -863,12 +904,16 @@ in
         }
     };
 
-    #[cfg(unix)]
-    let pgid = child.id().unwrap_or(0) as libc::pid_t;
-    #[cfg(not(unix))]
-    let pgid = 0i32;
-
-    let mut guard = NixEvalProcessGuard::new(child, pgid);
+    let mut guard = match NixEvalProcessGuard::from_spawned_child(child, "fallback nix eval") {
+        Ok(guard) => guard,
+        Err(error) => {
+            return FallbackEvalOutcome::InfrastructureFailure {
+                system_name: system_name.to_string(),
+                error: error.to_string(),
+            };
+        }
+    };
+    let pgid = guard.pgid();
     let mut stdout_buf = guard
         .child_mut()
         .stdout
@@ -918,6 +963,7 @@ in
             .unwrap_or_default(),
         None => CappedOutput::default(),
     };
+    guard.disarm_after_output_drained();
 
     if status.success() && !stdout.is_truncated() {
         // The system actually evaluates fine — this is an evaluator omission,
@@ -2319,21 +2365,10 @@ pub async fn evaluate_with_nix_eval_jobs(
     let child = cmd
         .spawn()
         .with_context(|| "Failed to spawn nix-eval-jobs")?;
-    // PGID == PID when spawned with process_group(0).  Used by
-    // kill_nix_process_tree to SIGKILL the entire evaluator subtree.
-    // Use context() rather than unwrap_or(0) because killpg with PGID 0
-    // would kill the caller's own process group (the server itself),
-    // which is catastrophic. A missing PID right after spawn is an
-    // infrastructure-level failure that must halt evaluation.
-    #[cfg(unix)]
-    let bulk_pgid = child.id().context("spawned nix-eval-jobs without PID")? as libc::pid_t;
-    #[cfg(not(unix))]
-    let bulk_pgid = 0i32;
-
     // Wrap the child in an RAII guard that will kill the entire process
-    // group when dropped unless disarmed (normal exit after child.wait()).
+    // group when dropped unless disarmed after child exit and pipe drain.
     // This ensures cleanup on any abnormal return path (bail!, ?, panic).
-    let mut guard = NixEvalProcessGuard::new(child, bulk_pgid);
+    let mut guard = NixEvalProcessGuard::from_spawned_child(child, "nix-eval-jobs")?;
     // Access the child through the guard for the remainder of this function.
     let stdout = guard.child_mut().stdout.take().unwrap();
     let stderr = guard.child_mut().stderr.take().unwrap();
@@ -3143,10 +3178,11 @@ pub async fn evaluate_with_nix_eval_jobs(
     // ── Capture child exit status after consuming both streams ─────────
     // Important: do NOT bail before synthesis — we must account for every
     // expected system even when nix-eval-jobs crashed partway through.
-    // guard.wait() reaps the child and disarms the guard ONLY if reaping
-    // succeeds; if it errors, the guard remains armed so Drop still
-    // attempts process-group cleanup for this `?` early-return path.
+    // Both streams reached EOF before this wait, so it is now safe to disarm
+    // after reaping the direct child. If wait errors, Drop still performs
+    // process-group cleanup for this `?` early-return path.
     let child_status = guard.wait().await?;
+    guard.disarm_after_output_drained();
 
     // ── Detect systems that nix-eval-jobs silently dropped ─────────────────
     // When a system fails evaluation catastrophically, nix-eval-jobs may not
@@ -4327,7 +4363,7 @@ mod tests {
             "descendant must be alive immediately after spawn"
         );
 
-        let mut guard = NixEvalProcessGuard::new(child, pgid);
+        let mut guard = NixEvalProcessGuard::new(child, pgid).unwrap();
         guard.terminate().await;
 
         // Give the kernel a brief moment to deliver SIGKILL.
@@ -4351,7 +4387,7 @@ mod tests {
                 process_is_alive(descendant_pid),
                 "descendant must be alive immediately after spawn"
             );
-            let _guard = NixEvalProcessGuard::new(child, pgid);
+            let _guard = NixEvalProcessGuard::new(child, pgid).unwrap();
             descendant_pid
             // `_guard` drops here.
         };
@@ -4382,7 +4418,7 @@ mod tests {
         #[cfg(not(unix))]
         let pgid = 0i32;
 
-        let mut guard = NixEvalProcessGuard::new(child, pgid);
+        let mut guard = NixEvalProcessGuard::new(child, pgid).unwrap();
         let status = guard
             .wait()
             .await
@@ -4392,12 +4428,71 @@ mod tests {
             status.success(),
             "expected the test process to exit successfully, got {status:?}"
         );
-        // No further assertion needed on the (moved/disarmed) guard: if
-        // wait() had failed to disarm on success, Drop would attempt a
-        // killpg on a PGID whose process has already exited normally —
-        // harmless (ESRCH) but not what we want to rely on. The
-        // meaningful guarantee here is simply that wait() returns Ok for
-        // a normal exit, matching the production success path.
+        guard.disarm_after_output_drained();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn guard_rejects_non_positive_process_group_id() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+        let child = cmd.spawn().expect("failed to spawn test process");
+
+        let error = match NixEvalProcessGuard::new(child, 0) {
+            Ok(mut guard) => {
+                guard.terminate().await;
+                panic!("PGID zero must be rejected before killpg can use it");
+            }
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("invalid Nix evaluator process group ID 0")
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn guard_stays_armed_after_leader_exit_until_inherited_pipe_drains() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 60 & echo $!; exit 0"]);
+        cmd.stdout(Stdio::piped());
+        cmd.process_group(0);
+
+        let child = cmd.spawn().expect("failed to spawn test process group");
+        let mut guard = NixEvalProcessGuard::from_spawned_child(child, "test shell").unwrap();
+        let stdout = guard
+            .child_mut()
+            .stdout
+            .take()
+            .expect("stdout must be piped");
+        let mut reader = tokio::io::BufReader::new(stdout);
+        let mut line = String::new();
+        use tokio::io::AsyncBufReadExt;
+        reader.read_line(&mut line).await.unwrap();
+        let descendant_pid: libc::pid_t = line.trim().parse().unwrap();
+
+        guard.wait().await.expect("leader should exit normally");
+        assert!(process_is_alive(descendant_pid));
+
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut remainder = Vec::new();
+            use tokio::io::AsyncReadExt;
+            reader.read_to_end(&mut remainder).await.unwrap();
+        })
+        .await
+        .expect("killing the inherited-pipe holder must let the reader reach EOF");
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while process_is_alive(descendant_pid) {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("killed descendant must be reaped before the test deadline");
+        assert!(!process_is_alive(descendant_pid));
     }
 
     #[test]
