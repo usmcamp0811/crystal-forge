@@ -20,6 +20,7 @@ use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
 use crate::handlers::agent_request::CFState;
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
+    is_reserved_policy_result_field,
 };
 use crate::queries::deployment_policies;
 
@@ -195,7 +196,7 @@ fn validate_policy_config(
             }
 
             if has_expression && !has_rules {
-                // Single-expression (legacy) path — normalize
+                // Single-expression (legacy) path — normalize expression and validate field_name.
                 let expression = obj
                     .get("expression")
                     .and_then(|v| v.as_str())
@@ -204,6 +205,23 @@ fn validate_policy_config(
                 let normalized_expr = validate_and_normalize_nix_expression(expression)?;
                 if let Some(config_obj) = validated_config.as_object_mut() {
                     config_obj.insert("expression".to_string(), Value::String(normalized_expr));
+                }
+
+                if let Some(field_name) = obj
+                    .get("field_name")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    if is_reserved_policy_result_field(field_name) {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            format!(
+                                "config.field_name '{}' is reserved for built-in evaluator metadata",
+                                field_name
+                            ),
+                        ));
+                    }
                 }
             }
 
@@ -245,6 +263,16 @@ fn validate_policy_config(
                             StatusCode::BAD_REQUEST,
                             format!(
                                 "config.rules[{}].field_name duplicates existing field_name '{}'",
+                                i, field_name
+                            ),
+                        ));
+                    }
+
+                    if is_reserved_policy_result_field(field_name) {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            format!(
+                                "config.rules[{}].field_name '{}' is reserved for built-in evaluator metadata",
                                 i, field_name
                             ),
                         ));
@@ -1044,6 +1072,68 @@ mod tests {
         assert_eq!(
             rules[1].get("expression").and_then(|v| v.as_str()),
             Some("cfg.config.services.nginx.enable")
+        );
+    }
+
+    #[test]
+    fn validate_policy_config_rejects_reserved_legacy_field_name() {
+        let err = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({
+                "expression": "true",
+                "field_name": "cfAgentEnabled",
+                "strict": true
+            }),
+        )
+        .expect_err("reserved legacy field_name must be rejected");
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("reserved"));
+        assert!(err.1.contains("cfAgentEnabled"));
+    }
+
+    #[test]
+    fn validate_policy_config_rejects_reserved_multi_rule_field_name() {
+        let err = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({
+                "mode": "all",
+                "rules": [
+                    {
+                        "field_name": "cfAgentEnabled",
+                        "expression": "true",
+                        "strict": true
+                    },
+                    {
+                        "field_name": "firewallEnabled",
+                        "expression": "cfg.config.networking.firewall.enable",
+                        "strict": true
+                    }
+                ]
+            }),
+        )
+        .expect_err("reserved multi-rule field_name must be rejected");
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("reserved"));
+        assert!(err.1.contains("cfAgentEnabled"));
+    }
+
+    #[test]
+    fn validate_policy_config_accepts_non_reserved_field_names() {
+        let result = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({
+                "expression": "true",
+                "field_name": "firewallEnabled",
+                "strict": true
+            }),
+        )
+        .expect("non-reserved legacy field_name must be accepted");
+
+        assert_eq!(
+            result.get("field_name").and_then(|v| v.as_str()),
+            Some("firewallEnabled")
         );
     }
 

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::types::chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, HashMap};
+use tracing::warn;
 use uuid::Uuid;
 
 // ============================================================================
@@ -461,6 +462,130 @@ pub struct AssignedPolicy {
 /// - Configurations not registered in Crystal Forge also produce no entry.
 pub type PoliciesByConfiguration = BTreeMap<String, Vec<AssignedPolicy>>;
 
+/// Nix result keys that are reserved for built-in evaluator metadata and may
+/// not be used as custom-check `field_name` values. Overriding these from a
+/// user-defined policy would let a policy spoof system-level safety signals.
+pub const RESERVED_POLICY_RESULT_FIELDS: &[&str] = &["cfAgentEnabled"];
+
+/// Returns true if `field_name` is reserved for built-in evaluator metadata.
+pub fn is_reserved_policy_result_field(field_name: &str) -> bool {
+    RESERVED_POLICY_RESULT_FIELDS
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(field_name))
+}
+
+fn policy_kind(policy: &DeploymentPolicy) -> &'static str {
+    match policy {
+        DeploymentPolicy::RequireCrystalForgeAgent { .. } => "require_cf_agent",
+        DeploymentPolicy::RequirePackages { .. } => "require_packages",
+        DeploymentPolicy::CustomCheck { .. } => "custom_check",
+        DeploymentPolicy::RequireCveCheck { .. } => "require_cve_check",
+        DeploymentPolicy::TimeWindow { .. } => "time_window",
+        DeploymentPolicy::RequireApprovals { .. } => "require_approvals",
+        DeploymentPolicy::CanaryRollout { .. } => "canary_rollout",
+        DeploymentPolicy::CveThreshold { .. } => "cve_threshold",
+    }
+}
+
+fn policy_result_detail(policy: &DeploymentPolicy, passed: Option<bool>) -> Option<String> {
+    if passed != Some(false) {
+        return None;
+    }
+
+    match policy {
+        DeploymentPolicy::RequireCrystalForgeAgent { .. } => {
+            Some("Crystal Forge agent is disabled".to_string())
+        }
+        DeploymentPolicy::RequirePackages { packages, .. } => Some(format!(
+            "Missing required packages: {}",
+            packages.join(", ")
+        )),
+        DeploymentPolicy::CustomCheck {
+            description, rules, ..
+        } if rules.is_empty() => Some(description.clone()),
+        DeploymentPolicy::CustomCheck { rules, .. } => {
+            let descriptions: Vec<&str> =
+                rules.iter().map(|rule| rule.description.as_str()).collect();
+            Some(format!(
+                "Failed custom-check rules: {}",
+                descriptions.join(", ")
+            ))
+        }
+        _ => Some(policy.description()),
+    }
+}
+
+fn assigned_policy_passed(policy: &DeploymentPolicy, check: &PolicyCheckResult) -> Option<bool> {
+    match policy {
+        DeploymentPolicy::RequireCrystalForgeAgent { .. } => check.cf_agent_enabled,
+        DeploymentPolicy::RequirePackages { .. } => check.has_required_packages,
+        DeploymentPolicy::CustomCheck {
+            field_name,
+            rules,
+            mode,
+            ..
+        } if rules.is_empty() => check.custom_checks.get(field_name).copied(),
+        DeploymentPolicy::CustomCheck { rules, mode, .. } => {
+            let values: Vec<bool> = rules
+                .iter()
+                .filter_map(|rule| check.custom_checks.get(&rule.field_name).copied())
+                .collect();
+            if values.len() != rules.len() {
+                return None;
+            }
+            Some(match mode {
+                RuleMode::All => values.iter().all(|v| *v),
+                RuleMode::Any => values.iter().any(|v| *v),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Build the persisted policy-result document for a successfully evaluated
+/// NixOS configuration. This is the source of truth for queue counters and the
+/// policy matrix; the legacy `cf_agent_enabled` column remains a fast global
+/// signal and compatibility field.
+pub fn policy_results_json(
+    check: &PolicyCheckResult,
+    assigned: &[AssignedPolicy],
+) -> serde_json::Value {
+    let mut assigned_results = serde_json::Map::new();
+
+    for assigned_policy in assigned.iter().filter(|ap| ap.policy.is_nix_evaluated()) {
+        let passed = assigned_policy_passed(&assigned_policy.policy, check);
+        assigned_results.insert(
+            assigned_policy.policy_id.to_string(),
+            serde_json::json!({
+                "name": assigned_policy.policy.description(),
+                "type": policy_kind(&assigned_policy.policy),
+                "strict": assigned_policy.policy.is_strict(),
+                "passed": passed,
+                "details": policy_result_detail(&assigned_policy.policy, passed),
+            }),
+        );
+    }
+
+    serde_json::json!({
+        "global": {
+            "cfAgentEnabled": {
+                "passed": check.cf_agent_enabled,
+                "strict": true,
+                "details": if check.cf_agent_enabled == Some(false) {
+                    Some("Crystal Forge agent is disabled")
+                } else {
+                    None::<&str>
+                }
+            }
+        },
+        "assigned": assigned_results,
+    })
+}
+
+pub fn policy_requirements_met(check: &PolicyCheckResult) -> bool {
+    check.cf_agent_enabled == Some(true) && !check.failed_policies.iter().any(|(_, strict)| *strict)
+}
+
 /// Look up the assigned policies for a NixOS configuration name, returning an
 /// empty slice when the configuration is unregistered or has no policies.
 pub fn policies_for_config<'a>(
@@ -643,11 +768,15 @@ impl PolicyCheckResult {
                                 }
                             }
                             None => {
-                                warnings.push(format!(
-                                    "{}: Could not evaluate custom check '{}'",
-                                    system_name, description
+                                return Err(format!(
+                                    "Configuration {:?}: custom check {:?} was absent from \
+                                     evaluator output (available: {:?})",
+                                    system_name,
+                                    field_name,
+                                    policies_json
+                                        .as_object()
+                                        .map(|o| o.keys().collect::<Vec<_>>()),
                                 ));
-                                failed_policies.push((description.clone(), *strict));
                             }
                         }
                     } else {
@@ -662,7 +791,17 @@ impl PolicyCheckResult {
                                         system_name, rule.field_name, v
                                     )
                                 })?,
-                                None => false,
+                                None => {
+                                    return Err(format!(
+                                        "Configuration {:?}: custom-check rule {:?} was absent \
+                                         from evaluator output (available: {:?})",
+                                        system_name,
+                                        rule.field_name,
+                                        policies_json
+                                            .as_object()
+                                            .map(|o| o.keys().collect::<Vec<_>>()),
+                                    ));
+                                }
                             };
                             custom_checks.insert(rule.field_name.clone(), passed);
                             rule_results.push((passed, rule));
@@ -930,15 +1069,49 @@ fn build_policy_fields_for_config_indented(
         }
         let key = policy_result_key(&ap.policy_id);
         match &ap.policy {
-            DeploymentPolicy::CustomCheck { rules, .. } if !rules.is_empty() => {
+            DeploymentPolicy::CustomCheck {
+                expression,
+                field_name,
+                rules,
+                ..
+            } if rules.is_empty() => {
+                // Legacy single-expression custom check: emit under the configured
+                // field_name so the parser can find it. The expression is inserted
+                // verbatim and must use the `cfg.config.*` lexical contract.
+                if is_reserved_policy_result_field(field_name) {
+                    warn!(
+                        policy_id = %ap.policy_id,
+                        field_name = %field_name,
+                        "Skipping custom check with reserved result field name"
+                    );
+                    continue;
+                }
+                lines.push(format!(
+                    "{}{} = {};",
+                    indent,
+                    nix_string(field_name),
+                    expression
+                ));
+            }
+            DeploymentPolicy::CustomCheck { rules, .. } => {
                 // Multi-rule: emit one line per rule using the rule's own field_name
                 // (existing convention; rules predate stable-ID keys).
                 // Expressions are expected to use `cfg.config.*` per the documented
                 // policy fragment lexical contract.
                 for rule in rules {
+                    if is_reserved_policy_result_field(&rule.field_name) {
+                        warn!(
+                            policy_id = %ap.policy_id,
+                            field_name = %rule.field_name,
+                            "Skipping custom-check rule with reserved result field name"
+                        );
+                        continue;
+                    }
                     lines.push(format!(
                         "{}{} = {};",
-                        indent, rule.field_name, rule.expression
+                        indent,
+                        nix_string(&rule.field_name),
+                        rule.expression
                     ));
                 }
             }
@@ -976,7 +1149,7 @@ fn build_policy_fields_for_config_indented(
 ///   let
 ///     drv = cfg.config.system.build.toplevel;
 ///     checker = policyCheckers.${name} or (_: {});
-///   in drv // { meta = (drv.meta or {}) // { policies = { cfAgentEnabled = cfAgentEnabledExpr cfg; } // (checker cfg); }; }
+///   in drv // { meta = (drv.meta or {}) // { policies = (checker cfg) // { cfAgentEnabled = cfAgentEnabledExpr cfg; }; }; }
 /// ) flake.nixosConfigurations
 /// ```
 pub fn build_nix_eval_expression(
@@ -1020,7 +1193,7 @@ in
     in
       drv // {{
         meta = (drv.meta or {{}}) // {{
-          policies = {{ cfAgentEnabled = cfAgentEnabledExpr cfg; }} // (checker cfg);
+          policies = (checker cfg) // {{ cfAgentEnabled = cfAgentEnabledExpr cfg; }};
         }};
       }}
   ) flake.nixosConfigurations
@@ -1754,6 +1927,123 @@ in {{
         assert!(
             err.contains("must evaluate to boolean"),
             "error should mention boolean requirement: {err}"
+        );
+    }
+
+    // ── Reserved result-field tests ────────────────────────────────────────
+
+    #[test]
+    fn reserved_policy_result_fields_include_cf_agent_enabled() {
+        assert!(is_reserved_policy_result_field("cfAgentEnabled"));
+        assert!(is_reserved_policy_result_field("cfagentenabled"));
+        assert!(!is_reserved_policy_result_field("firewallEnabled"));
+    }
+
+    #[test]
+    fn build_policy_fields_skips_legacy_custom_check_with_reserved_field_name() {
+        let assigned = vec![AssignedPolicy {
+            policy_id: uuid::Uuid::from_u128(1),
+            policy: DeploymentPolicy::CustomCheck {
+                expression: "true".to_string(),
+                description: "spoof agent".to_string(),
+                field_name: "cfAgentEnabled".to_string(),
+                strict: true,
+                rules: Vec::new(),
+                mode: RuleMode::All,
+            },
+        }];
+
+        let fields = build_policy_fields_for_config(&assigned);
+
+        assert!(
+            !fields
+                .iter()
+                .any(|line| line.contains("cfAgentEnabled = true")),
+            "custom check must not be allowed to emit reserved result field, got:\n{fields:#?}"
+        );
+    }
+
+    #[test]
+    fn build_policy_fields_skips_multi_rule_with_reserved_field_name() {
+        let assigned = vec![AssignedPolicy {
+            policy_id: uuid::Uuid::from_u128(1),
+            policy: DeploymentPolicy::CustomCheck {
+                expression: String::new(),
+                description: "mixed rules".to_string(),
+                field_name: "parent".to_string(),
+                strict: true,
+                rules: vec![
+                    PolicyRule {
+                        expression: "true".to_string(),
+                        description: "spoof agent".to_string(),
+                        field_name: "cfAgentEnabled".to_string(),
+                        strict: true,
+                    },
+                    PolicyRule {
+                        expression: "true".to_string(),
+                        description: "legit".to_string(),
+                        field_name: "firewallEnabled".to_string(),
+                        strict: true,
+                    },
+                ],
+                mode: RuleMode::All,
+            },
+        }];
+
+        let fields = build_policy_fields_for_config(&assigned);
+
+        assert!(
+            !fields
+                .iter()
+                .any(|line| line.contains("cfAgentEnabled = true")),
+            "custom-check rule must not be allowed to emit reserved result field, got:\n{fields:#?}"
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|line| line.contains("\"firewallEnabled\" = true")),
+            "non-reserved rule should still be emitted, got:\n{fields:#?}"
+        );
+    }
+
+    #[test]
+    fn strict_package_failure_persists_requirements_false_and_policy_json() {
+        let policy_id = uuid::Uuid::from_u128(1);
+        let assigned = vec![AssignedPolicy {
+            policy_id,
+            policy: DeploymentPolicy::RequirePackages {
+                packages: vec!["grafana".to_string()],
+                strict: true,
+            },
+        }];
+        let check = PolicyCheckResult::from_assigned(
+            "gray".to_string(),
+            &serde_json::json!({
+                "cfAgentEnabled": true,
+                policy_result_key(&policy_id): false,
+            }),
+            &assigned,
+        )
+        .expect("policy metadata should parse");
+
+        assert!(!policy_requirements_met(&check));
+
+        let persisted = policy_results_json(&check, &assigned);
+        let result = persisted
+            .get("assigned")
+            .and_then(|assigned| assigned.get(policy_id.to_string()))
+            .expect("assigned policy result should be persisted");
+        assert_eq!(
+            result.get("type").and_then(|value| value.as_str()),
+            Some("require_packages")
+        );
+        assert_eq!(
+            result.get("passed").and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            result.get("details").and_then(|value| value.as_str()),
+            Some("Missing required packages: grafana")
         );
     }
 }

@@ -701,12 +701,18 @@ pub async fn list_eval_queue(pool: &PgPool, limit: i64) -> Result<Vec<EvalQueueR
                 FROM derivations d
                 WHERE d.commit_id = c.id
                   AND d.cf_agent_enabled IS TRUE
+                  AND d.policy_requirements_met IS TRUE
+                  AND d.status_id <> 6
             ), 0) AS passed_count,
             COALESCE((
                 SELECT COUNT(*)::bigint
                 FROM derivations d
                 WHERE d.commit_id = c.id
-                  AND d.cf_agent_enabled IS FALSE
+                  AND d.status_id <> 6
+                  AND (
+                    d.cf_agent_enabled IS FALSE
+                    OR d.policy_requirements_met IS FALSE
+                  )
             ), 0) AS policy_failed_count,
             COALESCE((
                 SELECT COUNT(*)::bigint
@@ -1122,11 +1128,19 @@ pub async fn list_eval_history(
             COALESCE(CARDINALITY(cac.nixos_configurations), 0)::BIGINT AS system_count,
             COALESCE((
                 SELECT COUNT(*)::BIGINT FROM derivations d
-                WHERE d.commit_id = c.id AND d.cf_agent_enabled IS TRUE
+                WHERE d.commit_id = c.id
+                  AND d.cf_agent_enabled IS TRUE
+                  AND d.policy_requirements_met IS TRUE
+                  AND d.status_id <> 6
             ), 0)                           AS passed_count,
             COALESCE((
                 SELECT COUNT(*)::BIGINT FROM derivations d
-                WHERE d.commit_id = c.id AND d.cf_agent_enabled IS FALSE
+                WHERE d.commit_id = c.id
+                  AND d.status_id <> 6
+                  AND (
+                    d.cf_agent_enabled IS FALSE
+                    OR d.policy_requirements_met IS FALSE
+                  )
             ), 0)                           AS policy_failed_count,
             COALESCE((
                 SELECT COUNT(*)::BIGINT FROM derivations d
@@ -1195,8 +1209,9 @@ pub async fn list_eval_history(
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct EvalPolicySystemRow {
     pub system_name: String,
-    pub policy_status: String,
-    pub detail: Option<String>,
+    pub eval_status: String,
+    pub error_message: Option<String>,
+    pub policy_results: serde_json::Value,
 }
 
 pub async fn fetch_eval_policy_matrix(
@@ -1208,18 +1223,11 @@ pub async fn fetch_eval_policy_matrix(
         SELECT
             d.derivation_name AS system_name,
             CASE
-                WHEN d.cf_agent_enabled IS TRUE THEN 'pass'
-                WHEN d.cf_agent_enabled IS FALSE THEN 'fail'
-                WHEN d.status_id = 6 OR d.error_message IS NOT NULL THEN 'warn'
-                ELSE 'warn'
-            END AS policy_status,
-            CASE
-                WHEN d.cf_agent_enabled IS FALSE
-                    THEN 'Crystal Forge agent is disabled. Enable with crystal-forge.agent.enable = true in your NixOS configuration.'
-                WHEN d.error_message IS NOT NULL
-                    THEN d.error_message
-                ELSE NULL
-            END AS detail
+                WHEN d.status_id = 6 OR d.error_message IS NOT NULL THEN 'eval_failed'
+                ELSE 'evaluated'
+            END AS eval_status,
+            d.error_message,
+            d.policy_results
         FROM derivations d
         WHERE d.commit_id = $1
           AND d.derivation_type = 'nixos'

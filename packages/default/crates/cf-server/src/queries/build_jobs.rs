@@ -42,7 +42,7 @@ pub enum BuildJobInsertOutcome {
 /// # Returns
 /// Number of build jobs created
 pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Result<usize> {
-    let result = sqlx::query!(
+    let result = sqlx::query(
         r#"
         INSERT INTO build_jobs (
             derivation_id,
@@ -76,15 +76,16 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
         )
         WHERE d.commit_id = $1
             AND d.status_id = 5  -- CRITICAL: DryRunComplete (see migration 0027_create_derivation_statuses.sql)
-            AND d.cf_agent_enabled = TRUE  -- Only queue policy-passing derivations
+            AND d.cf_agent_enabled = TRUE
+            AND d.policy_requirements_met = TRUE  -- Only queue policy-passing derivations
             AND NOT EXISTS (
                 -- Prevent duplicates: don't create job if one already exists
                 SELECT 1 FROM build_jobs bj 
                 WHERE bj.derivation_id = d.id
             )
-        "#,
-        commit_id
+        "#
     )
+    .bind(commit_id)
     .execute(pool)
     .await
     .context("Failed to create build jobs for commit")?;
@@ -137,6 +138,7 @@ pub async fn create_build_jobs_for_commit_tx(
         WHERE d.commit_id = $1
             AND d.status_id = 5
             AND d.cf_agent_enabled = TRUE
+            AND d.policy_requirements_met = TRUE
             AND NOT EXISTS (
                 SELECT 1 FROM build_jobs bj
                 WHERE bj.derivation_id = d.id
@@ -188,6 +190,7 @@ pub async fn create_build_job_for_derivation_tx(
         WHERE d.id = $1
             AND d.status_id = 5
             AND d.cf_agent_enabled = TRUE
+            AND d.policy_requirements_met = TRUE
         ON CONFLICT (derivation_id) DO NOTHING
         RETURNING id
         "#,
@@ -235,7 +238,7 @@ pub async fn create_build_job_for_derivation_tx(
 ///
 /// Returns `true` if a new job was created, `false` if one already existed.
 pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32) -> Result<bool> {
-    let result = sqlx::query!(
+    let result = sqlx::query(
         r#"
         INSERT INTO build_jobs (
             derivation_id,
@@ -265,10 +268,11 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
         WHERE d.id = $1
           AND d.status_id = 5  -- DryRunComplete
           AND d.cf_agent_enabled = TRUE
+          AND d.policy_requirements_met = TRUE
         ON CONFLICT (derivation_id) DO NOTHING
         "#,
-        derivation_id
     )
+    .bind(derivation_id)
     .execute(pool)
     .await
     .context("Failed to enqueue build job for derivation")?;
@@ -436,33 +440,43 @@ mod tests {
     }
 
     /// The real eval path in evaluate_with_nix_eval_jobs guards incremental enqueue
-    /// on `cf_agent_enabled == Some(true)`. This test drives that predicate directly
-    /// so a refactor that widens the condition will break the test.
+    /// on `cf_agent_enabled == Some(true)` and `policy_requirements_met == true`.
+    /// This test drives that predicate directly so a refactor that widens the
+    /// condition will break the test.
     #[test]
     fn real_path_policy_gate_only_enqueues_passing_configs() {
         // Simulate the gate expression used in evaluate_with_nix_eval_jobs.
-        fn should_enqueue(cf_agent_enabled: Option<bool>, has_error: bool, has_drv: bool) -> bool {
-            !has_error && has_drv && cf_agent_enabled == Some(true)
+        fn should_enqueue(
+            cf_agent_enabled: Option<bool>,
+            policy_requirements_met: bool,
+            has_error: bool,
+            has_drv: bool,
+        ) -> bool {
+            !has_error && has_drv && cf_agent_enabled == Some(true) && policy_requirements_met
         }
 
         // Policy passed, eval success → enqueue.
-        assert!(should_enqueue(Some(true), false, true));
+        assert!(should_enqueue(Some(true), true, false, true));
 
         // Policy explicitly failed → do NOT enqueue.
-        assert!(!should_enqueue(Some(false), false, true));
+        assert!(!should_enqueue(Some(false), false, false, true));
+
+        // A non-agent strict policy failed → do NOT enqueue.
+        assert!(!should_enqueue(Some(true), false, false, true));
 
         // Policy result unknown (None) → do NOT enqueue.
-        assert!(!should_enqueue(None, false, true));
+        assert!(!should_enqueue(None, false, false, true));
 
         // Eval error → do NOT enqueue even if policy would pass.
-        assert!(!should_enqueue(Some(true), true, true));
+        assert!(!should_enqueue(Some(true), true, true, true));
 
         // Missing drv path → do NOT enqueue.
-        assert!(!should_enqueue(Some(true), false, false));
+        assert!(!should_enqueue(Some(true), true, false, false));
     }
 
     /// The backstop `create_build_jobs_for_commit` SQL now requires
-    /// `d.cf_agent_enabled = TRUE` in addition to DryRunComplete.
+    /// `d.cf_agent_enabled = TRUE` and `d.policy_requirements_met = TRUE` in
+    /// addition to DryRunComplete.
     ///
     /// This test documents that contract so accidental removal of the predicate
     /// is caught at review time. It mirrors the WHERE clause in the query.
@@ -472,12 +486,14 @@ mod tests {
         struct MockDerivation {
             status_id: i32,
             cf_agent_enabled: Option<bool>,
+            policy_requirements_met: bool,
             has_existing_job: bool,
         }
 
         fn is_eligible(d: &MockDerivation) -> bool {
             d.status_id == 5              // DryRunComplete
             && d.cf_agent_enabled == Some(true)  // policy passed
+            && d.policy_requirements_met
             // ON CONFLICT DO NOTHING handles existing jobs; has_existing_job
             // is checked here for documentation of the expected outcome only.
             && !d.has_existing_job
@@ -487,6 +503,7 @@ mod tests {
         assert!(is_eligible(&MockDerivation {
             status_id: 5,
             cf_agent_enabled: Some(true),
+            policy_requirements_met: true,
             has_existing_job: false
         }));
 
@@ -494,6 +511,15 @@ mod tests {
         assert!(!is_eligible(&MockDerivation {
             status_id: 5,
             cf_agent_enabled: Some(false),
+            policy_requirements_met: false,
+            has_existing_job: false
+        }));
+
+        // Non-agent strict policy failed.
+        assert!(!is_eligible(&MockDerivation {
+            status_id: 5,
+            cf_agent_enabled: Some(true),
+            policy_requirements_met: false,
             has_existing_job: false
         }));
 
@@ -501,6 +527,7 @@ mod tests {
         assert!(!is_eligible(&MockDerivation {
             status_id: 5,
             cf_agent_enabled: None,
+            policy_requirements_met: false,
             has_existing_job: false
         }));
 
@@ -508,6 +535,7 @@ mod tests {
         assert!(!is_eligible(&MockDerivation {
             status_id: 4,
             cf_agent_enabled: Some(true),
+            policy_requirements_met: true,
             has_existing_job: false
         }));
 
@@ -515,6 +543,7 @@ mod tests {
         assert!(!is_eligible(&MockDerivation {
             status_id: 5,
             cf_agent_enabled: Some(true),
+            policy_requirements_met: true,
             has_existing_job: true
         }));
     }

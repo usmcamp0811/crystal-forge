@@ -90,7 +90,7 @@ use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
     AssignedPolicy, DeploymentPolicy, PoliciesByConfiguration, PolicyCheckResult,
-    build_nix_eval_expression, policies_for_config,
+    build_nix_eval_expression, policies_for_config, policy_requirements_met, policy_results_json,
 };
 use crate::models::flakes::Flake;
 use crate::queries::build_jobs::{
@@ -1051,6 +1051,7 @@ pub async fn persist_evaluated_system(
     expected_attempt: i32,
     result: &SuccessfulSystemResult,
     policy_check: &PolicyCheckResult,
+    assigned_policies: &[AssignedPolicy],
 ) -> Result<SystemPersistenceOutcome> {
     let build_eligible = result.build_eligible;
     use crate::queries::derivations::{SuccessfulEvalWrite, record_successful_eval_result_in_tx};
@@ -1096,6 +1097,8 @@ pub async fn persist_evaluated_system(
     }
 
     let drv_path = result.drv_path.clone();
+    let policy_requirements_met = policy_requirements_met(policy_check);
+    let policy_results = policy_results_json(policy_check, assigned_policies);
     let write = record_successful_eval_result_in_tx(
         &mut tx,
         Some(commit_id),
@@ -1105,6 +1108,8 @@ pub async fn persist_evaluated_system(
         &result.drv_path,
         result.expected_store_path.as_deref(),
         result.cf_agent_enabled,
+        policy_requirements_met,
+        &policy_results,
     )
     .await
     .with_context(|| format!("Failed to write derivation for {}", result.system_name))?;
@@ -1445,7 +1450,8 @@ pub async fn finalize_evaluated_system(
     policy_check: &PolicyCheckResult,
 ) -> Result<SystemFinalizeOutcome> {
     let persisted =
-        persist_evaluated_system(pool, commit_id, expected_attempt, result, policy_check).await?;
+        persist_evaluated_system(pool, commit_id, expected_attempt, result, policy_check, &[])
+            .await?;
 
     match persisted {
         SystemPersistenceOutcome::NeedsBuildPreparation {
@@ -2188,7 +2194,10 @@ pub async fn evaluate_with_nix_eval_jobs(
                                         let log_msg = format!("❌ {}: {}", system_name, error_msg);
                                         broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
                                     } else {
-                                        let log_msg = format!("✅ {} evaluated successfully", system_name);
+                                        let log_msg = format!(
+                                            "🔍 {}: Nix evaluation succeeded; checking assigned policies",
+                                            system_name
+                                        );
                                         broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
                                     }
 
@@ -2210,6 +2219,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                 // Extract policy check results from meta.policies
                                 let mut cf_agent_enabled = None;
                                 let mut policy_check_for_system: Option<PolicyCheckResult> = None;
+                                let mut policy_metadata_error: Option<String> = None;
                                 if let Some(meta) = &result.meta {
                                     if let Some(policies_json) = meta.get("policies") {
                                         // Parse policy results using this configuration's assigned
@@ -2262,15 +2272,27 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                     let log_msg = format!("❌ {}: policy metadata mismatch: {}", system_name, mismatch);
                                                     broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
                                                 }
-                                                // Fall through with no policy_check_for_system;
-                                                // the system will not be queued.
+                                                policy_metadata_error = Some(format!(
+                                                    "Policy metadata mismatch: {}",
+                                                    mismatch
+                                                ));
                                             }
                                         }
                                     } else {
-                                        debug!("⚠️  No policies in meta for {}", system_name);
+                                        let msg = format!(
+                                            "{}: evaluator did not emit policy metadata",
+                                            system_name
+                                        );
+                                        debug!("⚠️  {msg}");
+                                        policy_metadata_error = Some(msg);
                                     }
                                 } else {
-                                    debug!("⚠️  No meta field for {}", system_name);
+                                    let msg = format!(
+                                        "{}: evaluator did not emit derivation metadata",
+                                        system_name
+                                    );
+                                    debug!("⚠️  {msg}");
+                                    policy_metadata_error = Some(msg);
                                 }
 
                                 // Configurations with no assigned policies still receive
@@ -2278,32 +2300,35 @@ pub async fn evaluate_with_nix_eval_jobs(
                                 // Synthesize a passing check only when that metadata is present;
                                 // otherwise leave policy_check_for_system as None so the system
                                 // is not incorrectly persisted with a null cf_agent_enabled.
-                                if policy_check_for_system.is_none() && assigned_policies.is_empty() {
+                                if policy_check_for_system.is_none()
+                                    && policy_metadata_error.is_none()
+                                    && assigned_policies.is_empty()
+                                {
                                     let cf_agent_enabled = result
                                         .meta
                                         .as_ref()
                                         .and_then(|m| m.get("policies"))
                                         .and_then(|p| p.get("cfAgentEnabled"))
                                         .and_then(|v| v.as_bool());
-                                    let check = PolicyCheckResult {
-                                        system_name: system_name.clone(),
-                                        cf_agent_enabled,
-                                        has_required_packages: None,
-                                        custom_checks: HashMap::new(),
-                                        meets_requirements: cf_agent_enabled.is_some(),
-                                        warnings: if cf_agent_enabled.is_none() {
-                                            vec![format!(
-                                                "{}: evaluator did not emit cfAgentEnabled metadata",
-                                                system_name
-                                            )]
-                                        } else {
-                                            Vec::new()
-                                        },
-                                        failed_policies: Vec::new(),
-                                        cve_checks: Vec::new(),
-                                    };
-                                    policy_check_for_system = Some(check.clone());
-                                    policy_checks.push(check);
+                                    if cf_agent_enabled.is_none() {
+                                        policy_metadata_error = Some(format!(
+                                            "{}: evaluator did not emit cfAgentEnabled metadata",
+                                            system_name
+                                        ));
+                                    } else {
+                                        let check = PolicyCheckResult {
+                                            system_name: system_name.clone(),
+                                            cf_agent_enabled,
+                                            has_required_packages: None,
+                                            custom_checks: HashMap::new(),
+                                            meets_requirements: cf_agent_enabled == Some(true),
+                                            warnings: Vec::new(),
+                                            failed_policies: Vec::new(),
+                                            cve_checks: Vec::new(),
+                                        };
+                                        policy_check_for_system = Some(check.clone());
+                                        policy_checks.push(check);
+                                    }
                                 }
 
                                 // Broadcast post-policy status to WebSocket clients.
@@ -2325,19 +2350,64 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             format!("❌ {}: {}", system_name, error_msg),
                                         )
                                         .await;
+                                    } else if let Some(metadata_error) = policy_metadata_error.as_ref() {
+                                        crate::handlers::api::commits::broadcast_system_status(
+                                            state,
+                                            commit.id,
+                                            system_name.clone(),
+                                            crate::handlers::api::commits::SystemEvalStatus::Failed,
+                                            Some(metadata_error.clone()),
+                                        )
+                                        .await;
                                     } else {
                                         // Use the actual policy check result to determine status.
                                         let passes = policy_check_for_system
                                             .as_ref()
                                             .map(|c| c.meets_requirements)
-                                            .unwrap_or(true);
+                                            .unwrap_or(false);
                                         if passes {
                                             // QueuedForBuild broadcast deferred to post-finalization.
                                             broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
-                                                format!("✅ {}: evaluated successfully", system_name),
+                                                format!("✅ {}: evaluation and policies passed", system_name),
                                             )
                                             .await;
                                         } else {
+                                            let reason = policy_check_for_system
+                                                .as_ref()
+                                                .and_then(|c| c.warnings.first())
+                                                .map(|d| d.as_str())
+                                                .or_else(|| {
+                                                    policy_check_for_system
+                                                        .as_ref()
+                                                        .and_then(|c| c.failed_policies.first())
+                                                        .map(|(d, _)| d.as_str())
+                                                })
+                                                .unwrap_or("policy failed");
+                                            let has_strict = policy_check_for_system
+                                                .as_ref()
+                                                .map(|c| {
+                                                    c.failed_policies.iter().any(|(_, strict)| *strict)
+                                                })
+                                                .unwrap_or(true);
+                                            let terminal_log = if has_strict {
+                                                format!(
+                                                    "❌ {}: strict policy failed — {}",
+                                                    system_name, reason
+                                                )
+                                            } else {
+                                                format!(
+                                                    "⚠️  {}: non-strict policy warning — {}",
+                                                    system_name, reason
+                                                )
+                                            };
+                                            broadcast_and_persist_eval_log(
+                                                pool,
+                                                Some(state),
+                                                commit.id,
+                                                &mut log_sequence,
+                                                terminal_log,
+                                            )
+                                            .await;
                                             let reason = policy_check_for_system
                                                 .as_ref()
                                                 .and_then(|c| c.failed_policies.first())
@@ -2359,7 +2429,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                 // A healthy system must be queued as soon as its own eval,
                                 // policy check, derivation write, and build-job insertion commit.
                                 if let Some(system_name) = result.attr_path.last() {
-                                    if !has_error && drv_path.is_some() {
+                                    if !has_error && drv_path.is_some() && policy_metadata_error.is_none() {
                                         let drv = drv_path.clone().unwrap();
                                         let derivation_target = build_agent_target(
                                             &flake.repo_url,
@@ -2400,6 +2470,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             expected_attempt,
                                             &successful,
                                             policy_check,
+                                            assigned_policies,
                                         )
                                         .await?;
 
@@ -2640,6 +2711,27 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                 );
                                             }
                                         }
+                                    } else if let Some(metadata_error) = policy_metadata_error.as_ref() {
+                                        let derivation_target = build_agent_target(
+                                            &flake.repo_url,
+                                            &commit.git_commit_hash,
+                                            system_name,
+                                        );
+                                        crate::queries::derivations::record_synthetic_eval_failure(
+                                            pool,
+                                            Some(commit.id),
+                                            system_name,
+                                            "nixos",
+                                            Some(&derivation_target),
+                                            metadata_error,
+                                        )
+                                        .await
+                                        .with_context(|| {
+                                            format!(
+                                                "Failed to record policy metadata failure for {}",
+                                                system_name
+                                            )
+                                        })?;
                                     } else {
                                         if has_error {
                                             debug!("⚠️  {} has evaluation error, will not be persisted as success", system_name);
@@ -5274,7 +5366,7 @@ mod tests {
         // ── Phase 1: persist only (no build job) ─────────────────────
         let system = successful_system("lambda");
         let check = passing_policy_check("lambda");
-        let persisted = persist_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let persisted = persist_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("persist should succeed");
 

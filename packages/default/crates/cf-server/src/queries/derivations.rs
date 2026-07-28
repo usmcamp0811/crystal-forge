@@ -67,8 +67,7 @@ pub enum SyntheticFailureWrite {
 ///
 /// Permitted state transitions:
 /// - No existing row → insert directly as DryRunFailed (6)
-/// - DryRunPending (3) → DryRunFailed (6)
-/// - DryRunInProgress (4) → DryRunFailed (6)
+/// - Dry-run evaluation states (3, 4, 5, 6) → DryRunFailed (6)
 /// - All other statuses → preserved unchanged
 ///
 /// When transitioning from 3 or 4, stale evaluation fields are explicitly
@@ -105,9 +104,10 @@ pub async fn record_synthetic_eval_failure(
             status_id,
             attempt_count,
             error_message,
+            policy_requirements_met,
             completed_at
         )
-        VALUES ($1, $2, $3, $4, $5, 0, $6, NOW())
+        VALUES ($1, $2, $3, $4, $5, 0, $6, FALSE, NOW())
         ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
         DO NOTHING
         RETURNING id, status_id
@@ -151,8 +151,8 @@ pub async fn record_synthetic_eval_failure(
 
             match existing {
                 Some((id, status_id)) => match status_id {
-                    3 | 4 => {
-                        // DryRunPending or DryRunInProgress → DryRunFailed.
+                    3 | 4 | 5 | 6 => {
+                        // Dry-run evaluation states → DryRunFailed.
                         // Also normalize stale evaluation fields (clear them).
                         sqlx::query(
                             r#"
@@ -163,7 +163,9 @@ pub async fn record_synthetic_eval_failure(
                                 derivation_path = NULL,
                                 store_path = NULL,
                                 expected_store_path = NULL,
-                                cf_agent_enabled = NULL
+                                cf_agent_enabled = NULL,
+                                policy_requirements_met = FALSE,
+                                policy_results = '{}'::jsonb
                             WHERE id = $3
                             "#,
                         )
@@ -389,6 +391,8 @@ pub async fn record_successful_eval_result(
     derivation_path: &str,
     expected_store_path: Option<&str>,
     cf_agent_enabled: Option<bool>,
+    policy_requirements_met: bool,
+    policy_results: &serde_json::Value,
 ) -> Result<SuccessfulEvalWrite> {
     let mut tx = pool.begin().await?;
 
@@ -407,11 +411,13 @@ pub async fn record_successful_eval_result(
             derivation_path,
             expected_store_path,
             cf_agent_enabled,
+            policy_requirements_met,
+            policy_results,
             error_message,
             completed_at,
             scheduled_at
         )
-        VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, NULL, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, $10, NULL, NOW(), NOW())
         ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
         DO NOTHING
         RETURNING id
@@ -425,6 +431,8 @@ pub async fn record_successful_eval_result(
     .bind(derivation_path)
     .bind(expected_store_path)
     .bind(cf_agent_enabled)
+    .bind(policy_requirements_met)
+    .bind(policy_results)
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -467,11 +475,13 @@ pub async fn record_successful_eval_result(
                                 derivation_target = COALESCE($3, derivation_target),
                                 expected_store_path = $4,
                                 cf_agent_enabled = $5,
+                                policy_requirements_met = $6,
+                                policy_results = $7,
                                 error_message = NULL,
                                 completed_at = NOW(),
                                 evaluation_duration_ms =
                                     EXTRACT(EPOCH FROM (NOW() - COALESCE(started_at, scheduled_at))) * 1000
-                            WHERE id = $6
+                            WHERE id = $8
                             "#,
                         )
                         .bind(EvaluationStatus::DryRunComplete.as_id())
@@ -479,6 +489,8 @@ pub async fn record_successful_eval_result(
                         .bind(derivation_target)
                         .bind(expected_store_path)
                         .bind(cf_agent_enabled)
+                        .bind(policy_requirements_met)
+                        .bind(policy_results)
                         .bind(id)
                         .execute(&mut *tx)
                         .await?;
@@ -518,6 +530,8 @@ pub async fn record_successful_eval_result_in_tx(
     derivation_path: &str,
     expected_store_path: Option<&str>,
     cf_agent_enabled: Option<bool>,
+    policy_requirements_met: bool,
+    policy_results: &serde_json::Value,
 ) -> Result<SuccessfulEvalWrite> {
     let insert_result = sqlx::query_as::<_, (i32,)>(
         r#"
@@ -531,11 +545,13 @@ pub async fn record_successful_eval_result_in_tx(
             derivation_path,
             expected_store_path,
             cf_agent_enabled,
+            policy_requirements_met,
+            policy_results,
             error_message,
             completed_at,
             scheduled_at
         )
-        VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, NULL, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, $10, NULL, NOW(), NOW())
         ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
         DO NOTHING
         RETURNING id
@@ -549,6 +565,8 @@ pub async fn record_successful_eval_result_in_tx(
     .bind(derivation_path)
     .bind(expected_store_path)
     .bind(cf_agent_enabled)
+    .bind(policy_requirements_met)
+    .bind(policy_results)
     .fetch_optional(&mut **tx)
     .await?;
 
@@ -586,11 +604,13 @@ pub async fn record_successful_eval_result_in_tx(
                                 derivation_target = COALESCE($3, derivation_target),
                                 expected_store_path = $4,
                                 cf_agent_enabled = $5,
+                                policy_requirements_met = $6,
+                                policy_results = $7,
                                 error_message = NULL,
                                 completed_at = NOW(),
                                 evaluation_duration_ms =
                                     EXTRACT(EPOCH FROM (NOW() - COALESCE(started_at, scheduled_at))) * 1000
-                            WHERE id = $6
+                            WHERE id = $8
                             "#,
                         )
                         .bind(EvaluationStatus::DryRunComplete.as_id())
@@ -598,6 +618,8 @@ pub async fn record_successful_eval_result_in_tx(
                         .bind(derivation_target)
                         .bind(expected_store_path)
                         .bind(cf_agent_enabled)
+                        .bind(policy_requirements_met)
+                        .bind(policy_results)
                         .bind(id)
                         .execute(&mut **tx)
                         .await?;
@@ -634,9 +656,10 @@ pub async fn record_synthetic_eval_failure_in_tx(
             status_id,
             attempt_count,
             error_message,
+            policy_requirements_met,
             completed_at
         )
-        VALUES ($1, $2, $3, $4, $5, 0, $6, NOW())
+        VALUES ($1, $2, $3, $4, $5, 0, $6, FALSE, NOW())
         ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
         DO NOTHING
         RETURNING id, status_id
@@ -672,7 +695,7 @@ pub async fn record_synthetic_eval_failure_in_tx(
 
             match existing {
                 Some((id, status_id)) => match status_id {
-                    3 | 4 => {
+                    3 | 4 | 5 | 6 => {
                         sqlx::query(
                             r#"
                             UPDATE derivations
@@ -682,7 +705,9 @@ pub async fn record_synthetic_eval_failure_in_tx(
                                 derivation_path = NULL,
                                 store_path = NULL,
                                 expected_store_path = NULL,
-                                cf_agent_enabled = NULL
+                                cf_agent_enabled = NULL,
+                                policy_requirements_met = FALSE,
+                                policy_results = '{}'::jsonb
                             WHERE id = $3
                             "#,
                         )
@@ -2676,6 +2701,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let name = format!("sys-insert-{}", uuid::Uuid::new_v4().simple());
+        let policy_results = serde_json::json!({});
 
         let result = record_successful_eval_result(
             &pool,
@@ -2686,6 +2712,8 @@ mod tests {
             "/nix/store/fake.drv",
             None,
             Some(true),
+            true,
+            &policy_results,
         )
         .await
         .expect("record_successful_eval_result should not error");
@@ -2719,6 +2747,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let name = format!("sys-bp-{}", uuid::Uuid::new_v4().simple());
+        let policy_results = serde_json::json!({});
 
         // Insert row then manually set BuildPending (7).
         record_successful_eval_result(
@@ -2730,6 +2759,8 @@ mod tests {
             "/nix/store/fake.drv",
             None,
             Some(true),
+            true,
+            &policy_results,
         )
         .await
         .expect("insert should succeed");
@@ -2751,6 +2782,8 @@ mod tests {
             "/nix/store/updated.drv",
             None,
             Some(true),
+            true,
+            &policy_results,
         )
         .await
         .expect("retry should not error");
@@ -2788,6 +2821,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let name = format!("sys-bip-{}", uuid::Uuid::new_v4().simple());
+        let policy_results = serde_json::json!({});
 
         record_successful_eval_result(
             &pool,
@@ -2798,6 +2832,8 @@ mod tests {
             "/nix/store/fake.drv",
             None,
             Some(true),
+            true,
+            &policy_results,
         )
         .await
         .expect("insert should succeed");
@@ -2818,6 +2854,8 @@ mod tests {
             "/nix/store/updated.drv",
             None,
             Some(true),
+            true,
+            &policy_results,
         )
         .await
         .expect("retry should not error");
@@ -2845,6 +2883,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let name = format!("sys-stale-err-{}", uuid::Uuid::new_v4().simple());
+        let policy_results = serde_json::json!({});
 
         // First attempt: synthetic failure.
         record_synthetic_eval_failure(
@@ -2880,6 +2919,8 @@ mod tests {
             "/nix/store/recovered.drv",
             None,
             Some(true),
+            true,
+            &policy_results,
         )
         .await
         .expect("recovery should not error");

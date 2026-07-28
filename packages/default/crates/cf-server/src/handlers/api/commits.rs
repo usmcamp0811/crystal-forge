@@ -353,20 +353,127 @@ pub async fn get_eval_policy_matrix(
         }
     };
 
-    let body = EvalPolicyMatrixResponse {
-        commit_id,
-        policies: vec!["cf.agent_enabled".to_string()],
-        systems: rows
-            .into_iter()
-            .map(|row| EvalPolicySystemRow {
-                system_name: row.system_name,
-                results: vec![row.policy_status],
-                details: vec![row.detail],
-            })
-            .collect(),
-    };
+    let body = build_eval_policy_matrix_response(commit_id, rows);
 
     Json(body).into_response()
+}
+
+fn build_eval_policy_matrix_response(
+    commit_id: i32,
+    rows: Vec<crate::queries::commits::EvalPolicySystemRow>,
+) -> EvalPolicyMatrixResponse {
+    let mut assigned_columns = std::collections::BTreeMap::<String, String>::new();
+    for row in &rows {
+        if let Some(assigned) = row
+            .policy_results
+            .get("assigned")
+            .and_then(|value| value.as_object())
+        {
+            for (policy_id, result) in assigned {
+                let name = result
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(policy_id)
+                    .to_string();
+                assigned_columns.entry(policy_id.clone()).or_insert(name);
+            }
+        }
+    }
+
+    let mut policy_labels = vec!["CF agent".to_string()];
+    policy_labels.extend(assigned_columns.values().cloned());
+
+    let systems = rows
+        .into_iter()
+        .map(|row| {
+            let mut results = Vec::with_capacity(policy_labels.len());
+            let mut details = Vec::with_capacity(policy_labels.len());
+
+            if row.eval_status == "eval_failed" {
+                results.push("nix_eval_failure".to_string());
+                details.push(row.error_message.clone());
+            } else {
+                let cf_agent = row
+                    .policy_results
+                    .get("global")
+                    .and_then(|global| global.get("cfAgentEnabled"));
+                match cf_agent.and_then(|result| result.get("passed")) {
+                    Some(value) if value.as_bool() == Some(true) => {
+                        results.push("pass".to_string());
+                        details.push(None);
+                    }
+                    Some(value) if value.as_bool() == Some(false) => {
+                        results.push("fail".to_string());
+                        details.push(
+                            cf_agent
+                                .and_then(|result| result.get("details"))
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string)
+                                .or_else(|| Some("Crystal Forge agent is disabled".to_string())),
+                        );
+                    }
+                    _ => {
+                        results.push("infrastructure_error".to_string());
+                        details.push(Some(
+                            "cfAgentEnabled metadata missing or invalid".to_string(),
+                        ));
+                    }
+                }
+            }
+
+            let assigned_results = row
+                .policy_results
+                .get("assigned")
+                .and_then(|value| value.as_object());
+            for policy_id in assigned_columns.keys() {
+                if row.eval_status == "eval_failed" {
+                    results.push("nix_eval_failure".to_string());
+                    details.push(row.error_message.clone());
+                    continue;
+                }
+
+                let Some(policy_result) =
+                    assigned_results.and_then(|assigned| assigned.get(policy_id))
+                else {
+                    results.push("not_assigned".to_string());
+                    details.push(None);
+                    continue;
+                };
+
+                match policy_result.get("passed") {
+                    Some(value) if value.as_bool() == Some(true) => {
+                        results.push("pass".to_string());
+                        details.push(None);
+                    }
+                    Some(value) if value.as_bool() == Some(false) => {
+                        results.push("fail".to_string());
+                        details.push(
+                            policy_result
+                                .get("details")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string),
+                        );
+                    }
+                    _ => {
+                        results.push("infrastructure_error".to_string());
+                        details.push(Some("policy result missing or invalid".to_string()));
+                    }
+                }
+            }
+
+            EvalPolicySystemRow {
+                system_name: row.system_name,
+                results,
+                details,
+            }
+        })
+        .collect();
+
+    EvalPolicyMatrixResponse {
+        commit_id,
+        policies: policy_labels,
+        systems,
+    }
 }
 
 /// Fetch dependency/derivation package breakdown for a commit evaluation.
@@ -792,5 +899,58 @@ mod tests {
         assert_eq!(details["duplicate_ids"], serde_json::json!([]));
         assert_eq!(details["missing_ids"], serde_json::json!([]));
         assert_eq!(details["extra_ids"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn policy_matrix_includes_strict_grafana_failures_for_gray_and_mattis() {
+        let policy_id = "f2752e95-40f5-4cb7-9211-7ac8fd98334f";
+        let policy_result = serde_json::json!({
+            "global": {
+                "cfAgentEnabled": {
+                    "passed": true,
+                    "strict": true,
+                    "details": null
+                }
+            },
+            "assigned": {
+                policy_id: {
+                    "name": "Required packages: grafana",
+                    "type": "require_packages",
+                    "strict": true,
+                    "passed": false,
+                    "details": "Missing required packages: grafana"
+                }
+            }
+        });
+        let rows = vec![
+            crate::queries::commits::EvalPolicySystemRow {
+                system_name: "gray".to_string(),
+                eval_status: "evaluated".to_string(),
+                error_message: None,
+                policy_results: policy_result.clone(),
+            },
+            crate::queries::commits::EvalPolicySystemRow {
+                system_name: "mattis".to_string(),
+                eval_status: "evaluated".to_string(),
+                error_message: None,
+                policy_results: policy_result,
+            },
+        ];
+
+        let matrix = build_eval_policy_matrix_response(2876, rows);
+
+        assert_eq!(
+            matrix.policies,
+            vec!["CF agent", "Required packages: grafana"]
+        );
+        assert_eq!(matrix.systems.len(), 2);
+        for row in &matrix.systems {
+            assert!(matches!(row.system_name.as_str(), "gray" | "mattis"));
+            assert_eq!(row.results, vec!["pass", "fail"]);
+            assert_eq!(
+                row.details,
+                vec![None, Some("Missing required packages: grafana".to_string())]
+            );
+        }
     }
 }
