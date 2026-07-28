@@ -515,6 +515,12 @@ fn policy_result_detail(policy: &DeploymentPolicy, passed: Option<bool>) -> Opti
     }
 }
 
+/// Fallback pass/fail resolution used only when a `PolicyCheckResult` has no
+/// entry in `assigned_results` for this policy (the legacy `from_json` path,
+/// or a hand-constructed synthetic result). This is intentionally NOT used as
+/// the primary source: `has_required_packages` is a single shared field, so
+/// when two `RequirePackages` policies are assigned to the same
+/// configuration this fallback cannot distinguish between them.
 fn assigned_policy_passed(policy: &DeploymentPolicy, check: &PolicyCheckResult) -> Option<bool> {
     match policy {
         DeploymentPolicy::RequireCrystalForgeAgent { .. } => check.cf_agent_enabled,
@@ -542,6 +548,20 @@ fn assigned_policy_passed(policy: &DeploymentPolicy, check: &PolicyCheckResult) 
     }
 }
 
+/// Resolve whether an assigned policy passed, preferring the per-UUID
+/// `assigned_results` map (correct for multiple policies of the same type)
+/// and falling back to the shared compatibility fields only when no
+/// per-UUID entry exists.
+fn resolve_assigned_policy_passed(
+    assigned_policy: &AssignedPolicy,
+    check: &PolicyCheckResult,
+) -> Option<bool> {
+    if let Some(result) = check.assigned_results.get(&assigned_policy.policy_id) {
+        return result.passed;
+    }
+    assigned_policy_passed(&assigned_policy.policy, check)
+}
+
 /// Build the persisted policy-result document for a successfully evaluated
 /// NixOS configuration. This is the source of truth for queue counters and the
 /// policy matrix; the legacy `cf_agent_enabled` column remains a fast global
@@ -553,7 +573,7 @@ pub fn policy_results_json(
     let mut assigned_results = serde_json::Map::new();
 
     for assigned_policy in assigned.iter().filter(|ap| ap.policy.is_nix_evaluated()) {
-        let passed = assigned_policy_passed(&assigned_policy.policy, check);
+        let passed = resolve_assigned_policy_passed(assigned_policy, check);
         assigned_results.insert(
             assigned_policy.policy_id.to_string(),
             serde_json::json!({
@@ -610,11 +630,30 @@ pub struct CveCheckOutcome {
     pub reason: Option<String>,
 }
 
+/// Per-policy outcome, keyed by the policy's stable database UUID.
+///
+/// This is the source of truth for the persisted `policy_results` JSON and
+/// the policy matrix. Unlike `has_required_packages` (a single shared field),
+/// this map holds one entry per assigned policy, so two `RequirePackages`
+/// policies on the same configuration do not collapse to a single boolean.
+#[derive(Debug, Clone)]
+pub struct AssignedPolicyCheckResult {
+    pub passed: Option<bool>,
+}
+
 /// Results from checking deployment policies for a single system
 #[derive(Debug, Clone)]
 pub struct PolicyCheckResult {
     pub system_name: String,
     pub cf_agent_enabled: Option<bool>,
+    /// Per-policy outcomes keyed by stable UUID. Populated by `from_assigned`;
+    /// empty for the legacy `from_json` path (which has no stable UUIDs) and
+    /// for synthetic/manually-constructed results.
+    pub assigned_results: BTreeMap<Uuid, AssignedPolicyCheckResult>,
+    /// Compatibility field: the *last* `RequirePackages` policy's result.
+    /// Do not use this to reconstruct per-policy UI state — use
+    /// `assigned_results` instead. Retained for the build-gate predicate and
+    /// existing callers that only ever assign a single package policy.
     pub has_required_packages: Option<bool>,
     pub custom_checks: HashMap<String, bool>,
     pub meets_requirements: bool,
@@ -645,6 +684,7 @@ impl PolicyCheckResult {
         let mut has_required_packages: Option<bool> = None;
         let mut custom_checks = HashMap::new();
         let mut failed_policies = Vec::new();
+        let mut assigned_results: BTreeMap<Uuid, AssignedPolicyCheckResult> = BTreeMap::new();
 
         // cfAgentEnabled is emitted unconditionally by the evaluator for every
         // configuration, even when no require_cf_agent policy is assigned. The
@@ -702,6 +742,12 @@ impl PolicyCheckResult {
                         }
                     };
                     cf_agent_enabled = Some(value);
+                    assigned_results.insert(
+                        ap.policy_id,
+                        AssignedPolicyCheckResult {
+                            passed: Some(value),
+                        },
+                    );
                     if !value {
                         warnings.push(format!(
                             "Crystal Forge agent not enabled for {}",
@@ -733,6 +779,12 @@ impl PolicyCheckResult {
                         }
                     };
                     has_required_packages = Some(value);
+                    assigned_results.insert(
+                        ap.policy_id,
+                        AssignedPolicyCheckResult {
+                            passed: Some(value),
+                        },
+                    );
                     if !value {
                         warnings.push(format!(
                             "Missing required packages for {}: {}",
@@ -762,6 +814,10 @@ impl PolicyCheckResult {
                                     )
                                 })?;
                                 custom_checks.insert(field_name.clone(), v);
+                                assigned_results.insert(
+                                    ap.policy_id,
+                                    AssignedPolicyCheckResult { passed: Some(v) },
+                                );
                                 if !v {
                                     warnings.push(format!("{}: {}", system_name, description));
                                     failed_policies.push((description.clone(), *strict));
@@ -810,6 +866,12 @@ impl PolicyCheckResult {
                             RuleMode::All => rule_results.iter().all(|(p, _)| *p),
                             RuleMode::Any => rule_results.iter().any(|(p, _)| *p),
                         };
+                        assigned_results.insert(
+                            ap.policy_id,
+                            AssignedPolicyCheckResult {
+                                passed: Some(overall_passed),
+                            },
+                        );
                         for (passed, rule) in &rule_results {
                             if !passed {
                                 warnings.push(format!(
@@ -839,10 +901,31 @@ impl PolicyCheckResult {
             }
         }
 
-        let meets_requirements = !failed_policies.iter().any(|(_, is_strict)| *is_strict);
+        // The Crystal Forge agent is a global, unconditional requirement: it must
+        // be enabled regardless of whether an explicit require_cf_agent policy is
+        // assigned to this configuration. Without this, a configuration with no
+        // require_cf_agent policy assigned but cfAgentEnabled=false would report
+        // meets_requirements=true from failed_policies alone, even though the
+        // database gate (policy_requirements_met) independently blocks the build.
+        // That mismatch let the live evaluator announce "evaluation and policies
+        // passed" for a system that was never going to be queued.
+        let already_recorded_agent_failure = assigned
+            .iter()
+            .any(|ap| matches!(ap.policy, DeploymentPolicy::RequireCrystalForgeAgent { .. }));
+        if cf_agent_enabled == Some(false) && !already_recorded_agent_failure {
+            warnings.push(format!(
+                "Crystal Forge agent not enabled for {}",
+                system_name
+            ));
+            failed_policies.push(("Crystal Forge agent is disabled".to_string(), true));
+        }
+
+        let meets_requirements = cf_agent_enabled == Some(true)
+            && !failed_policies.iter().any(|(_, is_strict)| *is_strict);
         Ok(PolicyCheckResult {
             system_name,
             cf_agent_enabled,
+            assigned_results,
             has_required_packages,
             custom_checks,
             meets_requirements,
@@ -1012,6 +1095,10 @@ impl PolicyCheckResult {
         PolicyCheckResult {
             system_name,
             cf_agent_enabled,
+            // Legacy path has no stable policy UUIDs to key by; the matrix and
+            // policy_results_json fall back to `has_required_packages`/
+            // `custom_checks` for results derived from this path.
+            assigned_results: BTreeMap::new(),
             has_required_packages,
             custom_checks,
             meets_requirements,
@@ -2045,5 +2132,140 @@ in {{
             result.get("details").and_then(|value| value.as_str()),
             Some("Missing required packages: grafana")
         );
+    }
+
+    // ── Global CF-agent invariant regression ────────────────────────────
+    //
+    // Scenario from review: a configuration with NO assigned
+    // require_cf_agent policy but cfAgentEnabled=false must never report
+    // meets_requirements=true. Without this invariant the live evaluator
+    // could log "evaluation and policies passed" for a system that the
+    // database gate (policy_requirements_met) was simultaneously blocking
+    // from being queued — a contradictory user-facing result.
+    #[test]
+    fn agent_disabled_with_no_assigned_policies_fails_meets_requirements() {
+        let check = PolicyCheckResult::from_assigned(
+            "gray".to_string(),
+            &serde_json::json!({ "cfAgentEnabled": false }),
+            &[],
+        )
+        .expect("policy metadata should parse");
+
+        assert_eq!(check.cf_agent_enabled, Some(false));
+        assert!(
+            !check.meets_requirements,
+            "meets_requirements must be false when cfAgentEnabled=false, \
+             even with zero assigned policies"
+        );
+        assert!(
+            check.failed_policies.iter().any(|(_, strict)| *strict),
+            "a strict failure must be recorded so system_not_queued_reason \
+             and the caller-visible status agree with policy_requirements_met"
+        );
+        assert!(!policy_requirements_met(&check));
+    }
+
+    #[test]
+    fn agent_disabled_failure_is_not_duplicated_when_require_cf_agent_is_assigned() {
+        let policy_id = uuid::Uuid::from_u128(1);
+        let assigned = vec![AssignedPolicy {
+            policy_id,
+            policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
+        }];
+        let check = PolicyCheckResult::from_assigned(
+            "gray".to_string(),
+            &serde_json::json!({
+                "cfAgentEnabled": false,
+                policy_result_key(&policy_id): false,
+            }),
+            &assigned,
+        )
+        .expect("policy metadata should parse");
+
+        assert!(!check.meets_requirements);
+        assert_eq!(
+            check.failed_policies.len(),
+            1,
+            "the assigned require_cf_agent failure and the global invariant \
+             must not both contribute a failed_policies entry: {:?}",
+            check.failed_policies
+        );
+    }
+
+    // ── Multiple policies of the same type persist distinct results ─────
+    //
+    // Regression for the P2 finding: `has_required_packages` is a single
+    // shared field, so before `assigned_results` was keyed by UUID, two
+    // `RequirePackages` policies assigned to the same configuration could
+    // collapse to a single boolean and both appear to pass/fail together
+    // depending on iteration order.
+    #[test]
+    fn two_require_packages_policies_persist_distinct_results() {
+        let policy_a = uuid::Uuid::from_u128(0xA);
+        let policy_b = uuid::Uuid::from_u128(0xB);
+        let assigned = vec![
+            AssignedPolicy {
+                policy_id: policy_a,
+                policy: DeploymentPolicy::RequirePackages {
+                    packages: vec!["grafana".to_string()],
+                    strict: true,
+                },
+            },
+            AssignedPolicy {
+                policy_id: policy_b,
+                policy: DeploymentPolicy::RequirePackages {
+                    packages: vec!["neovim".to_string()],
+                    strict: true,
+                },
+            },
+        ];
+
+        let check = PolicyCheckResult::from_assigned(
+            "gray".to_string(),
+            &serde_json::json!({
+                "cfAgentEnabled": true,
+                policy_result_key(&policy_a): false,
+                policy_result_key(&policy_b): true,
+            }),
+            &assigned,
+        )
+        .expect("policy metadata should parse");
+
+        // Per-UUID map must retain the distinct per-policy outcomes.
+        assert_eq!(
+            check.assigned_results.get(&policy_a).and_then(|r| r.passed),
+            Some(false)
+        );
+        assert_eq!(
+            check.assigned_results.get(&policy_b).and_then(|r| r.passed),
+            Some(true)
+        );
+
+        // The persisted JSON (the new UI source of truth) must not collapse
+        // the two policies to the same outcome.
+        let persisted = policy_results_json(&check, &assigned);
+        let assigned_json = persisted
+            .get("assigned")
+            .and_then(|v| v.as_object())
+            .expect("assigned map should be present");
+        let passed_a = assigned_json
+            .get(&policy_a.to_string())
+            .and_then(|v| v.get("passed"))
+            .and_then(|v| v.as_bool());
+        let passed_b = assigned_json
+            .get(&policy_b.to_string())
+            .and_then(|v| v.get("passed"))
+            .and_then(|v| v.as_bool());
+        assert_eq!(passed_a, Some(false), "policy A must persist as failed");
+        assert_eq!(passed_b, Some(true), "policy B must persist as passed");
+        assert_ne!(
+            passed_a, passed_b,
+            "two RequirePackages policies with different outcomes must not \
+             collapse to the same persisted result"
+        );
+
+        // Queue gate must reflect the strict failure from policy A even
+        // though policy B independently passed.
+        assert!(!policy_requirements_met(&check));
     }
 }

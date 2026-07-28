@@ -389,6 +389,32 @@ fn build_eval_policy_matrix_response(
             let mut results = Vec::with_capacity(policy_labels.len());
             let mut details = Vec::with_capacity(policy_labels.len());
 
+            // Rows written before migration 0185 (or otherwise never
+            // evaluated under the current policy-result model) have
+            // policy_requirements_met = NULL and no "global.cfAgentEnabled"
+            // entry in policy_results. These must not be displayed as
+            // passing, failing, or infrastructure errors — they simply have
+            // no data yet and require re-evaluation.
+            let is_legacy_unknown = row.eval_status != "eval_failed"
+                && row.policy_requirements_met.is_none()
+                && row
+                    .policy_results
+                    .get("global")
+                    .and_then(|global| global.get("cfAgentEnabled"))
+                    .is_none();
+
+            if is_legacy_unknown {
+                for _ in 0..policy_labels.len() {
+                    results.push("legacy_unknown".to_string());
+                    details.push(Some("Policy results unavailable; re-evaluate.".to_string()));
+                }
+                return EvalPolicySystemRow {
+                    system_name: row.system_name,
+                    results,
+                    details,
+                };
+            }
+
             if row.eval_status == "eval_failed" {
                 results.push("nix_eval_failure".to_string());
                 details.push(row.error_message.clone());
@@ -928,12 +954,14 @@ mod tests {
                 eval_status: "evaluated".to_string(),
                 error_message: None,
                 policy_results: policy_result.clone(),
+                policy_requirements_met: Some(false),
             },
             crate::queries::commits::EvalPolicySystemRow {
                 system_name: "mattis".to_string(),
                 eval_status: "evaluated".to_string(),
                 error_message: None,
                 policy_results: policy_result,
+                policy_requirements_met: Some(false),
             },
         ];
 
@@ -952,5 +980,53 @@ mod tests {
                 vec![None, Some("Missing required packages: grafana".to_string())]
             );
         }
+    }
+
+    /// Rows written before migration 0185 (policy_requirements_met = NULL,
+    /// policy_results = '{}') must render as "legacy_unknown", never as a
+    /// silent pass — the migration deliberately does not infer historical
+    /// per-policy outcomes from `cf_agent_enabled`.
+    #[test]
+    fn policy_matrix_marks_pre_migration_rows_as_legacy_unknown() {
+        let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+            system_name: "ancient-host".to_string(),
+            eval_status: "evaluated".to_string(),
+            error_message: None,
+            policy_results: serde_json::json!({}),
+            policy_requirements_met: None,
+        }];
+
+        let matrix = build_eval_policy_matrix_response(1, rows);
+
+        assert_eq!(matrix.policies, vec!["CF agent"]);
+        assert_eq!(matrix.systems.len(), 1);
+        let row = &matrix.systems[0];
+        assert_eq!(row.results, vec!["legacy_unknown"]);
+        assert_eq!(
+            row.details,
+            vec![Some("Policy results unavailable; re-evaluate.".to_string())]
+        );
+    }
+
+    /// A row with policy_requirements_met = NULL that nonetheless has a
+    /// populated policy_results document (should not happen in practice,
+    /// but the check must be evidence-based, not merely "is it NULL") is
+    /// evaluated normally rather than forced into legacy_unknown.
+    #[test]
+    fn policy_matrix_does_not_treat_populated_results_as_legacy_unknown() {
+        let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+            system_name: "gray".to_string(),
+            eval_status: "evaluated".to_string(),
+            error_message: None,
+            policy_results: serde_json::json!({
+                "global": { "cfAgentEnabled": { "passed": true, "strict": true, "details": null } },
+                "assigned": {}
+            }),
+            policy_requirements_met: None,
+        }];
+
+        let matrix = build_eval_policy_matrix_response(1, rows);
+
+        assert_eq!(matrix.systems[0].results, vec!["pass"]);
     }
 }

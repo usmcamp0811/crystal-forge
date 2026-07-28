@@ -1919,6 +1919,79 @@ fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
     }
 }
 
+/// Canonical category for a raw policy-matrix cell status string returned by
+/// the backend (`pass`, `fail`, `warn`, `not_assigned`, `infrastructure_error`,
+/// `nix_eval_failure`, `legacy_unknown`). Every raw status must map to
+/// exactly one category so the UI can never silently treat an unrecognized
+/// or infrastructure-level status as "clean".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PolicyCellCategory {
+    Pass,
+    Fail,
+    Warn,
+    /// Policy was not assigned to this configuration. Excluded from the
+    /// health denominator; never shown as a failure.
+    NotAssigned,
+    /// Historical row predating the persisted policy-results model
+    /// (migration 0185). Requires re-evaluation; excluded from the health
+    /// denominator; never counted as passing.
+    LegacyUnknown,
+}
+
+/// Map a raw backend status string to its display category.
+///
+/// `fail`, `infrastructure_error`, and `nix_eval_failure` all block
+/// deployment and are grouped as `Fail` for counting/coloring purposes (the
+/// raw string is still shown in the tooltip/detail text). Any unrecognized
+/// status also falls back to `Fail` — fail-closed, so a new backend status
+/// added without a matching UI case is never silently counted as passing.
+fn policy_cell_category(raw: &str) -> PolicyCellCategory {
+    match raw {
+        "pass" => PolicyCellCategory::Pass,
+        "warn" => PolicyCellCategory::Warn,
+        "not_assigned" => PolicyCellCategory::NotAssigned,
+        "legacy_unknown" => PolicyCellCategory::LegacyUnknown,
+        "fail" | "infrastructure_error" | "nix_eval_failure" => PolicyCellCategory::Fail,
+        _ => PolicyCellCategory::Fail,
+    }
+}
+
+/// True when this cell represents an actually-evaluated policy outcome
+/// (pass/fail/warn) and should count toward a system's health ratio.
+/// `not_assigned` and `legacy_unknown` carry no signal and must not affect
+/// the apparent pass ratio.
+fn policy_cell_counts_toward_health(raw: &str) -> bool {
+    !matches!(
+        policy_cell_category(raw),
+        PolicyCellCategory::NotAssigned | PolicyCellCategory::LegacyUnknown
+    )
+}
+
+fn policy_cell_glyph(raw: &str) -> &'static str {
+    match policy_cell_category(raw) {
+        PolicyCellCategory::Pass => "✓",
+        PolicyCellCategory::Fail => "✗",
+        PolicyCellCategory::Warn => "!",
+        PolicyCellCategory::NotAssigned => "–",
+        PolicyCellCategory::LegacyUnknown => "?",
+    }
+}
+
+/// CSS modifier suffix (without the `pm-` prefix) for a policy-matrix cell,
+/// driven by category rather than the raw backend status string. This is
+/// what makes `infrastructure_error`, `nix_eval_failure`, `not_assigned`,
+/// and `legacy_unknown` get real styling instead of silently rendering
+/// unstyled (and therefore looking indistinguishable from "clean").
+fn policy_cell_class_suffix(raw: &str) -> &'static str {
+    match policy_cell_category(raw) {
+        PolicyCellCategory::Pass => "pass",
+        PolicyCellCategory::Fail => "fail",
+        PolicyCellCategory::Warn => "warn",
+        PolicyCellCategory::NotAssigned => "not-assigned",
+        PolicyCellCategory::LegacyUnknown => "legacy-unknown",
+    }
+}
+
 #[component]
 fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> Element {
     let policy_resource =
@@ -1946,7 +2019,15 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                     let policies = &data.policies;
                     let base_rows = &data.systems;
 
-                    // Annotate rows with counts (matching JSX annotated)
+                    // Annotate rows with counts (matching JSX annotated).
+                    // fail/warn/pass are derived from the cell's canonical
+                    // category, not a literal string match, so
+                    // infrastructure_error/nix_eval_failure count as fail and
+                    // not_assigned/legacy_unknown count toward neither. Health
+                    // is measured against `evaluated` (policies that actually
+                    // produced a pass/fail/warn signal for this system), not
+                    // the raw policy count, so unassigned/legacy-unknown
+                    // columns cannot deflate a system's apparent pass ratio.
                     struct AnnotatedRow {
                         system_name: String,
                         results: Vec<String>,
@@ -1954,12 +2035,16 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                         fail: usize,
                         warn: usize,
                         pass: usize,
+                        evaluated: usize,
+                        legacy_unknown: usize,
                     }
 
                     let annotated: Vec<AnnotatedRow> = base_rows.iter().map(|r| {
-                        let fail = r.results.iter().filter(|x| *x == "fail").count();
-                        let warn = r.results.iter().filter(|x| *x == "warn").count();
-                        let pass = r.results.iter().filter(|x| *x == "pass").count();
+                        let fail = r.results.iter().filter(|x| policy_cell_category(x) == PolicyCellCategory::Fail).count();
+                        let warn = r.results.iter().filter(|x| policy_cell_category(x) == PolicyCellCategory::Warn).count();
+                        let pass = r.results.iter().filter(|x| policy_cell_category(x) == PolicyCellCategory::Pass).count();
+                        let evaluated = r.results.iter().filter(|x| policy_cell_counts_toward_health(x)).count();
+                        let legacy_unknown = r.results.iter().filter(|x| policy_cell_category(x) == PolicyCellCategory::LegacyUnknown).count();
                         AnnotatedRow {
                             system_name: r.system_name.clone(),
                             results: r.results.clone(),
@@ -1967,6 +2052,8 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                             fail,
                             warn,
                             pass,
+                            evaluated,
+                            legacy_unknown,
                         }
                     }).collect();
 
@@ -1978,12 +2065,21 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                         match f.as_str() {
                             "fail" => result.retain(|r| r.fail > 0),
                             "warn" => result.retain(|r| r.warn > 0 && r.fail == 0),
-                            "clean" => result.retain(|r| r.fail == 0 && r.warn == 0),
+                            // "Clean" means every evaluated policy passed AND
+                            // there are no legacy_unknown cells requiring
+                            // re-evaluation — a system with unknown history
+                            // must never be reported as clean.
+                            "clean" => result.retain(|r| r.fail == 0 && r.warn == 0 && r.legacy_unknown == 0),
                             _ => {}
                         }
                         if let Some(ref policy_name) = pf {
                             if let Some(idx) = policies.iter().position(|p| p == policy_name) {
-                                result.retain(|r| r.results.get(idx).map_or(false, |res| res != "pass"));
+                                result.retain(|r| r.results.get(idx).map_or(false, |res| {
+                                    !matches!(
+                                        policy_cell_category(res),
+                                        PolicyCellCategory::Pass | PolicyCellCategory::NotAssigned
+                                    )
+                                }));
                             }
                         }
                         // Sort
@@ -1996,7 +2092,10 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                         result
                     };
 
-                    // Per-policy summary (matching JSX policyStats)
+                    // Per-policy summary (matching JSX policyStats). `total`
+                    // is the number of systems for which this policy was
+                    // actually evaluated (excludes not_assigned/legacy_unknown)
+                    // so the fail/warn/pass percentage bar reflects real signal.
                     struct PolicyStat {
                         name: String,
                         fail: usize,
@@ -2005,10 +2104,11 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                         total: usize,
                     }
                     let policy_stats: Vec<PolicyStat> = policies.iter().enumerate().map(|(i, name)| {
-                        let fail = annotated.iter().filter(|r| r.results.get(i).map_or(false, |x| x == "fail")).count();
-                        let warn = annotated.iter().filter(|r| r.results.get(i).map_or(false, |x| x == "warn")).count();
-                        let pass = annotated.iter().filter(|r| r.results.get(i).map_or(false, |x| x == "pass")).count();
-                        PolicyStat { name: name.clone(), fail, warn, pass, total: annotated.len() }
+                        let fail = annotated.iter().filter(|r| r.results.get(i).map_or(false, |x| policy_cell_category(x) == PolicyCellCategory::Fail)).count();
+                        let warn = annotated.iter().filter(|r| r.results.get(i).map_or(false, |x| policy_cell_category(x) == PolicyCellCategory::Warn)).count();
+                        let pass = annotated.iter().filter(|r| r.results.get(i).map_or(false, |x| policy_cell_category(x) == PolicyCellCategory::Pass)).count();
+                        let evaluated = annotated.iter().filter(|r| r.results.get(i).map_or(false, |x| policy_cell_counts_toward_health(x))).count();
+                        PolicyStat { name: name.clone(), fail, warn, pass, total: evaluated }
                     }).collect();
 
                     // Top issues — top 3 most-failed policies (matching JSX)
@@ -2025,11 +2125,9 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                     // Counts for filter badges
                     let count_fail = annotated.iter().filter(|r| r.fail > 0).count();
                     let count_warn = annotated.iter().filter(|r| r.fail == 0 && r.warn > 0).count();
-                    let count_clean = annotated.iter().filter(|r| r.fail == 0 && r.warn == 0).count();
+                    let count_clean = annotated.iter().filter(|r| r.fail == 0 && r.warn == 0 && r.legacy_unknown == 0).count();
 
-                    let cell_glyph = |res: &str| -> &'static str {
-                        match res { "pass" => "✓", "warn" => "!", _ => "✗" }
-                    };
+                    let cell_glyph = policy_cell_glyph;
 
                     rsx! {
                         // Top issues callout (matching JSX)
@@ -2203,14 +2301,14 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                                                                 }
                                                             }
                                                             span { class: "mono pm-health-num", style: "color: {health_color};",
-                                                                "{row.pass}/{policies.len()}"
+                                                                "{row.pass}/{row.evaluated}"
                                                             }
                                                         }
                                                     }
                                                     {row.results.iter().enumerate().map(|(res_idx, result)| {
                                                         let policy_name = &policies[res_idx];
                                                         let col_filtered = policy_filter.read().as_ref() == Some(policy_name);
-                                                        let cls = format!("pm-td-cell pm-{}{}", result, if col_filtered { " col-filtered" } else { "" });
+                                                        let cls = format!("pm-td-cell pm-{}{}", policy_cell_class_suffix(result), if col_filtered { " col-filtered" } else { "" });
                                                         let mut pf = policy_filter.clone();
                                                         let name = policy_name.clone();
                                                         let cell_click = move |e: MouseEvent| {
@@ -2239,17 +2337,27 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                                                             div { class: "pm-expand",
                                                                  div { style: "display: flex; flex-direction: column; gap: 14px;",
                                                                       {row.results.iter().enumerate()
-                                                                          .filter(|(_, result)| *result != "pass")
+                                                                          // not_assigned carries no signal and has nothing to
+                                                                          // show; every other non-pass category (fail, warn,
+                                                                          // infrastructure_error, nix_eval_failure,
+                                                                          // legacy_unknown) needs a card so it can never be
+                                                                          // silently treated as clean.
+                                                                          .filter(|(_, result)| !matches!(
+                                                                              policy_cell_category(result),
+                                                                              PolicyCellCategory::Pass | PolicyCellCategory::NotAssigned
+                                                                          ))
                                                                           .map(|(res_idx, result)| {
                                                                               let policy_name = &policies[res_idx];
-                                                                              let failcard_class = format!("pm-failcard pm-failcard-{}", result);
+                                                                              let class_suffix = policy_cell_class_suffix(result);
+                                                                              let failcard_class = format!("pm-failcard pm-failcard-{}", class_suffix);
                                                                               let glyph = cell_glyph(result);
                                                                               let card_key = format!("{}::{}", row.system_name, res_idx);
                                                                               let is_open = open_cause.read().as_ref() == Some(&card_key);
-                                                                               let fallback_desc = if *result == "fail" {
-                                                                                   "Blocks deployment until resolved"
-                                                                               } else {
-                                                                                   "Soft warning — deploy will proceed"
+                                                                               let fallback_desc = match policy_cell_category(result) {
+                                                                                   PolicyCellCategory::Fail => "Blocks deployment until resolved",
+                                                                                   PolicyCellCategory::Warn => "Soft warning — deploy will proceed",
+                                                                                   PolicyCellCategory::LegacyUnknown => "Historical result predates policy tracking — re-evaluate to get current status",
+                                                                                   PolicyCellCategory::NotAssigned | PolicyCellCategory::Pass => "",
                                                                                };
                                                                                let evidence_text = row
                                                                                    .details
@@ -2274,7 +2382,7 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                                                                                                    }
                                                                                                }
                                                                                            },
-                                                                                           span { class: "pm-failcard-glyph pm-{result}", "{glyph}" }
+                                                                                           span { class: "pm-failcard-glyph pm-{class_suffix}", "{glyph}" }
                                                                                            div { style: "min-width: 0; text-align: left;",
                                                                                                div { class: "mono", style: "font-weight: 600; font-size: 12px;", "{policy_name}" }
                                                                                                div {
@@ -2315,7 +2423,7 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                                                                                }
                                                                            })}
 
-                                                                        if row.fail == 0 && row.warn == 0 {
+                                                                        if row.fail == 0 && row.warn == 0 && row.legacy_unknown == 0 {
                                                                             div { style: "font-size: 12px; color: #34d399; display: flex; align-items: center; gap: 8px;",
                                                                                 Icon { name: IconName::Check, size: 14 }
                                                                                 " All policies pass for this system."
@@ -2348,6 +2456,8 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                             span { span { class: "pm-legend-sw pm-pass", "✓" } " Pass" }
                             span { span { class: "pm-legend-sw pm-warn", "!" } " Warning" }
                             span { span { class: "pm-legend-sw pm-fail", "✗" } " Fail — blocks deploy" }
+                            span { span { class: "pm-legend-sw pm-not-assigned", "–" } " Not assigned" }
+                            span { span { class: "pm-legend-sw pm-legacy-unknown", "?" } " Unknown — re-evaluate" }
                             span { style: "margin-left: auto; font-size: 11px; color: var(--cf-text-muted);", "Click any policy header to filter · Click a row to expand" }
                         }
                     }
@@ -2677,5 +2787,112 @@ fn log_line_color(line: &str) -> &'static str {
         "#34d399"
     } else {
         "inherit"
+    }
+}
+
+#[cfg(test)]
+mod policy_matrix_status_tests {
+    use super::*;
+
+    // ── policy_cell_category ────────────────────────────────────────────
+
+    #[test]
+    fn category_pass_is_pass() {
+        assert_eq!(policy_cell_category("pass"), PolicyCellCategory::Pass);
+    }
+
+    #[test]
+    fn category_fail_is_fail() {
+        assert_eq!(policy_cell_category("fail"), PolicyCellCategory::Fail);
+    }
+
+    #[test]
+    fn category_warn_is_warn() {
+        assert_eq!(policy_cell_category("warn"), PolicyCellCategory::Warn);
+    }
+
+    #[test]
+    fn category_not_assigned_is_not_assigned() {
+        assert_eq!(
+            policy_cell_category("not_assigned"),
+            PolicyCellCategory::NotAssigned
+        );
+    }
+
+    #[test]
+    fn category_infrastructure_error_is_fail() {
+        // Infrastructure errors must block deployment and must never be
+        // silently counted as clean/passing.
+        assert_eq!(
+            policy_cell_category("infrastructure_error"),
+            PolicyCellCategory::Fail
+        );
+    }
+
+    #[test]
+    fn category_nix_eval_failure_is_fail() {
+        assert_eq!(
+            policy_cell_category("nix_eval_failure"),
+            PolicyCellCategory::Fail
+        );
+    }
+
+    #[test]
+    fn category_legacy_unknown_is_legacy_unknown() {
+        assert_eq!(
+            policy_cell_category("legacy_unknown"),
+            PolicyCellCategory::LegacyUnknown
+        );
+    }
+
+    #[test]
+    fn category_unrecognized_status_fails_closed() {
+        // A future backend status this UI doesn't know about yet must never
+        // be silently treated as passing/clean.
+        assert_eq!(
+            policy_cell_category("some_future_status"),
+            PolicyCellCategory::Fail
+        );
+    }
+
+    // ── policy_cell_counts_toward_health ────────────────────────────────
+
+    #[test]
+    fn health_denominator_excludes_not_assigned_and_legacy_unknown() {
+        assert!(policy_cell_counts_toward_health("pass"));
+        assert!(policy_cell_counts_toward_health("fail"));
+        assert!(policy_cell_counts_toward_health("warn"));
+        assert!(policy_cell_counts_toward_health("infrastructure_error"));
+        assert!(policy_cell_counts_toward_health("nix_eval_failure"));
+        assert!(!policy_cell_counts_toward_health("not_assigned"));
+        assert!(!policy_cell_counts_toward_health("legacy_unknown"));
+    }
+
+    // ── policy_cell_glyph ────────────────────────────────────────────────
+
+    #[test]
+    fn glyph_matches_expected_symbol_per_status() {
+        assert_eq!(policy_cell_glyph("pass"), "✓");
+        assert_eq!(policy_cell_glyph("fail"), "✗");
+        assert_eq!(policy_cell_glyph("warn"), "!");
+        assert_eq!(policy_cell_glyph("not_assigned"), "–");
+        assert_eq!(policy_cell_glyph("legacy_unknown"), "?");
+        assert_eq!(policy_cell_glyph("infrastructure_error"), "✗");
+        assert_eq!(policy_cell_glyph("nix_eval_failure"), "✗");
+    }
+
+    // ── policy_cell_class_suffix ─────────────────────────────────────────
+
+    #[test]
+    fn class_suffix_is_distinct_and_stable_per_category() {
+        assert_eq!(policy_cell_class_suffix("pass"), "pass");
+        assert_eq!(policy_cell_class_suffix("fail"), "fail");
+        assert_eq!(policy_cell_class_suffix("warn"), "warn");
+        assert_eq!(policy_cell_class_suffix("not_assigned"), "not-assigned");
+        assert_eq!(policy_cell_class_suffix("legacy_unknown"), "legacy-unknown");
+        // infrastructure_error/nix_eval_failure must render with real (fail)
+        // styling, not fall through to an unstyled/default class.
+        assert_eq!(policy_cell_class_suffix("infrastructure_error"), "fail");
+        assert_eq!(policy_cell_class_suffix("nix_eval_failure"), "fail");
     }
 }

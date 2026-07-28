@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -1448,10 +1448,17 @@ pub async fn finalize_evaluated_system(
     expected_attempt: i32,
     result: &SuccessfulSystemResult,
     policy_check: &PolicyCheckResult,
+    assigned_policies: &[AssignedPolicy],
 ) -> Result<SystemFinalizeOutcome> {
-    let persisted =
-        persist_evaluated_system(pool, commit_id, expected_attempt, result, policy_check, &[])
-            .await?;
+    let persisted = persist_evaluated_system(
+        pool,
+        commit_id,
+        expected_attempt,
+        result,
+        policy_check,
+        assigned_policies,
+    )
+    .await?;
 
     match persisted {
         SystemPersistenceOutcome::NeedsBuildPreparation {
@@ -2319,6 +2326,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                         let check = PolicyCheckResult {
                                             system_name: system_name.clone(),
                                             cf_agent_enabled,
+                                            assigned_results: BTreeMap::new(),
                                             has_required_packages: None,
                                             custom_checks: HashMap::new(),
                                             meets_requirements: cf_agent_enabled == Some(true),
@@ -2452,6 +2460,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                 default_check = PolicyCheckResult {
                                                     system_name: system_name.clone(),
                                                     cf_agent_enabled,
+                                                    assigned_results: BTreeMap::new(),
                                                     has_required_packages: None,
                                                     custom_checks: HashMap::new(),
                                                     meets_requirements: cf_agent_enabled != Some(false),
@@ -3111,12 +3120,20 @@ pub async fn evaluate_with_nix_eval_jobs(
                                 outputs: None,
                                 meta: None,
                             };
+                            // Re-resolve this configuration's assigned policies so the
+                            // persisted policy_results JSON and matrix column set match
+                            // the bulk-evaluation path exactly (fallback and bulk must
+                            // be equivalent from the UI's point of view).
+                            let fallback_assigned: Vec<AssignedPolicy> =
+                                policies_for_config(policies_by_configuration, &result.system_name)
+                                    .to_vec();
                             let finalize_outcome = finalize_evaluated_system(
                                 pool,
                                 commit.id,
                                 expected_attempt,
                                 &result,
                                 &policy_check,
+                                &fallback_assigned,
                             )
                             .await?;
 
@@ -3227,6 +3244,7 @@ pub async fn evaluate_with_nix_eval_jobs(
             policy_checks.push(PolicyCheckResult {
                 system_name: failure.system_name.clone(),
                 cf_agent_enabled: None,
+                assigned_results: BTreeMap::new(),
                 has_required_packages: None,
                 custom_checks: HashMap::new(),
                 meets_requirements: false,
@@ -3658,6 +3676,7 @@ pub async fn evaluate_with_mock_eval_jobs(
         let check = PolicyCheckResult {
             system_name: system_name.clone(),
             cf_agent_enabled: Some(!policy_failed),
+            assigned_results: BTreeMap::new(),
             has_required_packages: None,
             custom_checks: HashMap::new(),
             meets_requirements: !policy_failed,
@@ -3959,12 +3978,15 @@ mod tests {
         summarize_commit_metadata,
     };
     use crate::api::models::CancelEvalOutcome;
-    use crate::models::deployment_policies::PolicyCheckResult;
+    use crate::models::deployment_policies::{
+        AssignedPolicy, DeploymentPolicy, PolicyCheckResult, policy_result_key, policy_results_json,
+    };
     use crate::queries::commits::{
         EvalFailureOutcome, EvalStartOutcome, cancel_commit_evaluation,
         mark_commit_evaluation_failed, mark_commit_evaluation_started,
     };
     use sqlx::PgPool;
+    use std::collections::BTreeMap;
 
     fn test_database_url() -> String {
         std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
@@ -4054,6 +4076,7 @@ mod tests {
         PolicyCheckResult {
             system_name: system_name.to_string(),
             cf_agent_enabled: Some(passed),
+            assigned_results: BTreeMap::new(),
             has_required_packages: None,
             custom_checks: std::collections::HashMap::new(),
             meets_requirements: passed,
@@ -4079,6 +4102,7 @@ mod tests {
         PolicyCheckResult {
             system_name: system_name.to_string(),
             cf_agent_enabled: Some(true),
+            assigned_results: BTreeMap::new(),
             has_required_packages: Some(false),
             custom_checks: std::collections::HashMap::new(),
             meets_requirements: !strict,
@@ -4298,6 +4322,7 @@ mod tests {
         let checks = vec![PolicyCheckResult {
             system_name: "alpha".to_string(),
             cf_agent_enabled: None,
+            assigned_results: BTreeMap::new(),
             has_required_packages: None,
             custom_checks: std::collections::HashMap::new(),
             meets_requirements: false,
@@ -4477,13 +4502,99 @@ mod tests {
         let system = successful_system("alpha");
         let check = passing_policy_check("alpha");
 
-        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("system finalize should not error");
 
         assert!(matches!(outcome, SystemFinalizeOutcome::Queued { .. }));
         assert_eq!(derivation_count(&pool, commit_id).await, 1);
         assert_eq!(build_job_count(&pool, commit_id).await, 1);
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn fallback_finalize_persists_same_policy_results_as_bulk_path() {
+        // Regression: the fallback (standalone) evaluation path must persist
+        // the exact same policy_results document that the bulk streaming
+        // path would, for the same assigned policies. Before this fix,
+        // `finalize_evaluated_system` (used only by the fallback path)
+        // always persisted with an empty assigned-policy slice, so a
+        // fallback-recovered system's matrix column showed "not_assigned"
+        // for a policy it was actually evaluated against — bulk and
+        // fallback results were not equivalent.
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        let policy_id = uuid::Uuid::from_u128(0xF00D);
+        let assigned = vec![AssignedPolicy {
+            policy_id,
+            policy: DeploymentPolicy::RequirePackages {
+                packages: vec!["grafana".to_string()],
+                strict: true,
+            },
+        }];
+
+        let policies_json = serde_json::json!({
+            "cfAgentEnabled": true,
+            policy_result_key(&policy_id): false,
+        });
+        let check = PolicyCheckResult::from_assigned("gray".to_string(), &policies_json, &assigned)
+            .expect("policy metadata should parse");
+
+        let system = successful_system("gray");
+
+        // Simulates the fallback path: finalize_evaluated_system called with
+        // this configuration's real assigned policies, matching what the
+        // fixed production call site now re-resolves via
+        // `policies_for_config` before calling this function.
+        let outcome =
+            finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &assigned)
+                .await
+                .expect("fallback finalize should not error");
+
+        assert!(matches!(
+            outcome,
+            SystemFinalizeOutcome::RecordedWithoutBuild {
+                reason: SystemNotQueuedReason::StrictPolicyFailure,
+                ..
+            }
+        ));
+
+        let persisted: serde_json::Value = sqlx::query_scalar(
+            "SELECT policy_results FROM derivations WHERE commit_id = $1 AND derivation_name = 'gray'",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("derivation row should exist");
+
+        // What the bulk streaming path would have produced for the
+        // identical check + assigned policies (this is exactly what
+        // `persist_evaluated_system` computes internally).
+        let expected = policy_results_json(&check, &assigned);
+        assert_eq!(
+            persisted, expected,
+            "fallback path must persist the same policy_results document as the bulk path"
+        );
+
+        // The specific bug this regresses: the assigned policy must not be
+        // missing/dropped from the persisted document.
+        let assigned_entry = persisted
+            .get("assigned")
+            .and_then(|a| a.get(policy_id.to_string()))
+            .expect("fallback path must persist the assigned policy's result, not drop it");
+        assert_eq!(
+            assigned_entry.get("passed").and_then(|v| v.as_bool()),
+            Some(false)
+        );
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
@@ -4503,7 +4614,7 @@ mod tests {
         let system = successful_system("alpha");
         let check = failing_policy_check("alpha", true, "Require packages: git");
 
-        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("system finalize should record strict policy failures");
 
@@ -4543,7 +4654,7 @@ mod tests {
         let system = successful_system("alpha");
         let check = failing_policy_check("alpha", false, "Require packages: git");
 
-        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("non-strict policy warning should not block queueing");
 
@@ -4569,7 +4680,7 @@ mod tests {
         let system = successful_system("alpha");
         let check = passing_policy_check("alpha");
 
-        let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("first finalization should queue build");
         let first_job_id = match first {
@@ -4577,7 +4688,7 @@ mod tests {
             other => panic!("expected queued outcome, got {other:?}"),
         };
 
-        let second = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let second = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("retry finalization should be idempotent");
 
@@ -4659,6 +4770,7 @@ mod tests {
         PolicyCheckResult {
             system_name: system_name.to_string(),
             cf_agent_enabled: Some(false),
+            assigned_results: BTreeMap::new(),
             has_required_packages: None,
             custom_checks: std::collections::HashMap::new(),
             meets_requirements: true, // other policies pass
@@ -4672,6 +4784,7 @@ mod tests {
         PolicyCheckResult {
             system_name: system_name.to_string(),
             cf_agent_enabled: Some(false),
+            assigned_results: BTreeMap::new(),
             has_required_packages: Some(false),
             custom_checks: std::collections::HashMap::new(),
             meets_requirements: false,
@@ -4716,7 +4829,7 @@ mod tests {
         let system = successful_system_no_agent("beta");
         let check = agent_disabled_check("beta");
 
-        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("agent-disabled system should be recorded without error");
 
@@ -4752,7 +4865,7 @@ mod tests {
         let system = successful_system_no_agent("gamma");
         let check = agent_disabled_with_strict_failure("gamma");
 
-        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("multiple strict failures should be recorded without error");
 
@@ -4791,7 +4904,7 @@ mod tests {
         let first_system = successful_system("alpha");
         let first_check = passing_policy_check("alpha");
         let first_outcome =
-            finalize_evaluated_system(&pool, commit_id, attempt, &first_system, &first_check)
+            finalize_evaluated_system(&pool, commit_id, attempt, &first_system, &first_check, &[])
                 .await
                 .expect("first system should finalize");
         assert!(
@@ -4808,10 +4921,16 @@ mod tests {
         // Attempt to finalize a second system — must be rejected.
         let second_system = successful_system("beta");
         let second_check = passing_policy_check("beta");
-        let second_outcome =
-            finalize_evaluated_system(&pool, commit_id, attempt, &second_system, &second_check)
-                .await
-                .expect("finalize after cancel should return Cancelled, not error");
+        let second_outcome = finalize_evaluated_system(
+            &pool,
+            commit_id,
+            attempt,
+            &second_system,
+            &second_check,
+            &[],
+        )
+        .await
+        .expect("finalize after cancel should return Cancelled, not error");
         assert!(
             matches!(second_outcome, SystemFinalizeOutcome::Cancelled),
             "second system must be Cancelled after eval cancel; got {second_outcome:?}"
@@ -4849,9 +4968,10 @@ mod tests {
         // Finalize A incrementally (simulating streaming bulk path).
         let system_a = successful_system("alpha");
         let check_a = passing_policy_check("alpha");
-        let outcome_a = finalize_evaluated_system(&pool, commit_id, attempt, &system_a, &check_a)
-            .await
-            .expect("alpha should finalize");
+        let outcome_a =
+            finalize_evaluated_system(&pool, commit_id, attempt, &system_a, &check_a, &[])
+                .await
+                .expect("alpha should finalize");
         assert!(
             matches!(outcome_a, SystemFinalizeOutcome::Queued { .. }),
             "alpha must be queued; got {outcome_a:?}"
@@ -5013,13 +5133,13 @@ mod tests {
         let check = passing_policy_check("delta");
 
         // First finalize inserts derivation + build job.
-        let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("first finalize must succeed");
         assert!(matches!(first, SystemFinalizeOutcome::Queued { .. }));
 
         // Second finalize must return BuildAlreadyExists, not error.
-        let second = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let second = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("second finalize must not error");
         assert!(
@@ -5060,7 +5180,7 @@ mod tests {
         let system = successful_system("epsilon");
         let check = passing_policy_check("epsilon");
 
-        let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("first finalize");
         assert!(
@@ -5070,7 +5190,7 @@ mod tests {
         assert_eq!(build_job_count(&pool, commit_id).await, 1);
 
         // Simulate a retry or concurrent call.
-        let second = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let second = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("second finalize must not error");
 
@@ -5131,7 +5251,7 @@ mod tests {
         let system = successful_system("nix-builder-1");
         let check = passing_policy_check("nix-builder-1");
 
-        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("standalone fallback finalization must succeed");
 
@@ -5257,7 +5377,7 @@ mod tests {
         let check = passing_policy_check("kappa");
 
         // First finalize → Queued
-        let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("first finalize");
         assert!(
@@ -5278,7 +5398,7 @@ mod tests {
             .expect("update to building");
 
         // Second finalize → BuildAlreadyExists with status="building"
-        let second = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let second = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("second finalize");
         assert!(
@@ -5294,7 +5414,7 @@ mod tests {
             .await
             .expect("update to success");
 
-        let third = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check)
+        let third = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
             .expect("third finalize");
         assert!(

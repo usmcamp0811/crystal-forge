@@ -1212,6 +1212,13 @@ pub struct EvalPolicySystemRow {
     pub eval_status: String,
     pub error_message: Option<String>,
     pub policy_results: serde_json::Value,
+    /// NULL for rows written before the `policy_results` document existed
+    /// (migration 0185 backfill). A NULL value combined with an empty
+    /// `policy_results` document means the row has never been evaluated
+    /// under the new policy-result model and must be surfaced as
+    /// "legacy_unknown" rather than silently treated as passing or as an
+    /// infrastructure error.
+    pub policy_requirements_met: Option<bool>,
 }
 
 pub async fn fetch_eval_policy_matrix(
@@ -1227,7 +1234,8 @@ pub async fn fetch_eval_policy_matrix(
                 ELSE 'evaluated'
             END AS eval_status,
             d.error_message,
-            d.policy_results
+            d.policy_results,
+            d.policy_requirements_met
         FROM derivations d
         WHERE d.commit_id = $1
           AND d.derivation_type = 'nixos'
