@@ -1,10 +1,11 @@
 ---
 id: TASK-397
 title: Evaluation errors silently drop systems from nixosConfigurations count
-status: Review
-assignee: []
+status: In Progress
+assignee:
+  - opencode
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-27 21:30'
+updated_date: '2026-07-28 18:45'
 labels:
   - evaluator
   - reporting
@@ -90,19 +91,20 @@ Two separate fixes are needed:
 - [ ] #2 The 'Total' nixosConfigurations count in the evaluation summary equals successes + failures (matches the number of systems discovered in the flake)
 - [ ] #3 A system that crashes the evaluator never silently disappears — it is always accounted for in either the success or failure column
 - [ ] #4 The evaluation UI shows nix-builder-1 (and similar systems) as failed with the root cause error, not absent
+- [ ] #5 Evaluator subprocess groups are terminated when bulk or standalone evaluation futures time out are cancelled or are dropped
+- [ ] #6 The server service has default hard memory and bounded swap containment so evaluator descendants cannot trigger a host-wide OOM
+- [ ] #7 Evaluator diagnostics are drained without retaining unbounded stderr in server memory
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Reviewer-directed architecture correction for MR !309: replace commit-wide successful-result persistence/queueing with incremental per-system transactional finalization. Add `finalize_evaluated_system` that locks the commit attempt, records one successful derivation with existing state-preserving rules, gates build eligibility on strict policy semantics plus CF-agent requirement, and inserts/fetches an idempotent build job in the same transaction. During stdout and standalone fallback success processing, call this finalizer immediately, then only after commit run queue notification, `QueuedForBuild` broadcast, GC root, closure-count scheduling, and hardening-scan trigger. Keep commit-level finalization limited to summary/status transition and synthetic confirmed failures. Preserve fallback after nonzero `nix-eval-jobs` exit, add authoritative expected/seen/missing logging, and add focused regression tests for strict vs non-strict policy queue gating, fallback success queueing, deterministic missing failure recording, retry idempotency, and cancellation/duplicate finalize races where practical within the existing DB test harness.
-
-1. Emit cfAgentEnabled unconditionally in build_nix_eval_expression for every nixosConfiguration.
-2. Emit cfAgentEnabled unconditionally in build_single_system_eval_expression.
-3. Parse cfAgentEnabled unconditionally in PolicyCheckResult::from_assigned.
-4. Update unit tests: test_build_expression_no_policies and no_policy_configuration_passes_evaluation.
-5. Improve evaluator log to distinguish total registered configurations from configs with policies.
-6. Run cargo check, targeted tests, sqlx prepare --check, and nix build verification.
+OOM-containment follow-up for MR !309:
+1. Reuse NixEvalProcessGuard for standalone and fallback `nix eval` children so dropping an in-flight future synchronously kills its full process group.
+2. Replace unbounded evaluator stdout/stderr retention with capped buffers that continue draining child pipes and report truncation.
+3. Make evaluator defaults conservative (`eval_workers = 2`) and add default systemd cgroup containment (`MemoryHigh = 60%`, `MemoryMax = 75%`, `MemorySwapMax = 2G`) with overridable NixOS options and accurate documentation that nix-eval-jobs `--max-memory-size` is only a post-attribute worker restart threshold.
+4. Add focused unit tests for process-group cleanup and capped diagnostics plus Nix module evaluation coverage where practical.
+5. Run targeted Rust tests/checks and Nix module/package verification. Runtime acceptance on reckless remains a separate deployment check; do not modify or restart the live service from this worktree.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -292,6 +294,8 @@ The per-configuration bulk checker from `dab3b5b7` / `f4865c44` bound its checke
 - MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/309
 
 Remaining: runtime acceptance with the `campground` commit `3ea42835959d49fab431f07470dfc93fb7f7a52d` to confirm no `undefined variable 'cfg'` and that `gray` evaluates/queues correctly.
+
+2026-07-28 OOM follow-up investigation on reckless was read-only and used no sudo. Current unit settings report MemoryHigh/MemoryMax/MemorySwapMax=infinity. A recent real evaluation instance reached a 28.7G service-cgroup peak in 1m53s; previous supplied incident evidence recorded 115.1G memory and 14.9G swap. Kernel OOM entries were not readable from the current user journal. Code review found standalone fallback children had process groups but no RAII drop guard, bulk stderr was retained without a bound and duplicated on failure, standalone stdout/stderr used unbounded read_to_end, NixOS eval_workers default remained 4, and server cgroup limits remained opt-in.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
