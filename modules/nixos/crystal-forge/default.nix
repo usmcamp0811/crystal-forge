@@ -2402,7 +2402,7 @@ in {
         MemoryMax = lib.mkIf (cfg.server.systemd_memory_max != null)
           (toString cfg.server.systemd_memory_max);
         CPUQuota = lib.mkIf (cfg.server.systemd_cpu_quota != null)
-          (toString cfg.server.systemd_cpu_quota) + "%";
+          "${toString cfg.server.systemd_cpu_quota}%";
 
         # Kill the entire control group (including descendant nix-eval-jobs
         # workers) when the service stops or restarts, preventing orphaned
