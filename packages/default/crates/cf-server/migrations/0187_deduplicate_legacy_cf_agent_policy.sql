@@ -21,7 +21,7 @@ WITH legacy_cf_agent AS (
     SELECT id FROM deployment_policies
     WHERE policy_type = 'require_cf_agent'
 )
-DELETE FROM system_policy_assignments
+DELETE FROM system_policies
 WHERE policy_id IN (SELECT id FROM legacy_cf_agent);
 
 -- 3. Disable the legacy policy records themselves.
