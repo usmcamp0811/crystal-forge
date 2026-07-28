@@ -1453,26 +1453,28 @@ async fn process_pending_commits(
 
                         run_post_finalize_derivation_side_effects(pool, &derivations).await;
 
-                        match trigger_commit_hardening_scans(
-                            pool.clone(),
-                            commit.id,
-                            &flake.repo_url,
-                            &commit.git_commit_hash,
-                        )
-                        .await
-                        {
-                            Ok(count) if count > 0 => {
-                                info!(
-                                    "🛡️ Queued {} hardening scans for commit {}",
-                                    count, commit.git_commit_hash
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(err) => {
-                                warn!(
-                                    "Failed to queue hardening scans for commit {}: {}",
-                                    commit.git_commit_hash, err
-                                );
+                        if server_config.auto_hardening_scans {
+                            match trigger_commit_hardening_scans(
+                                pool.clone(),
+                                commit.id,
+                                &flake.repo_url,
+                                &commit.git_commit_hash,
+                            )
+                            .await
+                            {
+                                Ok(count) if count > 0 => {
+                                    info!(
+                                        "🛡️ Queued {} hardening scans for commit {}",
+                                        count, commit.git_commit_hash
+                                    );
+                                }
+                                Ok(_) => {}
+                                Err(err) => {
+                                    warn!(
+                                        "Failed to queue hardening scans for commit {}: {}",
+                                        commit.git_commit_hash, err
+                                    );
+                                }
                             }
                         }
 

@@ -39,6 +39,7 @@
           eval_workers = cfg.server.eval_workers;
           eval_max_memory_mb = cfg.server.eval_max_memory_mb;
           eval_check_cache = cfg.server.eval_check_cache;
+          auto_hardening_scans = cfg.server.auto_hardening_scans;
           allow_private_cache_test_targets =
             cfg.server.allow_private_cache_test_targets;
           trust_forwarded_builder_https =
@@ -381,6 +382,11 @@
     ''}
 
     exec ${pkgs.crystal-forge.default.server}/bin/server "$@"
+  '';
+
+  hardeningWorkerScript = pkgs.writeShellScript "crystal-forge-hardening-worker" ''
+    export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
+    exec ${pkgs.crystal-forge.default.server}/bin/hardening-worker "$@"
   '';
 
   builderScript = pkgs.writeShellScript "crystal-forge-builder" ''
@@ -1449,6 +1455,48 @@ in {
       ];
     };
 
+    hardening = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = lib.mdDoc ''
+          Run the durable hardening scan worker separately from the API server.
+          Automatic enqueueing remains controlled by
+          `server.auto_hardening_scans` and defaults to disabled.
+        '';
+      };
+
+      systemd_memory_high = lib.mkOption {
+        type = lib.types.str;
+        default = "8G";
+        description = "MemoryHigh for the isolated hardening worker slice.";
+      };
+
+      systemd_memory_max = lib.mkOption {
+        type = lib.types.str;
+        default = "12G";
+        description = "MemoryMax for the isolated hardening worker slice.";
+      };
+
+      systemd_memory_swap_max = lib.mkOption {
+        type = lib.types.str;
+        default = "512M";
+        description = "MemorySwapMax for the isolated hardening worker slice.";
+      };
+
+      systemd_cpu_quota = lib.mkOption {
+        type = lib.types.int;
+        default = 200;
+        description = "CPU quota percentage for the hardening worker slice.";
+      };
+
+      systemd_tasks_max = lib.mkOption {
+        type = lib.types.int;
+        default = 512;
+        description = "Maximum tasks in the hardening worker cgroup.";
+      };
+    };
+
     server = {
       enable = lib.mkEnableOption "Crystal Forge Server";
       host = lib.mkOption {
@@ -1631,6 +1679,17 @@ in {
         '';
       };
 
+      auto_hardening_scans = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = lib.mdDoc ''
+          Automatically enqueue systemd hardening scans after successful commit
+          evaluation. Disabled by default because each scan performs an
+          expensive full NixOS evaluation. Manual scan requests remain
+          available when this option is disabled.
+        '';
+      };
+
       allow_private_cache_test_targets = lib.mkOption {
         type = lib.types.bool;
         default = false;
@@ -1798,6 +1857,30 @@ in {
       "d /var/cache/crystal-forge/gc-roots 0755 crystal-forge crystal-forge -" # <-- ADD THIS
       "Z /var/lib/crystal-forge/ 0755 crystal-forge crystal-forge -"
     ];
+
+    systemd.slices.crystal-forge = lib.mkIf cfg.server.enable {
+      description = "Crystal Forge aggregate resource boundary";
+      sliceConfig = {
+        MemoryHigh = "85%";
+        MemoryMax = "90%";
+        MemorySwapMax = "2G";
+        TasksMax = 4096;
+      };
+    };
+
+    # Dash-prefix hierarchy makes hardening-crystal-forge.slice a child of
+    # crystal-forge.slice. The superficially reversed name would be a root
+    # sibling and would not enforce aggregate containment.
+    systemd.slices.hardening-crystal-forge = lib.mkIf (cfg.server.enable && cfg.hardening.enable) {
+      description = "Crystal Forge hardening worker resource boundary";
+      sliceConfig = {
+        MemoryHigh = cfg.hardening.systemd_memory_high;
+        MemoryMax = cfg.hardening.systemd_memory_max;
+        MemorySwapMax = cfg.hardening.systemd_memory_swap_max;
+        CPUQuota = toString cfg.hardening.systemd_cpu_quota + "%";
+        TasksMax = cfg.hardening.systemd_tasks_max;
+      };
+    };
 
     systemd.slices.crystal-forge-builds = lib.mkIf cfg.build.enable {
       description = "Crystal Forge Build Operations";
@@ -2272,6 +2355,60 @@ in {
         };
     });
 
+    systemd.services.crystal-forge-hardening = lib.mkIf (cfg.server.enable && cfg.hardening.enable) {
+      description = "Crystal Forge Hardening Worker";
+      wantedBy = ["multi-user.target"];
+      after = ["crystal-forge-server.service"] ++ lib.optional cfg.local-database "postgresql.service";
+      wants = ["crystal-forge-server.service"] ++ lib.optional cfg.local-database "postgresql.service";
+      startLimitIntervalSec = 300;
+      startLimitBurst = 2;
+
+      path = with pkgs; [nix git openssh coreutils];
+      environment = {
+        RUST_LOG = cfg.log_level;
+        TZDIR = "${pkgs.tzdata}/share/zoneinfo";
+        LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
+        NIX_REMOTE = "daemon";
+        HOME = "/var/lib/crystal-forge";
+        XDG_CONFIG_HOME = "/var/lib/crystal-forge/.config";
+        NIX_REGISTRY = "/dev/null";
+        NIX_CONFIG_DIR = "/dev/null";
+        NIX_USER_CONF_FILES = "/dev/null";
+        NIX_CONFIG = ''
+          experimental-features = nix-command flakes
+          flake-registry =
+        '';
+        GIT_SSH_COMMAND = "ssh -i /var/lib/crystal-forge/.ssh/id_ed25519 -o UserKnownHostsFile=/var/lib/crystal-forge/.ssh/known_hosts -o StrictHostKeyChecking=yes";
+        NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
+      };
+
+      preStart = ''
+        mkdir -p /run/crystal-forge
+        ${configScriptServer}
+      '';
+      serviceConfig = {
+        Type = "exec";
+        ExecStart = hardeningWorkerScript;
+        User = "crystal-forge";
+        Group = "crystal-forge";
+        WorkingDirectory = "/var/lib/crystal-forge";
+        Slice = "hardening-crystal-forge.slice";
+        EnvironmentFile = ["-${cfg.env-file}"];
+        KillMode = "control-group";
+        OOMPolicy = "stop";
+        Restart = "on-failure";
+        RestartSec = 30;
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ReadWritePaths = ["/var/lib/crystal-forge" "/var/cache/crystal-forge-nix"];
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+      };
+    };
+
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Server";
       wantedBy = ["multi-user.target"];
@@ -2372,6 +2509,7 @@ in {
         User = "crystal-forge";
         Group = "crystal-forge";
         WorkingDirectory = "/var/lib/crystal-forge";
+        Slice = "crystal-forge.slice";
 
         EnvironmentFile = ["-${cfg.env-file}"];
 

@@ -35,38 +35,36 @@ const CLOSURE_COUNT_MAX_CONCURRENT: usize = 2;
 const EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES: usize = 256 * 1024;
 const STANDALONE_STDOUT_MAX_BYTES: usize = 8 * 1024 * 1024;
 static CLOSURE_COUNT_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
-/// Process-wide limit on concurrent standalone `nix eval` subprocesses.
-/// Each full Nix evaluation of a large flake can use 4–6 GiB of memory;
-/// this semaphore prevents runaway fan-out when multiple commits evaluate
-/// concurrently or when the fallback phase fires for many systems.
-const MAX_CONCURRENT_STANDALONE_NIX_EVALS: usize = 2;
-static STANDALONE_NIX_EVAL_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+/// Process-wide permit shared by all full Nix evaluations. During incident
+/// diagnosis only one expensive evaluator tree may exist at a time.
+static HEAVY_NIX_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+pub(crate) const HEAVY_NIX_ADVISORY_LOCK: i64 = 0x4346_4e49_5848;
 
-fn standalone_nix_eval_limiter() -> Arc<Semaphore> {
-    STANDALONE_NIX_EVAL_LIMITER
-        .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_STANDALONE_NIX_EVALS)))
+pub(crate) fn heavy_nix_limiter() -> Arc<Semaphore> {
+    HEAVY_NIX_LIMITER
+        .get_or_init(|| Arc::new(Semaphore::new(1)))
         .clone()
 }
 
 #[derive(Debug, Default)]
-struct CappedOutput {
-    bytes: Vec<u8>,
-    total_bytes: usize,
+pub(crate) struct CappedOutput {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) total_bytes: usize,
 }
 
 impl CappedOutput {
-    fn push(&mut self, bytes: &[u8], limit: usize) {
+    pub(crate) fn push(&mut self, bytes: &[u8], limit: usize) {
         self.total_bytes = self.total_bytes.saturating_add(bytes.len());
         let remaining = limit.saturating_sub(self.bytes.len());
         self.bytes
             .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
     }
 
-    fn is_truncated(&self) -> bool {
+    pub(crate) fn is_truncated(&self) -> bool {
         self.total_bytes > self.bytes.len()
     }
 
-    fn diagnostic_excerpt(&self, max_chars: usize) -> String {
+    pub(crate) fn diagnostic_excerpt(&self, max_chars: usize) -> String {
         let mut text = String::from_utf8_lossy(&self.bytes)
             .chars()
             .take(max_chars)
@@ -82,7 +80,7 @@ impl CappedOutput {
     }
 }
 
-async fn read_capped<R>(mut reader: R, limit: usize) -> std::io::Result<CappedOutput>
+pub(crate) async fn read_capped<R>(mut reader: R, limit: usize) -> std::io::Result<CappedOutput>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -158,7 +156,7 @@ async fn kill_nix_process_tree(child: &mut tokio::process::Child, _pgid: i32) {
 /// get a chance to run. Only the (non-critical) reaping of the direct
 /// child after the group is already dead is deferred to a background
 /// task.
-struct NixEvalProcessGuard {
+pub(crate) struct NixEvalProcessGuard {
     child: Option<tokio::process::Child>,
     #[cfg(unix)]
     pgid: libc::pid_t,
@@ -183,7 +181,10 @@ impl NixEvalProcessGuard {
         })
     }
 
-    fn from_spawned_child(child: tokio::process::Child, process_name: &str) -> Result<Self> {
+    pub(crate) fn from_spawned_child(
+        child: tokio::process::Child,
+        process_name: &str,
+    ) -> Result<Self> {
         #[cfg(unix)]
         let pgid = child
             .id()
@@ -196,11 +197,11 @@ impl NixEvalProcessGuard {
         Self::new(child, pgid)
     }
 
-    fn pgid(&self) -> i32 {
+    pub(crate) fn pgid(&self) -> i32 {
         self.pgid
     }
 
-    fn child_mut(&mut self) -> &mut tokio::process::Child {
+    pub(crate) fn child_mut(&mut self) -> &mut tokio::process::Child {
         self.child
             .as_mut()
             .expect("NixEvalProcessGuard: child already taken")
@@ -209,7 +210,7 @@ impl NixEvalProcessGuard {
     /// Wait for the child to exit on its own. The guard remains armed after
     /// reaping so descendants that inherited stdout/stderr pipes are still
     /// cleaned up if draining those pipes fails or the future is cancelled.
-    async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+    pub(crate) async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child_mut().wait().await;
         if status.is_ok() {
             self.child_reaped = true;
@@ -217,7 +218,7 @@ impl NixEvalProcessGuard {
         status
     }
 
-    fn disarm_after_output_drained(&mut self) {
+    pub(crate) fn disarm_after_output_drained(&mut self) {
         debug_assert!(self.child_reaped, "cannot disarm before child is reaped");
         self.armed = false;
         self.child.take();
@@ -227,7 +228,7 @@ impl NixEvalProcessGuard {
     /// Kills and reaps the child, then disarms the guard so `Drop` does
     /// not perform a second, potentially-unsafe `killpg` on a
     /// possibly-reused PGID.
-    async fn terminate(&mut self) {
+    pub(crate) async fn terminate(&mut self) {
         self.armed = false;
         if let Some(mut child) = self.child.take() {
             kill_nix_process_tree(&mut child, self.pgid).await;
@@ -309,7 +310,6 @@ use crate::queries::build_jobs::{
 use crate::queries::commits_artifacts::CachedSystemsState;
 use crate::queries::systems::list_configuration_names_for_flake;
 use crate::queue::QueueNotifier;
-use crate::services::hardening_scans::trigger_commit_hardening_scans;
 
 /// NixEvalJobResult with meta field
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -431,13 +431,7 @@ fn closure_count_limiter() -> Arc<Semaphore> {
 /// GC root creation is intentionally NOT included here: it is performed
 /// *before* the queue notification so that a builder cannot claim a job
 /// before the derivation is safely rooted against Nix GC collection.
-fn spawn_closure_counting_and_hardening(
-    pool: PgPool,
-    commit_id: i32,
-    flake_repo_url: String,
-    commit_hash: String,
-    finalized: FinalizedDerivation,
-) {
+fn spawn_closure_counting(pool: PgPool, finalized: FinalizedDerivation) {
     // Closure counting: bounded via semaphore.
     let pool_cc = pool.clone();
     let drv_cc = finalized.drv_path.clone();
@@ -477,18 +471,6 @@ fn spawn_closure_counting_and_hardening(
             ),
         }
         drop(permit);
-    });
-
-    // Hardening scans: query DB targets + insert scan rows.
-    tokio::spawn(async move {
-        if let Err(err) =
-            trigger_commit_hardening_scans(pool, commit_id, &flake_repo_url, &commit_hash).await
-        {
-            warn!(
-                "Failed to queue hardening scans for commit {} after system {} finalized: {}",
-                commit_id, finalized.system_name, err
-            );
-        }
     });
 }
 
@@ -668,7 +650,7 @@ pub async fn evaluate_single_system_with_policies(
     // Acquire the process-wide standalone eval slot before spawning.
     // This semaphore caps total concurrent `nix eval` processes across all
     // commits and fallback phases, preventing memory exhaustion on large flakes.
-    let _nix_permit = match standalone_nix_eval_limiter().acquire_owned().await {
+    let _nix_permit = match heavy_nix_limiter().acquire_owned().await {
         Ok(p) => p,
         Err(_) => {
             return Ok(StandaloneSystemOutcome::InfrastructureFailure {
@@ -879,7 +861,7 @@ in
     }
 
     // Acquire the process-wide standalone eval slot before spawning.
-    let _nix_permit = match standalone_nix_eval_limiter().acquire_owned().await {
+    let _nix_permit = match heavy_nix_limiter().acquire_owned().await {
         Ok(p) => p,
         Err(_) => {
             return FallbackEvalOutcome::InfrastructureFailure {
@@ -2326,6 +2308,18 @@ pub async fn evaluate_with_nix_eval_jobs(
     // --impure is required because the Nix expression uses builtins.getFlake with a
     // remote git+ssh ref (e.g. git+git@github.com:...?rev=<hash>), which is only
     // permitted in impure evaluation mode.
+    // The transaction-scoped advisory lock extends serialization to a
+    // separately packaged hardening worker process. It remains held through
+    // fallback and build preparation so hardening cannot overlap evaluation.
+    let mut heavy_nix_db_lock = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(HEAVY_NIX_ADVISORY_LOCK)
+        .execute(&mut *heavy_nix_db_lock)
+        .await?;
+    let heavy_nix_permit = heavy_nix_limiter()
+        .acquire_owned()
+        .await
+        .context("heavy Nix evaluation limiter was closed")?;
     let mut cmd = Command::new("nix-eval-jobs");
     // Kill the child process if this future is dropped (e.g. cancellation,
     // discovery failure would no longer trigger this, but it is still a
@@ -2806,8 +2800,6 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                     system_name: system_name.clone(),
                                                     cf_agent_enabled: successful.cf_agent_enabled,
                                                 };
-                                                let repo_url = flake.repo_url.clone();
-                                                let commit_hash = commit.git_commit_hash.clone();
                                                 let successful = successful.clone();
                                                 let cf_state_owned = cf_state.cloned();
                                                 let queue_notifier_owned = _queue_notifier.cloned();
@@ -2896,13 +2888,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                             )
                                                             .await?;
 
-                                                            spawn_closure_counting_and_hardening(
-                                                                pool,
-                                                                commit_id,
-                                                                repo_url,
-                                                                commit_hash,
-                                                                finalized,
-                                                            );
+                                                            spawn_closure_counting(pool, finalized);
                                                         }
                                                         SystemBuildActivationOutcome::Cancelled => {
                                                             // Task completed after cancellation —
@@ -3183,6 +3169,7 @@ pub async fn evaluate_with_nix_eval_jobs(
     // process-group cleanup for this `?` early-return path.
     let child_status = guard.wait().await?;
     guard.disarm_after_output_drained();
+    drop(heavy_nix_permit);
 
     // ── Detect systems that nix-eval-jobs silently dropped ─────────────────
     // When a system fails evaluation catastrophically, nix-eval-jobs may not
@@ -3477,13 +3464,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                         system_name: result.system_name.clone(),
                                         cf_agent_enabled: result.cf_agent_enabled,
                                     };
-                                    spawn_closure_counting_and_hardening(
-                                        pool.clone(),
-                                        commit.id,
-                                        flake.repo_url.clone(),
-                                        commit.git_commit_hash.clone(),
-                                        finalized,
-                                    );
+                                    spawn_closure_counting(pool.clone(), finalized);
                                 }
                                 SystemFinalizeAction::Recorded => {}
                                 SystemFinalizeAction::Cancelled => {
@@ -3845,6 +3826,7 @@ pub async fn evaluate_with_nix_eval_jobs(
         commit_id = commit.id,
         expected_attempt, "build_preparation_drain_completed"
     );
+    heavy_nix_db_lock.commit().await?;
 
     Ok(EvaluationPlan {
         results,
