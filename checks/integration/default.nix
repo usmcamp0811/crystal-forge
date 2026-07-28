@@ -226,19 +226,19 @@ in pkgs.testers.runNixOSTest {
     )
     server.wait_for_unit("crystal-forge-hardening.service")
     server.succeed(
-      "test \"$(systemctl show crystal-forge-hardening.service -p Slice --value)\" = hardening-crystal-forge.slice"
+      "test \"$(systemctl show crystal-forge-hardening.service -p Slice --value)\" = crystal-forge-hardening.slice"
     )
     server.succeed(
-      "test \"$(systemctl show hardening-crystal-forge.slice -p MemoryHigh --value)\" = 8589934592"
+      "test \"$(systemctl show crystal-forge-hardening.slice -p MemoryHigh --value)\" = 8589934592"
     )
     server.succeed(
-      "test \"$(systemctl show hardening-crystal-forge.slice -p MemoryMax --value)\" = 12884901888"
+      "test \"$(systemctl show crystal-forge-hardening.slice -p MemoryMax --value)\" = 12884901888"
     )
     server.succeed(
-      "test \"$(systemctl show hardening-crystal-forge.slice -p MemorySwapMax --value)\" = 536870912"
+      "test \"$(systemctl show crystal-forge-hardening.slice -p MemorySwapMax --value)\" = 536870912"
     )
     server.succeed(
-      "test \"$(systemctl show hardening-crystal-forge.slice -p TasksMax --value)\" = 512"
+      "test \"$(systemctl show crystal-forge-hardening.slice -p TasksMax --value)\" = 512"
     )
     server.succeed(
       "test \"$(systemctl show crystal-forge-hardening.service -p KillMode --value)\" = control-group"

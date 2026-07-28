@@ -1868,10 +1868,9 @@ in {
       };
     };
 
-    # Dash-prefix hierarchy makes hardening-crystal-forge.slice a child of
-    # crystal-forge.slice. The superficially reversed name would be a root
-    # sibling and would not enforce aggregate containment.
-    systemd.slices.hardening-crystal-forge = lib.mkIf (cfg.server.enable && cfg.hardening.enable) {
+    # crystal-forge-hardening.slice is a child of crystal-forge.slice because
+    # systemd derives the parent from the leftmost dash-prefix segments.
+    systemd.slices.crystal-forge-hardening = lib.mkIf (cfg.server.enable && cfg.hardening.enable) {
       description = "Crystal Forge hardening worker resource boundary";
       sliceConfig = {
         MemoryHigh = cfg.hardening.systemd_memory_high;
@@ -2392,7 +2391,7 @@ in {
         User = "crystal-forge";
         Group = "crystal-forge";
         WorkingDirectory = "/var/lib/crystal-forge";
-        Slice = "hardening-crystal-forge.slice";
+        Slice = "crystal-forge-hardening.slice";
         EnvironmentFile = ["-${cfg.env-file}"];
         KillMode = "control-group";
         OOMPolicy = "stop";
