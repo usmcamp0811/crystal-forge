@@ -672,6 +672,20 @@ async fn load_policies_by_configuration_for_eval(
             let record = row.as_policy_record();
             if let Some(parsed) = parse_deployment_policy_record(&record) {
                 if parsed.is_nix_evaluated() {
+                    // require_cf_agent is handled by the unconditional
+                    // global invariant.  A legacy assignment would
+                    // produce a duplicate CF-agent result column in
+                    // the policy matrix, so it is filtered out here.
+                    // The global check (cfAgentEnabled) is always
+                    // emitted and enforced regardless of assignments.
+                    if matches!(parsed, DeploymentPolicy::RequireCrystalForgeAgent { .. }) {
+                        warn!(
+                            "Ignoring legacy require_cf_agent assignment {} ({}) — \
+                             CF-agent enablement is enforced globally",
+                            policy_id, row.name,
+                        );
+                        continue;
+                    }
                     assigned.push(AssignedPolicy {
                         policy_id,
                         policy_name: row.name.clone(),

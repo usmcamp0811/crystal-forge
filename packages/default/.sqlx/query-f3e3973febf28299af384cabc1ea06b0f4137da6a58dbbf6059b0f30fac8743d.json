@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE cache_push_jobs \n        SET \n            status = 'in_progress', \n            started_at = NOW(), \n            attempts = attempts + 1,\n            completed_at = NULL,\n            error_message = NULL,\n            retry_after = NULL\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f3e3973febf28299af384cabc1ea06b0f4137da6a58dbbf6059b0f30fac8743d"
+}

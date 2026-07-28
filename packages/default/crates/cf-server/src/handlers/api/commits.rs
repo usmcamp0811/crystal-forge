@@ -402,6 +402,15 @@ fn build_eval_policy_matrix_response(
             .and_then(|value| value.as_object())
         {
             for (policy_id, result) in assigned {
+                // Legacy require_cf_agent assigned results are handled
+                // by the unconditional global cfAgentEnabled metadata
+                // and must not produce a duplicate column.  Filter them
+                // out here so old evaluation data that was persisted
+                // before migration 0187 renders correctly without
+                // re-evaluation.
+                if result.get("type").and_then(|t| t.as_str()) == Some("require_cf_agent") {
+                    continue;
+                }
                 let name = result
                     .get("name")
                     .and_then(|value| value.as_str())
@@ -1177,5 +1186,88 @@ mod tests {
                 "status_id={status}: build error detail must not appear in eval matrix"
             );
         }
+    }
+
+    /// A historical persisted result containing a legacy
+    /// require_cf_agent assigned entry must produce only one
+    /// column ("CF agent") and must not add a duplicate
+    /// "Require Crystal Forge Agent" column — the global
+    /// cfAgentEnabled metadata already covers this signal.
+    #[test]
+    fn policy_matrix_deduplicates_legacy_cf_agent_assigned_result() {
+        let policy_id = "legacy-cf-agent-uuid";
+        let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+            system_name: "gray".to_string(),
+            eval_status: "evaluated".to_string(),
+            error_message: None,
+            policy_results: serde_json::json!({
+                "global": {
+                    "cfAgentEnabled": { "passed": true, "strict": true, "details": null }
+                },
+                "assigned": {
+                    policy_id: {
+                        "name": "Require Crystal Forge Agent",
+                        "type": "require_cf_agent",
+                        "strict": false,
+                        "passed": false,
+                        "details": null
+                    }
+                }
+            }),
+            policy_requirements_met: Some(true),
+        }];
+
+        let matrix = build_eval_policy_matrix_response(1, rows);
+
+        // Must have exactly one column ("CF agent"), not two.
+        assert_eq!(
+            matrix.policies,
+            vec!["CF agent"],
+            "legacy require_cf_agent assigned result must not produce a duplicate column"
+        );
+        // The system must still have a result for that single column.
+        assert_eq!(matrix.systems.len(), 1);
+        assert_eq!(
+            matrix.systems[0].results,
+            vec!["pass"],
+            "the single CF-agent cell must reflect the global invariant result"
+        );
+    }
+
+    /// A historical result with a DIFFERENT policy type assigned MUST
+    /// produce that policy's column — only require_cf_agent is filtered
+    /// from the deduplication.
+    #[test]
+    fn policy_matrix_does_not_filter_other_policy_types() {
+        let policy_id = "some-other-uuid";
+        let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+            system_name: "gray".to_string(),
+            eval_status: "evaluated".to_string(),
+            error_message: None,
+            policy_results: serde_json::json!({
+                "global": {
+                    "cfAgentEnabled": { "passed": true, "strict": true, "details": null }
+                },
+                "assigned": {
+                    policy_id: {
+                        "name": "Require Grafana",
+                        "type": "require_packages",
+                        "strict": true,
+                        "passed": false,
+                        "details": "Missing required packages: grafana"
+                    }
+                }
+            }),
+            policy_requirements_met: Some(false),
+        }];
+
+        let matrix = build_eval_policy_matrix_response(1, rows);
+
+        assert_eq!(
+            matrix.policies,
+            vec!["CF agent", "Require Grafana"],
+            "non-require_cf_agent assigned policies must still appear"
+        );
+        assert_eq!(matrix.systems[0].results, vec!["pass", "fail"]);
     }
 }

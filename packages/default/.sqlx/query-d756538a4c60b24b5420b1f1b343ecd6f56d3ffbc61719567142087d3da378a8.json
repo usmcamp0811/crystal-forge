@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE build_jobs\n        SET \n            status = 'success',\n            completed_at = NOW(),\n            logs = COALESCE($2, logs),\n            updated_at = NOW()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d756538a4c60b24b5420b1f1b343ecd6f56d3ffbc61719567142087d3da378a8"
+}

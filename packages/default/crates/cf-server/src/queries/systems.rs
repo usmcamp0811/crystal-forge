@@ -18,6 +18,8 @@ WHERE s.id = $1
   AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
   AND d.store_path IS NOT NULL
   AND BTRIM(d.store_path) <> ''
+  AND d.cf_agent_enabled IS TRUE
+  AND d.policy_requirements_met IS TRUE
   AND EXISTS (
       SELECT 1
       FROM cache_push_jobs cpj
@@ -955,6 +957,31 @@ pub async fn resolve_system_deployment_target(
     target: &str,
 ) -> Result<Option<String>> {
     if target.starts_with("/nix/store/") {
+        // A literal store path (used for rollback to a previously-known
+        // store path) must not bypass policy gating. Block only when we
+        // have positive evidence that a derivation producing this exact
+        // store path failed its CF-agent or assigned policy checks — if
+        // no matching derivation record exists (e.g. purged history),
+        // preserve the previous behavior of allowing it, since we cannot
+        // fabricate a failure we have no evidence for.
+        let policy_failed: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM derivations d
+                WHERE d.store_path = $1
+                  AND d.derivation_type = 'nixos'
+                  AND (d.cf_agent_enabled IS FALSE OR d.policy_requirements_met IS FALSE)
+            )
+            "#,
+        )
+        .bind(target)
+        .fetch_one(pool)
+        .await?;
+
+        if policy_failed {
+            return Ok(None);
+        }
+
         return Ok(Some(target.to_string()));
     }
 
@@ -2088,6 +2115,16 @@ mod tests {
         ));
         assert!(
             RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("LOWER(c.git_commit_hash) = LOWER($2)")
+        );
+        assert!(
+            RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("d.cf_agent_enabled IS TRUE"),
+            "manual/pinned deployment target resolution must not select a \
+             derivation whose CF agent policy failed"
+        );
+        assert!(
+            RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("d.policy_requirements_met IS TRUE"),
+            "manual/pinned deployment target resolution must not select a \
+             derivation whose assigned policies failed"
         );
     }
 

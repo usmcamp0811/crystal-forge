@@ -2384,4 +2384,80 @@ in {{
         assert_eq!(check.cf_agent_enabled, Some(true));
         assert!(check.meets_requirements);
     }
+
+    // ── Legacy require_cf_agent deduplication ────────────────────────────
+
+    #[test]
+    fn no_assigned_policies_agent_enabled_passes() {
+        // When no policies are assigned and the global cfAgentEnabled
+        // metadata is true, the check must pass with zero assigned
+        // results (the caller filters out require_cf_agent before
+        // calling from_assigned, so the assigned list is empty).
+        let check = PolicyCheckResult::from_assigned(
+            "gray".to_string(),
+            &serde_json::json!({ "cfAgentEnabled": true }),
+            &[],
+        )
+        .expect("should parse with only global cfAgentEnabled");
+
+        assert_eq!(check.cf_agent_enabled, Some(true));
+        assert!(check.meets_requirements);
+        assert!(check.assigned_results.is_empty());
+    }
+
+    #[test]
+    fn no_assigned_policies_agent_disabled_fails_strictly() {
+        // The caller filters out require_cf_agent, so the assigned list
+        // is empty. Global cfAgentEnabled=false must still produce a
+        // strict failure — the global invariant is independent of
+        // whether a legacy require_cf_agent policy was assigned.
+        let check = PolicyCheckResult::from_assigned(
+            "gray".to_string(),
+            &serde_json::json!({ "cfAgentEnabled": false }),
+            &[],
+        )
+        .expect("should parse when agent disabled with empty assigned");
+
+        assert_eq!(check.cf_agent_enabled, Some(false));
+        assert!(!check.meets_requirements);
+        assert!(
+            check.failed_policies.iter().any(|(_, strict)| *strict),
+            "global cfAgentEnabled=false must produce a strict failure \
+             even when the caller filtered out require_cf_agent assignments"
+        );
+    }
+
+    #[test]
+    fn contradictory_legacy_cf_agent_assignment_is_infrastructure_error() {
+        let policy_id = uuid::Uuid::from_u128(0xDEAD);
+        let assigned = vec![AssignedPolicy {
+            policy_id,
+            policy_name: "Require Crystal Forge Agent".to_string(),
+            policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: false },
+        }];
+
+        // Global says agent disabled BUT legacy result key says true.
+        // This should be caught by the mismatch guard and be treated
+        // as an infrastructure error — the assigned value must not
+        // override the unconditional global metadata.
+        let result = PolicyCheckResult::from_assigned(
+            "gray".to_string(),
+            &serde_json::json!({
+                "cfAgentEnabled": false,
+                policy_result_key(&policy_id): true,
+            }),
+            &assigned,
+        );
+
+        assert!(
+            result.is_err(),
+            "disagreement between global cfAgentEnabled (false) and \
+             legacy assigned key (true) must be an infrastructure error"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("disagrees"),
+            "error should describe the disagreement: {err}"
+        );
+    }
 }

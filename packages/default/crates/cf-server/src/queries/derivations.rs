@@ -2329,6 +2329,8 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
           WHERE d.derivation_type = 'nixos'
             AND d.derivation_target IS NOT NULL
             AND d.derivation_name = ANY($2::text[])
+            AND d.cf_agent_enabled IS TRUE
+            AND d.policy_requirements_met IS TRUE
           GROUP BY
             d.derivation_name,
             d.id,

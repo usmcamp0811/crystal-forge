@@ -654,12 +654,18 @@ pub async fn create_deployment_policy(
         ));
     }
 
-    // Core policy is always enabled
+    // The Crystal Forge agent requirement is a built-in invariant that
+    // cannot be created or assigned as a deployment policy.  Existing
+    // legacy require_cf_agent records are preserved for audit/history
+    // and automatically disabled by migration 0187, but no new ones
+    // can be created through the API.
     if request.policy_type == "require_cf_agent" {
-        request.enabled = Some(true);
-        if let Some(config_obj) = request.config.as_object_mut() {
-            config_obj.insert("strict".to_string(), Value::Bool(true));
-        }
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "The Crystal Forge agent requirement is a built-in invariant \
+             and cannot be created as a deployment policy."
+                .to_string(),
+        ));
     }
 
     // Create policy

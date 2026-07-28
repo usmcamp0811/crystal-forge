@@ -2139,7 +2139,11 @@ mod tests {
 
         // Insert derivations with varying status_id and error_message combinations.
         async fn insert_deriv(
-            pool: &PgPool, commit_id: i32, name: &str, status: i32, err: Option<&str>,
+            pool: &PgPool,
+            commit_id: i32,
+            name: &str,
+            status: i32,
+            err: Option<&str>,
         ) {
             sqlx::query(
                 r#"
@@ -2159,12 +2163,26 @@ mod tests {
             .unwrap();
         }
 
-        insert_deriv(&pool, commit_id, "eval-failed", 6, Some("undefined variable 'foobar'")).await;
+        insert_deriv(
+            &pool,
+            commit_id,
+            "eval-failed",
+            6,
+            Some("undefined variable 'foobar'"),
+        )
+        .await;
         insert_deriv(&pool, commit_id, "build-queued", 7, None).await;
         insert_deriv(&pool, commit_id, "build-building", 8, None).await;
         insert_deriv(&pool, commit_id, "build-complete", 10, None).await;
         insert_deriv(&pool, commit_id, "build-failed", 12, Some("gcc segfault")).await;
-        insert_deriv(&pool, commit_id, "build-failed-witherr", 12, Some("out of disk space")).await;
+        insert_deriv(
+            &pool,
+            commit_id,
+            "build-failed-witherr",
+            12,
+            Some("out of disk space"),
+        )
+        .await;
         insert_deriv(&pool, commit_id, "build-complete-noerr", 10, None).await;
 
         let rows = fetch_eval_policy_matrix(&pool, commit_id)
