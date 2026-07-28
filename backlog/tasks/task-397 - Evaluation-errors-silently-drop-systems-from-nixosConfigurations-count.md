@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode
 created_date: '2026-07-24 00:29'
-updated_date: '2026-07-28 20:10'
+updated_date: '2026-07-28 20:19'
 labels:
   - evaluator
   - reporting
@@ -329,6 +329,8 @@ Verification:
 A full `cargo test -p cf-server --lib` run was not clean: 684 passed, 200 ignored, and 3 unrelated runtime-database CVE tests failed with `PoolTimedOut` because the available DATABASE_URL did not accept connections. Runtime acceptance remains pending: reckless currently still reports infinity for MemoryHigh/MemoryMax/MemorySwapMax because this branch has not been deployed or the service restarted. Its last observed service instance peak remains 30,853,607,424 bytes.
 
 User explicitly prohibited merging MR !309 until both OOM containment and remote materialization runtime gates pass. Immediate downstream work targets `usmcamp0811/dotfiles` branch `nixos`; upstream remains `TASK-397-eval-errors-silently-drop`. No sudo or destructive deployment commands will be run by the agent.
+
+Downstream P0 containment committed and pushed to `usmcamp0811/dotfiles:nixos` as `f5224caeb fix: contain Crystal Forge evaluator resources`. Verified `/config` evaluates reckless with server `Slice=crystal-forge.slice`, `MemoryAccounting=true`, `MemoryHigh=24G`, `MemoryMax=32G`, `MemorySwapMax=1G`, `TasksMax=2048`, `KillMode=control-group`, `OOMPolicy=stop`, `Restart=on-failure`; aggregate slice 56G/64G/2G/4096; `eval_workers=1`; local builder disabled. `nix build .#nixosConfigurations.reckless.config.system.build.toplevel --dry-run` exited 0 and listed 69 derivations. No deployment or privileged command was run. Historical boot -4 journal confirms `crystal-forge-server.service: Failed with result 'oom-kill'` at 2026-07-28 00:18:19 and restarted afterward; builder activity was present around the incident.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
