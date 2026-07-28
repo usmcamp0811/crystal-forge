@@ -475,6 +475,12 @@ pub async fn check_policy_in_use(pool: &PgPool, policy_id: &Uuid) -> Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Executor;
+    use sqlx::migrate::Migrator;
+    use std::fs;
+    use std::path::PathBuf;
+
+    static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
     // Note: These tests would require a test database setup
     // For now, they serve as documentation of expected behavior
@@ -498,6 +504,84 @@ mod tests {
         sqlx::PgPool::connect(&url)
             .await
             .expect("connect to test DB")
+    }
+
+    fn admin_database_url() -> String {
+        let url = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect("CRYSTAL_FORGE_TEST_DATABASE_URL or DATABASE_URL must be set");
+        let slash = url
+            .rfind('/')
+            .expect("database URL must contain a final /db segment");
+        format!("{}postgres", &url[..slash + 1])
+    }
+
+    async fn create_temp_db() -> (sqlx::PgPool, sqlx::PgPool, String) {
+        let admin_url = admin_database_url();
+        let admin_pool = sqlx::PgPool::connect(&admin_url)
+            .await
+            .expect("connect to admin database");
+        let db_name = format!("cf_m187_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
+            .execute(&admin_pool)
+            .await
+            .expect("create temp database");
+
+        let slash = admin_url
+            .rfind('/')
+            .expect("admin URL must contain final /db segment");
+        let db_url = format!("{}{}", &admin_url[..slash + 1], db_name);
+        let db_pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect to temp database");
+        (admin_pool, db_pool, db_name)
+    }
+
+    async fn drop_temp_db(admin_pool: &sqlx::PgPool, db_name: &str) {
+        let _ = sqlx::query(
+            r#"
+            SELECT pg_terminate_backend(pid)
+            FROM pg_stat_activity
+            WHERE datname = $1
+              AND pid <> pg_backend_pid()
+            "#,
+        )
+        .bind(db_name)
+        .execute(admin_pool)
+        .await;
+
+        let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", db_name))
+            .execute(admin_pool)
+            .await;
+    }
+
+    fn migrations_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations")
+    }
+
+    async fn apply_migrations_through(pool: &sqlx::PgPool, max_version: i64) {
+        let dir = migrations_dir();
+        let mut entries = fs::read_dir(&dir)
+            .expect("read migrations dir")
+            .map(|entry| entry.expect("dir entry"))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+
+        for entry in entries {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.ends_with(".sql") {
+                continue;
+            }
+            let version: i64 = name[..4].parse().expect("4-digit migration prefix");
+            if version > max_version {
+                continue;
+            }
+            let sql = fs::read_to_string(entry.path()).expect("read migration file");
+            pool.execute(sql.as_str())
+                .await
+                .unwrap_or_else(|e| panic!("failed to apply migration {}: {e}", name));
+        }
     }
 
     /// Insert a minimal flake, environment, system, policy, and assignment row,
@@ -942,5 +1026,211 @@ mod tests {
         );
 
         tx.rollback().await.unwrap();
+    }
+
+    // ── Migration 0187 upgrade-path regression tests ──────────────────────
+
+    #[tokio::test]
+    #[ignore = "requires a test database role with CREATE DATABASE privileges"]
+    async fn migration_0187_transitions_legacy_require_cf_agent_to_disabled_historical_record() {
+        let (admin_pool, pool, db_name) = create_temp_db().await;
+
+        // Bring schema to the state immediately before 0187.
+        apply_migrations_through(&pool, 186).await;
+
+        // 1. A legacy require_cf_agent record exists and is enabled.
+        let cf_policy_id: uuid::Uuid = sqlx::query_scalar(
+            "SELECT id FROM deployment_policies WHERE policy_type = 'require_cf_agent' LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("canonical require_cf_agent policy should exist after 0089");
+
+        let enabled_before: bool =
+            sqlx::query_scalar("SELECT enabled FROM deployment_policies WHERE id = $1")
+                .bind(cf_policy_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch enabled before migration 0187");
+        assert!(
+            enabled_before,
+            "legacy row should still be enabled before 0187"
+        );
+
+        // Seed one environment assignment and one direct system assignment.
+        let flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url) VALUES ('m187-upgrade-flake', 'https://m187.example') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert flake");
+        let env_id: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ('m187-env') RETURNING id")
+                .fetch_one(&pool)
+                .await
+                .expect("insert environment");
+        let sys_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO systems (hostname, public_key, flake_id, environment_id, is_active, derivation) \
+             VALUES ('m187-host', 'test-public-key', $1, $2, TRUE, 'direct') RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(env_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert system");
+
+        sqlx::query("INSERT INTO environment_policies (environment_id, policy_id) VALUES ($1, $2)")
+            .bind(env_id)
+            .bind(cf_policy_id)
+            .execute(&pool)
+            .await
+            .expect("insert legacy env assignment");
+        sqlx::query("INSERT INTO system_policies (system_id, policy_id) VALUES ($1, $2)")
+            .bind(sys_id)
+            .bind(cf_policy_id)
+            .execute(&pool)
+            .await
+            .expect("insert legacy system assignment");
+
+        // Seed an ordinary policy and assignments so we can prove they survive unchanged.
+        let normal_policy_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
+             VALUES ('m187-normal', 'require_packages', '{\"packages\":[\"grafana\"]}', TRUE) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert ordinary policy");
+        sqlx::query("INSERT INTO environment_policies (environment_id, policy_id) VALUES ($1, $2)")
+            .bind(env_id)
+            .bind(normal_policy_id)
+            .execute(&pool)
+            .await
+            .expect("insert ordinary env assignment");
+
+        // 2. Migration 0187 applies successfully.
+        let sql_0187 = fs::read_to_string(
+            migrations_dir().join("0187_deduplicate_legacy_cf_agent_policy.sql"),
+        )
+        .expect("read migration 0187");
+        pool.execute(sql_0187.as_str())
+            .await
+            .expect("migration 0187 should apply cleanly");
+
+        // 3. Legacy policy record remains present but is disabled.
+        let enabled_after: bool =
+            sqlx::query_scalar("SELECT enabled FROM deployment_policies WHERE id = $1")
+                .bind(cf_policy_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch enabled after migration 0187");
+        assert!(
+            !enabled_after,
+            "legacy require_cf_agent row must be disabled"
+        );
+
+        // 4. Legacy environment/system assignments are removed.
+        let env_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM environment_policies WHERE policy_id = $1")
+                .bind(cf_policy_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count legacy env assignments");
+        assert_eq!(env_count, 0, "legacy env assignments must be removed");
+        let sys_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM system_policies WHERE policy_id = $1")
+                .bind(cf_policy_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count legacy system assignments");
+        assert_eq!(sys_count, 0, "legacy system assignments must be removed");
+
+        // 5. Ordinary policy and assignments remain intact.
+        let normal_enabled: bool =
+            sqlx::query_scalar("SELECT enabled FROM deployment_policies WHERE id = $1")
+                .bind(normal_policy_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch normal policy enabled");
+        assert!(normal_enabled, "ordinary policy must remain enabled");
+        let normal_env_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM environment_policies WHERE policy_id = $1")
+                .bind(normal_policy_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count normal env assignment");
+        assert_eq!(normal_env_count, 1, "ordinary env assignment must survive");
+
+        // 6. Obsolete enabled constraint is gone; replacement disabled constraint exists.
+        let old_constraint_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'deployment_policies_require_cf_agent_enabled')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check old constraint");
+        assert!(
+            !old_constraint_exists,
+            "obsolete enabled constraint must be dropped"
+        );
+        let new_constraint_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'deployment_policies_require_cf_agent_disabled')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check new disabled constraint");
+        assert!(
+            new_constraint_exists,
+            "replacement disabled constraint must exist"
+        );
+
+        // 7. Direct SQL re-enabling the legacy row must now fail.
+        let reenable = sqlx::query("UPDATE deployment_policies SET enabled = TRUE WHERE id = $1")
+            .bind(cf_policy_id)
+            .execute(&pool)
+            .await;
+        assert!(
+            reenable.is_err(),
+            "direct SQL re-enable must be rejected by replacement constraint"
+        );
+
+        // 8. Ordinary non-CF-agent policies can still toggle normally.
+        sqlx::query("UPDATE deployment_policies SET enabled = FALSE WHERE id = $1")
+            .bind(normal_policy_id)
+            .execute(&pool)
+            .await
+            .expect("disable ordinary policy");
+        sqlx::query("UPDATE deployment_policies SET enabled = TRUE WHERE id = $1")
+            .bind(normal_policy_id)
+            .execute(&pool)
+            .await
+            .expect("re-enable ordinary policy");
+
+        drop(pool);
+        drop_temp_db(&admin_pool, &db_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a test database role with CREATE DATABASE privileges"]
+    async fn full_migration_chain_applies_cleanly_on_fresh_database_including_0187() {
+        let (admin_pool, pool, db_name) = create_temp_db().await;
+
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("full migration chain should apply successfully on a fresh database");
+
+        // 0187 must be recorded as successfully applied.
+        let success_187: Option<bool> =
+            sqlx::query_scalar("SELECT success FROM _sqlx_migrations WHERE version = 187")
+                .fetch_optional(&pool)
+                .await
+                .expect("query _sqlx_migrations for version 187");
+        assert_eq!(
+            success_187,
+            Some(true),
+            "migration 0187 must be recorded as successful after a fresh-chain apply"
+        );
+
+        drop(pool);
+        drop_temp_db(&admin_pool, &db_name).await;
     }
 }

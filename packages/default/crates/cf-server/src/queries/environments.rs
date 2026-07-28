@@ -813,12 +813,10 @@ pub async fn set_environment_required_policies(
     // All operations share one transaction so a failure at any point
     // rolls back the entire replacement, preserving the previous
     // assignment set.
-    sqlx::query(
-        "DELETE FROM environment_policies WHERE environment_id = $1",
-    )
-    .bind(environment_id)
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query("DELETE FROM environment_policies WHERE environment_id = $1")
+        .bind(environment_id)
+        .execute(&mut *tx)
+        .await?;
 
     for policy_id in &unique_ids {
         sqlx::query(
