@@ -212,6 +212,15 @@ in pkgs.testers.runNixOSTest {
 
     server.wait_for_unit("crystal-forge-server.service")
     server.wait_for_open_port(${toString CF_TEST_SERVER_PORT})
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-server.service -p MemoryHigh --value)\" != infinity"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-server.service -p MemoryMax --value)\" != infinity"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-server.service -p MemorySwapMax --value)\" = 2147483648"
+    )
 
     # Wait for Grafana (needed for -m dashboard tests).
     print("Waiting for Grafana to start...")

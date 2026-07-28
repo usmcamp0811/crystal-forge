@@ -1592,7 +1592,7 @@ in {
       };
       eval_workers = lib.mkOption {
         type = lib.types.int;
-        default = 4;
+        default = 2;
         description = lib.mdDoc ''
           Number of worker threads for nix-eval-jobs parallel evaluation.
           Set to 0 to automatically use the number of CPU cores available.
@@ -1606,10 +1606,13 @@ in {
         type = lib.types.int;
         default = 4096;
         description = lib.mdDoc ''
-          Maximum memory size per worker in MB for nix-eval-jobs.
+          Worker restart threshold in MB for nix-eval-jobs.
 
-          Each evaluation worker will be limited to this amount of memory.
-          Default is 4096 MB (4 GB) per worker.
+          nix-eval-jobs checks this threshold after evaluating an attribute and
+          then restarts an oversized worker. It is not a hard memory limit and
+          a worker can temporarily exceed it while evaluating an attribute.
+          Default is 4096 MB (4 GB) per worker. Use the server systemd memory
+          options for hard service-cgroup containment.
 
           Adjust based on available system memory and the number of workers.
         '';
@@ -1682,23 +1685,37 @@ in {
 
       systemd_memory_max = lib.mkOption {
         type = lib.types.nullOr (lib.types.either lib.types.int lib.types.str);
-        default = null;
+        default = "75%";
         example = "8G";
         description = lib.mdDoc ''
           Maximum memory limit for the server systemd unit (MemoryMax).
           Passed as a systemd `MemoryMax` value (e.g. `"8G"` for 8 gibibytes).
-          Default is `null` (no limit).
+          Defaults to `"75%"` so the server and evaluator descendants cannot
+          consume all host memory. Set to `null` only when another cgroup
+          boundary provides an equivalent hard limit.
         '';
       };
 
       systemd_memory_high = lib.mkOption {
         type = lib.types.nullOr (lib.types.either lib.types.int lib.types.str);
-        default = null;
+        default = "60%";
         example = "6G";
         description = lib.mdDoc ''
           Memory throttling threshold (MemoryHigh).
           Once exceeded, the unit is aggressively reclaimed.
-          Default is `null` (no throttling).
+          Defaults to `"60%"` to begin reclaim before the hard limit.
+        '';
+      };
+
+      systemd_memory_swap_max = lib.mkOption {
+        type = lib.types.nullOr (lib.types.either lib.types.int lib.types.str);
+        default = "2G";
+        example = "4G";
+        description = lib.mdDoc ''
+          Maximum swap usage for the server systemd unit (MemorySwapMax).
+          Defaults to `"2G"` so evaluator descendants cannot exhaust host swap.
+          Set to `null` only when another cgroup boundary provides equivalent
+          swap containment.
         '';
       };
 
@@ -2391,9 +2408,9 @@ in {
 
         # Resource limits — nix-eval-jobs workers are memory-intensive and
         # the server must not exhaust the host under concurrent evaluation,
-        # build preparation, and closure counting. These are set to null
-        # (no limit) by default; configure them explicitly in your
-        # consuming configuration. Example for a 16 GB desktop host:
+        # build preparation, and closure counting. Defaults use host-relative
+        # memory limits plus a bounded swap allowance; deployments can override
+        # them with absolute values. Example for a 16 GB desktop host:
         #   systemd_memory_high = "6G";
         #   systemd_memory_max = "8G";
         #   systemd_cpu_quota = 400;
@@ -2401,6 +2418,8 @@ in {
           (toString cfg.server.systemd_memory_high);
         MemoryMax = lib.mkIf (cfg.server.systemd_memory_max != null)
           (toString cfg.server.systemd_memory_max);
+        MemorySwapMax = lib.mkIf (cfg.server.systemd_memory_swap_max != null)
+          (toString cfg.server.systemd_memory_swap_max);
         CPUQuota = lib.mkIf (cfg.server.systemd_cpu_quota != null)
           "${toString cfg.server.systemd_cpu_quota}%";
 

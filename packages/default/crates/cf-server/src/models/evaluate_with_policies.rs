@@ -32,6 +32,8 @@ const FALLBACK_CONCURRENCY: usize = 2;
 /// Overall deadline for the fallback phase.
 const FALLBACK_PHASE_TIMEOUT: Duration = Duration::from_secs(180);
 const CLOSURE_COUNT_MAX_CONCURRENT: usize = 2;
+const EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES: usize = 256 * 1024;
+const STANDALONE_STDOUT_MAX_BYTES: usize = 8 * 1024 * 1024;
 static CLOSURE_COUNT_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 /// Process-wide limit on concurrent standalone `nix eval` subprocesses.
 /// Each full Nix evaluation of a large flake can use 4–6 GiB of memory;
@@ -44,6 +46,57 @@ fn standalone_nix_eval_limiter() -> Arc<Semaphore> {
     STANDALONE_NIX_EVAL_LIMITER
         .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_STANDALONE_NIX_EVALS)))
         .clone()
+}
+
+#[derive(Debug, Default)]
+struct CappedOutput {
+    bytes: Vec<u8>,
+    total_bytes: usize,
+}
+
+impl CappedOutput {
+    fn push(&mut self, bytes: &[u8], limit: usize) {
+        self.total_bytes = self.total_bytes.saturating_add(bytes.len());
+        let remaining = limit.saturating_sub(self.bytes.len());
+        self.bytes
+            .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+    }
+
+    fn is_truncated(&self) -> bool {
+        self.total_bytes > self.bytes.len()
+    }
+
+    fn diagnostic_excerpt(&self, max_chars: usize) -> String {
+        let mut text = String::from_utf8_lossy(&self.bytes)
+            .chars()
+            .take(max_chars)
+            .collect::<String>();
+        if self.is_truncated() {
+            text.push_str(&format!(
+                "\n[diagnostic truncated: retained {} of {} bytes]",
+                self.bytes.len(),
+                self.total_bytes
+            ));
+        }
+        text
+    }
+}
+
+async fn read_capped<R>(mut reader: R, limit: usize) -> std::io::Result<CappedOutput>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let mut output = CappedOutput::default();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let count = reader.read(&mut chunk).await?;
+        if count == 0 {
+            return Ok(output);
+        }
+        output.push(&chunk[..count], limit);
+    }
 }
 
 /// Terminate an entire Nix evaluator process *group* (direct child + all
@@ -132,7 +185,7 @@ impl NixEvalProcessGuard {
     /// Wait for the child to exit on its own (the success path). The
     /// guard is disarmed only if reaping succeeds — if `wait()` errors,
     /// the guard remains armed and `Drop` still attempts cleanup.
-    async fn wait(mut self) -> std::io::Result<std::process::ExitStatus> {
+    async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child_mut().wait().await;
         if status.is_ok() {
             // Disarm: the child has exited and been reaped; there is
@@ -146,7 +199,7 @@ impl NixEvalProcessGuard {
     /// Kills and reaps the child, then disarms the guard so `Drop` does
     /// not perform a second, potentially-unsafe `killpg` on a
     /// possibly-reused PGID.
-    async fn terminate(mut self) {
+    async fn terminate(&mut self) {
         if let Some(mut child) = self.child.take() {
             kill_nix_process_tree(&mut child, self.pgid).await;
         }
@@ -602,7 +655,7 @@ pub async fn evaluate_single_system_with_policies(
         c.apply_to_nix_command(&mut cmd);
     }
 
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             return Ok(StandaloneSystemOutcome::InfrastructureFailure {
@@ -618,27 +671,24 @@ pub async fn evaluate_single_system_with_policies(
     #[cfg(not(unix))]
     let pgid = 0i32;
 
-    // Collect stdout/stderr via background tasks so `child` stays owned here
-    // and we can explicitly kill the process group on timeout.
-    let mut stdout_buf = child.stdout.take().map(|mut s| {
-        tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = Vec::new();
-            let _ = s.read_to_end(&mut buf).await;
-            buf
-        })
-    });
-    let mut stderr_buf = child.stderr.take().map(|mut s| {
-        tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = Vec::new();
-            let _ = s.read_to_end(&mut buf).await;
-            buf
-        })
-    });
+    // Keep a drop guard armed for the entire standalone evaluation. If the
+    // outer fallback phase is cancelled or times out and drops this future,
+    // the guard synchronously kills the whole process group before releasing
+    // the standalone-evaluation semaphore.
+    let mut guard = NixEvalProcessGuard::new(child, pgid);
+    let mut stdout_buf = guard
+        .child_mut()
+        .stdout
+        .take()
+        .map(|stdout| tokio::spawn(read_capped(stdout, STANDALONE_STDOUT_MAX_BYTES)));
+    let mut stderr_buf = guard
+        .child_mut()
+        .stderr
+        .take()
+        .map(|stderr| tokio::spawn(read_capped(stderr, EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES)));
 
     let status = tokio::select! {
-        result = child.wait() => {
+        result = guard.wait() => {
             match result {
                 Ok(s) => s,
                 Err(e) => {
@@ -651,7 +701,7 @@ pub async fn evaluate_single_system_with_policies(
         }
         _ = tokio::time::sleep(Duration::from_secs(120)) => {
             warn!(system = %system_name, pgid, "standalone nix eval timed out; killing process group");
-            kill_nix_process_tree(&mut child, pgid).await;
+            guard.terminate().await;
             if let Some(t) = stdout_buf.take() { t.abort(); }
             if let Some(t) = stderr_buf.take() { t.abort(); }
             return Ok(StandaloneSystemOutcome::InfrastructureFailure {
@@ -662,25 +712,26 @@ pub async fn evaluate_single_system_with_policies(
     };
 
     let stdout = match stdout_buf.take() {
-        Some(t) => t.await.unwrap_or_default(),
-        None => Vec::new(),
+        Some(t) => t
+            .await
+            .unwrap_or_else(|_| Ok(CappedOutput::default()))
+            .unwrap_or_default(),
+        None => CappedOutput::default(),
     };
     let stderr = match stderr_buf.take() {
-        Some(t) => t.await.unwrap_or_default(),
-        None => Vec::new(),
-    };
-    let output = std::process::Output {
-        status,
-        stdout,
-        stderr,
+        Some(t) => t
+            .await
+            .unwrap_or_else(|_| Ok(CappedOutput::default()))
+            .unwrap_or_default(),
+        None => CappedOutput::default(),
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !status.success() {
+        let stderr = stderr.diagnostic_excerpt(500);
         let error = if stderr.trim().is_empty() {
             "System evaluation failed with no error output".to_string()
         } else {
-            stderr.chars().take(500).collect::<String>()
+            stderr
         };
         return Ok(StandaloneSystemOutcome::ConfirmedSystemFailure {
             system_name: system_name.to_string(),
@@ -688,7 +739,17 @@ pub async fn evaluate_single_system_with_policies(
         });
     }
 
-    let parsed: StandaloneEvalJson = serde_json::from_slice(&output.stdout)
+    if stdout.is_truncated() {
+        return Ok(StandaloneSystemOutcome::InfrastructureFailure {
+            system_name: system_name.to_string(),
+            error: format!(
+                "Standalone eval JSON exceeded {} bytes for {}",
+                STANDALONE_STDOUT_MAX_BYTES, system_name
+            ),
+        });
+    }
+
+    let parsed: StandaloneEvalJson = serde_json::from_slice(&stdout.bytes)
         .with_context(|| format!("Failed to parse standalone eval JSON for {}", system_name))?;
 
     let expected_store_path =
@@ -792,7 +853,7 @@ in
     #[cfg(unix)]
     cmd.process_group(0);
 
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             return FallbackEvalOutcome::InfrastructureFailure {
@@ -807,25 +868,20 @@ in
     #[cfg(not(unix))]
     let pgid = 0i32;
 
-    let mut stdout_buf = child.stdout.take().map(|mut s| {
-        tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = Vec::new();
-            let _ = s.read_to_end(&mut buf).await;
-            buf
-        })
-    });
-    let mut stderr_buf = child.stderr.take().map(|mut s| {
-        tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = Vec::new();
-            let _ = s.read_to_end(&mut buf).await;
-            buf
-        })
-    });
+    let mut guard = NixEvalProcessGuard::new(child, pgid);
+    let mut stdout_buf = guard
+        .child_mut()
+        .stdout
+        .take()
+        .map(|stdout| tokio::spawn(read_capped(stdout, STANDALONE_STDOUT_MAX_BYTES)));
+    let mut stderr_buf = guard
+        .child_mut()
+        .stderr
+        .take()
+        .map(|stderr| tokio::spawn(read_capped(stderr, EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES)));
 
     let status = tokio::select! {
-        result = child.wait() => {
+        result = guard.wait() => {
             match result {
                 Ok(s) => s,
                 Err(e) => {
@@ -838,7 +894,7 @@ in
         }
         _ = tokio::time::sleep(Duration::from_secs(120)) => {
             warn!(system = %system_name, pgid, "fallback nix eval timed out; killing process group");
-            kill_nix_process_tree(&mut child, pgid).await;
+            guard.terminate().await;
             if let Some(t) = stdout_buf.take() { t.abort(); }
             if let Some(t) = stderr_buf.take() { t.abort(); }
             return FallbackEvalOutcome::InfrastructureFailure {
@@ -849,20 +905,21 @@ in
     };
 
     let stdout = match stdout_buf.take() {
-        Some(t) => t.await.unwrap_or_default(),
-        None => Vec::new(),
+        Some(t) => t
+            .await
+            .unwrap_or_else(|_| Ok(CappedOutput::default()))
+            .unwrap_or_default(),
+        None => CappedOutput::default(),
     };
-    let stderr_bytes = match stderr_buf.take() {
-        Some(t) => t.await.unwrap_or_default(),
-        None => Vec::new(),
-    };
-    let output = std::process::Output {
-        status,
-        stdout,
-        stderr: stderr_bytes,
+    let stderr = match stderr_buf.take() {
+        Some(t) => t
+            .await
+            .unwrap_or_else(|_| Ok(CappedOutput::default()))
+            .unwrap_or_default(),
+        None => CappedOutput::default(),
     };
 
-    if output.status.success() {
+    if status.success() && !stdout.is_truncated() {
         // The system actually evaluates fine — this is an evaluator omission,
         // not a broken NixOS configuration.
         return FallbackEvalOutcome::StandaloneEvaluationSucceeded {
@@ -870,11 +927,21 @@ in
         };
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    if status.success() {
+        return FallbackEvalOutcome::InfrastructureFailure {
+            system_name: system_name.to_string(),
+            error: format!(
+                "Fallback eval output exceeded {} bytes for {}",
+                STANDALONE_STDOUT_MAX_BYTES, system_name
+            ),
+        };
+    }
+
+    let stderr = stderr.diagnostic_excerpt(500);
     let error = if stderr.trim().is_empty() {
         "System evaluation failed with no error output".to_string()
     } else {
-        stderr.chars().take(500).collect::<String>()
+        stderr
     };
 
     FallbackEvalOutcome::CommandFailed {
@@ -2249,7 +2316,7 @@ pub async fn evaluate_with_nix_eval_jobs(
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let mut child = cmd
+    let child = cmd
         .spawn()
         .with_context(|| "Failed to spawn nix-eval-jobs")?;
     // PGID == PID when spawned with process_group(0).  Used by
@@ -2277,7 +2344,7 @@ pub async fn evaluate_with_nix_eval_jobs(
     let mut results = Vec::new();
     let mut policy_checks = Vec::new();
     let mut found_target = false;
-    let mut stderr_output = Vec::new();
+    let mut stderr_diagnostic = CappedOutput::default();
     let mut stderr_log_batch: Vec<(i32, Option<String>, String)> = Vec::new();
     const STDERR_LOG_BATCH_SIZE: usize = 100;
     let mut stdout_done = false;
@@ -3047,7 +3114,8 @@ pub async fn evaluate_with_nix_eval_jobs(
                             }
                         }
 
-                        stderr_output.push(line);
+                        stderr_diagnostic.push(line.as_bytes(), EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES);
+                        stderr_diagnostic.push(b"\n", EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES);
                     }
                     None => stderr_done = true,
                 }
@@ -3173,11 +3241,11 @@ pub async fn evaluate_with_nix_eval_jobs(
         commit.id, child_status
     );
     if !child_status.success() {
-        let stderr_text = stderr_output.join("\n");
+        let stderr_text = stderr_diagnostic.diagnostic_excerpt(500);
         warn!(
             "nix-eval-jobs failed with exit code: {}\nStderr:\n{}",
             child_status.code().unwrap_or(-1),
-            stderr_text.chars().take(500).collect::<String>(),
+            stderr_text,
         );
     }
 
@@ -4174,12 +4242,12 @@ fn summarize_commit_metadata(
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfirmedSystemFailure, EvaluationFinalizeOutcome, EvaluationPlan, NixEvalJobResult,
-        NixEvalProcessGuard, SuccessfulSystemResult, SystemBuildActivationOutcome,
-        SystemFinalizeOutcome, SystemNotQueuedReason, SystemPersistenceOutcome,
-        activate_evaluated_system_build, finalize_evaluated_system, finalize_evaluation_attempt,
-        mock_eval_stage_delay, persist_evaluated_system, resolve_mock_systems,
-        should_mock_policy_fail, summarize_commit_metadata,
+        CappedOutput, ConfirmedSystemFailure, EvaluationFinalizeOutcome, EvaluationPlan,
+        NixEvalJobResult, NixEvalProcessGuard, SuccessfulSystemResult,
+        SystemBuildActivationOutcome, SystemFinalizeOutcome, SystemNotQueuedReason,
+        SystemPersistenceOutcome, activate_evaluated_system_build, finalize_evaluated_system,
+        finalize_evaluation_attempt, mock_eval_stage_delay, persist_evaluated_system, read_capped,
+        resolve_mock_systems, should_mock_policy_fail, summarize_commit_metadata,
     };
     use crate::api::models::CancelEvalOutcome;
     use crate::models::deployment_policies::{
@@ -4259,7 +4327,7 @@ mod tests {
             "descendant must be alive immediately after spawn"
         );
 
-        let guard = NixEvalProcessGuard::new(child, pgid);
+        let mut guard = NixEvalProcessGuard::new(child, pgid);
         guard.terminate().await;
 
         // Give the kernel a brief moment to deliver SIGKILL.
@@ -4314,7 +4382,7 @@ mod tests {
         #[cfg(not(unix))]
         let pgid = 0i32;
 
-        let guard = NixEvalProcessGuard::new(child, pgid);
+        let mut guard = NixEvalProcessGuard::new(child, pgid);
         let status = guard
             .wait()
             .await
@@ -4330,6 +4398,39 @@ mod tests {
         // harmless (ESRCH) but not what we want to rely on. The
         // meaningful guarantee here is simply that wait() returns Ok for
         // a normal exit, matching the production success path.
+    }
+
+    #[test]
+    fn capped_output_retains_prefix_and_reports_total_size() {
+        let mut output = CappedOutput::default();
+        output.push(b"abcdef", 4);
+        output.push(b"ghij", 4);
+
+        assert_eq!(output.bytes, b"abcd");
+        assert_eq!(output.total_bytes, 10);
+        assert!(output.is_truncated());
+        assert!(
+            output
+                .diagnostic_excerpt(500)
+                .contains("retained 4 of 10 bytes")
+        );
+    }
+
+    #[tokio::test]
+    async fn capped_reader_drains_stream_without_retaining_all_output() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut writer, reader) = tokio::io::duplex(128);
+        let writer_task = tokio::spawn(async move {
+            writer.write_all(&vec![b'x'; 4096]).await.unwrap();
+        });
+
+        let output = read_capped(reader, 64).await.unwrap();
+        writer_task.await.unwrap();
+
+        assert_eq!(output.bytes.len(), 64);
+        assert_eq!(output.total_bytes, 4096);
+        assert!(output.is_truncated());
     }
 
     fn test_database_url() -> String {
