@@ -5023,8 +5023,12 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
 .chip-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; flex-shrink: 0; }
 
 /* ─── Multi-select hint (in sd-tabs bar) ──────────────────────────────────── */
+.q-tabbar-spacer {
+  margin-left: auto;
+}
+
 .ms-hint {
-  margin-left: auto; display: inline-flex; align-items: center; gap: 3px;
+  display: inline-flex; align-items: center; gap: 3px;
   font-size: 11px; color: var(--cf-text-muted); white-space: nowrap;
   user-select: none;
 }

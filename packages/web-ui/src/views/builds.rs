@@ -967,14 +967,9 @@ pub fn BuildsView() -> Element {
                     } else {
                         filtered_len > 0
                     } {
-                        // JSX: <span className="ms-hint" title="⌘/Ctrl-click to toggle rows · Shift-click to select a range">
-                        //        <kbd>⌘</kbd>/<kbd>⇧</kbd>-click to select
-                        //      </span>
                         span {
                             class: "ms-hint",
-                            title: "⌘/Ctrl-click to toggle rows · Shift-click to select a range",
-                            kbd { "⌘" }
-                            "/"
+                            title: "Shift-click to toggle row selection",
                             kbd { "⇧" }
                             "-click to select"
                         }

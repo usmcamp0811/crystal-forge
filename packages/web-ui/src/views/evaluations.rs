@@ -780,15 +780,14 @@ fn EvaluationsPage() -> Element {
                             "History"
                             span { class: "sd-tab-badge", "{history_count}" }
                         }
-                        // Push Latest per flake + search to the right (matches JSX MultiSelectHint margin-left:auto pattern)
-                        if (active_tab() == EvaluationsTab::ActiveQueue && active_domain_total > 0)
-                            || active_tab() == EvaluationsTab::History
-                        {
+                        // Spacer — pushes Latest per flake + search to the right edge.
+                        span { class: "q-tabbar-spacer" }
+                        // Show a Shift-click hint only on History where Shift-click
+                        // actually toggles row selection.
+                        if active_tab() == EvaluationsTab::History && history_total_acc() > 0 {
                             span {
                                 class: "ms-hint",
-                                title: "⌘/Ctrl-click to toggle rows · Shift-click to select a range",
-                                kbd { "⌘" }
-                                "/"
+                                title: "Shift-click to toggle row selection",
                                 kbd { "⇧" }
                                 "-click to select"
                             }
