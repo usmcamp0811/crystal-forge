@@ -2586,7 +2586,11 @@ async fn evaluate_with_nix_eval_jobs_inner(
                         last_output_at = Instant::now();
                         match serde_json::from_str::<NixEvalJobResult>(&line) {
                             Ok(result) => {
-                                let system_name = result.attr.clone();
+                                let system_name = result
+                                    .attr_path
+                                    .last()
+                                    .cloned()
+                                    .unwrap_or_else(|| result.attr.clone());
                                 let build_eligible = match &allowed_systems {
                                     Some(systems) => systems.iter().any(|c| c == &system_name),
                                     None => true,
