@@ -377,3 +377,22 @@ cve-processing-test:
   only:
     - merge_requests
     - main
+
+# Runs the evaluation state-machine regression tests (queries::commits::tests and
+# queries::derivations::tests, all #[ignore]-marked) via the repo-owned
+# `devScripts.state-machine-test` process-compose project. That target starts an
+# isolated DB, applies migrations, runs the tests with --ignored, and exits.
+state-machine-tests:
+  stage: check
+  tags:
+    - nix
+  before_script:
+    - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
+    - echo "login gitlab-ci-token" >> ~/.netrc
+    - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
+    - chmod 600 ~/.netrc
+  script:
+    - nix run .#devScripts.state-machine-test -- up --tui=false
+  only:
+    - merge_requests
+    - main

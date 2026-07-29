@@ -212,6 +212,40 @@ in pkgs.testers.runNixOSTest {
 
     server.wait_for_unit("crystal-forge-server.service")
     server.wait_for_open_port(${toString CF_TEST_SERVER_PORT})
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-server.service -p MemoryHigh --value)\" != infinity"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-server.service -p MemoryMax --value)\" != infinity"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-server.service -p MemorySwapMax --value)\" = 2147483648"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-server.service -p Slice --value)\" = crystal-forge.slice"
+    )
+    server.wait_for_unit("crystal-forge-hardening.service")
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-hardening.service -p Slice --value)\" = crystal-forge-hardening.slice"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-hardening.slice -p MemoryHigh --value)\" = 8589934592"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-hardening.slice -p MemoryMax --value)\" = 12884901888"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-hardening.slice -p MemorySwapMax --value)\" = 536870912"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-hardening.slice -p TasksMax --value)\" = 512"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-hardening.service -p KillMode --value)\" = control-group"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-hardening.service -p OOMPolicy --value)\" = stop"
+    )
 
     # Wait for Grafana (needed for -m dashboard tests).
     print("Waiting for Grafana to start...")

@@ -697,7 +697,9 @@ pub async fn accept_history_rewrite_and_sync(
         e
     })?;
     if start_result.rows_affected() != 1 {
-        bail!("flake {flake_id} not found or repo_url/branch changed before rewrite sync could start");
+        bail!(
+            "flake {flake_id} not found or repo_url/branch changed before rewrite sync could start"
+        );
     }
 
     let creds = FlakeCredentialEnv::load(pool, flake_id)
@@ -888,16 +890,17 @@ pub async fn accept_history_rewrite_and_sync(
     }
 
     // Resolve eval/build attention for commits that left the active snapshot.
-    let current_snapshot_ids: std::collections::HashSet<i32> =
-        resolved.iter().copied().collect();
+    let current_snapshot_ids: std::collections::HashSet<i32> = resolved.iter().copied().collect();
     let removed_from_snapshot: Vec<i32> = previous_snapshot_ids
         .into_iter()
         .filter(|id| !current_snapshot_ids.contains(id))
         .collect();
 
     if !removed_from_snapshot.is_empty() {
-        let removed_commit_subjects: Vec<String> =
-            removed_from_snapshot.iter().map(ToString::to_string).collect();
+        let removed_commit_subjects: Vec<String> = removed_from_snapshot
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         let removed_build_subjects: Vec<String> = match sqlx::query_scalar(
             r#"
             SELECT bj.id::text
@@ -912,9 +915,7 @@ pub async fn accept_history_rewrite_and_sync(
         {
             Ok(ids) => ids,
             Err(e) => {
-                error!(
-                    "Failed to read removed build job IDs for flake {flake_id}: {e:#}"
-                );
+                error!("Failed to read removed build job IDs for flake {flake_id}: {e:#}");
                 let _ = tx.rollback().await;
                 record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
                 return Err(e.into());
@@ -2564,28 +2565,49 @@ pub async fn get_commit_changed_files(
     Ok(changed)
 }
 
-async fn load_commit_nixos_configurations(
+/// Evaluate nixosConfigurations for a single commit, with optional credentials.
+///
+/// Returns the sorted list of configuration attribute names. Propagates errors
+/// (timeout, nix eval failure, parse failure) — the caller should fail the
+/// evaluation when this cannot determine the expected system set.
+pub async fn load_commit_nixos_configurations_with_creds(
     repo_url: &str,
     commit_hash: &str,
+    creds: Option<&FlakeCredentialEnv>,
+    build_config: Option<&crate::config::BuildConfig>,
 ) -> Result<Vec<String>> {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     let flake_target = format!("{flake_ref}#nixosConfigurations");
 
-    let output = timeout(
-        NIX_CONFIG_EVAL_TIMEOUT,
-        tokio::process::Command::new("nix")
-            .args([
-                "eval",
-                "--json",
-                "--apply",
-                "builtins.attrNames",
-                flake_target.as_str(),
-            ])
-            .output(),
-    )
-    .await
-    .with_context(|| format!("Timed out evaluating nixosConfigurations for {commit_hash}"))?
-    .with_context(|| format!("Failed to evaluate nixosConfigurations for {commit_hash}"))?;
+    let mut cmd = tokio::process::Command::new("nix");
+    cmd.args([
+        "eval",
+        "--json",
+        "--apply",
+        "builtins.attrNames",
+        flake_target.as_str(),
+    ]);
+
+    // Kill the nix process if the future is dropped (timeout or
+    // cancellation).  Without this, a timed-out discovery can orphan
+    // a nix process that continues running indefinitely.
+    cmd.kill_on_drop(true);
+
+    // Apply Nix configuration (offline mode, substitute behaviour,
+    // timeouts, sandbox settings, etc.) consistently with the main
+    // and fallback evaluators.
+    if let Some(bc) = build_config {
+        bc.apply_to_command(&mut cmd);
+    }
+
+    if let Some(c) = creds {
+        c.apply_to_nix_command(&mut cmd);
+    }
+
+    let output = timeout(NIX_CONFIG_EVAL_TIMEOUT, cmd.output())
+        .await
+        .with_context(|| format!("Timed out evaluating nixosConfigurations for {commit_hash}"))?
+        .with_context(|| format!("Failed to evaluate nixosConfigurations for {commit_hash}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2597,6 +2619,13 @@ async fn load_commit_nixos_configurations(
     names.sort();
     names.dedup();
     Ok(names)
+}
+
+async fn load_commit_nixos_configurations(
+    repo_url: &str,
+    commit_hash: &str,
+) -> Result<Vec<String>> {
+    load_commit_nixos_configurations_with_creds(repo_url, commit_hash, None, None).await
 }
 
 async fn load_commit_changed_files(
@@ -3019,14 +3048,12 @@ mod tests {
 
         // Simulate: the newer attempt already recorded an error and opened
         // its attention occurrence.
-        sqlx::query(
-            "UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2 WHERE id = $1",
-        )
-        .bind(flake_id)
-        .bind(newer_attempt_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2 WHERE id = $1")
+            .bind(flake_id)
+            .bind(newer_attempt_id)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         transition_flake_attention_to_error_if_current(
             &pool,
@@ -3050,10 +3077,12 @@ mod tests {
             "a stale success handler must not resolve a newer attempt's occurrence"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
-            .bind(flake_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1",
+        )
+        .bind(flake_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -3068,14 +3097,12 @@ mod tests {
         let attempt_id = uuid::Uuid::new_v4();
 
         // Open a sync_error occurrence for this exact attempt.
-        sqlx::query(
-            "UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2 WHERE id = $1",
-        )
-        .bind(flake_id)
-        .bind(attempt_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2 WHERE id = $1")
+            .bind(flake_id)
+            .bind(attempt_id)
+            .execute(&pool)
+            .await
+            .unwrap();
         transition_flake_attention_to_error_if_current(
             &pool,
             flake_id,
@@ -3098,10 +3125,12 @@ mod tests {
             "the current attempt's own resolve must succeed"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
-            .bind(flake_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1",
+        )
+        .bind(flake_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -3118,14 +3147,12 @@ mod tests {
         let newer_attempt_id = uuid::Uuid::new_v4();
 
         // Newer attempt has since succeeded.
-        sqlx::query(
-            "UPDATE flakes SET sync_status = 'synced', sync_attempt_id = $2 WHERE id = $1",
-        )
-        .bind(flake_id)
-        .bind(newer_attempt_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("UPDATE flakes SET sync_status = 'synced', sync_attempt_id = $2 WHERE id = $1")
+            .bind(flake_id)
+            .bind(newer_attempt_id)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         // A delayed error handler from a stale, superseded attempt must not
         // open a sync_error occurrence.
@@ -3142,10 +3169,12 @@ mod tests {
             "a stale error handler must not open an occurrence after a newer success"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
-            .bind(flake_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1",
+        )
+        .bind(flake_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -3154,7 +3183,8 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn transition_flake_attention_to_error_if_current_does_not_inherit_dismissal_across_intervening_success() {
+    async fn transition_flake_attention_to_error_if_current_does_not_inherit_dismissal_across_intervening_success()
+     {
         // Regression test for round 9: attempt A fails and opens (then the
         // user dismisses) occurrence O. Attempt B succeeds, but its
         // resolve_flake_attention_if_current call is lost (simulated here
@@ -3258,10 +3288,12 @@ mod tests {
                 .unwrap();
         assert!(o_resolved.is_some(), "O must be resolved as superseded");
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
-            .bind(flake_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1",
+        )
+        .bind(flake_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -3271,7 +3303,8 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn transition_flake_attention_to_error_if_current_reuses_occurrence_without_intervening_success() {
+    async fn transition_flake_attention_to_error_if_current_reuses_occurrence_without_intervening_success()
+     {
         // Sanity counterpart: when NO success has occurred since the
         // existing occurrence was last observed, it IS safe to reuse
         // (observe) it -- this is the normal, common case of a flake
@@ -3331,10 +3364,12 @@ mod tests {
             "with no intervening success, the SAME occurrence must be reused, not a new one opened"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
-            .bind(flake_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1",
+        )
+        .bind(flake_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -3383,10 +3418,12 @@ mod tests {
             "a delayed error transition must not create an occurrence for a deleted flake"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
-            .bind(flake_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1",
+        )
+        .bind(flake_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -3441,10 +3478,12 @@ mod tests {
              (the deleted_at guard makes still_current false, so this is a no-op)"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1")
-            .bind(flake_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'flakes' AND subject_id = $1",
+        )
+        .bind(flake_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -3667,7 +3706,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(open_count, 1, "eval occurrence must be opened while commit is in snapshot");
+        assert_eq!(
+            open_count, 1,
+            "eval occurrence must be opened while commit is in snapshot"
+        );
 
         // Simulate history rewrite: remove the commit from the snapshot and
         // delete the occurrence (e.g. the producer/rewrite resolved it).
@@ -3696,10 +3738,12 @@ mod tests {
             "eval occurrence must NOT be reopened once commit leaves the active snapshot"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
-            .bind(commit_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1",
+        )
+        .bind(commit_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -3737,7 +3781,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(open_count, 1, "build occurrence must be opened while commit is in snapshot");
+        assert_eq!(
+            open_count, 1,
+            "build occurrence must be opened while commit is in snapshot"
+        );
 
         // Simulate history rewrite removing the commit.
         remove_snapshot_entry(&pool, flake_id, commit_id).await;
@@ -3764,10 +3811,12 @@ mod tests {
             "build occurrence must NOT be reopened once commit leaves the active snapshot"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'builds' AND subject_id = $1")
-            .bind(job_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'builds' AND subject_id = $1",
+        )
+        .bind(job_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM build_jobs WHERE id = $1")
             .bind(job_id)
             .execute(&pool)
@@ -3872,10 +3921,12 @@ mod tests {
             "eval occurrence must not be reopened when rewrite holds the sync lock and removes the commit"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
-            .bind(commit_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1",
+        )
+        .bind(commit_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
             .bind(flake_id)
             .execute(&pool)

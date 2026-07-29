@@ -525,6 +525,7 @@ dependencies = [
  "hyper 1.8.1",
  "include_dir",
  "jsonwebtoken",
+ "libc",
  "mime_guess",
  "nix",
  "num_cpus",

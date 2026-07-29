@@ -27,14 +27,16 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
     WHERE id = (
         SELECT build_jobs.id
         FROM build_jobs
+        JOIN derivations d ON d.id = build_jobs.derivation_id
         WHERE build_jobs.status = 'queued'
+          AND d.cf_agent_enabled IS TRUE
+          AND d.policy_requirements_met IS TRUE
         ORDER BY
             build_jobs.priority_weight DESC,
             (
                 SELECT c.commit_timestamp
-                FROM derivations d
-                LEFT JOIN commits c ON c.id = d.commit_id
-                WHERE d.id = build_jobs.derivation_id
+                FROM commits c
+                WHERE c.id = d.commit_id
             ) DESC NULLS LAST,
             build_jobs.created_at ASC
         LIMIT 1
@@ -53,15 +55,17 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
     WHERE id = (
         SELECT build_jobs.id
         FROM build_jobs
+        JOIN derivations d ON d.id = build_jobs.derivation_id
         WHERE build_jobs.status = 'queued'
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
+          AND d.cf_agent_enabled IS TRUE
+          AND d.policy_requirements_met IS TRUE
         ORDER BY
             build_jobs.priority_weight DESC,
             (
                 SELECT c.commit_timestamp
-                FROM derivations d
-                LEFT JOIN commits c ON c.id = d.commit_id
-                WHERE d.id = build_jobs.derivation_id
+                FROM commits c
+                WHERE c.id = d.commit_id
             ) DESC NULLS LAST,
             build_jobs.created_at ASC
         LIMIT 1
@@ -84,6 +88,8 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL: &str = r#"
         LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
         WHERE build_jobs.status = 'queued'
+          AND d.cf_agent_enabled IS TRUE
+          AND d.policy_requirements_met IS TRUE
           AND (
               NOT $2
               OR (
@@ -118,6 +124,8 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
         LEFT JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
         WHERE build_jobs.status = 'queued'
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
+          AND d.cf_agent_enabled IS TRUE
+          AND d.policy_requirements_met IS TRUE
           AND (
               NOT $3
               OR (
@@ -906,66 +914,6 @@ pub async fn count_active_jobs_for_builder(pool: &PgPool, builder_id: &Uuid) -> 
     Ok(count)
 }
 
-/// Get the next queued job for a builder based on environment assignments
-/// Returns None if no jobs available
-/// If builder has no environment assignments, returns jobs from any environment (wildcard)
-pub async fn get_next_queued_job(
-    pool: &PgPool,
-    environment_ids: &[Uuid],
-) -> Result<Option<BuildJob>> {
-    let job = if environment_ids.is_empty() {
-        // Wildcard: builder can pick up jobs from any environment
-        sqlx::query_as::<_, BuildJobRow>(
-            r#"
-            SELECT *
-            FROM build_jobs
-            WHERE status = 'queued'
-            ORDER BY
-                priority_weight DESC,
-                (
-                    SELECT c.commit_timestamp
-                    FROM derivations d
-                    LEFT JOIN commits c ON c.id = d.commit_id
-                    WHERE d.id = build_jobs.derivation_id
-                ) DESC NULLS LAST,
-                created_at ASC
-            LIMIT 1
-            FOR UPDATE SKIP LOCKED
-            "#,
-        )
-        .fetch_optional(pool)
-        .await
-        .context("Failed to fetch next queued job (wildcard)")?
-    } else {
-        // Filtered: only jobs matching builder's environment assignments
-        sqlx::query_as::<_, BuildJobRow>(
-            r#"
-            SELECT *
-            FROM build_jobs
-            WHERE status = 'queued'
-              AND (environment_id = ANY($1) OR environment_id IS NULL)
-            ORDER BY
-                priority_weight DESC,
-                (
-                    SELECT c.commit_timestamp
-                    FROM derivations d
-                    LEFT JOIN commits c ON c.id = d.commit_id
-                    WHERE d.id = build_jobs.derivation_id
-                ) DESC NULLS LAST,
-                created_at ASC
-            LIMIT 1
-            FOR UPDATE SKIP LOCKED
-            "#,
-        )
-        .bind(environment_ids)
-        .fetch_optional(pool)
-        .await
-        .context("Failed to fetch next queued job (filtered)")?
-    };
-
-    Ok(job)
-}
-
 /// Atomically claim the next job for a builder (race-free concurrency enforcement)
 ///
 /// This function ensures concurrency limits are enforced correctly by:
@@ -1107,8 +1055,17 @@ pub async fn claim_next_job_atomic(
     Ok(job)
 }
 
-/// Assign a job to a builder and mark it as building
-pub async fn assign_job_to_builder(
+/// Assign a job to a builder and mark it as building.
+///
+/// Test-only helper: this directly transitions an arbitrary job to
+/// 'building' by ID, bypassing the policy-gated claim queries
+/// (`claim_next_job_atomic`, `get_next_job_for_builder`). It exists to
+/// force test fixtures into a known 'building' state when exercising
+/// unrelated behavior (e.g. orphaned-job recovery, stale-builder
+/// handling). It must never be used as, or become, a production claim
+/// path — hence `#[cfg(test)]` rather than `pub`.
+#[cfg(test)]
+pub(crate) async fn assign_job_to_builder(
     pool: &PgPool,
     job_id: &Uuid,
     builder_id: &Uuid,
@@ -2144,7 +2101,7 @@ mod tests {
         .await
         .expect("Failed to insert derivation");
 
-        sqlx::query_scalar::<_, Uuid>(
+        let build_job_id = sqlx::query_scalar::<_, Uuid>(
             r#"
             INSERT INTO build_jobs (derivation_id, status, priority_weight, created_at)
             VALUES ($1, 'queued', $2, $3)
@@ -2156,7 +2113,21 @@ mod tests {
         .bind(created_at)
         .fetch_one(pool)
         .await
-        .expect("Failed to insert queued build job")
+        .expect("Failed to insert queued build job");
+
+        // Mark derivation as policy-passing so the claim-query gates
+        // (cf_agent_enabled IS TRUE, policy_requirements_met IS TRUE)
+        // accept this job.
+        sqlx::query(
+            "UPDATE derivations SET cf_agent_enabled = TRUE, policy_requirements_met = TRUE WHERE id = $1",
+        )
+        .bind(derivation.id)
+        .execute(pool)
+        .await
+        .expect("Failed to set policy fields on test derivation");
+
+        // Return the build job id (not the derivation id).
+        build_job_id
     }
 
     async fn queued_order(pool: &PgPool) -> Vec<Uuid> {

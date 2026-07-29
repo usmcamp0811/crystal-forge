@@ -20,6 +20,7 @@ use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
 use crate::handlers::agent_request::CFState;
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
+    is_reserved_policy_result_field,
 };
 use crate::queries::deployment_policies;
 
@@ -195,7 +196,7 @@ fn validate_policy_config(
             }
 
             if has_expression && !has_rules {
-                // Single-expression (legacy) path — normalize
+                // Single-expression (legacy) path — normalize expression and validate field_name.
                 let expression = obj
                     .get("expression")
                     .and_then(|v| v.as_str())
@@ -204,6 +205,23 @@ fn validate_policy_config(
                 let normalized_expr = validate_and_normalize_nix_expression(expression)?;
                 if let Some(config_obj) = validated_config.as_object_mut() {
                     config_obj.insert("expression".to_string(), Value::String(normalized_expr));
+                }
+
+                if let Some(field_name) = obj
+                    .get("field_name")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    if is_reserved_policy_result_field(field_name) {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            format!(
+                                "config.field_name '{}' is reserved for built-in evaluator metadata",
+                                field_name
+                            ),
+                        ));
+                    }
                 }
             }
 
@@ -245,6 +263,16 @@ fn validate_policy_config(
                             StatusCode::BAD_REQUEST,
                             format!(
                                 "config.rules[{}].field_name duplicates existing field_name '{}'",
+                                i, field_name
+                            ),
+                        ));
+                    }
+
+                    if is_reserved_policy_result_field(field_name) {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            format!(
+                                "config.rules[{}].field_name '{}' is reserved for built-in evaluator metadata",
                                 i, field_name
                             ),
                         ));
@@ -538,6 +566,30 @@ pub async fn get_deployment_policy(
 ///
 /// Returns 400 for validation errors.
 /// Returns 409 if a policy with the same name already exists.
+
+/// The Crystal Forge agent requirement is a built-in invariant and cannot
+/// be created, converted into, enabled, or assigned as a deployment policy.
+/// Legacy historical records are preserved by migration 0187 but are
+/// permanently disabled and read-only.
+const BUILTIN_CF_AGENT_POLICY_MESSAGE: &str = "The Crystal Forge agent requirement is a built-in invariant \
+     and cannot be created, converted, or assigned as a deployment policy.";
+
+/// Reject `require_cf_agent` as a policy type in create/update operations.
+/// This is intentionally checked BEFORE config validation, name-conflict
+/// lookup, and duplicate-content lookup so the caller gets the correct
+/// "built-in invariant" message rather than a misleading 409 from the
+/// duplicate-content check (migration 0187 preserves the historical
+/// record, which can match an attempted creation).
+fn reject_builtin_policy_type(policy_type: &str) -> Result<(), (StatusCode, String)> {
+    if policy_type == "require_cf_agent" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            BUILTIN_CF_AGENT_POLICY_MESSAGE.to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn create_deployment_policy(
     RequireOperator(_user): RequireOperator,
     State(state): State<CFState>,
@@ -559,9 +611,17 @@ pub async fn create_deployment_policy(
         ));
     }
 
+    // The Crystal Forge agent requirement is a built-in invariant that
+    // cannot be created as a deployment policy.  This check comes FIRST
+    // — before config validation, name-conflict lookup, and duplicate-
+    // content lookup — so the caller gets a clear "built-in invariant"
+    // message rather than a misleading 409 returned because migration
+    // 0187 preserved the historical record (which would match a
+    // duplicate-content check).
+    reject_builtin_policy_type(&request.policy_type)?;
+
     // Validate policy_type
     let valid_types = [
-        "require_cf_agent",
         "require_packages",
         "custom_check",
         "require_cve_check",
@@ -626,14 +686,6 @@ pub async fn create_deployment_policy(
         ));
     }
 
-    // Core policy is always enabled
-    if request.policy_type == "require_cf_agent" {
-        request.enabled = Some(true);
-        if let Some(config_obj) = request.config.as_object_mut() {
-            config_obj.insert("strict".to_string(), Value::Bool(true));
-        }
-    }
-
     // Create policy
     let policy = deployment_policies::create_deployment_policy(&state.pool, &request)
         .await
@@ -688,29 +740,27 @@ pub async fn update_deployment_policy(
             "Deployment policy not found".to_string(),
         ))?;
 
-    // Core require_cf_agent policy is immutable except name/description updates.
+    // The Crystal Forge agent requirement is a built-in invariant.
+    // If the existing record is a require_cf_agent policy, it is a
+    // legacy historical record preserved by migration 0187.  It is
+    // permanently disabled, read-only, and cannot be renamed, edited,
+    // re-enabled, or changed in any way — doing so would contradict
+    // the migration invariant (which disabled it) and could make it
+    // reappear as an assignable policy in the UI.
     if existing.policy_type == "require_cf_agent" {
-        if let Some(ref policy_type) = request.policy_type {
-            if policy_type != "require_cf_agent" {
-                return Err((
-                    StatusCode::CONFLICT,
-                    "Core require_cf_agent policy type cannot be changed".to_string(),
-                ));
-            }
-        }
-        if request.enabled == Some(false) {
-            return Err((
-                StatusCode::CONFLICT,
-                "Core require_cf_agent policy is always enabled".to_string(),
-            ));
-        }
-        if request.config.is_some() {
-            return Err((
-                StatusCode::CONFLICT,
-                "Core require_cf_agent policy config cannot be changed".to_string(),
-            ));
-        }
-        request.enabled = Some(true);
+        return Err((
+            StatusCode::CONFLICT,
+            "The Crystal Forge agent requirement is a built-in invariant. \
+             Legacy policy records preserved by migration 0187 are read-only \
+             and cannot be modified."
+                .to_string(),
+        ));
+    }
+
+    // Also reject any attempt to convert a non-CF-agent policy into
+    // require_cf_agent.
+    if let Some(ref policy_type) = request.policy_type {
+        reject_builtin_policy_type(policy_type)?;
     }
 
     // Validate name if provided
@@ -751,7 +801,6 @@ pub async fn update_deployment_policy(
     // Validate policy_type if provided
     if let Some(ref policy_type) = request.policy_type {
         let valid_types = [
-            "require_cf_agent",
             "require_packages",
             "custom_check",
             "require_cve_check",
@@ -1044,6 +1093,68 @@ mod tests {
         assert_eq!(
             rules[1].get("expression").and_then(|v| v.as_str()),
             Some("cfg.config.services.nginx.enable")
+        );
+    }
+
+    #[test]
+    fn validate_policy_config_rejects_reserved_legacy_field_name() {
+        let err = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({
+                "expression": "true",
+                "field_name": "cfAgentEnabled",
+                "strict": true
+            }),
+        )
+        .expect_err("reserved legacy field_name must be rejected");
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("reserved"));
+        assert!(err.1.contains("cfAgentEnabled"));
+    }
+
+    #[test]
+    fn validate_policy_config_rejects_reserved_multi_rule_field_name() {
+        let err = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({
+                "mode": "all",
+                "rules": [
+                    {
+                        "field_name": "cfAgentEnabled",
+                        "expression": "true",
+                        "strict": true
+                    },
+                    {
+                        "field_name": "firewallEnabled",
+                        "expression": "cfg.config.networking.firewall.enable",
+                        "strict": true
+                    }
+                ]
+            }),
+        )
+        .expect_err("reserved multi-rule field_name must be rejected");
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("reserved"));
+        assert!(err.1.contains("cfAgentEnabled"));
+    }
+
+    #[test]
+    fn validate_policy_config_accepts_non_reserved_field_names() {
+        let result = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({
+                "expression": "true",
+                "field_name": "firewallEnabled",
+                "strict": true
+            }),
+        )
+        .expect("non-reserved legacy field_name must be accepted");
+
+        assert_eq!(
+            result.get("field_name").and_then(|v| v.as_str()),
+            Some("firewallEnabled")
         );
     }
 

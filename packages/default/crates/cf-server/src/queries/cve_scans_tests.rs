@@ -24,14 +24,15 @@ async fn insert_environment_and_system(pool: &PgPool) -> (Uuid, Uuid, String) {
     let system_id = Uuid::new_v4();
     let hostname = format!("host-{}", system_id.simple().to_string()[..12].to_string());
 
-    sqlx::query(
-        "INSERT INTO environments (id, name, is_active) VALUES ($1, $2, TRUE)",
-    )
-    .bind(env_id)
-    .bind(format!("env-{}", env_id.simple().to_string()[..8].to_string()))
-    .execute(pool)
-    .await
-    .expect("insert environment");
+    sqlx::query("INSERT INTO environments (id, name, is_active) VALUES ($1, $2, TRUE)")
+        .bind(env_id)
+        .bind(format!(
+            "env-{}",
+            env_id.simple().to_string()[..8].to_string()
+        ))
+        .execute(pool)
+        .await
+        .expect("insert environment");
 
     sqlx::query(
         "INSERT INTO systems (id, hostname, environment_id, is_active, public_key, derivation) \
@@ -154,13 +155,21 @@ async fn save_scan_results_sets_fleet_relevant_since_atomically_with_cve_attenti
     .await
     .expect("insert nixos derivation");
 
-    let scan_id = create_cve_scan(&pool, nixos_derivation_id, "vulnix", Some("test".to_string()))
-        .await
-        .expect("create scan")
-        .id();
+    let scan_id = create_cve_scan(
+        &pool,
+        nixos_derivation_id,
+        "vulnix",
+        Some("test".to_string()),
+    )
+    .await
+    .expect("create scan")
+    .id();
 
     // Package derivation, build-complete.
-    let pkg_name = format!("test-pkg-{}", Uuid::new_v4().simple().to_string()[..8].to_string());
+    let pkg_name = format!(
+        "test-pkg-{}",
+        Uuid::new_v4().simple().to_string()[..8].to_string()
+    );
     let pkg_derivation_id: i32 = sqlx::query_scalar(
         "INSERT INTO derivations (commit_id, derivation_type, derivation_name, pname, version, status_id, attempt_count) \
          VALUES (NULL, 'package', $1, 'test-pkg', '1.0.0', 11, 0) RETURNING id",
@@ -195,13 +204,12 @@ async fn save_scan_results_sets_fleet_relevant_since_atomically_with_cve_attenti
     .await
     .expect("save_scan_results should succeed");
 
-    let fleet_relevant_since: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        "SELECT fleet_relevant_since FROM cves WHERE id = $1",
-    )
-    .bind(&cve_id)
-    .fetch_one(&pool)
-    .await
-    .expect("fetch cves.fleet_relevant_since");
+    let fleet_relevant_since: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT fleet_relevant_since FROM cves WHERE id = $1")
+            .bind(&cve_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch cves.fleet_relevant_since");
     assert!(
         fleet_relevant_since.is_some(),
         "fleet_relevant_since must be set atomically with the scan results"
@@ -221,10 +229,12 @@ async fn save_scan_results_sets_fleet_relevant_since_atomically_with_cve_attenti
     );
 
     // Cleanup.
-    let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'cves' AND subject_id = $1")
-        .bind(&cve_id)
-        .execute(&pool)
-        .await;
+    let _ = sqlx::query(
+        "DELETE FROM attention_occurrences WHERE category = 'cves' AND subject_id = $1",
+    )
+    .bind(&cve_id)
+    .execute(&pool)
+    .await;
     let _ = sqlx::query("DELETE FROM package_vulnerabilities WHERE cve_id = $1")
         .bind(&cve_id)
         .execute(&pool)
