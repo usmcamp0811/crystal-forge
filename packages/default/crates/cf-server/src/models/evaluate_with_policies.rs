@@ -3951,7 +3951,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                 commit.id,
                 &mut log_sequence,
                 format!(
-                    "🚀 {} derivations ready for build queue",
+                    "🚀 {} derivations eligible for build queue preparation",
                     successful_results.len()
                 ),
             )
@@ -3972,12 +3972,44 @@ async fn evaluate_with_nix_eval_jobs_inner(
         commit_id = commit.id,
         expected_attempt, "build_preparation_drain_started"
     );
-    // Drain all pending build preparations before returning.  Any
-    // preparation failure (GC root error, activation error) propagates
-    // here so the evaluation attempt is not marked complete with
-    // incomplete build preparations.
+    // Drain all pending build preparations before returning. Build
+    // preparation is downstream of evaluation: a GC-root or build-queue
+    // activation problem must be visible in logs, but it must not rewrite a
+    // partially successful evaluation as a failed attempt after individual
+    // system results have already been persisted. The finalizer below records
+    // actual Nix eval failures separately.
     while let Some(result) = build_preparations.join_next().await {
-        result.context("Build preparation task panicked")??;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                let message = format!("⚠️  Build queue preparation failed: {err:#}");
+                warn!(commit_id = commit.id, expected_attempt, "{}", message);
+                if let Some(state) = cf_state {
+                    broadcast_and_persist_eval_log(
+                        pool,
+                        Some(state),
+                        commit.id,
+                        &mut log_sequence,
+                        message,
+                    )
+                    .await;
+                }
+            }
+            Err(err) => {
+                let message = format!("⚠️  Build queue preparation task panicked: {err:#}");
+                warn!(commit_id = commit.id, expected_attempt, "{}", message);
+                if let Some(state) = cf_state {
+                    broadcast_and_persist_eval_log(
+                        pool,
+                        Some(state),
+                        commit.id,
+                        &mut log_sequence,
+                        message,
+                    )
+                    .await;
+                }
+            }
+        }
     }
     info!(
         commit_id = commit.id,
