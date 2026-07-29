@@ -5027,6 +5027,10 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
   margin-left: auto;
 }
 
+.q-tabbar > .q-search {
+  margin-left: 0;
+}
+
 .ms-hint {
   display: inline-flex; align-items: center; gap: 3px;
   font-size: 11px; color: var(--cf-text-muted); white-space: nowrap;

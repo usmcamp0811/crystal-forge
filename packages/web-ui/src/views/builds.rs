@@ -960,6 +960,8 @@ pub fn BuildsView() -> Element {
                         "Completed"
                         span { class: "sd-tab-badge", "{build_history_total()}" }
                     }
+                    // Spacer — pushes Latest per flake + search to the right edge.
+                    span { class: "q-tabbar-spacer" }
                     // JSX: {selectableIds.length > 0 && <MultiSelectHint />}
                     // selectableIds = cancellable builds on Active, filteredList on Completed.
                     if if active_view() == BuildsTab::ActiveQueue {
