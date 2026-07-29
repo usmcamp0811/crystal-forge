@@ -1638,17 +1638,29 @@ pub async fn activate_evaluated_system_build(
             }
         }
         None => {
+            warn!(
+                commit_id,
+                derivation_id,
+                "system_build_job_activation_insert_filtered"
+            );
+
             #[derive(sqlx::FromRow)]
             struct DerivationActivationState {
                 derivation_name: String,
                 status_id: i32,
                 cf_agent_enabled: Option<bool>,
+                policy_requirements_met: bool,
                 derivation_path: Option<String>,
             }
 
             let state = sqlx::query_as::<_, DerivationActivationState>(
                 r#"
-                SELECT derivation_name, status_id, cf_agent_enabled, derivation_path
+                SELECT
+                    derivation_name,
+                    status_id,
+                    cf_agent_enabled,
+                    policy_requirements_met,
+                    derivation_path
                 FROM derivations
                 WHERE id = $1
                 "#,
@@ -1667,11 +1679,12 @@ pub async fn activate_evaluated_system_build(
             };
 
             bail!(
-                "Build activation could not create a build job for derivation {} ({}) with status_id={}, cf_agent_enabled={:?}, derivation_path={:?}",
+                "Build activation could not create a build job for derivation {} ({}) with status_id={}, cf_agent_enabled={:?}, policy_requirements_met={}, derivation_path={:?}",
                 derivation_id,
                 state.derivation_name,
                 state.status_id,
                 state.cf_agent_enabled,
+                state.policy_requirements_met,
                 state.derivation_path,
             );
         }

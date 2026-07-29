@@ -665,6 +665,7 @@ pub async fn list_build_queue_paginated(
             NULLIF(split_part(COALESCE(c.message, ''), E'\n', 1), '') AS commit_message,
             bj.status,
             bj.priority_weight,
+            bj.queue_position,
             b.name AS builder_name,
             bj.created_at AS queued_at,
             bj.started_at,
