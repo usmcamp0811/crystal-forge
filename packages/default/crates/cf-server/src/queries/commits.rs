@@ -152,7 +152,7 @@ pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<Commit>
         WHERE c.evaluation_status = 'pending'
         AND ea.available_at <= NOW()
         ORDER BY
-            COALESCE(c.eval_queue_position, 9223372036854775807),
+            COALESCE(c.eval_queue_position, 0) DESC,
             c.commit_timestamp DESC,
             c.id DESC
         "#,
@@ -1034,7 +1034,7 @@ pub async fn list_eval_queue(pool: &PgPool, params: &EvalQueueParams) -> Result<
                 WHEN evaluation_status = 'pending' THEN 1
                 ELSE 2
             END,
-            queue_position,
+            queue_position DESC NULLS LAST,
             committed_at DESC,
             commit_id DESC
         LIMIT $5
@@ -1076,7 +1076,7 @@ pub async fn reorder_eval_queue(pool: &PgPool, ordered_commit_ids: &[i32]) -> Re
                 WHEN c.evaluation_status = 'in_progress' THEN 0
                 ELSE 1
             END,
-            COALESCE(c.eval_queue_position, 9223372036854775807),
+            COALESCE(c.eval_queue_position, 0) DESC,
             c.commit_timestamp DESC,
             c.id DESC
         FOR UPDATE
@@ -1090,7 +1090,8 @@ pub async fn reorder_eval_queue(pool: &PgPool, ordered_commit_ids: &[i32]) -> Re
     sqlx::query(
         r#"
         WITH ordered AS (
-            SELECT commit_id, ordinality::bigint AS position
+            SELECT commit_id,
+                   MAX(ordinality) OVER () - ordinality + 1 AS position
             FROM UNNEST($1::int[]) WITH ORDINALITY AS t(commit_id, ordinality)
         )
         UPDATE commits c
