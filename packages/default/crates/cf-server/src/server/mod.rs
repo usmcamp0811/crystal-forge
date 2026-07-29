@@ -8,16 +8,18 @@ use crate::log::log_builder_worker_status;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::DeploymentPolicy;
 use crate::models::evaluate_with_policies::{
-    evaluate_with_mock_eval_jobs, evaluate_with_nix_eval_jobs, update_commit_metadata_cache,
+    EvaluationFinalizeOutcome, FinalizedDerivation, evaluate_with_mock_eval_jobs,
+    evaluate_with_nix_eval_jobs, finalize_evaluation_attempt, update_commit_metadata_cache,
 };
 use crate::models::flakes::Flake;
 use crate::queue::QueueNotifier;
 use crate::server::jobs::{BackgroundJobHandle, BackgroundJobRegistry};
 // NOTE: removed increment_commit_list_attempt_count – we now rely on the new evaluation_* fields
 use crate::queries::flakes::get_all_flakes_from_db_with_ids;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::PgPool;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Semaphore;
 use tokio::time;
 use tokio::time::Duration;
 use tokio::time::Instant;
@@ -25,18 +27,48 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
-use crate::queries::build_jobs::create_build_jobs_for_commit;
+use crate::derivations::utils::count_closure_packages;
+use crate::models::deployment_policies::{AssignedPolicy, PoliciesByConfiguration};
+use crate::queries::build_jobs::QueuedBuild;
 use crate::queries::builders::{
     cleanup_expired_build_logs, mark_stale_builders_offline,
     requeue_orphaned_building_jobs_with_reason,
 };
 use crate::queries::commits::{
-    get_commits_pending_evaluation, mark_commit_evaluation_complete, mark_commit_evaluation_failed,
-    mark_commit_evaluation_started, reset_stuck_commit_evaluations,
+    EvalCancellationOutcome, EvalFailureOutcome, EvalStartOutcome, get_commits_pending_evaluation,
+    mark_commit_evaluation_failed, mark_commit_evaluation_started, reset_stuck_commit_evaluations,
 };
-use crate::queries::deployment_policies::list_enabled_deployment_policies;
-use crate::queries::derivations::{cleanup_partial_derivations, reset_stuck_builds};
+use crate::queries::deployment_policies::{
+    list_enabled_deployment_policies, list_enabled_policies_for_flake,
+    list_policy_rows_by_configuration_for_flake, list_registered_configuration_names_for_flake,
+};
+use crate::queries::derivations::{
+    cleanup_partial_derivations, reset_stuck_builds, set_closure_counts,
+};
 use crate::services::hardening_scans::trigger_commit_hardening_scans;
+
+const CLOSURE_COUNT_MAX_CONCURRENT: usize = 2;
+static CLOSURE_COUNT_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+/// Maximum number of commit evaluations (nix-eval-jobs + fallback phase)
+/// that may run concurrently across the entire server process.
+/// Each bulk evaluation loads and evaluates a large flake and can use
+/// several GiB of memory; running more than one at a time on this host
+/// risks memory exhaustion when combined with the standalone fallback evals.
+const MAX_CONCURRENT_COMMIT_EVALUATIONS: usize = 1;
+static COMMIT_EVALUATION_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn commit_evaluation_limiter() -> Arc<Semaphore> {
+    COMMIT_EVALUATION_LIMITER
+        .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_COMMIT_EVALUATIONS)))
+        .clone()
+}
+
+fn closure_count_limiter() -> Arc<Semaphore> {
+    CLOSURE_COUNT_LIMITER
+        .get_or_init(|| Arc::new(Semaphore::new(CLOSURE_COUNT_MAX_CONCURRENT)))
+        .clone()
+}
 
 fn custom_field_name(name: &str, id: uuid::Uuid) -> String {
     let mut slug = name
@@ -89,6 +121,222 @@ fn normalize_custom_policy_expression(expression: &str) -> (String, bool) {
 
     normalized.push_str(&expression[cursor..]);
     (normalized, changed)
+}
+
+async fn run_post_finalize_derivation_side_effects(
+    pool: &PgPool,
+    derivations: &[FinalizedDerivation],
+) {
+    for derivation in derivations {
+        match crate::builder::create_drv_gc_root(&derivation.drv_path, derivation.derivation_id)
+            .await
+        {
+            Ok(true) => debug!(
+                "📌 Rooted evaluated drv (id={}, drv={})",
+                derivation.derivation_id, derivation.drv_path
+            ),
+            Ok(false) => warn!(
+                "⚠️  Evaluated drv (id={}, drv={}) is not valid in the server store; \
+                 remote builders may not be able to import it",
+                derivation.derivation_id, derivation.drv_path
+            ),
+            Err(err) => warn!(
+                "⚠️  Failed to create GC root for evaluated drv {} (id={}): {}",
+                derivation.drv_path, derivation.derivation_id, err
+            ),
+        }
+
+        let pool2 = pool.clone();
+        let drv2 = derivation.drv_path.clone();
+        let derivation_id = derivation.derivation_id;
+        let limiter = closure_count_limiter();
+        tokio::spawn(async move {
+            let permit = match limiter.acquire_owned().await {
+                Ok(permit) => permit,
+                Err(err) => {
+                    warn!(
+                        "⚠️  Failed to acquire closure count permit for id={}: {}",
+                        derivation_id, err
+                    );
+                    return;
+                }
+            };
+            match count_closure_packages(&drv2).await {
+                Ok((total, cached)) => {
+                    if let Err(err) = set_closure_counts(&pool2, derivation_id, total, cached).await
+                    {
+                        warn!(
+                            "⚠️  Failed to store closure counts for id={}: {}",
+                            derivation_id, err
+                        );
+                    } else {
+                        info!(
+                            "📦 closure id={}: {}/{} packages cached/local",
+                            derivation_id, cached, total
+                        );
+                    }
+                }
+                Err(err) => warn!(
+                    "⚠️  Failed to count closure packages for id={}: {}",
+                    derivation_id, err
+                ),
+            }
+            drop(permit);
+        });
+    }
+}
+
+async fn broadcast_queued_builds(
+    cf_state: &crate::handlers::agent_request::CFState,
+    commit_id: i32,
+    queued_builds: &[QueuedBuild],
+) {
+    for build in queued_builds {
+        debug!(
+            "Queued build job {} for derivation {} ({})",
+            build.build_job_id, build.derivation_id, build.system_name
+        );
+        crate::handlers::api::commits::broadcast_system_status(
+            cf_state,
+            commit_id,
+            build.system_name.clone(),
+            crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
+            None,
+        )
+        .await;
+        crate::handlers::api::commits::broadcast_eval_log(
+            cf_state,
+            commit_id,
+            format!("🚀 {}: build job queued", build.system_name),
+        )
+        .await;
+    }
+}
+
+async fn handle_evaluation_attempt_failure(
+    pool: &PgPool,
+    cf_state: &crate::handlers::agent_request::CFState,
+    commit: &Commit,
+    attempt: i32,
+    error: &anyhow::Error,
+) -> Result<()> {
+    error!(
+        "❌ Failed to evaluate commit {}: {}",
+        commit.git_commit_hash, error
+    );
+
+    match mark_commit_evaluation_failed(pool, commit.id, &error.to_string(), attempt).await {
+        Err(mark_err) => {
+            crate::handlers::api::commits::cleanup_eval_channel(cf_state, commit.id).await;
+            return Err(mark_err).with_context(|| {
+                format!(
+                    "Failed to mark commit {} evaluation failed (attempt {})",
+                    commit.git_commit_hash, attempt
+                )
+            });
+        }
+        Ok(EvalFailureOutcome::SupersededOrCancelled) => {
+            let cancel_outcome =
+                crate::queries::commits::finalize_requested_commit_evaluation_cancellation(
+                    pool, commit.id, attempt,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to finalize cancellation for commit {} attempt {}",
+                        commit.id, attempt
+                    )
+                })?;
+
+            if matches!(
+                cancel_outcome,
+                EvalCancellationOutcome::Cancelled | EvalCancellationOutcome::AlreadyCancelled
+            ) {
+                if let Err(err) =
+                    crate::queries::commits::cleanup_partial_derivations_for_commit(pool, commit.id)
+                        .await
+                {
+                    warn!(
+                        "Failed to clean partial derivations for cancelled commit {}: {}",
+                        commit.id, err
+                    );
+                }
+                crate::handlers::api::commits::broadcast_eval_status(
+                    cf_state,
+                    commit.id,
+                    "cancelled".to_string(),
+                    Some("Evaluation cancelled by user".to_string()),
+                )
+                .await;
+                crate::handlers::api::commits::broadcast_eval_log(
+                    cf_state,
+                    commit.id,
+                    "🚫 Evaluation cancelled by user".to_string(),
+                )
+                .await;
+            } else {
+                warn!(
+                    "Commit {} evaluation superseded; failure not recorded for attempt {}",
+                    commit.git_commit_hash, attempt
+                );
+            }
+        }
+        Ok(EvalFailureOutcome::RetryScheduled) => {
+            if let Err(cache_err) = update_commit_metadata_cache(pool, commit.id, &[], true).await {
+                error!(
+                    "❌ Failed to update commit metadata cache for {}: {}",
+                    commit.git_commit_hash, cache_err
+                );
+            }
+
+            info!(
+                "Commit {} evaluation will be retried (attempt {})",
+                commit.git_commit_hash, attempt
+            );
+
+            crate::handlers::api::commits::broadcast_eval_status(
+                cf_state,
+                commit.id,
+                "retrying".to_string(),
+                Some(format!("Evaluation will be retried: {}", error)),
+            )
+            .await;
+            crate::handlers::api::commits::broadcast_eval_log(
+                cf_state,
+                commit.id,
+                format!(
+                    "🔄 Evaluation will be retried (attempt {}): {}",
+                    attempt, error
+                ),
+            )
+            .await;
+        }
+        Ok(EvalFailureOutcome::PermanentlyFailed) => {
+            if let Err(cache_err) = update_commit_metadata_cache(pool, commit.id, &[], true).await {
+                error!(
+                    "❌ Failed to update commit metadata cache for {}: {}",
+                    commit.git_commit_hash, cache_err
+                );
+            }
+
+            crate::handlers::api::commits::broadcast_eval_status(
+                cf_state,
+                commit.id,
+                "failed".to_string(),
+                Some(format!("Evaluation failed: {}", error)),
+            )
+            .await;
+            crate::handlers::api::commits::broadcast_eval_log(
+                cf_state,
+                commit.id,
+                format!("❌ Evaluation permanently failed: {}", error),
+            )
+            .await;
+        }
+    }
+
+    crate::handlers::api::commits::cleanup_eval_channel(cf_state, commit.id).await;
+    Ok(())
 }
 
 fn parse_deployment_policy_record(
@@ -330,8 +578,8 @@ fn parse_deployment_policy_record(
     }
 }
 
-async fn load_deployment_policies_for_eval(pool: &PgPool) -> Vec<DeploymentPolicy> {
-    match list_enabled_deployment_policies(pool).await {
+async fn load_deployment_policies_for_eval(pool: &PgPool, flake_id: i32) -> Vec<DeploymentPolicy> {
+    match list_enabled_policies_for_flake(pool, flake_id).await {
         Ok(records) => {
             let all_policies = records
                 .iter()
@@ -368,6 +616,214 @@ async fn load_deployment_policies_for_eval(pool: &PgPool) -> Vec<DeploymentPolic
             vec![DeploymentPolicy::RequireCrystalForgeAgent { strict: true }]
         }
     }
+}
+
+/// Build a per-configuration policy map for a flake's evaluation run.
+///
+/// For each active Crystal Forge system in the flake, the effective policy set
+/// is the union of:
+/// - Policies assigned directly through `system_policies`
+/// - Policies inherited from the system's environment through `environment_policies`
+///
+/// If two active systems share the same NixOS configuration name but have
+/// *different* effective policy ID sets, this function returns an error with
+/// an actionable message — silently unioning the sets would re-introduce the
+/// cross-environment policy leak we are trying to eliminate.
+///
+/// Systems with zero assigned policies produce *no entry* in the returned map.
+/// Use `policies_for_config(map, name)` to safely get an empty slice for those.
+async fn load_policies_by_configuration_for_eval(
+    pool: &PgPool,
+    flake_id: i32,
+) -> anyhow::Result<PoliciesByConfiguration> {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+    let rows = list_policy_rows_by_configuration_for_flake(pool, flake_id).await?;
+
+    // Group raw rows by configuration name, collecting (policy_id, record) pairs.
+    // The SQL already orders by (configuration_name, policy_id) so insertion order
+    // is deterministic; using a BTreeMap preserves that order in the output.
+    let mut raw: BTreeMap<
+        String,
+        Vec<(
+            uuid::Uuid,
+            crate::queries::deployment_policies::ConfigPolicyRow,
+        )>,
+    > = BTreeMap::new();
+    for row in rows {
+        raw.entry(row.configuration_name.clone())
+            .or_default()
+            .push((row.policy_id, row));
+    }
+
+    let mut map: PoliciesByConfiguration = BTreeMap::new();
+
+    for (config_name, policy_rows) in raw {
+        // Deduplicate by policy_id (the UNION in SQL handles most cases but
+        // two systems in different environments can both reference the same
+        // environment if environment membership changes mid-request).
+        let mut seen_ids: BTreeSet<uuid::Uuid> = BTreeSet::new();
+        let mut assigned: Vec<AssignedPolicy> = Vec::new();
+
+        for (policy_id, row) in policy_rows {
+            if !seen_ids.insert(policy_id) {
+                continue; // duplicate — skip
+            }
+            let record = row.as_policy_record();
+            if let Some(parsed) = parse_deployment_policy_record(&record) {
+                if parsed.is_nix_evaluated() {
+                    // require_cf_agent is handled by the unconditional
+                    // global invariant.  A legacy assignment would
+                    // produce a duplicate CF-agent result column in
+                    // the policy matrix, so it is filtered out here.
+                    // The global check (cfAgentEnabled) is always
+                    // emitted and enforced regardless of assignments.
+                    if matches!(parsed, DeploymentPolicy::RequireCrystalForgeAgent { .. }) {
+                        warn!(
+                            "Ignoring legacy require_cf_agent assignment {} ({}) — \
+                             CF-agent enablement is enforced globally",
+                            policy_id, row.name,
+                        );
+                        continue;
+                    }
+                    assigned.push(AssignedPolicy {
+                        policy_id,
+                        policy_name: row.name.clone(),
+                        policy: parsed,
+                    });
+                }
+            }
+        }
+
+        if !assigned.is_empty() {
+            map.insert(config_name, assigned);
+        }
+    }
+
+    // Conflict detection: multiple *active* systems sharing a configuration
+    // name but with different effective policy sets.
+    // We re-query registered names to detect systems that were collapsed above.
+    // The per-config deduplication already merged identical sets; we only need
+    // to check whether two systems independently produced *different* sets.
+    // Since the SQL UNION already merged rows from multiple systems with the
+    // same config name, a conflict manifests as a discrepancy between what
+    // one system would have contributed vs. another. We detect this by checking
+    // whether any two `scoped_systems` rows with the same config name have
+    // different effective policy-ID collections — which requires a second query.
+    // For now we detect only the case where the merged set cannot be
+    // unambiguously attributed to a single environment. A future enhancement
+    // can query system-level breakdowns.
+    //
+    // NOTE: The UNION of environment_policies and system_policies with the
+    // same config name is intentional when two systems in the same environment
+    // have different DIRECT assignments — that's the dedup case above. A
+    // genuine conflict (different environments, different required policies)
+    // is caught by a separate verification pass below.
+    {
+        // Build a map: config_name → set of unique policy-id sets contributed
+        // by individual systems (i.e. per-system effective policy sets).
+        // This requires per-system breakdown.
+        #[derive(Debug)]
+        struct SystemPolicySet {
+            system_id: uuid::Uuid,
+            policy_ids: BTreeSet<uuid::Uuid>,
+        }
+
+        let system_rows = sqlx::query_as::<_, (uuid::Uuid, String, Option<uuid::Uuid>)>(
+            r#"
+            SELECT s.id, COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname),
+                   s.environment_id
+            FROM systems s
+            WHERE s.flake_id = $1 AND s.is_active = TRUE
+            "#,
+        )
+        .bind(flake_id)
+        .fetch_all(pool)
+        .await
+        .context("Failed to load systems for conflict detection")?;
+
+        // For each system, load its effective policy IDs.
+        let mut per_config_systems: HashMap<String, Vec<SystemPolicySet>> = HashMap::new();
+        for (system_id, config_name, env_id) in &system_rows {
+            let direct_ids: BTreeSet<uuid::Uuid> = sqlx::query_scalar::<_, uuid::Uuid>(
+                "SELECT policy_id FROM system_policies WHERE system_id = $1",
+            )
+            .bind(system_id)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+            let env_ids: BTreeSet<uuid::Uuid> = if let Some(eid) = env_id {
+                sqlx::query_scalar::<_, uuid::Uuid>(
+                    "SELECT policy_id FROM environment_policies WHERE environment_id = $1",
+                )
+                .bind(eid)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+            } else {
+                BTreeSet::new()
+            };
+
+            let mut all_ids: BTreeSet<uuid::Uuid> = direct_ids;
+            all_ids.extend(env_ids);
+
+            per_config_systems
+                .entry(config_name.clone())
+                .or_default()
+                .push(SystemPolicySet {
+                    system_id: *system_id,
+                    policy_ids: all_ids,
+                });
+        }
+
+        for (config_name, systems) in &per_config_systems {
+            if systems.len() < 2 {
+                continue;
+            }
+            // Check whether all systems have the same effective policy set.
+            let first_set = &systems[0].policy_ids;
+            for other in &systems[1..] {
+                if &other.policy_ids != first_set {
+                    anyhow::bail!(
+                        "Configuration {:?} is assigned to active systems with different policy sets: \
+                         system {} has policies {:?}, while system {} has policies {:?}. \
+                         Use distinct system_configuration_name values or align their assigned policies.",
+                        config_name,
+                        systems[0].system_id,
+                        first_set.iter().collect::<Vec<_>>(),
+                        other.system_id,
+                        other.policy_ids.iter().collect::<Vec<_>>(),
+                    );
+                }
+            }
+        }
+    }
+
+    info!(
+        flake_id,
+        unique_policies = map
+            .values()
+            .flat_map(|v| v.iter())
+            .map(|a| a.policy_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        registered_configurations_with_policies = map.len(),
+        "policies_by_configuration_loaded"
+    );
+    for (config, policies) in &map {
+        debug!(
+            configuration = %config,
+            assigned_policy_count = policies.len(),
+            "per_configuration_policy_assignment"
+        );
+    }
+
+    Ok(map)
 }
 
 /// Load enabled `require_cve_check` policies from the database.
@@ -745,22 +1201,23 @@ async fn process_pending_commits(
             return Ok(());
         };
         // ⬇️ mark STARTED (bumps evaluation_attempt_count internally)
-        if let Err(e) = mark_commit_evaluation_started(pool, commit.id).await {
-            let error_text = e.to_string();
-            if error_text.contains("another commit is already being evaluated") {
+        let attempt = match mark_commit_evaluation_started(pool, commit.id).await {
+            Ok(EvalStartOutcome::Started { attempt }) => attempt,
+            Ok(EvalStartOutcome::NoLongerPending) => {
                 debug!(
-                    "⏭️ Eval start race for commit {} ({}): another worker/loop iteration already claimed in_progress",
+                    "⏭️ Eval start race for commit {} ({}): another worker/loop iteration already took pending",
                     commit.id, commit.git_commit_hash
                 );
                 return Ok(());
-            } else {
+            }
+            Err(e) => {
                 error!(
                     "❌ Could not mark commit {} evaluation started: {}",
                     commit.git_commit_hash, e
                 );
+                return Ok(());
             }
-            return Ok(());
-        }
+        };
 
         // Get flake info (post-claim; failures now go through retry/defer path)
         let flake = match commit.get_flake(&pool).await {
@@ -770,7 +1227,8 @@ async fn process_pending_commits(
                     "❌ Failed to get flake for commit {}: {}",
                     commit.git_commit_hash, e
                 );
-                let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await;
+                let _ =
+                    mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt).await;
                 return Ok(());
             }
         };
@@ -780,7 +1238,8 @@ async fn process_pending_commits(
             Ok(cfg) => cfg,
             Err(e) => {
                 error!("❌ Failed to load config: {}", e);
-                let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await;
+                let _ =
+                    mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt).await;
                 return Ok(());
             }
         };
@@ -793,8 +1252,25 @@ async fn process_pending_commits(
             .map(|s| s.hostname.clone())
             .collect::<Vec<_>>();
 
-        // Load enabled deployment policies from DB for nix-eval-jobs policy checks.
-        let policies = load_deployment_policies_for_eval(pool).await;
+        // Load per-configuration policies: each active system's effective policy set
+        // (environment + direct assignments), returned as a BTreeMap keyed by
+        // NixOS configuration name. Configurations with zero assigned policies
+        // produce no entry and are evaluated without policy gates.
+        let policies_by_configuration =
+            match load_policies_by_configuration_for_eval(pool, flake.id).await {
+                Ok(m) => std::sync::Arc::new(m),
+                Err(e) => {
+                    // Conflict or query failure — fail the attempt so the operator can resolve it.
+                    let e = e.context(format!(
+                        "Failed to load per-configuration policies for flake {} (commit {})",
+                        flake.id, commit.git_commit_hash,
+                    ));
+                    error!("{:#}", e);
+                    let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt)
+                        .await;
+                    return Ok(());
+                }
+            };
 
         // CRITICAL: Create broadcast channel BEFORE eval starts
         // This ensures WebSocket clients can subscribe before messages are sent
@@ -821,6 +1297,28 @@ async fn process_pending_commits(
         )
         .await;
 
+        // Acquire the process-wide commit-evaluation slot before launching
+        // nix-eval-jobs.  Only MAX_CONCURRENT_COMMIT_EVALUATIONS bulk evals
+        // (plus their fallback phases) may run simultaneously.  This prevents
+        // a burst of incoming commits from each spawning their own full-flake
+        // Nix evaluation concurrently and exhausting host memory.
+        let _eval_permit = match commit_evaluation_limiter().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                error!(
+                    commit_id = commit.id,
+                    "commit evaluation limiter was closed; cannot evaluate"
+                );
+                return Ok(());
+            }
+        };
+        info!(
+            commit_id = commit.id,
+            expected_attempt = attempt,
+            max_concurrent = MAX_CONCURRENT_COMMIT_EVALUATIONS,
+            "commit_evaluation_permit_acquired"
+        );
+
         // Use nix-eval-jobs to discover AND evaluate all nixosConfigurations
         // This will:
         // 1. Evaluate all systems in parallel
@@ -841,7 +1339,7 @@ async fn process_pending_commits(
                 "all",
                 &build_config,
                 &server_config,
-                &policies,
+                &policies_by_configuration,
                 &mock_systems,
                 Some(&cf_state),
                 Some(&queue_notifier),
@@ -851,183 +1349,187 @@ async fn process_pending_commits(
             evaluate_with_nix_eval_jobs(
                 pool,
                 &commit,
+                attempt,
                 &flake,
                 &flake.repo_url,
                 &commit.git_commit_hash,
                 "all", // Evaluate all systems
                 &build_config,
                 &server_config,
-                &policies,
+                &policies_by_configuration,
                 Some(&cf_state), // Pass CFState for WebSocket broadcasting
                 Some(&queue_notifier),
             )
             .await
         };
 
+        // ── Helper: finalize cancellation side effects ──────────────────
+        // Shared by both the success and failure SupersededOrCancelled branches.
+        // Inline async closures are not stable, so we use a labelled block.
+        //
+        // The helper is inlined at each call site below using a macro-style
+        // comment so the borrow checker sees each use in its own scope.
+
         match eval_result {
-            Ok((results, policy_checks)) => {
-                // Broadcast completion status
-                crate::handlers::api::commits::broadcast_eval_status(
-                    &cf_state,
-                    commit.id,
-                    "complete".to_string(),
-                    Some(format!("Evaluated {} systems", results.len())),
-                )
-                .await;
-                crate::handlers::api::commits::broadcast_eval_log(
-                    &cf_state,
-                    commit.id,
-                    format!(
-                        "✅ Evaluation complete for commit {}",
-                        commit.git_commit_hash
-                    ),
-                )
-                .await;
+            Ok(plan) => {
+                let results = plan.results.clone();
+                let policy_checks = plan.policy_checks.clone();
 
-                // Cleanup WebSocket broadcast channel
-                crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
-
-                // ⬇️ mark COMPLETE
-                if let Err(e) = mark_commit_evaluation_complete(pool, commit.id).await {
-                    error!(
-                        "❌ Failed to mark commit {} evaluation complete: {}",
-                        commit.git_commit_hash, e
-                    );
-                }
-
-                // ⬇️ UPDATE CACHE with evaluation summary
-                if let Err(e) =
-                    update_commit_metadata_cache(pool, commit.id, &policy_checks, false).await
-                {
-                    error!(
-                        "❌ Failed to update commit metadata cache for {}: {}",
-                        commit.git_commit_hash, e
-                    );
-                }
-
-                // ⬇️ CREATE BUILD JOBS for evaluated derivations
-                match create_build_jobs_for_commit(pool, commit.id).await {
-                    Ok(job_count) if job_count > 0 => {
-                        info!(
-                            "📋 Queued {} build jobs for commit {}, notifying build workers",
-                            job_count, commit.git_commit_hash
-                        );
-                        // Notify build queue that new work is available
-                        queue_notifier.notify_build_queue();
-                    }
-                    Ok(_) => {
-                        debug!(
-                            "No new build jobs for commit {} (already queued or no ready derivations)",
-                            commit.git_commit_hash
-                        );
-                    }
+                info!(
+                    commit_id = commit.id,
+                    expected_attempt = attempt,
+                    "commit_evaluation_finalization_started"
+                );
+                match finalize_evaluation_attempt(pool, commit.id, attempt, &plan).await {
                     Err(e) => {
-                        error!(
-                            "❌ Failed to create build jobs for commit {}: {}",
-                            commit.git_commit_hash, e
-                        );
-                        // Don't fail the whole evaluation if job creation fails
+                        let error = e.context(format!(
+                            "Failed to atomically finalize commit {} evaluation (attempt {})",
+                            commit.git_commit_hash, attempt
+                        ));
+                        return handle_evaluation_attempt_failure(
+                            pool, &cf_state, &commit, attempt, &error,
+                        )
+                        .await;
                     }
-                }
-
-                match trigger_commit_hardening_scans(
-                    pool.clone(),
-                    commit.id,
-                    &flake.repo_url,
-                    &commit.git_commit_hash,
-                )
-                .await
-                {
-                    Ok(count) => {
-                        if count > 0 {
-                            info!(
-                                "🛡️ Queued {} hardening scans for commit {}",
-                                count, commit.git_commit_hash
+                    Ok(EvaluationFinalizeOutcome::Cancelled) => {
+                        if let Err(err) =
+                            crate::queries::commits::cleanup_partial_derivations_for_commit(
+                                pool, commit.id,
+                            )
+                            .await
+                        {
+                            warn!(
+                                "Failed to clean partial derivations for cancelled commit {}: {}",
+                                commit.id, err
                             );
                         }
+                        crate::handlers::api::commits::broadcast_eval_status(
+                            &cf_state,
+                            commit.id,
+                            "cancelled".to_string(),
+                            Some("Evaluation cancelled by user".to_string()),
+                        )
+                        .await;
+                        crate::handlers::api::commits::broadcast_eval_log(
+                            &cf_state,
+                            commit.id,
+                            "🚫 Evaluation cancelled by user".to_string(),
+                        )
+                        .await;
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
+                            .await;
+                        return Ok(());
                     }
-                    Err(err) => {
+                    Ok(EvaluationFinalizeOutcome::Superseded) => {
                         warn!(
-                            "Failed to queue hardening scans for commit {}: {}",
-                            commit.git_commit_hash, err
+                            "Commit {} evaluation superseded before finalization",
+                            commit.git_commit_hash
                         );
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
+                            .await;
+                        return Ok(());
                     }
-                }
+                    Ok(EvaluationFinalizeOutcome::Completed {
+                        derivations,
+                        queued_builds,
+                    }) => {
+                        // Atomic DB finalization succeeded — now safe to run all
+                        // external completion side effects.
 
-                let total = results.len();
-                let with_agent = policy_checks
-                    .iter()
-                    .filter(|check| check.cf_agent_enabled == Some(true))
-                    .count();
+                        if !queued_builds.is_empty() {
+                            info!(
+                                "📋 Queued {} build jobs for commit {}, notifying build workers",
+                                queued_builds.len(),
+                                commit.git_commit_hash
+                            );
+                            queue_notifier.notify_build_queue();
+                            broadcast_queued_builds(&cf_state, commit.id, &queued_builds).await;
+                        } else {
+                            debug!(
+                                "No new build jobs for commit {} (already queued or no ready derivations)",
+                                commit.git_commit_hash
+                            );
+                        }
 
-                info!(
-                    "✅ Evaluated {} NixOS configurations for commit {}",
-                    total, commit.git_commit_hash
-                );
-                info!(
-                    "   CF agent: {}/{} systems enabled ({:.1}%)",
-                    with_agent,
-                    policy_checks.len(),
-                    if policy_checks.len() > 0 {
-                        (with_agent as f64 / policy_checks.len() as f64) * 100.0
-                    } else {
-                        0.0
-                    }
-                );
+                        run_post_finalize_derivation_side_effects(pool, &derivations).await;
 
-                // Log any policy warnings
-                for check in policy_checks.iter().filter(|c| !c.meets_requirements) {
-                    for warning in &check.warnings {
-                        warn!("⚠️  {}: {}", check.system_name, warning);
+                        if server_config.auto_hardening_scans {
+                            match trigger_commit_hardening_scans(
+                                pool.clone(),
+                                commit.id,
+                                &flake.repo_url,
+                                &commit.git_commit_hash,
+                            )
+                            .await
+                            {
+                                Ok(count) if count > 0 => {
+                                    info!(
+                                        "🛡️ Queued {} hardening scans for commit {}",
+                                        count, commit.git_commit_hash
+                                    );
+                                }
+                                Ok(_) => {}
+                                Err(err) => {
+                                    warn!(
+                                        "Failed to queue hardening scans for commit {}: {}",
+                                        commit.git_commit_hash, err
+                                    );
+                                }
+                            }
+                        }
+
+                        let total = results.len();
+                        let with_agent = policy_checks
+                            .iter()
+                            .filter(|check| check.cf_agent_enabled == Some(true))
+                            .count();
+
+                        info!(
+                            "✅ Evaluated {} NixOS configurations for commit {}",
+                            total, commit.git_commit_hash
+                        );
+                        info!(
+                            "   CF agent: {}/{} systems enabled ({:.1}%)",
+                            with_agent,
+                            policy_checks.len(),
+                            if policy_checks.len() > 0 {
+                                (with_agent as f64 / policy_checks.len() as f64) * 100.0
+                            } else {
+                                0.0
+                            }
+                        );
+
+                        for check in policy_checks.iter().filter(|c| !c.meets_requirements) {
+                            for warning in &check.warnings {
+                                warn!("⚠️  {}: {}", check.system_name, warning);
+                            }
+                        }
+
+                        // Broadcast AFTER the CAS and all persistence are done.
+                        crate::handlers::api::commits::broadcast_eval_status(
+                            &cf_state,
+                            commit.id,
+                            "complete".to_string(),
+                            Some(format!("Evaluated {} systems", results.len())),
+                        )
+                        .await;
+                        crate::handlers::api::commits::broadcast_eval_log(
+                            &cf_state,
+                            commit.id,
+                            format!(
+                                "✅ Evaluation complete for commit {}",
+                                commit.git_commit_hash
+                            ),
+                        )
+                        .await;
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
+                            .await;
                     }
                 }
             }
             Err(e) => {
-                error!(
-                    "❌ Failed to evaluate commit {}: {}",
-                    commit.git_commit_hash, e
-                );
-
-                // Broadcast failure status
-                crate::handlers::api::commits::broadcast_eval_status(
-                    &cf_state,
-                    commit.id,
-                    "failed".to_string(),
-                    Some(format!("Evaluation failed: {}", e)),
-                )
-                .await;
-                crate::handlers::api::commits::broadcast_eval_log(
-                    &cf_state,
-                    commit.id,
-                    format!("❌ Evaluation failed: {}", e),
-                )
-                .await;
-
-                // Cleanup WebSocket broadcast channel
-                crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
-
-                // ⬇️ mark FAILED (function will set 'pending' or terminal 'failed'
-                // depending on attempt limit inside your SQL)
-                if let Err(mark_err) =
-                    mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await
-                {
-                    error!(
-                        "❌ Failed to mark commit {} evaluation failed: {}",
-                        commit.git_commit_hash, mark_err
-                    );
-                }
-
-                // ⬇️ UPDATE CACHE to record eval error (no policy checks available)
-                if let Err(cache_err) =
-                    update_commit_metadata_cache(pool, commit.id, &[], true).await
-                {
-                    error!(
-                        "❌ Failed to update commit metadata cache for {}: {}",
-                        commit.git_commit_hash, cache_err
-                    );
-                }
-
-                return Ok(());
+                return handle_evaluation_attempt_failure(pool, &cf_state, &commit, attempt, &e)
+                    .await;
             }
         }
     }

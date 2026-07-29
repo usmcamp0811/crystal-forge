@@ -4,38 +4,166 @@ use anyhow::Result;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::hardening::scanner::ScanResult;
 use crate::hardening::types::{
     FleetHardeningSummary, HardeningJustification, HardeningScan, RiskLevel,
     ServiceHardeningResult, SystemHardeningPosture, TopVulnerableService,
 };
 use crate::models::hardening_scans::ScanStatus;
 
-/// Create a new hardening scan record.
+/// Idempotently enqueue a hardening scan for a derivation.
+///
+/// The `ON CONFLICT ... DO NOTHING` clause relies on the partial unique index
+/// added by migration 0188:
+///
+///   UNIQUE (derivation_id) WHERE status IN ('pending', 'in_progress')
+///
+/// This means concurrent callers can never create two active rows for the same
+/// derivation.  If a row already exists, the INSERT is silently skipped and
+/// the function returns the existing scan ID instead.
+///
+/// IMPORTANT: This function only writes a database row.  It does NOT spawn a
+/// task or start a subprocess.  The actual `nix eval` is performed later by
+/// `run_hardening_scan_queue` in `services/hardening_scans.rs`.
 pub async fn create_hardening_scan(pool: &PgPool, derivation_id: i32) -> Result<Uuid> {
     let scan_id = Uuid::new_v4();
 
-    sqlx::query!(
+    let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO hardening_scans (
             id, derivation_id, status, attempts,
             total_services, well_hardened_count, moderately_hardened_count,
             poorly_hardened_count, vulnerable_count
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ) VALUES ($1, $2, 'pending', 0, 0, 0, 0, 0, 0)
+        ON CONFLICT (derivation_id)
+          WHERE status IN ('pending', 'in_progress')
+        DO NOTHING
+        RETURNING id
         "#,
-        scan_id,
-        derivation_id,
-        "pending" as &str,
-        0i32,
-        0i32,
-        0i32,
-        0i32,
-        0i32,
-        0i32
+    )
+    .bind(scan_id)
+    .bind(derivation_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(id) = inserted {
+        return Ok(id);
+    }
+
+    get_active_scan_for_derivation(pool, derivation_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("active hardening scan disappeared during enqueue"))
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ClaimedHardeningScan {
+    pub id: Uuid,
+    pub derivation_id: i32,
+    pub config_name: String,
+    pub repo_url: String,
+    pub commit_hash: String,
+    pub attempts: i32,
+}
+
+/// PostgreSQL advisory lock key used to serialize hardening scan claims and
+/// stale recovery across multiple server processes.  Held only for the duration
+/// of the claim transaction (milliseconds), NOT for the duration of the scan.
+///
+/// This is distinct from `HEAVY_NIX_ADVISORY_LOCK` in `evaluate_with_policies.rs`,
+/// which is held for the entire `nix eval` subprocess lifetime to prevent bulk
+/// evaluation and hardening from overlapping.  Using separate keys lets the
+/// claim step itself remain lightweight.
+const HARDENING_CLAIM_ADVISORY_LOCK: i64 = 0x4346_4841_5244;
+
+/// Atomically claim the oldest pending hardening scan.
+///
+/// Uses a transaction-scoped PostgreSQL advisory lock to serialize concurrent
+/// claim attempts across multiple server or worker processes.  `SKIP LOCKED`
+/// makes the inner SELECT non-blocking: if another transaction already holds a
+/// row lock (e.g. during stale recovery), this call simply returns `None` and
+/// the caller will retry on the next poll tick.
+///
+/// The global `in_progress` partial unique index (migration 0188) provides an
+/// additional database-level guard: even if two processes race past the advisory
+/// lock, only one UPDATE can succeed.
+pub async fn claim_next_hardening_scan(pool: &PgPool) -> Result<Option<ClaimedHardeningScan>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(HARDENING_CLAIM_ADVISORY_LOCK)
+        .execute(&mut *tx)
+        .await?;
+
+    let claimed = sqlx::query_as::<_, ClaimedHardeningScan>(
+        r#"
+        WITH candidate AS (
+            SELECT hs.id
+            FROM hardening_scans hs
+            WHERE hs.status = 'pending'
+              AND NOT EXISTS (
+                  SELECT 1 FROM hardening_scans active
+                  WHERE active.status = 'in_progress'
+              )
+            ORDER BY hs.scheduled_at ASC, hs.id ASC
+            LIMIT 1
+            FOR UPDATE OF hs SKIP LOCKED
+        ), claimed AS (
+            UPDATE hardening_scans hs
+            SET status = 'in_progress',
+                started_at = NOW(),
+                completed_at = NULL,
+                attempts = hs.attempts + 1
+            FROM candidate
+            WHERE hs.id = candidate.id
+            RETURNING hs.id, hs.derivation_id, hs.attempts
+        )
+        SELECT claimed.id,
+               claimed.derivation_id,
+               d.derivation_name AS config_name,
+               f.repo_url,
+               c.git_commit_hash AS commit_hash,
+               claimed.attempts
+        FROM claimed
+        JOIN derivations d ON d.id = claimed.derivation_id
+        JOIN commits c ON c.id = d.commit_id
+        JOIN flakes f ON f.id = c.flake_id
+        "#,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(claimed)
+}
+
+/// Recover work abandoned by a crashed worker. A five-minute subprocess
+/// deadline plus a two-minute cleanup margin defines staleness.
+pub async fn recover_stale_hardening_scans(pool: &PgPool) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE hardening_scans
+        SET status = CASE WHEN attempts < 3 THEN 'pending' ELSE 'failed' END,
+            started_at = NULL,
+            completed_at = CASE WHEN attempts < 3 THEN NULL ELSE NOW() END,
+            scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+              || jsonb_build_object(
+                  'recovered_at', NOW(),
+                  'recovery_reason', 'stale hardening worker claim'
+              )
+        WHERE status = 'in_progress'
+          AND started_at < NOW() - INTERVAL '7 minutes'
+        "#,
     )
     .execute(pool)
     .await?;
+    Ok(result.rows_affected())
+}
 
-    Ok(scan_id)
+pub async fn hardening_queue_depth(pool: &PgPool) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM hardening_scans WHERE status = 'pending'",
+    )
+    .fetch_one(pool)
+    .await?)
 }
 
 /// Mark a scan as in progress.
@@ -118,6 +246,112 @@ pub async fn mark_scan_failed(pool: &PgPool, scan_id: Uuid, error_message: &str)
     .execute(pool)
     .await?;
 
+    Ok(())
+}
+
+/// Persist all service rows and the completed scan summary atomically using a
+/// single database connection and one batched UNNEST insert.
+pub async fn persist_completed_hardening_scan(
+    pool: &PgPool,
+    scan_id: Uuid,
+    scan: &ScanResult,
+    scan_duration_ms: i32,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("DELETE FROM service_hardening_results WHERE scan_id = $1")
+        .bind(scan_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let mut names = Vec::with_capacity(scan.services.len());
+    let mut service_types = Vec::with_capacity(scan.services.len());
+    let mut scores = Vec::with_capacity(scan.services.len());
+    let mut risk_levels = Vec::with_capacity(scan.services.len());
+    let mut directives = Vec::with_capacity(scan.services.len());
+    let mut enabled = Vec::with_capacity(scan.services.len());
+    let mut disabled = Vec::with_capacity(scan.services.len());
+    let mut missing = Vec::with_capacity(scan.services.len());
+
+    for service in &scan.services {
+        names.push(service.name.clone());
+        service_types.push(service.service_type.clone());
+        scores.push(service.score_result.score);
+        risk_levels.push(match service.score_result.risk_level {
+            RiskLevel::WellHardened => "well_hardened".to_string(),
+            RiskLevel::ModeratelyHardened => "moderately_hardened".to_string(),
+            RiskLevel::PoorlyHardened => "poorly_hardened".to_string(),
+            RiskLevel::Vulnerable => "vulnerable".to_string(),
+        });
+        directives.push(serde_json::to_value(&service.score_result.directives)?);
+        enabled.push(service.score_result.enabled_count);
+        disabled.push(service.score_result.disabled_count);
+        missing.push(service.score_result.missing_count);
+    }
+
+    if !names.is_empty() {
+        sqlx::query(
+            r#"
+            INSERT INTO service_hardening_results (
+                id, scan_id, service_name, service_type, hardening_score,
+                risk_level, directives_detail, enabled_directives_count,
+                disabled_directives_count, missing_directives_count
+            )
+            SELECT gen_random_uuid(), $1, rows.*
+            FROM UNNEST(
+                $2::text[], $3::text[], $4::integer[], $5::text[],
+                $6::jsonb[], $7::integer[], $8::integer[], $9::integer[]
+            ) AS rows(
+                service_name, service_type, hardening_score, risk_level,
+                directives_detail, enabled_directives_count,
+                disabled_directives_count, missing_directives_count
+            )
+            "#,
+        )
+        .bind(scan_id)
+        .bind(&names)
+        .bind(&service_types)
+        .bind(&scores)
+        .bind(&risk_levels)
+        .bind(&directives)
+        .bind(&enabled)
+        .bind(&disabled)
+        .bind(&missing)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let updated = sqlx::query(
+        r#"
+        UPDATE hardening_scans
+        SET status = 'completed',
+            completed_at = NOW(),
+            total_services = $2,
+            well_hardened_count = $3,
+            moderately_hardened_count = $4,
+            poorly_hardened_count = $5,
+            vulnerable_count = $6,
+            overall_score = $7,
+            scan_duration_ms = $8
+        WHERE id = $1 AND status = 'in_progress'
+        "#,
+    )
+    .bind(scan_id)
+    .bind(scan.total_services)
+    .bind(scan.well_hardened_count)
+    .bind(scan.moderately_hardened_count)
+    .bind(scan.poorly_hardened_count)
+    .bind(scan.vulnerable_count)
+    .bind(scan.overall_score)
+    .bind(scan_duration_ms)
+    .execute(&mut *tx)
+    .await?;
+
+    if updated.rows_affected() != 1 {
+        anyhow::bail!("hardening scan {scan_id} lost its in-progress claim before completion");
+    }
+
+    tx.commit().await?;
     Ok(())
 }
 

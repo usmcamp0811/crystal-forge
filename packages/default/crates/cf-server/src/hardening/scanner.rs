@@ -2,20 +2,57 @@
 //!
 //! Uses `nix eval` to extract systemd.services from NixOS configurations.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tracing::{debug, warn};
+use tokio::time::Duration;
+use tracing::debug;
+
+use crate::models::evaluate_with_policies::{
+    CappedOutput, NixEvalProcessGuard, heavy_nix_limiter, read_capped,
+};
 
 use super::scoring::{ServiceScoreResult, calculate_scan_statistics, calculate_service_score};
+
+const HARDENING_SCAN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const HARDENING_STDOUT_MAX_BYTES: usize = 64 * 1024 * 1024;
+const HARDENING_STDERR_MAX_BYTES: usize = 256 * 1024;
+
+async fn read_capped_with_overflow_signal<R>(
+    mut reader: R,
+    limit: usize,
+    overflow: std::sync::Arc<tokio::sync::Notify>,
+) -> std::io::Result<CappedOutput>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut output = CappedOutput::default();
+    let mut overflow_reported = false;
+    let mut chunk = [0u8; 8192];
+    loop {
+        let count = reader.read(&mut chunk).await?;
+        if count == 0 {
+            return Ok(output);
+        }
+        output.push(&chunk[..count], limit);
+        if output.is_truncated() && !overflow_reported {
+            overflow.notify_one();
+            overflow_reported = true;
+        }
+    }
+}
 
 /// Scanner for extracting systemd service hardening information.
 pub struct HardeningScanner {
     /// Optional Nix command override (for testing)
     nix_command: String,
+    timeout: Duration,
+    stdout_max_bytes: usize,
+    stderr_max_bytes: usize,
 }
 
 impl Default for HardeningScanner {
@@ -28,6 +65,9 @@ impl HardeningScanner {
     pub fn new() -> Self {
         Self {
             nix_command: "nix".to_string(),
+            timeout: HARDENING_SCAN_TIMEOUT,
+            stdout_max_bytes: HARDENING_STDOUT_MAX_BYTES,
+            stderr_max_bytes: HARDENING_STDERR_MAX_BYTES,
         }
     }
 
@@ -36,7 +76,17 @@ impl HardeningScanner {
     pub fn with_nix_command(nix_command: impl Into<String>) -> Self {
         Self {
             nix_command: nix_command.into(),
+            timeout: HARDENING_SCAN_TIMEOUT,
+            stdout_max_bytes: HARDENING_STDOUT_MAX_BYTES,
+            stderr_max_bytes: HARDENING_STDERR_MAX_BYTES,
         }
+    }
+
+    #[cfg(test)]
+    fn with_test_limits(mut self, timeout: Duration, stdout_max_bytes: usize) -> Self {
+        self.timeout = timeout;
+        self.stdout_max_bytes = stdout_max_bytes;
+        self
     }
 
     /// Extract systemd services configuration from a NixOS flake output.
@@ -55,7 +105,13 @@ impl HardeningScanner {
             config_name, flake_ref
         );
 
-        let output = Command::new(&self.nix_command)
+        let _heavy_nix_permit = heavy_nix_limiter()
+            .acquire_owned()
+            .await
+            .context("heavy Nix evaluation limiter was closed")?;
+
+        let mut command = Command::new(&self.nix_command);
+        command
             .args([
                 "eval",
                 "--json",
@@ -110,18 +166,105 @@ impl HardeningScanner {
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
-            .await
-            .context("Failed to execute nix eval")?;
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("nix eval failed: {}", stderr);
+        let child = command.spawn().context("Failed to execute nix eval")?;
+        let mut guard = NixEvalProcessGuard::from_spawned_child(child, "hardening nix eval")?;
+        let leader_pid = guard
+            .child_mut()
+            .id()
+            .context("hardening nix eval lost its leader PID")?;
+        let pgid = guard.pgid();
+        let stdout = guard
+            .child_mut()
+            .stdout
+            .take()
+            .context("hardening nix eval stdout was not piped")?;
+        let stderr = guard
+            .child_mut()
+            .stderr
+            .take()
+            .context("hardening nix eval stderr was not piped")?;
+        let overflow = std::sync::Arc::new(tokio::sync::Notify::new());
+        let mut stdout_task = tokio::spawn(read_capped_with_overflow_signal(
+            stdout,
+            self.stdout_max_bytes,
+            overflow.clone(),
+        ));
+        let mut stderr_task = tokio::spawn(read_capped(stderr, self.stderr_max_bytes));
+
+        debug!(
+            process_kind = "hardening",
+            config_name, leader_pid, pgid, "heavy_nix_process_started"
+        );
+
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let status = tokio::select! {
+            status = guard.wait() => status.context("Failed to wait for hardening nix eval")?,
+            _ = overflow.notified() => {
+                guard.terminate().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                bail!(
+                    "hardening result exceeded stdout limit of {} bytes for {}",
+                    self.stdout_max_bytes,
+                    config_name
+                );
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                guard.terminate().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                bail!(
+                    "hardening scan timed out after {} seconds for {config_name}",
+                    self.timeout.as_secs_f64()
+                );
+            }
+        };
+
+        let drained = tokio::time::timeout_at(deadline, async {
+            tokio::join!(&mut stdout_task, &mut stderr_task)
+        })
+        .await;
+        let (stdout_result, stderr_result) = match drained {
+            Ok(results) => results,
+            Err(_) => {
+                guard.terminate().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                bail!("hardening scan timed out while draining evaluator output for {config_name}");
+            }
+        };
+        let stdout = stdout_result.context("hardening stdout reader task failed")??;
+        let stderr = stderr_result.context("hardening stderr reader task failed")??;
+
+        if stdout.is_truncated() {
+            guard.terminate().await;
+            bail!(
+                "hardening result exceeded stdout limit of {} bytes for {}",
+                self.stdout_max_bytes,
+                config_name
+            );
+        }
+        guard.disarm_after_output_drained();
+
+        debug!(
+            process_kind = "hardening",
+            config_name,
+            leader_pid,
+            pgid,
+            stdout_bytes = stdout.total_bytes,
+            "heavy_nix_process_finished"
+        );
+
+        if !status.success() {
+            bail!("nix eval failed: {}", stderr.diagnostic_excerpt(4096));
         }
 
-        let services: HashMap<String, SystemdServiceConfig> =
-            serde_json::from_slice(&output.stdout)
-                .context("Failed to parse nix eval output as JSON")?;
+        let services: HashMap<String, SystemdServiceConfig> = serde_json::from_slice(&stdout.bytes)
+            .context("Failed to parse nix eval output as JSON")?;
 
         debug!(
             "Found {} systemd services in {}",
@@ -296,6 +439,24 @@ pub struct ScanResult {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn test_script(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fake-nix");
+        std::fs::write(&path, format!("#!/bin/sh\n{contents}\n")).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        (directory, path)
+    }
+
+    #[cfg(unix)]
+    fn process_is_alive(pid: libc::pid_t) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
     #[test]
     fn test_should_skip_service() {
         // Should skip
@@ -354,5 +515,57 @@ mod tests {
         assert!(result.overall_score.is_some());
         let score = result.overall_score.unwrap();
         assert!(score > 0, "Score should be positive for hardened service");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn oversized_hardening_output_is_rejected_without_waiting_for_process_exit() {
+        let (_directory, script) =
+            test_script("i=0; while [ $i -lt 1024 ]; do printf x; i=$((i + 1)); done; sleep 60");
+        let scanner = HardeningScanner::with_nix_command(script.to_string_lossy())
+            .with_test_limits(Duration::from_secs(5), 64);
+
+        let started = std::time::Instant::now();
+        let error = scanner
+            .extract_services("ignored", "test")
+            .await
+            .expect_err("oversized stdout must fail the scan");
+
+        assert!(
+            error
+                .to_string()
+                .contains("exceeded stdout limit of 64 bytes")
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn timed_out_hardening_scan_kills_descendant_process_group() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("descendant.pid");
+        let script_body = format!("sleep 60 & echo $! > '{}'; wait", pid_file.display());
+        let (_script_directory, script) = test_script(&script_body);
+        let scanner = HardeningScanner::with_nix_command(script.to_string_lossy())
+            .with_test_limits(Duration::from_millis(100), 1024);
+
+        let error = scanner
+            .extract_services("ignored", "test")
+            .await
+            .expect_err("hung hardening scan must time out");
+        assert!(error.to_string().contains("timed out"));
+
+        let descendant_pid: libc::pid_t = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while process_is_alive(descendant_pid) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("timed-out hardening descendant must be killed and reaped");
     }
 }

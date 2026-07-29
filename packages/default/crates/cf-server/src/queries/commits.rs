@@ -278,60 +278,98 @@ pub async fn reset_stuck_commit_evaluations(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-/// Mark commit evaluation as started
+/// Outcome of attempting to start a commit evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalStartOutcome {
+    /// Evaluation started successfully; includes the current attempt number.
+    Started { attempt: i32 },
+    /// The commit is no longer pending (already started, cancelled, or
+    /// completed by another worker).
+    NoLongerPending,
+}
+
+/// Atomically claim a pending commit for evaluation.
 ///
-/// This will fail if another commit is already in_progress due to the unique constraint
-/// enforced by idx_commits_single_in_progress (migration 0088)
-pub async fn mark_commit_evaluation_started(pool: &PgPool, commit_id: i32) -> Result<()> {
-    sqlx::query!(
+/// Uses a compare-and-set pattern: only transitions `pending` → `in_progress`.
+/// Returns `Started` with the attempt count when the claim succeeds, or
+/// `NoLongerPending` when the commit is no longer in a startable state.
+/// This prevents resurrecting a cancelled evaluation (Race C in the review).
+pub async fn mark_commit_evaluation_started(
+    pool: &PgPool,
+    commit_id: i32,
+) -> Result<EvalStartOutcome> {
+    let row = sqlx::query_as::<_, (i32,)>(
         r#"
         UPDATE commits
         SET 
             evaluation_status = 'in_progress',
             evaluation_started_at = NOW(),
             evaluation_completed_at = NULL,
-            evaluation_attempt_count = COALESCE(evaluation_attempt_count, 0) + 1
+            evaluation_error_message = NULL,
+            evaluation_attempt_count = COALESCE(evaluation_attempt_count, 0) + 1,
+            cancellation_requested = FALSE
         WHERE id = $1
+          AND COALESCE(evaluation_status, 'pending') = 'pending'
+        RETURNING evaluation_attempt_count
         "#,
-        commit_id
     )
-    .execute(pool)
-    .await
-    .map_err(|e| {
-        // Check if this is a unique constraint violation (another commit is in_progress)
-        if let sqlx::Error::Database(ref db_err) = e {
-            if db_err.code().as_deref() == Some("23505") {
-                return anyhow::anyhow!(
-                    "Cannot start evaluation for commit {}: another commit is already being evaluated",
-                    commit_id
-                );
-            }
-        }
-        anyhow::anyhow!("Failed to mark commit {} as in_progress: {}", commit_id, e)
-    })?;
+    .bind(commit_id)
+    .fetch_optional(pool)
+    .await?;
 
-    Ok(())
+    match row {
+        Some((attempt,)) => Ok(EvalStartOutcome::Started { attempt }),
+        None => Ok(EvalStartOutcome::NoLongerPending),
+    }
 }
 
-/// Mark commit evaluation as successfully completed
-pub async fn mark_commit_evaluation_complete(pool: &PgPool, commit_id: i32) -> Result<()> {
-    sqlx::query(
+/// Outcome of attempting to mark a commit evaluation as complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalCompleteOutcome {
+    /// The evaluation was successfully marked complete.
+    Completed,
+    /// The row could not be updated — the evaluation may have been
+    /// cancelled or superseded by another transition.
+    SupersededOrCancelled,
+}
+
+/// Atomically mark a commit evaluation as complete (compare-and-set).
+///
+/// Only transitions `in_progress` → `complete` when cancellation has not
+/// been requested and the attempt count matches.  Returns
+/// `SupersededOrCancelled` if the row was already in a different state
+/// (e.g. cancelled), preventing a completion broadcast from overwriting
+/// a concurrent cancellation (Race B).
+pub async fn mark_commit_evaluation_complete(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+) -> Result<EvalCompleteOutcome> {
+    let result = sqlx::query(
         r#"
         UPDATE commits
         SET
             evaluation_status = 'complete',
             evaluation_completed_at = NOW(),
-            evaluation_error_message = NULL
+            evaluation_error_message = NULL,
+            cancellation_requested = FALSE
         WHERE id = $1
+          AND evaluation_status = 'in_progress'
+          AND COALESCE(cancellation_requested, FALSE) = FALSE
+          AND evaluation_attempt_count = $2
         "#,
     )
     .bind(commit_id)
+    .bind(expected_attempt)
     .execute(pool)
     .await?;
 
-    resolve_eval_attention_unless_failed(pool, commit_id).await;
-
-    Ok(())
+    if result.rows_affected() > 0 {
+        resolve_eval_attention_unless_failed(pool, commit_id).await;
+        Ok(EvalCompleteOutcome::Completed)
+    } else {
+        Ok(EvalCompleteOutcome::SupersededOrCancelled)
+    }
 }
 
 /// Resolve the evaluation-failure attention occurrence for a commit, but
@@ -406,7 +444,25 @@ async fn resolve_eval_attention_unless_failed(pool: &PgPool, commit_id: i32) {
     }
 }
 
+/// Outcome of attempting to mark a commit evaluation as failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalFailureOutcome {
+    /// The evaluation was marked for retry (will become `pending`).
+    RetryScheduled,
+    /// The evaluation is permanently failed (attempt limit reached).
+    PermanentlyFailed,
+    /// The evaluation state was superseded or cancelled — no failure
+    /// metadata or broadcast should be emitted.
+    SupersededOrCancelled,
+}
+
 /// Mark commit evaluation as failed (with retry logic)
+///
+/// Atomically transitions `in_progress` → `pending`/`failed` only when
+/// cancellation has not been requested and the attempt count matches.
+/// Returns `SupersededOrCancelled` if the row is not in `in_progress` or
+/// cancellation was requested, preventing the generic failure handler
+/// from overwriting a concurrent cancellation.
 ///
 /// Retries up to 3 times with exponential backoff:
 /// - Attempt 1: immediate
@@ -419,7 +475,8 @@ pub async fn mark_commit_evaluation_failed(
     pool: &PgPool,
     commit_id: i32,
     error: &str,
-) -> Result<()> {
+    expected_attempt: i32,
+) -> Result<EvalFailureOutcome> {
     let row = sqlx::query(
         r#"
         UPDATE commits
@@ -434,13 +491,21 @@ pub async fn mark_commit_evaluation_failed(
             END,
             evaluation_error_message = $2
         WHERE id = $1
+          AND evaluation_status = 'in_progress'
+          AND COALESCE(cancellation_requested, FALSE) = FALSE
+          AND evaluation_attempt_count = $3
         RETURNING evaluation_status, evaluation_completed_at
         "#,
     )
     .bind(commit_id)
     .bind(error)
-    .fetch_one(pool)
+    .bind(expected_attempt)
+    .fetch_optional(pool)
     .await?;
+
+    let Some(row) = row else {
+        return Ok(EvalFailureOutcome::SupersededOrCancelled);
+    };
 
     let status: &str = row.try_get("evaluation_status")?;
     if status == "failed" {
@@ -449,9 +514,10 @@ pub async fn mark_commit_evaluation_failed(
         if let Some(completed_at) = completed_at {
             open_eval_attention_if_current(pool, commit_id, completed_at).await;
         }
+        Ok(EvalFailureOutcome::PermanentlyFailed)
+    } else {
+        Ok(EvalFailureOutcome::RetryScheduled)
     }
-
-    Ok(())
 }
 
 /// Open (or observe) the evaluation-failure attention occurrence for a
@@ -554,6 +620,7 @@ async fn open_eval_attention_if_current(
 /// - evaluation_status → 'pending'
 /// - evaluation_attempt_count → 0
 /// - evaluation_error_message → NULL
+/// - cancellation_requested → FALSE (so stale finalizer cannot cancel the reset evaluation)
 ///
 /// Use this for manual re-evaluation after fixing issues.
 pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()> {
@@ -571,7 +638,8 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
             evaluation_attempt_count = 0,
             evaluation_started_at = NULL,
             evaluation_completed_at = NULL,
-            evaluation_error_message = NULL
+            evaluation_error_message = NULL,
+            cancellation_requested = FALSE
         WHERE id = $1
         RETURNING id, git_commit_hash
         "#,
@@ -633,12 +701,18 @@ pub async fn list_eval_queue(pool: &PgPool, limit: i64) -> Result<Vec<EvalQueueR
                 FROM derivations d
                 WHERE d.commit_id = c.id
                   AND d.cf_agent_enabled IS TRUE
+                  AND d.policy_requirements_met IS TRUE
+                  AND d.status_id <> 6
             ), 0) AS passed_count,
             COALESCE((
                 SELECT COUNT(*)::bigint
                 FROM derivations d
                 WHERE d.commit_id = c.id
-                  AND d.cf_agent_enabled IS FALSE
+                  AND d.status_id <> 6
+                  AND (
+                    d.cf_agent_enabled IS FALSE
+                    OR d.policy_requirements_met IS FALSE
+                  )
             ), 0) AS policy_failed_count,
             COALESCE((
                 SELECT COUNT(*)::bigint
@@ -780,57 +854,66 @@ fn validate_eval_queue_reorder_payload(
 /// - `pending → cancelled` immediately (sets cancellation_requested = FALSE)
 /// - `in_progress → cancelling` (sets cancellation_requested = TRUE so the loop kills the subprocess)
 /// - Returns `NotFound` if no matching row, `AlreadyTerminal` for complete/failed/cancelled rows.
+///
+/// NOTE: Uses `UPDATE ... RETURNING` so the returned outcome reflects an actual
+/// row transition, avoiding the TOCTOU race between a SELECT and subsequent UPDATE.
 pub async fn cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<CancelEvalOutcome> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        evaluation_status: Option<String>,
+    // Try pending -> cancelled first (no in-flight worker to coordinate with).
+    let updated = sqlx::query_scalar::<_, i32>(
+        r#"
+        UPDATE commits
+        SET evaluation_status = 'cancelled',
+            cancellation_requested = FALSE,
+            evaluation_completed_at = NOW()
+        WHERE id = $1
+          AND COALESCE(evaluation_status, 'pending') = 'pending'
+        RETURNING id
+        "#,
+    )
+    .bind(commit_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if updated.is_some() {
+        info!("🚫 Cancelled pending evaluation for commit {commit_id}");
+        return Ok(CancelEvalOutcome::Cancelled);
     }
 
-    let current = sqlx::query_as::<_, Row>("SELECT evaluation_status FROM commits WHERE id = $1")
-        .bind(commit_id)
-        .fetch_optional(pool)
-        .await?;
+    // Try in_progress -> cancelling (worker will see cancellation_requested
+    // in its poll loop and kill the subprocess cooperatively).
+    let updated = sqlx::query_scalar::<_, i32>(
+        r#"
+        UPDATE commits
+        SET evaluation_status = 'cancelling',
+            cancellation_requested = TRUE
+        WHERE id = $1
+          AND evaluation_status = 'in_progress'
+        RETURNING id
+        "#,
+    )
+    .bind(commit_id)
+    .fetch_optional(pool)
+    .await?;
 
-    let Some(row) = current else {
-        return Ok(CancelEvalOutcome::NotFound);
-    };
+    if updated.is_some() {
+        info!("🔄 Requested cancellation for in-progress evaluation commit {commit_id}");
+        return Ok(CancelEvalOutcome::CancellingInProgress);
+    }
 
-    match row.evaluation_status.as_deref().unwrap_or("pending") {
-        "pending" => {
-            sqlx::query(
-                r#"
-                UPDATE commits
-                SET evaluation_status = 'cancelled',
-                    cancellation_requested = FALSE,
-                    evaluation_completed_at = NOW()
-                WHERE id = $1
-                  AND COALESCE(evaluation_status, 'pending') = 'pending'
-                "#,
-            )
+    // No transition occurred — determine the current state for a meaningful response.
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
             .bind(commit_id)
-            .execute(pool)
-            .await?;
-            info!("🚫 Cancelled pending evaluation for commit {commit_id}");
-            Ok(CancelEvalOutcome::Cancelled)
-        }
-        "in_progress" => {
-            sqlx::query(
-                r#"
-                UPDATE commits
-                SET evaluation_status = 'cancelling',
-                    cancellation_requested = TRUE
-                WHERE id = $1
-                  AND evaluation_status = 'in_progress'
-                "#,
-            )
-            .bind(commit_id)
-            .execute(pool)
-            .await?;
-            info!("🔄 Requested cancellation for in-progress evaluation commit {commit_id}");
-            Ok(CancelEvalOutcome::CancellingInProgress)
-        }
-        "complete" | "failed" | "cancelled" => Ok(CancelEvalOutcome::AlreadyTerminal),
-        _ => Ok(CancelEvalOutcome::NotFound),
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+
+    match current.as_deref() {
+        None => Ok(CancelEvalOutcome::NotFound),
+        Some("complete" | "failed" | "cancelled") => Ok(CancelEvalOutcome::AlreadyTerminal),
+        // cancelling means a prior cancellation took effect between our updates.
+        Some("cancelling") => Ok(CancelEvalOutcome::CancellingInProgress),
+        Some(_) => Ok(CancelEvalOutcome::AlreadyTerminal),
     }
 }
 
@@ -846,6 +929,11 @@ pub async fn cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<C
 /// sets cancellation_requested and lets the loop kill the process cooperatively),
 /// then use force-cancel only if it gets stuck in `cancelling`.
 ///
+/// NOTE: does NOT clear `cancellation_requested` so a still-running evaluator
+/// can detect the cancellation via its poll loop and return a typed
+/// `EvaluationCancelled` error, which the outer handler treats as a
+/// cancellation rather than a generic failure.
+///
 /// Returns `true` if the row was updated, `false` if it was already in a
 /// different state (idempotent).
 pub async fn force_cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<bool> {
@@ -853,7 +941,6 @@ pub async fn force_cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Re
         r#"
         UPDATE commits
         SET evaluation_status = 'cancelled',
-            cancellation_requested = FALSE,
             evaluation_completed_at = COALESCE(evaluation_completed_at, NOW())
         WHERE id = $1
           AND evaluation_status = 'cancelling'
@@ -881,6 +968,82 @@ pub async fn check_cancellation_requested(pool: &PgPool, commit_id: i32) -> Resu
             .fetch_optional(pool)
             .await?;
     Ok(flag.unwrap_or(false))
+}
+
+/// Outcome of attempting to finalize an evaluation cancellation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalCancellationOutcome {
+    /// The cancellation was finalized (row transitioned to cancelled).
+    Cancelled,
+    /// Already in a terminal cancelled state (idempotent).
+    AlreadyCancelled,
+    /// The evaluation attempt does not match (stale worker) or
+    /// the commit is in a terminal complete/failed state.
+    Superseded,
+}
+
+/// Atomically finalize a user-requested evaluation cancellation.
+///
+/// Transitions `cancelling` or `in_progress` (with `cancellation_requested`)
+/// commits to `cancelled`, clears the request flag, and records completion
+/// time — but only when the evaluation attempt matches. This prevents a
+/// stale worker from finalizing a cancellation against a newer attempt
+/// (P1-4 fix).
+///
+/// Returns:
+/// - `Cancelled` when a transition actually occurred.
+/// - `AlreadyCancelled` when the commit is already in `cancelled` state.
+/// - `Superseded` when the attempt does not match or the commit is in a
+///    terminal complete/failed state.
+pub async fn finalize_requested_commit_evaluation_cancellation(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+) -> Result<EvalCancellationOutcome> {
+    let updated = sqlx::query_scalar::<_, i32>(
+        r#"
+        UPDATE commits
+        SET evaluation_status = 'cancelled',
+            cancellation_requested = FALSE,
+            evaluation_completed_at = COALESCE(
+                evaluation_completed_at,
+                NOW()
+            ),
+            evaluation_error_message = NULL
+        WHERE id = $1
+          AND evaluation_attempt_count = $2
+          AND (
+              evaluation_status = 'cancelling'
+              OR (
+                  evaluation_status = 'in_progress'
+                  AND cancellation_requested IS TRUE
+              )
+          )
+        RETURNING id
+        "#,
+    )
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .fetch_optional(pool)
+    .await?;
+
+    if updated.is_some() {
+        return Ok(EvalCancellationOutcome::Cancelled);
+    }
+
+    // No transition — check current state for a meaningful response.
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
+            .bind(commit_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+
+    match current.as_deref() {
+        Some("cancelled") => Ok(EvalCancellationOutcome::AlreadyCancelled),
+        // Any other existing state means this worker's attempt was superseded.
+        _ => Ok(EvalCancellationOutcome::Superseded),
+    }
 }
 
 /// Clean up partial derivations for a specific commit.
@@ -965,11 +1128,19 @@ pub async fn list_eval_history(
             COALESCE(CARDINALITY(cac.nixos_configurations), 0)::BIGINT AS system_count,
             COALESCE((
                 SELECT COUNT(*)::BIGINT FROM derivations d
-                WHERE d.commit_id = c.id AND d.cf_agent_enabled IS TRUE
+                WHERE d.commit_id = c.id
+                  AND d.cf_agent_enabled IS TRUE
+                  AND d.policy_requirements_met IS TRUE
+                  AND d.status_id <> 6
             ), 0)                           AS passed_count,
             COALESCE((
                 SELECT COUNT(*)::BIGINT FROM derivations d
-                WHERE d.commit_id = c.id AND d.cf_agent_enabled IS FALSE
+                WHERE d.commit_id = c.id
+                  AND d.status_id <> 6
+                  AND (
+                    d.cf_agent_enabled IS FALSE
+                    OR d.policy_requirements_met IS FALSE
+                  )
             ), 0)                           AS policy_failed_count,
             COALESCE((
                 SELECT COUNT(*)::BIGINT FROM derivations d
@@ -1038,8 +1209,16 @@ pub async fn list_eval_history(
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct EvalPolicySystemRow {
     pub system_name: String,
-    pub policy_status: String,
-    pub detail: Option<String>,
+    pub eval_status: String,
+    pub error_message: Option<String>,
+    pub policy_results: serde_json::Value,
+    /// NULL for rows written before the `policy_results` document existed
+    /// (migration 0185 backfill). A NULL value combined with an empty
+    /// `policy_results` document means the row has never been evaluated
+    /// under the new policy-result model and must be surfaced as
+    /// "legacy_unknown" rather than silently treated as passing or as an
+    /// infrastructure error.
+    pub policy_requirements_met: Option<bool>,
 }
 
 pub async fn fetch_eval_policy_matrix(
@@ -1051,18 +1230,12 @@ pub async fn fetch_eval_policy_matrix(
         SELECT
             d.derivation_name AS system_name,
             CASE
-                WHEN d.cf_agent_enabled IS TRUE THEN 'pass'
-                WHEN d.cf_agent_enabled IS FALSE THEN 'fail'
-                WHEN d.status_id = 6 OR d.error_message IS NOT NULL THEN 'warn'
-                ELSE 'warn'
-            END AS policy_status,
-            CASE
-                WHEN d.cf_agent_enabled IS FALSE
-                    THEN 'Crystal Forge agent is disabled. Enable with crystal-forge.agent.enable = true in your NixOS configuration.'
-                WHEN d.error_message IS NOT NULL
-                    THEN d.error_message
-                ELSE NULL
-            END AS detail
+                WHEN d.status_id = 6 THEN 'eval_failed'
+                ELSE 'evaluated'
+            END AS eval_status,
+            d.error_message,
+            d.policy_results,
+            d.policy_requirements_met
         FROM derivations d
         WHERE d.commit_id = $1
           AND d.derivation_type = 'nixos'
@@ -1145,7 +1318,7 @@ pub async fn fetch_eval_dependency_breakdown(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_eval_queue_reorder_payload;
+    use super::{fetch_eval_policy_matrix, validate_eval_queue_reorder_payload};
 
     #[test]
     fn reorder_validation_rejects_duplicates() {
@@ -1212,8 +1385,16 @@ mod tests {
     use super::{open_eval_attention_if_current, resolve_eval_attention_unless_failed};
     use sqlx::PgPool;
 
+    fn test_database_url() -> String {
+        std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect(
+                "CRYSTAL_FORGE_TEST_DATABASE_URL or DATABASE_URL must be set for database tests",
+            )
+    }
+
     async fn test_pool() -> PgPool {
-        PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"))
+        PgPool::connect(&test_database_url())
             .await
             .expect("failed to connect to test database")
     }
@@ -1281,10 +1462,12 @@ mod tests {
             "a delayed failure handler must not open an occurrence for a reset commit"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
-            .bind(commit_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1",
+        )
+        .bind(commit_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -1315,10 +1498,12 @@ mod tests {
             "a still-current failure must open its attention occurrence"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
-            .bind(commit_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1",
+        )
+        .bind(commit_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -1354,10 +1539,12 @@ mod tests {
             "resolve must not clear a newer failure's occurrence"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
-            .bind(commit_id.to_string())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1",
+        )
+        .bind(commit_id.to_string())
+        .execute(&pool)
+        .await;
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)
@@ -1397,10 +1584,628 @@ mod tests {
             "resolve must clear the occurrence once the commit is no longer failed"
         );
 
-        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1")
-            .bind(commit_id.to_string())
+        let _ = sqlx::query(
+            "DELETE FROM attention_occurrences WHERE category = 'evals' AND subject_id = $1",
+        )
+        .bind(commit_id.to_string())
+        .execute(&pool)
+        .await;
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
             .execute(&pool)
             .await;
+    }
+
+    // ── P1 state-machine regression tests ───────────────────────────────────
+    //
+    // These tests cover the race scenarios identified in the P1 review of
+    // MR !309.  Run against an isolated database:
+    //
+    //   DATABASE_URL=postgres://crystal_forge:password@localhost:3042/crystal_forge \
+    //     cargo test -p cf-server --lib queries::commits::tests \
+    //     -- --ignored --test-threads=1
+
+    use super::{
+        CancelEvalOutcome, EvalCancellationOutcome, EvalCompleteOutcome, EvalFailureOutcome,
+        EvalStartOutcome, cancel_commit_evaluation,
+        finalize_requested_commit_evaluation_cancellation, force_cancel_commit_evaluation,
+        mark_commit_evaluation_complete, mark_commit_evaluation_failed,
+        mark_commit_evaluation_started, reset_commit_evaluation,
+    };
+
+    async fn start_eval(pool: &PgPool, commit_id: i32) -> i32 {
+        match mark_commit_evaluation_started(pool, commit_id)
+            .await
+            .expect("start should succeed")
+        {
+            EvalStartOutcome::Started { attempt } => attempt,
+            EvalStartOutcome::NoLongerPending => panic!("commit should be pending"),
+        }
+    }
+
+    // ── Test 1: cancel-API pending race ────────────────────────────────────
+    // The cancel API reads pending, the worker wins first (pending→in_progress).
+    // The cancel UPDATE must affect zero rows and must NOT return Cancelled.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cancel_api_pending_race_does_not_return_cancelled_when_worker_wins() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        // Worker claims the commit first.
+        let _attempt = start_eval(&pool, commit_id).await;
+
+        // Cancel API now tries to cancel a "pending" commit — but it's already
+        // in_progress.  The outcome must be CancellingInProgress (not Cancelled).
+        let outcome = cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("cancel should not error");
+
+        assert_ne!(
+            outcome,
+            CancelEvalOutcome::Cancelled,
+            "cancel must not claim success when the worker already claimed in_progress"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 2: cancel-API completion race ────────────────────────────────
+    // Cancel reads in_progress; evaluation completes before the cancel UPDATE.
+    // Cancel must return AlreadyTerminal, not CancellingInProgress.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cancel_api_completion_race_returns_already_terminal_when_eval_wins() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let attempt = start_eval(&pool, commit_id).await;
+
+        // Evaluation completes first (CAS succeeds).
+        let complete = mark_commit_evaluation_complete(&pool, commit_id, attempt)
+            .await
+            .expect("complete should not error");
+        assert_eq!(complete, EvalCompleteOutcome::Completed);
+
+        // Cancel API must now see the terminal state.
+        let cancel = cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("cancel should not error");
+        assert_eq!(
+            cancel,
+            CancelEvalOutcome::AlreadyTerminal,
+            "cancel must not transition a complete commit"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 3: force-cancel then manual reset clears cancellation_requested ─
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn force_cancel_then_reset_clears_cancellation_requested() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let _attempt = start_eval(&pool, commit_id).await;
+
+        // cancel API: in_progress → cancelling
+        let cancel = cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("cancel should not error");
+        assert_eq!(cancel, CancelEvalOutcome::CancellingInProgress);
+
+        // force-cancel: cancelling → cancelled
+        let forced = force_cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("force cancel should not error");
+        assert!(forced, "force cancel should transition the row");
+
+        // Manual reset: cancelled → pending
+        reset_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("reset should not error");
+
+        // Verify cancellation_requested is now FALSE.
+        let flag: bool = sqlx::query_scalar(
+            "SELECT COALESCE(cancellation_requested, FALSE) FROM commits WHERE id = $1",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("query should succeed");
+
+        assert!(
+            !flag,
+            "cancellation_requested must be FALSE after manual reset"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 4: stale typed cancellation does not affect newer attempt ────
+    // Attempt 1 is force-cancelled. Manual reset intentionally resets the
+    // attempt counter, then a new attempt starts. The old finalizer (still
+    // carrying expected_attempt=1) must not cancel the reset evaluation.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn stale_cancellation_finalizer_does_not_affect_newer_attempt() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        // Attempt 1 starts, is cancelled.
+        let attempt1 = start_eval(&pool, commit_id).await;
+        cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("cancel should not error");
+        force_cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("force cancel should not error");
+
+        // Manual reset → pending.
+        reset_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("reset should not error");
+
+        // A new attempt starts. Because manual reset resets the attempt
+        // counter, this may reuse attempt number 1; stale cancellation is
+        // still prevented by status/cancellation_requested guards.
+        let attempt2 = start_eval(&pool, commit_id).await;
+        assert_eq!(
+            attempt1, attempt2,
+            "manual reset intentionally resets attempts"
+        );
+
+        // The stale worker for attempt 1 calls the finalizer with the old attempt.
+        let outcome = finalize_requested_commit_evaluation_cancellation(
+            &pool, commit_id, attempt1, // stale expected_attempt
+        )
+        .await
+        .expect("finalizer should not error");
+
+        assert_eq!(
+            outcome,
+            EvalCancellationOutcome::Superseded,
+            "stale finalizer must not affect the newer attempt"
+        );
+
+        // Verify attempt 2 is still in_progress.
+        let status: String =
+            sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
+                .bind(commit_id)
+                .fetch_one(&pool)
+                .await
+                .expect("query should succeed");
+        assert_eq!(
+            status, "in_progress",
+            "newer attempt must remain in_progress"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 5: complete CAS returns SupersededOrCancelled when cancellation wins ─
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn complete_cas_superseded_when_cancellation_wins() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let attempt = start_eval(&pool, commit_id).await;
+
+        // Cancellation wins — sets cancelling + cancellation_requested.
+        cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("cancel should not error");
+
+        // Completion CAS must fail because cancellation_requested = TRUE.
+        let complete = mark_commit_evaluation_complete(&pool, commit_id, attempt)
+            .await
+            .expect("complete should not error");
+        assert_eq!(
+            complete,
+            EvalCompleteOutcome::SupersededOrCancelled,
+            "complete CAS must fail when cancellation_requested is set"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 6: failure CAS returns SupersededOrCancelled when cancellation wins ─
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn failure_cas_superseded_when_cancellation_wins() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let attempt = start_eval(&pool, commit_id).await;
+
+        // Cancellation wins.
+        cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("cancel should not error");
+
+        // Failure CAS must fail because cancellation_requested = TRUE.
+        let fail = mark_commit_evaluation_failed(&pool, commit_id, "test error", attempt)
+            .await
+            .expect("fail should not error");
+        assert_eq!(
+            fail,
+            EvalFailureOutcome::SupersededOrCancelled,
+            "failure CAS must fail when cancellation_requested is set"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 7: finalize cancellation sets status=cancelled and clears flag ──
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalize_cancellation_transitions_cancelling_to_cancelled() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let attempt = start_eval(&pool, commit_id).await;
+
+        cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("cancel should not error");
+
+        // Finalizer with correct attempt must succeed.
+        let outcome = finalize_requested_commit_evaluation_cancellation(&pool, commit_id, attempt)
+            .await
+            .expect("finalizer should not error");
+        assert_eq!(outcome, EvalCancellationOutcome::Cancelled);
+
+        // Verify the DB state.
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            evaluation_status: String,
+            cancellation_requested: Option<bool>,
+        }
+        let row = sqlx::query_as::<_, Row>(
+            "SELECT evaluation_status, cancellation_requested FROM commits WHERE id = $1",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("query should succeed");
+
+        assert_eq!(row.evaluation_status, "cancelled");
+        assert!(
+            !row.cancellation_requested.unwrap_or(false),
+            "cancellation_requested must be cleared after finalization"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 8: finalize cancellation is idempotent (AlreadyCancelled) ───────
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalize_cancellation_is_idempotent_when_already_cancelled() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let attempt = start_eval(&pool, commit_id).await;
+        cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("cancel should not error");
+
+        // First finalization.
+        finalize_requested_commit_evaluation_cancellation(&pool, commit_id, attempt)
+            .await
+            .expect("first finalization should not error");
+
+        // Second finalization (same attempt) must be idempotent.
+        let second = finalize_requested_commit_evaluation_cancellation(&pool, commit_id, attempt)
+            .await
+            .expect("second finalization should not error");
+        assert_eq!(
+            second,
+            EvalCancellationOutcome::AlreadyCancelled,
+            "repeated finalization must return AlreadyCancelled"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 9: mark_commit_evaluation_started skips cancelled commits ────────
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn mark_evaluation_started_skips_cancelled_commit() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        // Commit is directly cancelled (no in-progress phase).
+        cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("cancel should not error");
+
+        let outcome = mark_commit_evaluation_started(&pool, commit_id)
+            .await
+            .expect("start should not error");
+        assert_eq!(
+            outcome,
+            EvalStartOutcome::NoLongerPending,
+            "cancelled commit must not be resurrected by mark_evaluation_started"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 11: cancel is idempotent on already-cancelled commit ─────────────
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cancel_api_idempotent_on_already_cancelled() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        // First cancel: pending → cancelled
+        let first = cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("first cancel should not error");
+        assert_eq!(first, CancelEvalOutcome::Cancelled);
+
+        // Second cancel: already terminal
+        let second = cancel_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("second cancel should not error");
+        assert_eq!(
+            second,
+            CancelEvalOutcome::AlreadyTerminal,
+            "repeated cancel must return AlreadyTerminal"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 12: complete CAS wins before cancellation flag set ───────────────
+    // If mark_commit_evaluation_complete is called before any cancellation
+    // request is made, it must succeed.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn complete_cas_wins_when_no_cancellation_requested() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let attempt = start_eval(&pool, commit_id).await;
+
+        // Complete without any cancellation → should win.
+        let result = mark_commit_evaluation_complete(&pool, commit_id, attempt)
+            .await
+            .expect("complete should not error");
+        assert_eq!(result, EvalCompleteOutcome::Completed);
+
+        let status: String =
+            sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
+                .bind(commit_id)
+                .fetch_one(&pool)
+                .await
+                .expect("query should succeed");
+        assert_eq!(status, "complete");
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 13: finalizer Superseded when commit is already complete ──────────
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalizer_superseded_when_commit_already_complete() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let attempt = start_eval(&pool, commit_id).await;
+        // Completion wins.
+        mark_commit_evaluation_complete(&pool, commit_id, attempt)
+            .await
+            .expect("complete should not error");
+
+        // Stale finalizer should see Superseded (not Cancelled).
+        let outcome = finalize_requested_commit_evaluation_cancellation(&pool, commit_id, attempt)
+            .await
+            .expect("finalizer should not error");
+        assert_eq!(
+            outcome,
+            EvalCancellationOutcome::Superseded,
+            "finalizer must return Superseded when commit already completed"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 14: mark_evaluation_failed retry increments attempt count ────────
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn failed_attempt_retry_increments_count() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        // Attempt 1 starts and fails (with retry).
+        let attempt1 = start_eval(&pool, commit_id).await;
+        let outcome1 = mark_commit_evaluation_failed(&pool, commit_id, "error1", attempt1)
+            .await
+            .expect("fail should not error");
+        // With attempt_count = 1 (< 3), should retry.
+        assert_eq!(outcome1, EvalFailureOutcome::RetryScheduled);
+
+        // Attempt 2 starts.
+        let attempt2 = start_eval(&pool, commit_id).await;
+        assert_eq!(
+            attempt2,
+            attempt1 + 1,
+            "attempt counter must increment on retry"
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // ── Test 10: complete CAS returns SupersededOrCancelled for wrong attempt ─
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn complete_cas_superseded_for_stale_attempt() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let attempt = start_eval(&pool, commit_id).await;
+
+        // Simulate a stale worker using attempt - 1.
+        let stale = attempt.saturating_sub(1);
+        let complete = mark_commit_evaluation_complete(&pool, commit_id, stale)
+            .await
+            .expect("complete should not error");
+        assert_eq!(
+            complete,
+            EvalCompleteOutcome::SupersededOrCancelled,
+            "CAS must fail for a stale attempt number"
+        );
+
+        // Actual attempt still wins.
+        let correct = mark_commit_evaluation_complete(&pool, commit_id, attempt)
+            .await
+            .expect("complete should not error");
+        assert_eq!(correct, EvalCompleteOutcome::Completed);
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    /// Verify that the eval_status CASE expression in
+    /// fetch_eval_policy_matrix distinguishes DryRunFailed (status_id = 6)
+    /// from all build-state statuses (7, 8, 10, 12) regardless of
+    /// error_message content.  Only status_id = 6 proves evaluation
+    /// failure; build errors must not render as nix_eval_failure.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn fetch_policy_matrix_distinguishes_eval_failure_from_build_errors() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        // Insert derivations with varying status_id and error_message combinations.
+        async fn insert_deriv(
+            pool: &PgPool,
+            commit_id: i32,
+            name: &str,
+            status: i32,
+            err: Option<&str>,
+        ) {
+            sqlx::query(
+                r#"
+                INSERT INTO derivations (
+                    commit_id, derivation_type, derivation_name, derivation_target,
+                    status_id, attempt_count, cf_agent_enabled, policy_requirements_met,
+                    policy_results, error_message
+                ) VALUES ($1, 'nixos', $2, $2, $3, 0, TRUE, TRUE, '{}'::jsonb, $4)
+                "#,
+            )
+            .bind(commit_id)
+            .bind(name)
+            .bind(status)
+            .bind(err)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+
+        insert_deriv(
+            &pool,
+            commit_id,
+            "eval-failed",
+            6,
+            Some("undefined variable 'foobar'"),
+        )
+        .await;
+        insert_deriv(&pool, commit_id, "build-queued", 7, None).await;
+        insert_deriv(&pool, commit_id, "build-building", 8, None).await;
+        insert_deriv(&pool, commit_id, "build-complete", 10, None).await;
+        insert_deriv(&pool, commit_id, "build-failed", 12, Some("gcc segfault")).await;
+        insert_deriv(
+            &pool,
+            commit_id,
+            "build-failed-witherr",
+            12,
+            Some("out of disk space"),
+        )
+        .await;
+        insert_deriv(&pool, commit_id, "build-complete-noerr", 10, None).await;
+
+        let rows = fetch_eval_policy_matrix(&pool, commit_id)
+            .await
+            .expect("fetch should succeed");
+
+        for row in &rows {
+            match row.system_name.as_str() {
+                "eval-failed" => {
+                    assert_eq!(
+                        row.eval_status, "eval_failed",
+                        "status_id=6 must produce eval_failed"
+                    );
+                }
+                other => {
+                    assert_eq!(
+                        row.eval_status, "evaluated",
+                        "status_id for {other} must produce 'evaluated', not 'eval_failed'"
+                    );
+                }
+            }
+        }
+
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
             .execute(&pool)

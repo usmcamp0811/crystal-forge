@@ -398,13 +398,12 @@ pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
     .await
     .context("Failed to collect build IDs for attention resolution during hard delete")?;
 
-    let commit_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id::text FROM commits WHERE flake_id = $1",
-    )
-    .bind(flake_id)
-    .fetch_all(&mut *tx)
-    .await
-    .context("Failed to collect commit IDs for attention resolution during hard delete")?;
+    let commit_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id::text FROM commits WHERE flake_id = $1")
+            .bind(flake_id)
+            .fetch_all(&mut *tx)
+            .await
+            .context("Failed to collect commit IDs for attention resolution during hard delete")?;
 
     sqlx::query(
         r#"
@@ -546,13 +545,12 @@ pub async fn reset_flake_source(
     .await
     .context("Failed to collect build IDs for attention resolution during source reset")?;
 
-    let commit_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id::text FROM commits WHERE flake_id = $1",
-    )
-    .bind(flake_id)
-    .fetch_all(&mut **tx)
-    .await
-    .context("Failed to collect commit IDs for attention resolution during source reset")?;
+    let commit_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id::text FROM commits WHERE flake_id = $1")
+            .bind(flake_id)
+            .fetch_all(&mut **tx)
+            .await
+            .context("Failed to collect commit IDs for attention resolution during source reset")?;
 
     sqlx::query(
         r#"
@@ -970,13 +968,14 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
     .await
     .context("Failed to collect build IDs for attention resolution during rewrite acceptance")?;
 
-    let commit_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id::text FROM commits WHERE flake_id = $1",
-    )
-    .bind(flake_id)
-    .fetch_all(&mut *tx)
-    .await
-    .context("Failed to collect commit IDs for attention resolution during rewrite acceptance")?;
+    let commit_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id::text FROM commits WHERE flake_id = $1")
+            .bind(flake_id)
+            .fetch_all(&mut *tx)
+            .await
+            .context(
+                "Failed to collect commit IDs for attention resolution during rewrite acceptance",
+            )?;
 
     sqlx::query(
         r#"
@@ -1182,13 +1181,12 @@ pub async fn cascade_delete_flake(
     // deadlocks, acquire each system's attention lock, and resolve both
     // `systems` and `environments` occurrences for them in the same
     // transaction.
-    let system_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT id FROM systems WHERE flake_id = $1 ORDER BY id ASC",
-    )
-    .bind(flake_id)
-    .fetch_all(&mut **tx)
-    .await
-    .context("Failed to read associated system IDs for cascade delete")?;
+    let system_ids: Vec<uuid::Uuid> =
+        sqlx::query_scalar("SELECT id FROM systems WHERE flake_id = $1 ORDER BY id ASC")
+            .bind(flake_id)
+            .fetch_all(&mut **tx)
+            .await
+            .context("Failed to read associated system IDs for cascade delete")?;
 
     for system_id in &system_ids {
         let sys_lock = format!("attention_occurrence:systems:{system_id}");
@@ -1243,13 +1241,14 @@ pub async fn cascade_delete_flake(
     .await
     .context("Failed to collect build IDs for attention resolution during cascade delete")?;
 
-    let commit_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id::text FROM commits WHERE flake_id = $1",
-    )
-    .bind(flake_id)
-    .fetch_all(&mut **tx)
-    .await
-    .context("Failed to collect commit IDs for attention resolution during cascade delete")?;
+    let commit_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id::text FROM commits WHERE flake_id = $1")
+            .bind(flake_id)
+            .fetch_all(&mut **tx)
+            .await
+            .context(
+                "Failed to collect commit IDs for attention resolution during cascade delete",
+            )?;
 
     sqlx::query(
         r#"
@@ -2026,9 +2025,11 @@ mod attention_lifecycle_tests {
     use super::*;
 
     async fn test_pool() -> PgPool {
-        PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"))
-            .await
-            .expect("failed to connect to test database")
+        PgPool::connect(
+            &std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests"),
+        )
+        .await
+        .expect("failed to connect to test database")
     }
 
     async fn insert_throwaway_flake(pool: &PgPool) -> i32 {
@@ -2037,7 +2038,9 @@ mod attention_lifecycle_tests {
             "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
         )
         .bind(format!("att-lifecycle-flake-{short}"))
-        .bind(format!("https://git.example/att-lifecycle-flake-{short}.git"))
+        .bind(format!(
+            "https://git.example/att-lifecycle-flake-{short}.git"
+        ))
         .fetch_one(pool)
         .await
         .expect("failed to insert throwaway test flake")
@@ -2240,7 +2243,10 @@ mod attention_lifecycle_tests {
         )
         .bind(uuid::Uuid::new_v4())
         .bind(system_id.to_string())
-        .bind(format!("system:{system_id}:offline:{}", uuid::Uuid::new_v4()))
+        .bind(format!(
+            "system:{system_id}:offline:{}",
+            uuid::Uuid::new_v4()
+        ))
         .bind(serde_json::json!({"reason": "offline"}))
         .execute(&pool)
         .await
@@ -2311,12 +2317,10 @@ mod attention_lifecycle_tests {
         );
 
         // Cleanup.
-        let _ = sqlx::query(
-            "DELETE FROM attention_occurrences WHERE subject_id = ANY($1)",
-        )
-        .bind::<Vec<String>>(vec![system_id.to_string(), env_id.to_string()])
-        .execute(&pool)
-        .await;
+        let _ = sqlx::query("DELETE FROM attention_occurrences WHERE subject_id = ANY($1)")
+            .bind::<Vec<String>>(vec![system_id.to_string(), env_id.to_string()])
+            .execute(&pool)
+            .await;
         let _ = sqlx::query("DELETE FROM systems WHERE id = $1")
             .bind(system_id)
             .execute(&pool)

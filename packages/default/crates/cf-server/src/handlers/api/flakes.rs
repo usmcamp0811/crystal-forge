@@ -18,13 +18,13 @@ use crate::api::models::{
 };
 use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth, RequireOperator};
 use crate::config::CrystalForgeConfig;
-use crate::flake::commits::{sync_flake_recorded, HistoryRewriteOutcome};
 use crate::flake::commits::{
     GitCommitMetadata, branch_exists, branch_exists_with_creds, get_commit_changed_files,
     get_commit_diff_with_creds, get_commit_metadata, get_commit_nixos_configurations,
     get_recent_branch_commit_hashes_with_creds, infer_default_branch,
     infer_default_branch_with_creds, is_history_rewrite_error,
 };
+use crate::flake::commits::{HistoryRewriteOutcome, sync_flake_recorded};
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
@@ -36,10 +36,10 @@ use crate::queries::flake_credentials::{
     delete_flake_credential, get_flake_credential, update_flake_credential, upsert_flake_credential,
 };
 use crate::queries::flakes::{
-    cascade_delete_flake, check_flake_dependencies,
-    count_systems_for_flake, create_or_mutate_flake, delete_flake_by_id,
-    fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
-    list_flake_registry, mutate_flake_locked, soft_delete_flake,
+    cascade_delete_flake, check_flake_dependencies, count_systems_for_flake,
+    create_or_mutate_flake, delete_flake_by_id, fetch_dashboard_flake_timelines,
+    fetch_flake_timelines, get_flake_by_id, get_flake_by_name, list_flake_registry,
+    mutate_flake_locked, soft_delete_flake,
 };
 use crate::queries::users::get_by_email;
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
@@ -1804,7 +1804,9 @@ pub async fn accept_flake_history_rewrite(
                 StatusCode::CONFLICT,
                 Json(ApiError {
                     error: "history_rewrite_superseded".to_string(),
-                    message: "Another flake sync superseded the rewrite acceptance. Retry the operation.".to_string(),
+                    message:
+                        "Another flake sync superseded the rewrite acceptance. Retry the operation."
+                            .to_string(),
                     details: None,
                 }),
             )

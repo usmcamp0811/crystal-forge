@@ -183,9 +183,9 @@ async fn main() -> anyhow::Result<()> {
     // Round 13: failure is fatal — the repair has been removed from the
     // periodic sweep and there is no retry path. A transient database error
     // would leave malformed attention state in place indefinitely.
-    let repaired = dedupe_open_occurrences(&background_pool)
-        .await
-        .context("failed to repair attention occurrences at startup — required before producers start")?;
+    let repaired = dedupe_open_occurrences(&background_pool).await.context(
+        "failed to repair attention occurrences at startup — required before producers start",
+    )?;
 
     if repaired > 0 {
         tracing::warn!("🧹 Deduped {repaired} duplicate open attention occurrence(s) on startup");

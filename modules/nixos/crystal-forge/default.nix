@@ -39,6 +39,7 @@
           eval_workers = cfg.server.eval_workers;
           eval_max_memory_mb = cfg.server.eval_max_memory_mb;
           eval_check_cache = cfg.server.eval_check_cache;
+          auto_hardening_scans = cfg.server.auto_hardening_scans;
           allow_private_cache_test_targets =
             cfg.server.allow_private_cache_test_targets;
           trust_forwarded_builder_https =
@@ -381,6 +382,11 @@
     ''}
 
     exec ${pkgs.crystal-forge.default.server}/bin/server "$@"
+  '';
+
+  hardeningWorkerScript = pkgs.writeShellScript "crystal-forge-hardening-worker" ''
+    export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
+    exec ${pkgs.crystal-forge.default.server}/bin/hardening-worker "$@"
   '';
 
   builderScript = pkgs.writeShellScript "crystal-forge-builder" ''
@@ -1449,6 +1455,48 @@ in {
       ];
     };
 
+    hardening = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = lib.mdDoc ''
+          Run the durable hardening scan worker separately from the API server.
+          Automatic enqueueing remains controlled by
+          `server.auto_hardening_scans` and defaults to disabled.
+        '';
+      };
+
+      systemd_memory_high = lib.mkOption {
+        type = lib.types.str;
+        default = "8G";
+        description = "MemoryHigh for the isolated hardening worker slice.";
+      };
+
+      systemd_memory_max = lib.mkOption {
+        type = lib.types.str;
+        default = "12G";
+        description = "MemoryMax for the isolated hardening worker slice.";
+      };
+
+      systemd_memory_swap_max = lib.mkOption {
+        type = lib.types.str;
+        default = "512M";
+        description = "MemorySwapMax for the isolated hardening worker slice.";
+      };
+
+      systemd_cpu_quota = lib.mkOption {
+        type = lib.types.int;
+        default = 200;
+        description = "CPU quota percentage for the hardening worker slice.";
+      };
+
+      systemd_tasks_max = lib.mkOption {
+        type = lib.types.int;
+        default = 512;
+        description = "Maximum tasks in the hardening worker cgroup.";
+      };
+    };
+
     server = {
       enable = lib.mkEnableOption "Crystal Forge Server";
       host = lib.mkOption {
@@ -1592,7 +1640,7 @@ in {
       };
       eval_workers = lib.mkOption {
         type = lib.types.int;
-        default = 4;
+        default = 2;
         description = lib.mdDoc ''
           Number of worker threads for nix-eval-jobs parallel evaluation.
           Set to 0 to automatically use the number of CPU cores available.
@@ -1606,10 +1654,13 @@ in {
         type = lib.types.int;
         default = 4096;
         description = lib.mdDoc ''
-          Maximum memory size per worker in MB for nix-eval-jobs.
+          Worker restart threshold in MB for nix-eval-jobs.
 
-          Each evaluation worker will be limited to this amount of memory.
-          Default is 4096 MB (4 GB) per worker.
+          nix-eval-jobs checks this threshold after evaluating an attribute and
+          then restarts an oversized worker. It is not a hard memory limit and
+          a worker can temporarily exceed it while evaluating an attribute.
+          Default is 4096 MB (4 GB) per worker. Use the server systemd memory
+          options for hard service-cgroup containment.
 
           Adjust based on available system memory and the number of workers.
         '';
@@ -1625,6 +1676,28 @@ in {
           already built (in local store or binary cache) vs need building.
 
           Disable if cache checking is slow or causing issues.
+        '';
+      };
+
+      # IMPORTANT: Keep this false (the default) on memory-constrained hosts.
+      # Setting it to true caused a production OOM on 2026-07-28: every
+      # finalized system re-enqueued the entire commit's derivation set, and
+      # each inserted row immediately spawned a full `nix eval` subprocess.
+      # Nine concurrent hardening evaluators overlapped one bulk nix-eval-jobs
+      # run, driving the server cgroup to 58.5 GiB / 1.9 GiB swap with 0 B
+      # available and the API unresponsive.
+      #
+      # When false, the crystal-forge-hardening worker still runs and processes
+      # scans queued via the manual API endpoint — only automatic post-commit
+      # enqueueing is suppressed.
+      auto_hardening_scans = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = lib.mdDoc ''
+          Automatically enqueue systemd hardening scans after successful commit
+          evaluation. Disabled by default because each scan performs an
+          expensive full NixOS evaluation. Manual scan requests remain
+          available when this option is disabled.
         '';
       };
 
@@ -1677,6 +1750,53 @@ in {
           values are the Crystal Forge role names (e.g., "admin", "user").
 
           Example: `{ "Admins" = "admin"; "Developers" = "user"; }`
+        '';
+      };
+
+      systemd_memory_max = lib.mkOption {
+        type = lib.types.nullOr (lib.types.either lib.types.int lib.types.str);
+        default = "75%";
+        example = "8G";
+        description = lib.mdDoc ''
+          Maximum memory limit for the server systemd unit (MemoryMax).
+          Passed as a systemd `MemoryMax` value (e.g. `"8G"` for 8 gibibytes).
+          Defaults to `"75%"` so the server and evaluator descendants cannot
+          consume all host memory. Set to `null` only when another cgroup
+          boundary provides an equivalent hard limit.
+        '';
+      };
+
+      systemd_memory_high = lib.mkOption {
+        type = lib.types.nullOr (lib.types.either lib.types.int lib.types.str);
+        default = "60%";
+        example = "6G";
+        description = lib.mdDoc ''
+          Memory throttling threshold (MemoryHigh).
+          Once exceeded, the unit is aggressively reclaimed.
+          Defaults to `"60%"` to begin reclaim before the hard limit.
+        '';
+      };
+
+      systemd_memory_swap_max = lib.mkOption {
+        type = lib.types.nullOr (lib.types.either lib.types.int lib.types.str);
+        default = "2G";
+        example = "4G";
+        description = lib.mdDoc ''
+          Maximum swap usage for the server systemd unit (MemorySwapMax).
+          Defaults to `"2G"` so evaluator descendants cannot exhaust host swap.
+          Set to `null` only when another cgroup boundary provides equivalent
+          swap containment.
+        '';
+      };
+
+      systemd_cpu_quota = lib.mkOption {
+        type = lib.types.nullOr lib.types.int;
+        default = null;
+        example = 400;
+        description = lib.mdDoc ''
+          CPU quota percentage for the server systemd unit (CPUQuota).
+          Example: `400` means up to 4 CPU cores.
+          Default is `null` (no limit).
         '';
       };
     };
@@ -1748,6 +1868,44 @@ in {
       "d /var/cache/crystal-forge/gc-roots 0755 crystal-forge crystal-forge -" # <-- ADD THIS
       "Z /var/lib/crystal-forge/ 0755 crystal-forge crystal-forge -"
     ];
+
+    # Aggregate resource boundary that caps the combined memory of the API
+    # server, the hardening worker, and all their Nix subprocess descendants.
+    # crystal-forge-server.service and crystal-forge-hardening.service must
+    # both set Slice = "crystal-forge.slice" to be covered by this boundary.
+    systemd.slices.crystal-forge = lib.mkIf cfg.server.enable {
+      description = "Crystal Forge aggregate resource boundary";
+      sliceConfig = {
+        MemoryHigh = "85%";
+        MemoryMax = "90%";
+        MemorySwapMax = "2G";
+        TasksMax = 4096;
+      };
+    };
+
+    # ── Slice hierarchy note ─────────────────────────────────────────────────
+    # systemd derives a slice's parent from its name by splitting on dashes,
+    # so the LEFTMOST prefix segments determine ancestry:
+    #
+    #   crystal-forge-hardening.slice
+    #       → parent: crystal-forge.slice   ✓  (what we want)
+    #
+    #   hardening-crystal-forge.slice
+    #       → parent: hardening.slice       ✗  (root level, NOT under crystal-forge)
+    #
+    # IMPORTANT: The slice attribute name and the Slice= assignment in
+    # crystal-forge-hardening.service MUST both use "crystal-forge-hardening"
+    # to achieve nesting under crystal-forge.slice.  Do not swap the words.
+    systemd.slices.crystal-forge-hardening = lib.mkIf (cfg.server.enable && cfg.hardening.enable) {
+      description = "Crystal Forge hardening worker resource boundary";
+      sliceConfig = {
+        MemoryHigh = cfg.hardening.systemd_memory_high;
+        MemoryMax = cfg.hardening.systemd_memory_max;
+        MemorySwapMax = cfg.hardening.systemd_memory_swap_max;
+        CPUQuota = toString cfg.hardening.systemd_cpu_quota + "%";
+        TasksMax = cfg.hardening.systemd_tasks_max;
+      };
+    };
 
     systemd.slices.crystal-forge-builds = lib.mkIf cfg.build.enable {
       description = "Crystal Forge Build Operations";
@@ -2222,6 +2380,67 @@ in {
         };
     });
 
+    systemd.services.crystal-forge-hardening = lib.mkIf (cfg.server.enable && cfg.hardening.enable) {
+      description = "Crystal Forge Hardening Worker";
+      wantedBy = ["multi-user.target"];
+      after = ["crystal-forge-server.service"] ++ lib.optional cfg.local-database "postgresql.service";
+      wants = ["crystal-forge-server.service"] ++ lib.optional cfg.local-database "postgresql.service";
+      startLimitIntervalSec = 300;
+      startLimitBurst = 2;
+
+      path = with pkgs; [nix git openssh coreutils];
+      environment = {
+        RUST_LOG = cfg.log_level;
+        TZDIR = "${pkgs.tzdata}/share/zoneinfo";
+        LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
+        NIX_REMOTE = "daemon";
+        HOME = "/var/lib/crystal-forge";
+        XDG_CONFIG_HOME = "/var/lib/crystal-forge/.config";
+        NIX_REGISTRY = "/dev/null";
+        NIX_CONFIG_DIR = "/dev/null";
+        NIX_USER_CONF_FILES = "/dev/null";
+        NIX_CONFIG = ''
+          experimental-features = nix-command flakes
+          flake-registry =
+        '';
+        GIT_SSH_COMMAND = "ssh -i /var/lib/crystal-forge/.ssh/id_ed25519 -o UserKnownHostsFile=/var/lib/crystal-forge/.ssh/known_hosts -o StrictHostKeyChecking=yes";
+        NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
+      };
+
+      preStart = ''
+        mkdir -p /run/crystal-forge
+        ${configScriptServer}
+      '';
+      serviceConfig = {
+        Type = "exec";
+        ExecStart = hardeningWorkerScript;
+        User = "crystal-forge";
+        Group = "crystal-forge";
+        WorkingDirectory = "/var/lib/crystal-forge";
+        # Must match the slice defined above.  "crystal-forge-hardening" nests
+        # under crystal-forge.slice.  "hardening-crystal-forge" would instead
+        # attach to the root-level hardening.slice — see slice hierarchy note.
+        Slice = "crystal-forge-hardening.slice";
+        EnvironmentFile = ["-${cfg.env-file}"];
+        # Kill all Nix subprocess descendants when the service stops or OOMs,
+        # not just the direct hardening-worker process.
+        KillMode = "control-group";
+        # If the kernel OOM-kills something in this cgroup, stop the whole
+        # service rather than leaving a partially-alive worker.
+        OOMPolicy = "stop";
+        Restart = "on-failure";
+        RestartSec = 30;
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ReadWritePaths = ["/var/lib/crystal-forge" "/var/cache/crystal-forge-nix"];
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+      };
+    };
+
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Server";
       wantedBy = ["multi-user.target"];
@@ -2322,6 +2541,10 @@ in {
         User = "crystal-forge";
         Group = "crystal-forge";
         WorkingDirectory = "/var/lib/crystal-forge";
+        # Place the API server in the aggregate crystal-forge.slice so its
+        # memory and the memory of all Nix subprocess descendants count toward
+        # the aggregate cap defined in systemd.slices.crystal-forge above.
+        Slice = "crystal-forge.slice";
 
         EnvironmentFile = ["-${cfg.env-file}"];
 
@@ -2355,6 +2578,29 @@ in {
 
         Restart = "always";
         RestartSec = 5;
+
+        # Resource limits — nix-eval-jobs workers are memory-intensive and
+        # the server must not exhaust the host under concurrent evaluation,
+        # build preparation, and closure counting. Defaults use host-relative
+        # memory limits plus a bounded swap allowance; deployments can override
+        # them with absolute values. Example for a 16 GB desktop host:
+        #   systemd_memory_high = "6G";
+        #   systemd_memory_max = "8G";
+        #   systemd_cpu_quota = 400;
+        MemoryHigh = lib.mkIf (cfg.server.systemd_memory_high != null)
+          (toString cfg.server.systemd_memory_high);
+        MemoryMax = lib.mkIf (cfg.server.systemd_memory_max != null)
+          (toString cfg.server.systemd_memory_max);
+        MemorySwapMax = lib.mkIf (cfg.server.systemd_memory_swap_max != null)
+          (toString cfg.server.systemd_memory_swap_max);
+        CPUQuota = lib.mkIf (cfg.server.systemd_cpu_quota != null)
+          "${toString cfg.server.systemd_cpu_quota}%";
+
+        # Kill the entire control group (including descendant nix-eval-jobs
+        # workers) when the service stops or restarts, preventing orphaned
+        # evaluator processes from accumulating.
+        KillMode = "control-group";
+        OOMPolicy = "stop";
       };
     };
 

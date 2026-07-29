@@ -53,6 +53,21 @@ pub struct ServerConfig {
     #[serde(default = "default_eval_check_cache")]
     pub eval_check_cache: bool,
 
+    /// Automatically enqueue hardening scans after successful commit evaluation.
+    ///
+    /// IMPORTANT: Keep this `false` (the default) on memory-constrained deployments.
+    /// Each hardening scan launches a full `nix eval` subprocess that can consume
+    /// several GiB of memory.  When `false`, scans must be triggered manually via
+    /// the API; the durable `crystal-forge-hardening` queue worker still runs and
+    /// will pick up any manually-enqueued scans.
+    ///
+    /// Setting this to `true` caused a production OOM incident on 2026-07-28:
+    /// nine concurrent hardening `nix eval` processes overlapped a bulk
+    /// `nix-eval-jobs` evaluation, driving the server cgroup to 58.5 GiB with
+    /// 1.9 GiB of swap and making the API unresponsive.
+    #[serde(default)]
+    pub auto_hardening_scans: bool,
+
     /// Authentication mode: "dev" or "oidc"
     /// Default: "oidc" (read from AUTH_MODE env var)
     #[serde(default = "default_auth_mode")]
@@ -211,6 +226,7 @@ impl Default for ServerConfig {
             eval_workers: default_eval_workers(),
             eval_max_memory_mb: default_eval_max_memory_mb(),
             eval_check_cache: default_eval_check_cache(),
+            auto_hardening_scans: false,
             auth_mode: default_auth_mode(),
             execution_mode: ExecutionMode::default(),
             allow_registration: false,
@@ -361,6 +377,15 @@ mod tests {
         assert!(
             !cfg.trust_forwarded_builder_https,
             "credential delivery must be opt-in, not opt-out"
+        );
+    }
+
+    #[test]
+    fn automatic_hardening_scans_default_false() {
+        let cfg = ServerConfig::default();
+        assert!(
+            !cfg.auto_hardening_scans,
+            "expensive hardening evaluations must require explicit opt-in"
         );
     }
 

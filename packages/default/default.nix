@@ -104,6 +104,7 @@ let
     cargoBuildFlags = [
       "--package" "cf-server"
       "--bin" "server"
+      "--bin" "hardening-worker"
       "--bin" "test-agent"
       "--features" "cf-server/embedded-ui"
     ];

@@ -108,7 +108,9 @@ async fn reconcile_system_attention_inner(
     .fetch_optional(&mut **tx)
     .await
     .context("failed to re-read system state")?
-    .ok_or_else(|| anyhow::anyhow!("system {system_id} not found during attention reconciliation"))?;
+    .ok_or_else(|| {
+        anyhow::anyhow!("system {system_id} not found during attention reconciliation")
+    })?;
 
     if health.is_empty() {
         anyhow::bail!("system {system_id} has empty health status during attention reconciliation");
@@ -344,13 +346,9 @@ async fn reconcile_system_attention_inner(
             // System is healthy/warning — resolve all open occurrences for
             // this system, which prevents the stale reconciler from racing
             // with our resolution by holding the same subject lock.
-            attention::resolve_open_occurrences_for_subject(
-                &mut **tx,
-                "systems",
-                &subject_id,
-            )
-            .await
-            .context("failed to resolve system attention occurrence")?;
+            attention::resolve_open_occurrences_for_subject(&mut **tx, "systems", &subject_id)
+                .await
+                .context("failed to resolve system attention occurrence")?;
 
             // Also resolve every open environment occurrence derived from
             // this system now that its underlying occurrence is resolved —
@@ -432,14 +430,8 @@ async fn reconcile_all_systems(pool: &PgPool) {
                     Ok(p) => p,
                     Err(_) => return, // semaphore closed — should not happen
                 };
-                reconcile_system_attention(
-                    &pool,
-                    system_id,
-                    &hostname,
-                    &health,
-                    environment_id,
-                )
-                .await;
+                reconcile_system_attention(&pool, system_id, &hostname, &health, environment_id)
+                    .await;
             }
         })
         .buffer_unordered(MAX_CONCURRENT)
@@ -725,8 +717,7 @@ async fn reconcile_synced_flakes_missing_resolution(pool: &PgPool) {
     };
 
     for (flake_id, attempt_id) in rows {
-        crate::flake::commits::resolve_flake_attention_if_current(pool, flake_id, attempt_id)
-            .await;
+        crate::flake::commits::resolve_flake_attention_if_current(pool, flake_id, attempt_id).await;
     }
 }
 
@@ -1149,12 +1140,10 @@ async fn open_eval_attention_if_current(
     commit_id: i32,
     expected_completed_at: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<()> {
-    let flake_id: Option<i32> = sqlx::query_scalar(
-        "SELECT flake_id FROM commits WHERE id = $1",
-    )
-    .bind(commit_id)
-    .fetch_optional(pool)
-    .await?;
+    let flake_id: Option<i32> = sqlx::query_scalar("SELECT flake_id FROM commits WHERE id = $1")
+        .bind(commit_id)
+        .fetch_optional(pool)
+        .await?;
     let Some(flake_id) = flake_id else {
         return Ok(());
     };
@@ -1505,14 +1494,12 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let attempt_id = uuid::Uuid::new_v4();
 
-        sqlx::query(
-            "UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2 WHERE id = $1",
-        )
-        .bind(flake_id)
-        .bind(attempt_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("UPDATE flakes SET sync_status = 'error', sync_attempt_id = $2 WHERE id = $1")
+            .bind(flake_id)
+            .bind(attempt_id)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         // A sync_error occurrence already exists (the normal, non-crashed
         // path) -- must be excluded by reason, not merely "any occurrence".
@@ -1599,13 +1586,12 @@ mod tests {
 
         // The stale_sync occurrence must be resolved, and a new sync_error
         // occurrence must be open in its place.
-        let stale_sync_resolved: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-            "SELECT resolved_at FROM attention_occurrences WHERE id = $1",
-        )
-        .bind(stale_sync_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let stale_sync_resolved: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT resolved_at FROM attention_occurrences WHERE id = $1")
+                .bind(stale_sync_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert!(
             stale_sync_resolved.is_some(),
             "the mismatched-reason stale_sync occurrence must be resolved"
@@ -1992,7 +1978,10 @@ mod tests {
 
         reconcile_cve_attention(&pool).await;
 
-        let (occurrence_opened, persisted_since): (Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+        let (occurrence_opened, persisted_since): (
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ) = sqlx::query_as(
             "SELECT \
                  (SELECT opened_at FROM attention_occurrences \
                   WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL LIMIT 1), \
@@ -2036,13 +2025,12 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        let first_fleet_relevant_since: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
-            "SELECT fleet_relevant_since FROM cves WHERE id = $1",
-        )
-        .bind(&cve_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let first_fleet_relevant_since: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT fleet_relevant_since FROM cves WHERE id = $1")
+                .bind(&cve_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
 
         // Make the CVE no longer relevant by whitelisting the vulnerability.
         sqlx::query(
@@ -2065,14 +2053,16 @@ mod tests {
         .unwrap();
         assert_eq!(resolved_count, 0, "CVE must be resolved after whitelisting");
 
-        let cleared_since: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-            "SELECT fleet_relevant_since FROM cves WHERE id = $1",
-        )
-        .bind(&cve_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(cleared_since.is_none(), "fleet_relevant_since must be cleared when resolved");
+        let cleared_since: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT fleet_relevant_since FROM cves WHERE id = $1")
+                .bind(&cve_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            cleared_since.is_none(),
+            "fleet_relevant_since must be cleared when resolved"
+        );
 
         // Second episode: remove whitelist and reconcile again.
         sqlx::query(
@@ -2093,13 +2083,12 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        let second_fleet_relevant_since: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
-            "SELECT fleet_relevant_since FROM cves WHERE id = $1",
-        )
-        .bind(&cve_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let second_fleet_relevant_since: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT fleet_relevant_since FROM cves WHERE id = $1")
+                .bind(&cve_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
 
         assert!(
             second_opened > first_opened,
@@ -2148,7 +2137,10 @@ mod tests {
 
         reconcile_cve_attention(&pool).await;
 
-        let (db_opened_at, persisted_since): (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+        let (db_opened_at, persisted_since): (
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        ) = sqlx::query_as(
             "SELECT \
                  (SELECT opened_at FROM attention_occurrences \
                   WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL LIMIT 1), \

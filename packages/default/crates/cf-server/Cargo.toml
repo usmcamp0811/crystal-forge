@@ -15,7 +15,8 @@ anyhow = "1.0.98"
 dotenvy = "0.15.7"
 envy = "0.4.2"
 sysinfo = "0.34.2"
-nix = { version = "0.30.1", default-features = false, features = ["inotify", "fs" ,"user"] }
+nix = { version = "0.30.1", default-features = false, features = ["inotify", "fs", "user", "signal", "process"] }
+libc = "0.2"
 postgres = "0.19.10"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
@@ -75,6 +76,10 @@ path = "src/bin/server.rs"
 [[bin]]
 name = "test-agent"
 path = "src/bin/test-agent.rs"
+
+[[bin]]
+name = "hardening-worker"
+path = "src/bin/hardening-worker.rs"
 
 [package.metadata.sqlx]
 offline = true
