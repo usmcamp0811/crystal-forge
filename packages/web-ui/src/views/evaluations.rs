@@ -780,32 +780,31 @@ fn EvaluationsPage() -> Element {
                             "History"
                             span { class: "sd-tab-badge", "{history_count}" }
                         }
-                        // Spacer — pushes Latest per flake + search to the right edge.
-                        span { class: "q-tabbar-spacer" }
-                        // Show a Shift-click hint only on History where Shift-click
-                        // actually toggles row selection.
-                        if active_tab() == EvaluationsTab::History && history_total_acc() > 0 {
-                            span {
-                                class: "ms-hint",
-                                title: "Shift-click to toggle row selection",
-                                kbd { "⇧" }
-                                "-click to select"
+                        div { class: "q-tabbar-actions",
+                            // Show a Shift-click hint only on History where Shift-click
+                            // actually toggles row selection.
+                            if active_tab() == EvaluationsTab::History && history_total_acc() > 0 {
+                                span {
+                                    class: "ms-hint",
+                                    title: "Shift-click to toggle row selection",
+                                    kbd { "⇧" }
+                                    "-click to select"
+                                }
                             }
-                        }
-                        button {
-                            class: if latest_filter().enabled() {
-                                "btn btn-ghost xs focus-ring active-filter"
-                            } else {
-                                "btn btn-ghost xs focus-ring"
-                            },
-                            title: "Show only the most recent evaluation per flake",
-                            aria_pressed: latest_filter().enabled(),
-                            onclick: move |_| latest_filter.with_mut(LatestFilterState::toggle),
-                            Icon { name: IconName::Star, size: 12 }
-                            "Latest per flake"
-                        }
-                        div {
-                            class: "q-search",
+                            button {
+                                class: if latest_filter().enabled() {
+                                    "btn btn-ghost xs focus-ring active-filter"
+                                } else {
+                                    "btn btn-ghost xs focus-ring"
+                                },
+                                title: "Show only the most recent evaluation per flake",
+                                aria_pressed: latest_filter().enabled(),
+                                onclick: move |_| latest_filter.with_mut(LatestFilterState::toggle),
+                                Icon { name: IconName::Star, size: 12 }
+                                "Latest per flake"
+                            }
+                            div {
+                                class: "q-search",
                             Icon { name: IconName::Search, size: 13 }
                             input {
                                 class: "q-search-input",
@@ -830,6 +829,7 @@ fn EvaluationsPage() -> Element {
                                 }
                             }
                         }
+                    }
                     }
 
                     if active_tab() == EvaluationsTab::ActiveQueue {

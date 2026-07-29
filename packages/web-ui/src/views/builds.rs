@@ -960,37 +960,37 @@ pub fn BuildsView() -> Element {
                         "Completed"
                         span { class: "sd-tab-badge", "{build_history_total()}" }
                     }
-                    // Spacer — pushes Latest per flake + search to the right edge.
-                    span { class: "q-tabbar-spacer" }
-                    // JSX: {selectableIds.length > 0 && <MultiSelectHint />}
-                    // selectableIds = cancellable builds on Active, filteredList on Completed.
-                    if if active_view() == BuildsTab::ActiveQueue {
-                        queue_data.iter().any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building | BuildStatus::Stopping))
-                    } else {
-                        filtered_len > 0
-                    } {
-                        span {
-                            class: "ms-hint",
-                            title: "Shift-click to toggle row selection",
-                            kbd { "⇧" }
-                            "-click to select"
-                        }
-                    }
-                    button {
-                        class: if latest_only {
-                            "btn btn-ghost xs focus-ring active-filter"
+                    // Right-side action group — hint, Latest per flake, search
+                    div { class: "q-tabbar-actions",
+                        // JSX: {selectableIds.length > 0 && <MultiSelectHint />}
+                        // selectableIds = cancellable builds on Active, filteredList on Completed.
+                        if if active_view() == BuildsTab::ActiveQueue {
+                            queue_data.iter().any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building | BuildStatus::Stopping))
                         } else {
-                            "btn btn-ghost xs focus-ring"
-                        },
-                        title: "Show only the most recent build per flake",
-                        aria_pressed: latest_only,
-                        onclick: move |_| latest_filter.with_mut(LatestFilterState::toggle),
-                        Icon { name: IconName::Star, size: 12 }
-                        "Latest per flake"
-                    }
-                    // JSX: search bar
-                    div {
-                        class: "q-search",
+                            filtered_len > 0
+                        } {
+                            span {
+                                class: "ms-hint",
+                                title: "Shift-click to toggle row selection",
+                                kbd { "⇧" }
+                                "-click to select"
+                            }
+                        }
+                        button {
+                            class: if latest_only {
+                                "btn btn-ghost xs focus-ring active-filter"
+                            } else {
+                                "btn btn-ghost xs focus-ring"
+                            },
+                            title: "Show only the most recent build per flake",
+                            aria_pressed: latest_only,
+                            onclick: move |_| latest_filter.with_mut(LatestFilterState::toggle),
+                            Icon { name: IconName::Star, size: 12 }
+                            "Latest per flake"
+                        }
+                        // JSX: search bar
+                        div {
+                            class: "q-search",
                         // search icon
                         svg {
                             width: "13", height: "13",
@@ -1030,6 +1030,7 @@ pub fn BuildsView() -> Element {
                                 }
                             }
                         }
+                    }
                     }
                 }
                 // JSX: {filteredList.length === 0 ? <EmptyState/> : <BuildQueueTable .../>}
