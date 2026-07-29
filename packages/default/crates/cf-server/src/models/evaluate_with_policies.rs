@@ -336,11 +336,11 @@ use crate::models::retry_policy::RetryFailureClass;
 use crate::queries::build_jobs::{
     BuildJobInsertOutcome, QueuedBuild, create_build_job_for_derivation_tx,
 };
+use crate::queries::commits_artifacts::CachedSystemsState;
 use crate::queries::derivations::{
     insert_derivation_with_target, mark_derivation_dry_run_complete, set_closure_counts,
     set_expected_store_path,
 };
-use crate::queries::commits_artifacts::CachedSystemsState;
 use crate::queries::systems::list_configuration_names_for_flake;
 use crate::queue::QueueNotifier;
 
@@ -5469,6 +5469,7 @@ mod tests {
             commit_id,
             "synthetic failure finalization failed",
             attempt,
+            RetryFailureClass::Transient,
         )
         .await
         .expect("failure CAS should succeed after finalizer rollback");

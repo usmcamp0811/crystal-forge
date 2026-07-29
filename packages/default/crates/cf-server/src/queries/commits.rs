@@ -165,10 +165,18 @@ pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<Commit>
 pub async fn next_evaluation_available_at(
     pool: &PgPool,
 ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
-    sqlx::query_scalar("SELECT MIN(available_at) FROM evaluation_attempts WHERE status = 'queued'")
-        .fetch_one(pool)
-        .await
-        .context("Failed to load next evaluation due time")
+    sqlx::query_scalar(
+        r#"
+        SELECT MIN(ea.available_at)
+        FROM evaluation_attempts ea
+        JOIN commits c ON c.id = ea.commit_id
+        WHERE ea.status = 'queued'
+          AND COALESCE(c.evaluation_status, 'pending') = 'pending'
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("Failed to load next evaluation due time")
 }
 
 pub async fn increment_commit_list_attempt_count(pool: &PgPool, commit: &Commit) -> Result<()> {
@@ -1155,29 +1163,37 @@ fn validate_eval_queue_reorder_payload(
 /// NOTE: Uses `UPDATE ... RETURNING` so the returned outcome reflects an actual
 /// row transition, avoiding the TOCTOU race between a SELECT and subsequent UPDATE.
 pub async fn cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<CancelEvalOutcome> {
+    let mut tx = pool.begin().await?;
+
     // Try pending -> cancelled first (no in-flight worker to coordinate with).
     let updated = sqlx::query_scalar::<_, i32>(
         r#"
-        UPDATE commits
+        WITH cancelled_attempts AS (
+            UPDATE evaluation_attempts
+            SET status = 'cancelled',
+                completed_at = COALESCE(completed_at, NOW()),
+                updated_at = NOW()
+            WHERE commit_id = $1
+              AND status = 'queued'
+            RETURNING id
+        )
+        UPDATE commits c
         SET evaluation_status = 'cancelled',
             cancellation_requested = FALSE,
-            evaluation_completed_at = NOW()
+            evaluation_completed_at = NOW(),
+            evaluation_error_message = NULL
         WHERE id = $1
           AND COALESCE(evaluation_status, 'pending') = 'pending'
+          AND EXISTS (SELECT 1 FROM cancelled_attempts)
         RETURNING id
         "#,
     )
     .bind(commit_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
 
     if updated.is_some() {
-        sqlx::query(
-            "UPDATE evaluation_attempts SET status = 'cancelled', completed_at = NOW(), updated_at = NOW() WHERE commit_id = $1 AND status = 'queued'",
-        )
-        .bind(commit_id)
-        .execute(pool)
-        .await?;
+        tx.commit().await?;
         info!("🚫 Cancelled pending evaluation for commit {commit_id}");
         return Ok(CancelEvalOutcome::Cancelled);
     }
@@ -1195,10 +1211,11 @@ pub async fn cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<C
         "#,
     )
     .bind(commit_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
 
     if updated.is_some() {
+        tx.commit().await?;
         info!("🔄 Requested cancellation for in-progress evaluation commit {commit_id}");
         return Ok(CancelEvalOutcome::CancellingInProgress);
     }
@@ -1207,9 +1224,11 @@ pub async fn cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<C
     let current: Option<String> =
         sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
             .bind(commit_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *tx)
             .await?
             .flatten();
+
+    tx.commit().await?;
 
     match current.as_deref() {
         None => Ok(CancelEvalOutcome::NotFound),
@@ -1342,6 +1361,16 @@ pub async fn finalize_requested_commit_evaluation_cancellation(
 ) -> Result<EvalCancellationOutcome> {
     let updated = sqlx::query_scalar::<_, i32>(
         r#"
+        WITH cancelled_attempt AS (
+            UPDATE evaluation_attempts
+            SET status = 'cancelled',
+                completed_at = COALESCE(completed_at, NOW()),
+                updated_at = NOW()
+            WHERE commit_id = $1
+              AND attempt_number = $2
+              AND status = 'in_progress'
+            RETURNING id
+        )
         UPDATE commits
         SET evaluation_status = 'cancelled',
             cancellation_requested = FALSE,
@@ -1359,6 +1388,7 @@ pub async fn finalize_requested_commit_evaluation_cancellation(
                   AND cancellation_requested IS TRUE
               )
           )
+          AND EXISTS (SELECT 1 FROM cancelled_attempt)
         RETURNING id
         "#,
     )
@@ -1899,7 +1929,9 @@ mod tests {
     //     cargo test -p cf-server --lib queries::commits -- --ignored
 
     use super::{
-        cancel_commit_evaluation, force_cancel_commit_evaluation_attempt,
+        EvalCancellationOutcome, EvalCompleteOutcome, EvalFailureOutcome, EvalStartOutcome,
+        cancel_commit_evaluation, finalize_requested_commit_evaluation_cancellation,
+        force_cancel_commit_evaluation, force_cancel_commit_evaluation_attempt,
         get_commits_pending_evaluation, list_eval_queue, mark_commit_evaluation_complete,
         mark_commit_evaluation_failed, mark_commit_evaluation_started,
         next_evaluation_available_at, open_eval_attention_if_current, reset_commit_evaluation,
@@ -1968,16 +2000,13 @@ mod tests {
     ) {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
-        let commit = get_commits_pending_evaluation(&pool)
+        let attempt = match mark_commit_evaluation_started(&pool, commit_id)
             .await
-            .expect("load pending evaluations")
-            .into_iter()
-            .find(|commit| commit.id == commit_id)
-            .expect("new commit should be due");
-        let attempt_id = commit.evaluation_attempt_id.expect("attempt id");
-        mark_commit_evaluation_started(&pool, commit_id, attempt_id)
-            .await
-            .expect("start attempt");
+            .expect("start attempt")
+        {
+            EvalStartOutcome::Started { attempt } => attempt,
+            EvalStartOutcome::NoLongerPending => panic!("new commit should be due"),
+        };
         sqlx::query(
             "UPDATE automatic_retry_policy SET max_evaluation_retries = 1, backoff_seconds = 10, transient_only = TRUE WHERE id = 1",
         )
@@ -1987,8 +2016,8 @@ mod tests {
         mark_commit_evaluation_failed(
             &pool,
             commit_id,
-            attempt_id,
             "temporary evaluator source failure",
+            attempt,
             RetryFailureClass::Transient,
         )
         .await
@@ -2036,16 +2065,19 @@ mod tests {
         let duplicate = mark_commit_evaluation_failed(
             &pool,
             commit_id,
-            attempt_id,
             "duplicate event",
+            attempt,
             RetryFailureClass::Unknown,
         )
         .await;
-        assert_eq!(duplicate.expect("duplicate is idempotent"), false);
+        assert_eq!(
+            duplicate.expect("duplicate is idempotent"),
+            EvalFailureOutcome::SupersededOrCancelled
+        );
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM evaluation_attempts WHERE automatic_retry_source_id = $1",
         )
-        .bind(attempt_id)
+        .bind(attempts[0].id)
         .fetch_one(&pool)
         .await
         .expect("count retry children");
@@ -2064,16 +2096,21 @@ mod tests {
     ) {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
-        let commit = get_commits_pending_evaluation(&pool)
+        let attempt = match mark_commit_evaluation_started(&pool, commit_id)
             .await
             .unwrap()
-            .into_iter()
-            .find(|commit| commit.id == commit_id)
-            .unwrap();
-        let attempt_id = commit.evaluation_attempt_id.unwrap();
-        mark_commit_evaluation_started(&pool, commit_id, attempt_id)
-            .await
-            .unwrap();
+        {
+            EvalStartOutcome::Started { attempt } => attempt,
+            EvalStartOutcome::NoLongerPending => panic!("commit should be pending"),
+        };
+        let attempt_id: uuid::Uuid = sqlx::query_scalar(
+            "SELECT id FROM evaluation_attempts WHERE commit_id = $1 AND attempt_number = $2",
+        )
+        .bind(commit_id)
+        .bind(attempt)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         assert_eq!(
             cancel_commit_evaluation(&pool, commit_id).await.unwrap(),
@@ -2085,31 +2122,30 @@ mod tests {
                 .unwrap()
         );
         reset_commit_evaluation(&pool, commit_id).await.unwrap();
-        let newer = get_commits_pending_evaluation(&pool)
+        let _newer_attempt = match mark_commit_evaluation_started(&pool, commit_id)
             .await
             .unwrap()
-            .into_iter()
-            .find(|commit| commit.id == commit_id)
-            .unwrap();
-        let newer_attempt_id = newer.evaluation_attempt_id.unwrap();
-        mark_commit_evaluation_started(&pool, commit_id, newer_attempt_id)
-            .await
-            .unwrap();
+        {
+            EvalStartOutcome::Started { attempt } => attempt,
+            EvalStartOutcome::NoLongerPending => panic!("commit should be pending after reset"),
+        };
         assert!(
-            !mark_commit_evaluation_complete(&pool, commit_id, attempt_id)
+            mark_commit_evaluation_complete(&pool, commit_id, attempt)
                 .await
                 .unwrap()
+                == EvalCompleteOutcome::SupersededOrCancelled
         );
-        assert!(
-            !mark_commit_evaluation_failed(
+        assert_eq!(
+            mark_commit_evaluation_failed(
                 &pool,
                 commit_id,
-                attempt_id,
                 "stale failure",
+                attempt,
                 RetryFailureClass::Transient,
             )
             .await
-            .unwrap()
+            .unwrap(),
+            EvalFailureOutcome::SupersededOrCancelled
         );
 
         let current_status: String =
@@ -2144,15 +2180,18 @@ mod tests {
         );
 
         let orphan_id = insert_throwaway_commit(&pool, flake_id).await;
-        let orphan = get_commits_pending_evaluation(&pool)
+        get_commits_pending_evaluation(&pool)
             .await
             .unwrap()
             .into_iter()
             .find(|commit| commit.id == orphan_id)
             .unwrap();
-        mark_commit_evaluation_started(&pool, orphan_id, orphan.evaluation_attempt_id.unwrap())
-            .await
-            .unwrap();
+        assert!(matches!(
+            mark_commit_evaluation_started(&pool, orphan_id)
+                .await
+                .unwrap(),
+            EvalStartOutcome::Started { .. }
+        ));
         reset_stuck_commit_evaluations(&pool).await.unwrap();
         let orphan_status: String =
             sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
@@ -2332,14 +2371,6 @@ mod tests {
     //   DATABASE_URL=postgres://crystal_forge:password@localhost:3042/crystal_forge \
     //     cargo test -p cf-server --lib queries::commits::tests \
     //     -- --ignored --test-threads=1
-
-    use super::{
-        CancelEvalOutcome, EvalCancellationOutcome, EvalCompleteOutcome, EvalFailureOutcome,
-        EvalStartOutcome, cancel_commit_evaluation,
-        finalize_requested_commit_evaluation_cancellation, force_cancel_commit_evaluation,
-        mark_commit_evaluation_complete, mark_commit_evaluation_failed,
-        mark_commit_evaluation_started, reset_commit_evaluation,
-    };
 
     async fn start_eval(pool: &PgPool, commit_id: i32) -> i32 {
         match mark_commit_evaluation_started(pool, commit_id)
@@ -2575,9 +2606,15 @@ mod tests {
             .expect("cancel should not error");
 
         // Failure CAS must fail because cancellation_requested = TRUE.
-        let fail = mark_commit_evaluation_failed(&pool, commit_id, "test error", attempt)
-            .await
-            .expect("fail should not error");
+        let fail = mark_commit_evaluation_failed(
+            &pool,
+            commit_id,
+            "test error",
+            attempt,
+            RetryFailureClass::Transient,
+        )
+        .await
+        .expect("fail should not error");
         assert_eq!(
             fail,
             EvalFailureOutcome::SupersededOrCancelled,
@@ -2629,6 +2666,28 @@ mod tests {
             !row.cancellation_requested.unwrap_or(false),
             "cancellation_requested must be cleared after finalization"
         );
+
+        let attempt_status: String = sqlx::query_scalar(
+            "SELECT status FROM evaluation_attempts WHERE commit_id = $1 AND attempt_number = $2",
+        )
+        .bind(commit_id)
+        .bind(attempt)
+        .fetch_one(&pool)
+        .await
+        .expect("query attempt status");
+        assert_eq!(attempt_status, "cancelled");
+
+        reset_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("reset after cooperative cancellation should insert a new queued attempt");
+        let queued_attempts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = $1 AND status = 'queued'",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count queued attempts");
+        assert_eq!(queued_attempts, 1);
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
@@ -2800,9 +2859,15 @@ mod tests {
 
         // Attempt 1 starts and fails (with retry).
         let attempt1 = start_eval(&pool, commit_id).await;
-        let outcome1 = mark_commit_evaluation_failed(&pool, commit_id, "error1", attempt1)
-            .await
-            .expect("fail should not error");
+        let outcome1 = mark_commit_evaluation_failed(
+            &pool,
+            commit_id,
+            "error1",
+            attempt1,
+            RetryFailureClass::Transient,
+        )
+        .await
+        .expect("fail should not error");
         // With attempt_count = 1 (< 3), should retry.
         assert_eq!(outcome1, EvalFailureOutcome::RetryScheduled);
 

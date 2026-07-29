@@ -36,8 +36,8 @@ use crate::queries::builders::{
 };
 use crate::queries::commits::{
     EvalCancellationOutcome, EvalFailureOutcome, EvalStartOutcome, get_commits_pending_evaluation,
-    mark_commit_evaluation_failed, mark_commit_evaluation_started, reset_stuck_commit_evaluations,
-    next_evaluation_available_at,
+    mark_commit_evaluation_failed, mark_commit_evaluation_started, next_evaluation_available_at,
+    reset_stuck_commit_evaluations,
 };
 use crate::queries::deployment_policies::{
     list_enabled_deployment_policies, list_enabled_policies_for_flake,
@@ -227,9 +227,7 @@ async fn handle_evaluation_attempt_failure(
         commit.git_commit_hash, error
     );
 
-    match mark_commit_evaluation_failed(pool, commit.id, error, attempt, failure_class)
-        .await
-    {
+    match mark_commit_evaluation_failed(pool, commit.id, error, attempt, failure_class).await {
         Err(mark_err) => {
             crate::handlers::api::commits::cleanup_eval_channel(cf_state, commit.id).await;
             return Err(mark_err).with_context(|| {
