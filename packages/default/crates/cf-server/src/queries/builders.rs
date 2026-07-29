@@ -20,7 +20,7 @@ use crate::models::retry_policy::{
     automatic_retry_eligible,
 };
 use crate::queries::attention;
-use crate::queries::build_jobs::BUILD_QUEUE_ORDER_LOCK_KEY;
+use crate::queries::build_jobs::{BUILD_QUEUE_ORDER_LOCK_KEY, lock_build_queue_order};
 
 const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
     UPDATE build_jobs
@@ -157,19 +157,6 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
     )
     RETURNING *
     "#;
-
-/// Acquire transaction-level advisory lock for all build-queue-position mutations.
-/// Every code path that computes `MAX(queue_position)` + 1 must hold this lock
-/// to prevent concurrent allocators from observing the same maximum.
-/// The lock key matches `BUILD_QUEUE_ORDER_LOCK_KEY` from `build_jobs.rs`.
-async fn lock_build_queue_order(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
-        .execute(&mut **tx)
-        .await
-        .context("Failed to acquire build queue order lock")?;
-    Ok(())
-}
 
 /// Generate a cryptographically correct Ed25519 keypair
 /// Returns (public_key_base64, private_key_base64)
@@ -1686,25 +1673,26 @@ pub async fn mark_job_failed_with_retry(
         if automatic_retry_budget_remaining(job.retry_count, i32::from(policy.max_build_retries))
             && automatic_retry_eligible(policy.transient_only, failure_class)
         {
+            lock_build_queue_order(&mut tx).await?;
+
+            let next_pos: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM build_jobs WHERE status = 'queued' OR status = 'building'",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .context("Failed to read max queue_position for retry")?;
+
             sqlx::query_as::<_, BuildJobRow>(
                 r#"
-            WITH queue_lock AS (
-                SELECT pg_advisory_xact_lock($10)
-            ),
-            queue_base AS (
-                SELECT COALESCE(MAX(queue_position), 0) + 1 AS next_pos
-                FROM build_jobs
-                WHERE status = 'queued' OR status = 'building'
-            )
             INSERT INTO build_jobs (
                 derivation_id, environment_id, status, retry_count, max_retries,
                 priority_weight, queue_position, parent_job_id, root_job_id,
                 automatic_retry_source_id, attempt_number, available_at
             )
-            SELECT
-                $1, $2, 'queued', $3, $4, $5, queue_base.next_pos, $6, $7, $6, $8,
-                NOW() + make_interval(secs => $9)
-            FROM queue_lock, queue_base
+            VALUES (
+                $1, $2, 'queued', $3, $4, $5, $6, $7, $8, $7, $9,
+                NOW() + make_interval(secs => $10)
+            )
             ON CONFLICT (automatic_retry_source_id)
                 WHERE automatic_retry_source_id IS NOT NULL DO NOTHING
             RETURNING *
@@ -1715,11 +1703,11 @@ pub async fn mark_job_failed_with_retry(
             .bind(job.retry_count + 1)
             .bind(i32::from(policy.max_build_retries))
             .bind(job.priority_weight * 0.95)
+            .bind(next_pos)
             .bind(job.id)
             .bind(job.root_job_id.unwrap_or(job.id))
             .bind(job.attempt_number + 1)
             .bind(policy.backoff_seconds)
-            .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
             .fetch_optional(&mut *tx)
             .await
             .context("Failed to schedule automatic build retry")?
@@ -1913,6 +1901,20 @@ pub async fn finalize_cancelled_job(
 /// New attempts are appended to the queue tail by assigning a weight lower than
 /// the current minimum queued weight.
 pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin requeue_build_job_as_new_attempt transaction")?;
+
+    lock_build_queue_order(&mut tx).await?;
+
+    let next_pos: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM build_jobs WHERE status = 'queued' OR status = 'building'",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .context("Failed to read max queue_position for requeue")?;
+
     let inserted = sqlx::query_as::<_, BuildJobRow>(
         r#"
         WITH source_job AS (
@@ -1921,12 +1923,6 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
             FROM build_jobs
             WHERE id = $1
               AND status IN ('cancelled', 'failed', 'success')
-        ), queue_lock AS (
-            SELECT pg_advisory_xact_lock($2)
-        ), queue_pos AS (
-            SELECT COALESCE(MAX(queue_position), 0) + 1 AS next_pos
-            FROM build_jobs
-            WHERE status = 'queued' OR status = 'building'
         )
         INSERT INTO build_jobs (
             derivation_id,
@@ -1948,19 +1944,18 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
             0,
             COALESCE((SELECT max_build_retries FROM automatic_retry_policy WHERE id = 1), 2),
             1.0,
-            queue_pos.next_pos,
+            $2,
             s.id,
             s.root_job_id,
             s.attempt_number + 1,
             NOW()
         FROM source_job s
-        CROSS JOIN queue_lock, queue_pos
         RETURNING *
         "#,
     )
     .bind(job_id)
-    .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
-    .fetch_optional(pool)
+    .bind(next_pos)
+    .fetch_optional(&mut *tx)
     .await
     .context("Failed to requeue build job as new attempt")?
     .ok_or_else(|| {
@@ -1968,6 +1963,10 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
             "Build job not found or not in a requeue-eligible status (cancelled/failed/success)"
         )
     })?;
+
+    tx.commit()
+        .await
+        .context("Failed to commit requeue_build_job_as_new_attempt")?;
 
     Ok(inserted)
 }

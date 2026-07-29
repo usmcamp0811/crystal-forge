@@ -1517,6 +1517,14 @@ pub async fn persist_evaluated_system(
     };
 
     if let Some(reason) = system_not_queued_reason(policy_check, build_eligible) {
+        // Mark the derivation as not requiring build preparation so the recovery
+        // reconciler can distinguish it from a failed activation.
+        sqlx::query(
+            "UPDATE derivations SET build_preparation_state = 'not_required' WHERE id = $1",
+        )
+        .bind(derivation_id)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         return Ok(SystemPersistenceOutcome::RecordedWithoutBuild {
             derivation_id,
@@ -1534,6 +1542,13 @@ pub async fn persist_evaluated_system(
     .await?;
 
     if let Some((build_job_id, build_job_status)) = existing {
+        // Already has a build job; mark as queued so the state is consistent.
+        sqlx::query(
+            "UPDATE derivations SET build_preparation_state = 'queued' WHERE id = $1",
+        )
+        .bind(derivation_id)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         return Ok(SystemPersistenceOutcome::ExistingBuildJob {
             derivation_id,
@@ -1543,7 +1558,15 @@ pub async fn persist_evaluated_system(
         });
     }
 
-    // Persisted successfully — don't insert the build job yet.
+    // Mark as pending — build-preparation task will complete the activation.
+    // Recovery reconciler watches for 'pending' derivations whose commit is
+    // complete but whose build_jobs row is absent.
+    sqlx::query(
+        "UPDATE derivations SET build_preparation_state = 'pending' WHERE id = $1",
+    )
+    .bind(derivation_id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     info!(
         commit_id,
@@ -1619,6 +1642,13 @@ pub async fn activate_evaluated_system_build(
                 %build_job_id,
                 "system_build_job_activated"
             );
+            // Mark preparation complete so the recovery reconciler skips it.
+            sqlx::query(
+                "UPDATE derivations SET build_preparation_state = 'queued' WHERE id = $1",
+            )
+            .bind(derivation_id)
+            .execute(&mut *tx)
+            .await?;
             SystemBuildActivationOutcome::Queued { build_job_id }
         }
         Some(BuildJobInsertOutcome::AlreadyExists {
@@ -1632,6 +1662,13 @@ pub async fn activate_evaluated_system_build(
                 existing_status = %status,
                 "system_build_job_activate_already_exists"
             );
+            // Build job already exists; keep preparation state consistent.
+            sqlx::query(
+                "UPDATE derivations SET build_preparation_state = 'queued' WHERE id = $1",
+            )
+            .bind(derivation_id)
+            .execute(&mut *tx)
+            .await?;
             SystemBuildActivationOutcome::AlreadyExists {
                 build_job_id,
                 status,
@@ -2991,7 +3028,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                     );
 
                                                     // Phase 2: GC root (required — bail on failure)
-                                                    let rooted = crate::builder::create_drv_gc_root(
+                                                    let gc_root_result = crate::builder::create_drv_gc_root(
                                                         &drv_path,
                                                         derivation_id,
                                                     )
@@ -3001,8 +3038,30 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                             "Failed to create GC root for derivation {}",
                                                             derivation_id,
                                                         )
-                                                    })?;
+                                                    });
+                                                    let rooted = match gc_root_result {
+                                                        Ok(r) => r,
+                                                        Err(err) => {
+                                                            // Mark preparation as failed so the recovery
+                                                            // reconciler can retry after a server restart.
+                                                            let _ = sqlx::query(
+                                                                "UPDATE derivations SET build_preparation_state = 'failed' WHERE id = $1",
+                                                            )
+                                                            .bind(derivation_id)
+                                                            .execute(&pool)
+                                                            .await;
+                                                            return Err(err);
+                                                        }
+                                                    };
                                                     if !rooted {
+                                                        // Derivation path is not valid in the store —
+                                                        // mark as failed so recovery can detect this.
+                                                        let _ = sqlx::query(
+                                                            "UPDATE derivations SET build_preparation_state = 'failed' WHERE id = $1",
+                                                        )
+                                                        .bind(derivation_id)
+                                                        .execute(&pool)
+                                                        .await;
                                                         #[cfg(not(test))]
                                                         bail!(
                                                             "Derivation {} (drv={}) is not valid \
@@ -3034,7 +3093,20 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                             attempt,
                                                             derivation_id,
                                                         )
-                                                        .await?;
+                                                        .await
+                                                        .map_err(|err| {
+                                                            // Mark as failed for recovery. Best-effort; ignore errors.
+                                                            let pool2 = pool.clone();
+                                                            tokio::spawn(async move {
+                                                                let _ = sqlx::query(
+                                                                    "UPDATE derivations SET build_preparation_state = 'failed' WHERE id = $1",
+                                                                )
+                                                                .bind(derivation_id)
+                                                                .execute(&pool2)
+                                                                .await;
+                                                            });
+                                                            err
+                                                        })?;
 
                                                     match &activation {
                                                         SystemBuildActivationOutcome::Queued { .. }
@@ -3956,7 +4028,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                 commit.id,
                 &mut log_sequence,
                 format!(
-                    "🚀 {} derivations evaluated and queued for build",
+                    "🚀 {} derivations eligible for build queue preparation",
                     build_prep_count
                 ),
             )

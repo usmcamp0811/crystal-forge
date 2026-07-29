@@ -12,6 +12,19 @@ use uuid::Uuid;
 /// Using the ASCII encoding of 'CFBQ' as a 64-bit integer (0x43464251).
 pub const BUILD_QUEUE_ORDER_LOCK_KEY: i64 = 0x4346_4251;
 
+/// Acquire the transaction-level advisory lock before reading MAX(queue_position).
+///
+/// Every code path that computes `MAX(queue_position) + 1` must call this first.
+/// The lock is scoped to the transaction and released automatically at commit/rollback.
+pub async fn lock_build_queue_order(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to acquire build queue order lock")?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct QueuedBuild {
     pub build_job_id: Uuid,
@@ -46,19 +59,21 @@ pub enum BuildJobInsertOutcome {
 /// # Returns
 /// Number of build jobs created
 pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Result<usize> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin create_build_jobs_for_commit transaction")?;
+    lock_build_queue_order(&mut tx).await?;
+
+    let max_pos: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(queue_position), 0) FROM build_jobs WHERE status = 'queued' OR status = 'building'",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .context("Failed to read max queue_position")?;
+
     let result = sqlx::query(
         r#"
-        WITH queue_lock AS (
-            SELECT pg_advisory_xact_lock($2)
-        ),
-        queue_base AS (
-            -- CROSS JOIN queue_lock creates a data dependency so PostgreSQL
-            -- evaluates the advisory lock before reading MAX(queue_position).
-            SELECT COALESCE(MAX(b.queue_position), 0) AS max_pos
-            FROM build_jobs b
-            CROSS JOIN queue_lock
-            WHERE b.status = 'queued' OR b.status = 'building'
-        )
         INSERT INTO build_jobs (
             derivation_id,
             environment_id,
@@ -66,10 +81,10 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
             queue_position,
             status
         )
-        SELECT 
+        SELECT
             d.id as derivation_id,
             s.environment_id,
-            CASE 
+            CASE
                 WHEN s.id IS NOT NULL THEN 10.0
                 ELSE 1.0
             END *
@@ -78,13 +93,12 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
                 WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
                 ELSE 1.0
             END as priority_weight,
-            queue_base.max_pos + ROW_NUMBER() OVER (ORDER BY d.id) AS queue_position,
+            $2 + ROW_NUMBER() OVER (ORDER BY d.id) AS queue_position,
             'queued' as status
         FROM derivations d
-        CROSS JOIN queue_base
         INNER JOIN commits c ON d.commit_id = c.id
         LEFT JOIN systems s ON (
-            d.derivation_target = s.hostname 
+            d.derivation_target = s.hostname
             AND s.flake_id = c.flake_id
         )
         WHERE d.commit_id = $1
@@ -92,16 +106,20 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
             AND d.cf_agent_enabled = TRUE
             AND d.policy_requirements_met = TRUE
             AND NOT EXISTS (
-                SELECT 1 FROM build_jobs bj 
+                SELECT 1 FROM build_jobs bj
                 WHERE bj.derivation_id = d.id
             )
-        "#
+        "#,
     )
     .bind(commit_id)
-    .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
-    .execute(pool)
+    .bind(max_pos)
+    .execute(&mut *tx)
     .await
     .context("Failed to create build jobs for commit")?;
+
+    tx.commit()
+        .await
+        .context("Failed to commit create_build_jobs_for_commit")?;
 
     let count = result.rows_affected() as usize;
 
@@ -121,19 +139,17 @@ pub async fn create_build_jobs_for_commit_tx(
     tx: &mut Transaction<'_, Postgres>,
     commit_id: i32,
 ) -> Result<Vec<QueuedBuild>> {
+    lock_build_queue_order(tx).await?;
+
+    let max_pos: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(queue_position), 0) FROM build_jobs WHERE status = 'queued' OR status = 'building'",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to read max queue_position")?;
+
     let rows = sqlx::query_as::<_, QueuedBuild>(
         r#"
-        WITH queue_lock AS (
-            SELECT pg_advisory_xact_lock($2)
-        ),
-        queue_base AS (
-            -- CROSS JOIN queue_lock creates a data dependency so PostgreSQL
-            -- evaluates the advisory lock before reading MAX(queue_position).
-            SELECT COALESCE(MAX(b.queue_position), 0) AS max_pos
-            FROM build_jobs b
-            CROSS JOIN queue_lock
-            WHERE b.status = 'queued' OR b.status = 'building'
-        )
         INSERT INTO build_jobs (
             derivation_id,
             environment_id,
@@ -153,10 +169,9 @@ pub async fn create_build_jobs_for_commit_tx(
                 WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
                 ELSE 1.0
             END as priority_weight,
-            queue_base.max_pos + ROW_NUMBER() OVER (ORDER BY d.id) AS queue_position,
+            $2 + ROW_NUMBER() OVER (ORDER BY d.id) AS queue_position,
             'queued' as status
         FROM derivations d
-        CROSS JOIN queue_base
         INNER JOIN commits c ON d.commit_id = c.id
         LEFT JOIN systems s ON (
             d.derivation_target = s.hostname
@@ -176,7 +191,7 @@ pub async fn create_build_jobs_for_commit_tx(
         "#,
     )
     .bind(commit_id)
-    .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
+    .bind(max_pos)
     .fetch_all(&mut **tx)
     .await
     .context("Failed to create build jobs for commit")?;
@@ -188,19 +203,17 @@ pub async fn create_build_job_for_derivation_tx(
     tx: &mut Transaction<'_, Postgres>,
     derivation_id: i32,
 ) -> Result<Option<BuildJobInsertOutcome>> {
+    lock_build_queue_order(tx).await?;
+
+    let next_pos: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM build_jobs WHERE status = 'queued' OR status = 'building'",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to read max queue_position")?;
+
     let inserted: Option<(Uuid,)> = sqlx::query_as(
         r#"
-        WITH queue_lock AS (
-            SELECT pg_advisory_xact_lock($2)
-        ),
-        queue_base AS (
-            -- CROSS JOIN queue_lock creates a data dependency so PostgreSQL
-            -- evaluates the advisory lock before reading MAX(queue_position).
-            SELECT COALESCE(MAX(b.queue_position), 0) + 1 AS next_pos
-            FROM build_jobs b
-            CROSS JOIN queue_lock
-            WHERE b.status = 'queued' OR b.status = 'building'
-        )
         INSERT INTO build_jobs (
             derivation_id,
             environment_id,
@@ -220,10 +233,9 @@ pub async fn create_build_job_for_derivation_tx(
                 WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
                 ELSE 1.0
             END AS priority_weight,
-            queue_base.next_pos AS queue_position,
+            $2 AS queue_position,
             'queued' AS status
         FROM derivations d
-        CROSS JOIN queue_base
         INNER JOIN commits c ON d.commit_id = c.id
         LEFT JOIN systems s ON (
             d.derivation_target = s.hostname
@@ -238,7 +250,7 @@ pub async fn create_build_job_for_derivation_tx(
         "#,
     )
     .bind(derivation_id)
-    .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
+    .bind(next_pos)
     .fetch_optional(&mut **tx)
     .await
     .context("Failed to create build job for derivation")?;
@@ -281,19 +293,21 @@ pub async fn create_build_job_for_derivation_tx(
 ///
 /// Returns `true` if a new job was created, `false` if one already existed.
 pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32) -> Result<bool> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin enqueue_build_job_for_derivation transaction")?;
+    lock_build_queue_order(&mut tx).await?;
+
+    let next_pos: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM build_jobs WHERE status = 'queued' OR status = 'building'",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .context("Failed to read max queue_position")?;
+
     let result = sqlx::query(
         r#"
-        WITH queue_lock AS (
-            SELECT pg_advisory_xact_lock($2)
-        ),
-        queue_base AS (
-            -- CROSS JOIN queue_lock creates a data dependency so PostgreSQL
-            -- evaluates the advisory lock before reading MAX(queue_position).
-            SELECT COALESCE(MAX(b.queue_position), 0) + 1 AS next_pos
-            FROM build_jobs b
-            CROSS JOIN queue_lock
-            WHERE b.status = 'queued' OR b.status = 'building'
-        )
         INSERT INTO build_jobs (
             derivation_id,
             environment_id,
@@ -313,10 +327,9 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
                 WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
                 ELSE 1.0
             END AS priority_weight,
-            queue_base.next_pos,
+            $2,
             'queued' AS status
         FROM derivations d
-        CROSS JOIN queue_base
         INNER JOIN commits c ON d.commit_id = c.id
         LEFT JOIN systems s ON (
             d.derivation_target = s.hostname
@@ -330,10 +343,14 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
         "#,
     )
     .bind(derivation_id)
-    .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
-    .execute(pool)
+    .bind(next_pos)
+    .execute(&mut *tx)
     .await
     .context("Failed to enqueue build job for derivation")?;
+
+    tx.commit()
+        .await
+        .context("Failed to commit enqueue_build_job_for_derivation")?;
 
     let created = result.rows_affected() > 0;
     if created {
@@ -412,94 +429,225 @@ pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result
     Ok(job)
 }
 
-/// Recover orphaned build-eligible derivations that have no build job.
+/// A recovery candidate: build-eligible derivation whose preparation failed or was
+/// interrupted before a build job was created.
+#[derive(Debug, sqlx::FromRow)]
+struct RecoveryCandidate {
+    derivation_id: i32,
+    derivation_path: Option<String>,
+    derivation_target: Option<String>,
+    commit_id: Option<i32>,
+    flake_id: Option<i32>,
+}
+
+/// Recover derivations whose build-queue preparation failed or was interrupted.
 ///
-/// A derivation is "orphaned" when it was persisted as DryRunComplete (status_id=5)
-/// with build eligibility flags set, but the build-queue activation task failed or
-/// the server restarted before creating the build_jobs row.
+/// Only derivations explicitly marked `build_preparation_state = 'pending'` or
+/// `'failed'` are eligible. `'not_required'` (scope-excluded, policy-excluded) and
+/// `NULL` (rows pre-dating this state machine) are never recovered.
 ///
-/// This function is idempotent and safe to call at startup or after finalization.
-/// It creates at most one build job per derivation (enforced by the UNIQUE constraint
-/// on build_jobs.derivation_id via ON CONFLICT DO NOTHING).
+/// For each candidate:
+/// 1. Creates or verifies the derivation GC root.
+/// 2. Inserts the build job under the advisory lock (only after rooting).
+/// 3. Sets `build_preparation_state = 'queued'` on success or `'failed'` on error.
 ///
-/// Returns the number of build jobs created.
+/// Idempotent: `ON CONFLICT (derivation_id) DO NOTHING` prevents duplicate jobs.
+///
+/// Returns the number of build jobs successfully created.
 pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usize> {
-    // Find all build-eligible derivations that have no build job at all and whose
-    // commit is in a terminal-or-complete state (not still being evaluated — those
-    // are handled by the normal build-preparation path).
-    //
-    // We also include derivations for complete commits so a server restart can
-    // recover builds that were lost between persist and activation.
-    let result = sqlx::query(
+    // Find derivations that need recovery. Only those with explicit 'pending' or
+    // 'failed' state — never NULL (pre-migration rows) or 'not_required'.
+    let candidates: Vec<RecoveryCandidate> = sqlx::query_as(
         r#"
-        WITH queue_lock AS (
-            SELECT pg_advisory_xact_lock($1)
-        ),
-        queue_base AS (
-            SELECT COALESCE(MAX(b.queue_position), 0) AS max_pos
-            FROM build_jobs b
-            CROSS JOIN queue_lock
-            WHERE b.status = 'queued' OR b.status = 'building'
-        ),
-        orphaned AS (
-            SELECT
-                d.id AS derivation_id,
-                ROW_NUMBER() OVER (ORDER BY d.id) AS rn
-            FROM derivations d
-            CROSS JOIN queue_base
-            INNER JOIN commits c ON c.id = d.commit_id
-            WHERE d.status_id = 5                     -- DryRunComplete
-              AND d.cf_agent_enabled = TRUE
-              AND d.policy_requirements_met = TRUE
-              AND c.evaluation_status IN ('complete')  -- commit fully evaluated
-              AND NOT EXISTS (
-                  SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = d.id
-              )
-        )
-        INSERT INTO build_jobs (
-            derivation_id,
-            environment_id,
-            priority_weight,
-            queue_position,
-            status
-        )
         SELECT
             d.id AS derivation_id,
-            s.environment_id,
-            CASE
-                WHEN s.id IS NOT NULL THEN 10.0
-                ELSE 1.0
-            END *
-            CASE
-                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 3600  THEN 2.0
-                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
-                ELSE 1.0
-            END AS priority_weight,
-            (SELECT max_pos FROM queue_base) + o.rn AS queue_position,
-            'queued' AS status
-        FROM orphaned o
-        INNER JOIN derivations d ON d.id = o.derivation_id
-        INNER JOIN commits c ON c.id = d.commit_id
-        LEFT JOIN systems s ON (
-            d.derivation_target = s.hostname
-            AND s.flake_id = c.flake_id
-        )
-        ON CONFLICT (derivation_id) DO NOTHING
+            d.derivation_path,
+            d.derivation_target,
+            d.commit_id,
+            c.flake_id
+        FROM derivations d
+        LEFT JOIN commits c ON c.id = d.commit_id
+        WHERE d.build_preparation_state IN ('pending', 'failed')
+          AND d.status_id = 5                       -- DryRunComplete
+          AND d.cf_agent_enabled = TRUE
+          AND d.policy_requirements_met = TRUE
+          AND c.evaluation_status = 'complete'      -- commit fully evaluated
+          AND NOT EXISTS (
+              SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = d.id
+          )
+        ORDER BY d.id
         "#,
     )
-    .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
-    .execute(pool)
+    .fetch_all(pool)
     .await
-    .context("Failed to recover orphaned derivation build jobs")?;
+    .context("Failed to query recovery candidates")?;
 
-    let count = result.rows_affected() as usize;
-    if count > 0 {
-        warn!(
-            "🔄 Recovered {} orphaned build-eligible derivations missing a build job",
-            count
-        );
+    if candidates.is_empty() {
+        return Ok(0);
     }
-    Ok(count)
+
+    info!(
+        "🔍 Found {} build-preparation recovery candidate(s)",
+        candidates.len()
+    );
+
+    let mut recovered = 0usize;
+
+    for candidate in &candidates {
+        let derivation_id = candidate.derivation_id;
+        let drv_path = match &candidate.derivation_path {
+            Some(p) => p.clone(),
+            None => {
+                warn!(
+                    derivation_id,
+                    "Skipping recovery for derivation with no drv path"
+                );
+                continue;
+            }
+        };
+
+        // Phase 1: create / verify GC root before inserting any claimable job.
+        let rooted = match crate::builder::create_drv_gc_root(&drv_path, derivation_id).await {
+            Ok(r) => r,
+            Err(err) => {
+                warn!(
+                    derivation_id,
+                    "Recovery: GC root creation failed for derivation {}: {:#}", derivation_id, err
+                );
+                // Leave state as 'failed'; it will be retried on the next reconciliation.
+                continue;
+            }
+        };
+
+        if !rooted {
+            warn!(
+                derivation_id,
+                "Recovery: derivation {} drv path {} is not valid in the store; skipping",
+                derivation_id,
+                drv_path,
+            );
+            // Mark as failed so it is not retried indefinitely against a missing path.
+            let _ = sqlx::query(
+                "UPDATE derivations SET build_preparation_state = 'failed' WHERE id = $1",
+            )
+            .bind(derivation_id)
+            .execute(pool)
+            .await;
+            continue;
+        }
+
+        // Phase 2: insert build job under advisory lock.
+        let mut tx = match pool.begin().await {
+            Ok(t) => t,
+            Err(err) => {
+                warn!(derivation_id, "Recovery: failed to begin tx: {:#}", err);
+                continue;
+            }
+        };
+
+        if let Err(err) = lock_build_queue_order(&mut tx).await {
+            warn!(derivation_id, "Recovery: failed to acquire lock: {:#}", err);
+            let _ = tx.rollback().await;
+            continue;
+        }
+
+        let next_pos: i64 = match sqlx::query_scalar(
+            "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM build_jobs WHERE status = 'queued' OR status = 'building'",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        {
+            Ok(p) => p,
+            Err(err) => {
+                warn!(derivation_id, "Recovery: failed to read max position: {:#}", err);
+                let _ = tx.rollback().await;
+                continue;
+            }
+        };
+
+        let inserted: Result<bool, _> = sqlx::query_scalar(
+            r#"
+            INSERT INTO build_jobs (
+                derivation_id, environment_id, priority_weight, queue_position, status
+            )
+            SELECT
+                d.id,
+                s.environment_id,
+                CASE WHEN s.id IS NOT NULL THEN 10.0 ELSE 1.0 END *
+                CASE
+                    WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 3600  THEN 2.0
+                    WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
+                    ELSE 1.0
+                END,
+                $2,
+                'queued'
+            FROM derivations d
+            INNER JOIN commits c ON c.id = d.commit_id
+            LEFT JOIN systems s ON (
+                d.derivation_target = s.hostname AND s.flake_id = c.flake_id
+            )
+            WHERE d.id = $1
+              AND d.status_id = 5
+              AND d.cf_agent_enabled = TRUE
+              AND d.policy_requirements_met = TRUE
+            ON CONFLICT (derivation_id) DO NOTHING
+            RETURNING TRUE
+            "#,
+        )
+        .bind(derivation_id)
+        .bind(next_pos)
+        .fetch_optional(&mut *tx)
+        .await
+        .map(|opt| opt.unwrap_or(false));
+
+        match inserted {
+            Ok(true) => {
+                // Update preparation state inside the same transaction.
+                let state_result = sqlx::query(
+                    "UPDATE derivations SET build_preparation_state = 'queued' WHERE id = $1",
+                )
+                .bind(derivation_id)
+                .execute(&mut *tx)
+                .await;
+
+                if state_result.is_err() {
+                    let _ = tx.rollback().await;
+                    warn!(derivation_id, "Recovery: failed to update prep state");
+                    continue;
+                }
+
+                if let Err(err) = tx.commit().await {
+                    warn!(derivation_id, "Recovery: commit failed: {:#}", err);
+                    continue;
+                }
+
+                warn!(
+                    derivation_id,
+                    "🔄 Recovery: created missing build job for derivation {}", derivation_id
+                );
+                recovered += 1;
+            }
+            Ok(false) => {
+                // Already has a build job (idempotent). Update state.
+                let _ = sqlx::query(
+                    "UPDATE derivations SET build_preparation_state = 'queued' WHERE id = $1",
+                )
+                .bind(derivation_id)
+                .execute(&mut *tx)
+                .await;
+                let _ = tx.commit().await;
+            }
+            Err(err) => {
+                let _ = tx.rollback().await;
+                warn!(
+                    derivation_id,
+                    "Recovery: insert failed for derivation {}: {:#}", derivation_id, err
+                );
+            }
+        }
+    }
+
+    Ok(recovered)
 }
 
 /// Mark a build job as successful.

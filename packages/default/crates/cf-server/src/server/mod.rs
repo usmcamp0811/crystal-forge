@@ -1206,6 +1206,19 @@ async fn run_builder_recovery_loop(
         {
             error!("❌ Builder recovery cycle failed: {:#}", err);
         }
+
+        // Periodically recover derivations whose build-preparation task failed.
+        // This runs regardless of service restarts so a build job is eventually
+        // created without requiring manual intervention or a service restart.
+        match recover_orphaned_derivation_build_jobs(&pool).await {
+            Ok(count) if count > 0 => {
+                info!("🔄 Periodic recovery: queued {} orphaned build-eligible derivations", count);
+                queue_notifier.notify_build_queue();
+            }
+            Ok(_) => {}
+            Err(e) => error!("❌ Periodic build-preparation recovery failed: {}", e),
+        }
+
         ticker.tick().await;
     }
 }
