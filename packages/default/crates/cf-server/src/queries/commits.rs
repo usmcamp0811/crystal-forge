@@ -639,6 +639,9 @@ pub async fn mark_commit_evaluation_failed(
         i32::from(policy.max_evaluation_retries),
     ) && automatic_retry_eligible(policy.transient_only, failure_class);
     if retry_scheduled {
+        // Move this commit to the front of the eval queue (LIFO) so that
+        // retried evaluations are picked up promptly rather than waiting
+        // behind every newer commit that was discovered in the meantime.
         sqlx::query(
             r#"
             INSERT INTO evaluation_attempts (
@@ -656,6 +659,29 @@ pub async fn mark_commit_evaluation_failed(
         .bind(failed.attempt_number + 1)
         .bind(failed.automatic_retry_count + 1)
         .bind(policy.backoff_seconds)
+        .execute(&mut *tx)
+        .await?;
+
+        // Bump eval_queue_position to front under the advisory lock.
+        sqlx::query(
+            r#"
+            WITH queue_lock AS (
+                SELECT pg_advisory_xact_lock($2)
+            ),
+            next_position AS (
+                SELECT COALESCE(MAX(eval_queue_position), 0) + 1 AS position
+                FROM commits
+                WHERE COALESCE(evaluation_status, 'pending')
+                    IN ('pending', 'in_progress', 'cancelling')
+            )
+            UPDATE commits
+            SET eval_queue_position = next_position.position
+            FROM queue_lock, next_position
+            WHERE id = $1
+            "#,
+        )
+        .bind(commit_id)
+        .bind(EVAL_QUEUE_ADVISORY_LOCK_KEY)
         .execute(&mut *tx)
         .await?;
     }
@@ -827,6 +853,7 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
     .fetch_one(&mut *tx)
     .await?;
 
+    // Insert a fresh evaluation attempt.
     sqlx::query(
         r#"
         WITH source AS (
@@ -845,6 +872,29 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
         "#,
     )
     .bind(commit_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // Bump eval_queue_position to front (LIFO) under the advisory lock.
+    sqlx::query(
+        r#"
+        WITH queue_lock AS (
+            SELECT pg_advisory_xact_lock($2)
+        ),
+        next_position AS (
+            SELECT COALESCE(MAX(eval_queue_position), 0) + 1 AS position
+            FROM commits
+            WHERE COALESCE(evaluation_status, 'pending')
+                IN ('pending', 'in_progress', 'cancelling')
+        )
+        UPDATE commits
+        SET eval_queue_position = next_position.position
+        FROM queue_lock, next_position
+        WHERE id = $1
+        "#,
+    )
+    .bind(commit_id)
+    .bind(EVAL_QUEUE_ADVISORY_LOCK_KEY)
     .execute(&mut *tx)
     .await?;
 

@@ -20,6 +20,7 @@ use crate::models::retry_policy::{
     automatic_retry_eligible,
 };
 use crate::queries::attention;
+use crate::queries::build_jobs::BUILD_QUEUE_ORDER_LOCK_KEY;
 
 const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
     UPDATE build_jobs
@@ -157,15 +158,16 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
     RETURNING *
     "#;
 
-/// Advisory lock used to serialize all queue priority_weight mutations.
-const BUILD_QUEUE_PRIORITY_LOCK_ID: i64 = 0x4346_4251; // 'CFBQ'
-
-async fn lock_build_queue_priority(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
+/// Acquire transaction-level advisory lock for all build-queue-position mutations.
+/// Every code path that computes `MAX(queue_position)` + 1 must hold this lock
+/// to prevent concurrent allocators from observing the same maximum.
+/// The lock key matches `BUILD_QUEUE_ORDER_LOCK_KEY` from `build_jobs.rs`.
+async fn lock_build_queue_order(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(BUILD_QUEUE_PRIORITY_LOCK_ID)
+        .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
         .execute(&mut **tx)
         .await
-        .context("Failed to acquire build queue priority lock")?;
+        .context("Failed to acquire build queue order lock")?;
     Ok(())
 }
 
@@ -1442,16 +1444,16 @@ pub async fn prioritize_build_job(pool: &PgPool, job_id: &Uuid) -> Result<()> {
         .await
         .context("Failed to open prioritize transaction")?;
 
-    lock_build_queue_priority(&mut tx).await?;
+    lock_build_queue_order(&mut tx).await?;
 
     let result = sqlx::query(
         r#"
         UPDATE build_jobs
         SET
-            priority_weight = (
-                SELECT COALESCE(MAX(priority_weight), 1.0) + 1.0
+            queue_position = (
+                SELECT COALESCE(MAX(queue_position), 0) + 1
                 FROM build_jobs
-                WHERE status = 'queued'
+                WHERE status IN ('queued', 'building')
             ),
             updated_at = now()
         WHERE id = $1
@@ -1490,7 +1492,7 @@ async fn reorder_queued_build_job(pool: &PgPool, job_id: &Uuid, move_up: bool) -
         .await
         .context("Failed to open queue reorder transaction")?;
 
-    lock_build_queue_priority(&mut tx).await?;
+    lock_build_queue_order(&mut tx).await?;
 
     let mut ids: Vec<Uuid> = sqlx::query_scalar(
         r#"
@@ -1553,7 +1555,7 @@ pub async fn reorder_build_queue(pool: &PgPool, ordered_job_ids: &[Uuid]) -> Res
         .await
         .context("Failed to begin bulk reorder transaction")?;
 
-    lock_build_queue_priority(&mut tx).await?;
+    lock_build_queue_order(&mut tx).await?;
 
     // Get current queued jobs
     let current_ids: Vec<Uuid> = sqlx::query_scalar(
@@ -1686,7 +1688,10 @@ pub async fn mark_job_failed_with_retry(
         {
             sqlx::query_as::<_, BuildJobRow>(
                 r#"
-            WITH queue_base AS (
+            WITH queue_lock AS (
+                SELECT pg_advisory_xact_lock($10)
+            ),
+            queue_base AS (
                 SELECT COALESCE(MAX(queue_position), 0) + 1 AS next_pos
                 FROM build_jobs
                 WHERE status = 'queued' OR status = 'building'
@@ -1699,7 +1704,7 @@ pub async fn mark_job_failed_with_retry(
             SELECT
                 $1, $2, 'queued', $3, $4, $5, queue_base.next_pos, $6, $7, $6, $8,
                 NOW() + make_interval(secs => $9)
-            FROM queue_base
+            FROM queue_lock, queue_base
             ON CONFLICT (automatic_retry_source_id)
                 WHERE automatic_retry_source_id IS NOT NULL DO NOTHING
             RETURNING *
@@ -1714,6 +1719,7 @@ pub async fn mark_job_failed_with_retry(
             .bind(job.root_job_id.unwrap_or(job.id))
             .bind(job.attempt_number + 1)
             .bind(policy.backoff_seconds)
+            .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
             .fetch_optional(&mut *tx)
             .await
             .context("Failed to schedule automatic build retry")?
@@ -1915,6 +1921,8 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
             FROM build_jobs
             WHERE id = $1
               AND status IN ('cancelled', 'failed', 'success')
+        ), queue_lock AS (
+            SELECT pg_advisory_xact_lock($2)
         ), queue_pos AS (
             SELECT COALESCE(MAX(queue_position), 0) + 1 AS next_pos
             FROM build_jobs
@@ -1946,11 +1954,12 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
             s.attempt_number + 1,
             NOW()
         FROM source_job s
-        CROSS JOIN queue_pos
+        CROSS JOIN queue_lock, queue_pos
         RETURNING *
         "#,
     )
     .bind(job_id)
+    .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
     .fetch_optional(pool)
     .await
     .context("Failed to requeue build job as new attempt")?
@@ -2474,7 +2483,8 @@ mod tests {
             .iter()
             .find_map(|item| item.job_id)
             .expect("Expected queued jobs before prioritize");
-        assert_eq!(first_before, first);
+        // With LIFO the newest job (second) is naturally at the front.
+        assert_eq!(first_before, second);
 
         prioritize_build_job(&pool, &second)
             .await
@@ -2545,17 +2555,18 @@ mod tests {
         )
         .await;
 
-        assert_eq!(queued_order(&pool).await, vec![first, second, third]);
+        // LIFO: newest (third) first, oldest (first) last
+        assert_eq!(queued_order(&pool).await, vec![third, second, first]);
 
-        move_build_job_down(&pool, &first)
+        move_build_job_down(&pool, &third)
             .await
             .expect("move down should succeed");
-        assert_eq!(queued_order(&pool).await, vec![second, first, third]);
+        assert_eq!(queued_order(&pool).await, vec![second, third, first]);
 
-        move_build_job_up(&pool, &third)
+        move_build_job_up(&pool, &first)
             .await
             .expect("move up should succeed");
-        assert_eq!(queued_order(&pool).await, vec![second, third, first]);
+        assert_eq!(queued_order(&pool).await, vec![second, first, third]);
     }
 
     #[tokio::test]
@@ -2587,14 +2598,15 @@ mod tests {
         )
         .await;
 
-        move_build_job_up(&pool, &first)
+        // Under LIFO front = newest (second), back = oldest (first).
+        move_build_job_up(&pool, &second)
             .await
-            .expect("move up first should no-op");
-        move_build_job_down(&pool, &second)
+            .expect("move up front should no-op");
+        move_build_job_down(&pool, &first)
             .await
-            .expect("move down last should no-op");
+            .expect("move down back should no-op");
 
-        assert_eq!(queued_order(&pool).await, vec![first, second]);
+        assert_eq!(queued_order(&pool).await, vec![second, first]);
     }
 
     #[tokio::test]

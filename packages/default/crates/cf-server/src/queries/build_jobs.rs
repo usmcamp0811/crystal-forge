@@ -8,6 +8,10 @@ use sqlx::{PgPool, Postgres, Transaction};
 use tracing::{debug, info};
 use uuid::Uuid;
 
+/// Advisory lock serializing all build-queue-position allocations.
+/// Using the ASCII encoding of 'CFBQ' as a 64-bit integer (0x43464251).
+pub const BUILD_QUEUE_ORDER_LOCK_KEY: i64 = 0x4346_4251;
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct QueuedBuild {
     pub build_job_id: Uuid,
@@ -44,7 +48,10 @@ pub enum BuildJobInsertOutcome {
 pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Result<usize> {
     let result = sqlx::query(
         r#"
-        WITH queue_base AS (
+        WITH queue_lock AS (
+            SELECT pg_advisory_xact_lock($2)
+        ),
+        queue_base AS (
             SELECT COALESCE(MAX(queue_position), 0) AS max_pos
             FROM build_jobs
             WHERE status = 'queued' OR status = 'building'
@@ -71,7 +78,7 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
             queue_base.max_pos + ROW_NUMBER() OVER (ORDER BY d.id) AS queue_position,
             'queued' as status
         FROM derivations d
-        CROSS JOIN queue_base
+        CROSS JOIN queue_lock, queue_base
         INNER JOIN commits c ON d.commit_id = c.id
         LEFT JOIN systems s ON (
             d.derivation_target = s.hostname 
@@ -88,6 +95,7 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
         "#
     )
     .bind(commit_id)
+    .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
     .execute(pool)
     .await
     .context("Failed to create build jobs for commit")?;
@@ -112,7 +120,10 @@ pub async fn create_build_jobs_for_commit_tx(
 ) -> Result<Vec<QueuedBuild>> {
     let rows = sqlx::query_as::<_, QueuedBuild>(
         r#"
-        WITH queue_base AS (
+        WITH queue_lock AS (
+            SELECT pg_advisory_xact_lock($2)
+        ),
+        queue_base AS (
             SELECT COALESCE(MAX(queue_position), 0) AS max_pos
             FROM build_jobs
             WHERE status = 'queued' OR status = 'building'
@@ -139,7 +150,7 @@ pub async fn create_build_jobs_for_commit_tx(
             queue_base.max_pos + ROW_NUMBER() OVER (ORDER BY d.id) AS queue_position,
             'queued' as status
         FROM derivations d
-        CROSS JOIN queue_base
+        CROSS JOIN queue_lock, queue_base
         INNER JOIN commits c ON d.commit_id = c.id
         LEFT JOIN systems s ON (
             d.derivation_target = s.hostname
@@ -159,6 +170,7 @@ pub async fn create_build_jobs_for_commit_tx(
         "#,
     )
     .bind(commit_id)
+    .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
     .fetch_all(&mut **tx)
     .await
     .context("Failed to create build jobs for commit")?;
@@ -172,7 +184,10 @@ pub async fn create_build_job_for_derivation_tx(
 ) -> Result<Option<BuildJobInsertOutcome>> {
     let inserted: Option<(Uuid,)> = sqlx::query_as(
         r#"
-        WITH queue_base AS (
+        WITH queue_lock AS (
+            SELECT pg_advisory_xact_lock($2)
+        ),
+        queue_base AS (
             SELECT COALESCE(MAX(queue_position), 0) + 1 AS next_pos
             FROM build_jobs
             WHERE status = 'queued' OR status = 'building'
@@ -199,7 +214,7 @@ pub async fn create_build_job_for_derivation_tx(
             queue_base.next_pos AS queue_position,
             'queued' AS status
         FROM derivations d
-        CROSS JOIN queue_base
+        CROSS JOIN queue_lock, queue_base
         INNER JOIN commits c ON d.commit_id = c.id
         LEFT JOIN systems s ON (
             d.derivation_target = s.hostname
@@ -214,6 +229,7 @@ pub async fn create_build_job_for_derivation_tx(
         "#,
     )
     .bind(derivation_id)
+    .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
     .fetch_optional(&mut **tx)
     .await
     .context("Failed to create build job for derivation")?;
@@ -258,7 +274,10 @@ pub async fn create_build_job_for_derivation_tx(
 pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32) -> Result<bool> {
     let result = sqlx::query(
         r#"
-        WITH queue_base AS (
+        WITH queue_lock AS (
+            SELECT pg_advisory_xact_lock($2)
+        ),
+        queue_base AS (
             SELECT COALESCE(MAX(queue_position), 0) + 1 AS next_pos
             FROM build_jobs
             WHERE status = 'queued' OR status = 'building'
@@ -285,7 +304,7 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
             queue_base.next_pos,
             'queued' AS status
         FROM derivations d
-        CROSS JOIN queue_base
+        CROSS JOIN queue_lock, queue_base
         INNER JOIN commits c ON d.commit_id = c.id
         LEFT JOIN systems s ON (
             d.derivation_target = s.hostname
@@ -299,6 +318,7 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
         "#,
     )
     .bind(derivation_id)
+    .bind(BUILD_QUEUE_ORDER_LOCK_KEY)
     .execute(pool)
     .await
     .context("Failed to enqueue build job for derivation")?;
