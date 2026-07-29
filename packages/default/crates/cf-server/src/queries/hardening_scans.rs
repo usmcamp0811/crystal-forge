@@ -11,7 +11,20 @@ use crate::hardening::types::{
 };
 use crate::models::hardening_scans::ScanStatus;
 
-/// Create a new hardening scan record.
+/// Idempotently enqueue a hardening scan for a derivation.
+///
+/// The `ON CONFLICT ... DO NOTHING` clause relies on the partial unique index
+/// added by migration 0188:
+///
+///   UNIQUE (derivation_id) WHERE status IN ('pending', 'in_progress')
+///
+/// This means concurrent callers can never create two active rows for the same
+/// derivation.  If a row already exists, the INSERT is silently skipped and
+/// the function returns the existing scan ID instead.
+///
+/// IMPORTANT: This function only writes a database row.  It does NOT spawn a
+/// task or start a subprocess.  The actual `nix eval` is performed later by
+/// `run_hardening_scan_queue` in `services/hardening_scans.rs`.
 pub async fn create_hardening_scan(pool: &PgPool, derivation_id: i32) -> Result<Uuid> {
     let scan_id = Uuid::new_v4();
 
@@ -52,11 +65,27 @@ pub struct ClaimedHardeningScan {
     pub attempts: i32,
 }
 
+/// PostgreSQL advisory lock key used to serialize hardening scan claims and
+/// stale recovery across multiple server processes.  Held only for the duration
+/// of the claim transaction (milliseconds), NOT for the duration of the scan.
+///
+/// This is distinct from `HEAVY_NIX_ADVISORY_LOCK` in `evaluate_with_policies.rs`,
+/// which is held for the entire `nix eval` subprocess lifetime to prevent bulk
+/// evaluation and hardening from overlapping.  Using separate keys lets the
+/// claim step itself remain lightweight.
 const HARDENING_CLAIM_ADVISORY_LOCK: i64 = 0x4346_4841_5244;
 
-/// Atomically claim the oldest pending hardening scan. The transaction-scoped
-/// advisory lock serializes claim/recovery across server processes; SKIP LOCKED
-/// keeps the queue operation non-blocking if a row is being maintained.
+/// Atomically claim the oldest pending hardening scan.
+///
+/// Uses a transaction-scoped PostgreSQL advisory lock to serialize concurrent
+/// claim attempts across multiple server or worker processes.  `SKIP LOCKED`
+/// makes the inner SELECT non-blocking: if another transaction already holds a
+/// row lock (e.g. during stale recovery), this call simply returns `None` and
+/// the caller will retry on the next poll tick.
+///
+/// The global `in_progress` partial unique index (migration 0188) provides an
+/// additional database-level guard: even if two processes race past the advisory
+/// lock, only one UPDATE can succeed.
 pub async fn claim_next_hardening_scan(pool: &PgPool) -> Result<Option<ClaimedHardeningScan>> {
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")

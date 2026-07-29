@@ -1679,6 +1679,17 @@ in {
         '';
       };
 
+      # IMPORTANT: Keep this false (the default) on memory-constrained hosts.
+      # Setting it to true caused a production OOM on 2026-07-28: every
+      # finalized system re-enqueued the entire commit's derivation set, and
+      # each inserted row immediately spawned a full `nix eval` subprocess.
+      # Nine concurrent hardening evaluators overlapped one bulk nix-eval-jobs
+      # run, driving the server cgroup to 58.5 GiB / 1.9 GiB swap with 0 B
+      # available and the API unresponsive.
+      #
+      # When false, the crystal-forge-hardening worker still runs and processes
+      # scans queued via the manual API endpoint — only automatic post-commit
+      # enqueueing is suppressed.
       auto_hardening_scans = lib.mkOption {
         type = lib.types.bool;
         default = false;
@@ -1858,6 +1869,10 @@ in {
       "Z /var/lib/crystal-forge/ 0755 crystal-forge crystal-forge -"
     ];
 
+    # Aggregate resource boundary that caps the combined memory of the API
+    # server, the hardening worker, and all their Nix subprocess descendants.
+    # crystal-forge-server.service and crystal-forge-hardening.service must
+    # both set Slice = "crystal-forge.slice" to be covered by this boundary.
     systemd.slices.crystal-forge = lib.mkIf cfg.server.enable {
       description = "Crystal Forge aggregate resource boundary";
       sliceConfig = {
@@ -1868,8 +1883,19 @@ in {
       };
     };
 
-    # crystal-forge-hardening.slice is a child of crystal-forge.slice because
-    # systemd derives the parent from the leftmost dash-prefix segments.
+    # ── Slice hierarchy note ─────────────────────────────────────────────────
+    # systemd derives a slice's parent from its name by splitting on dashes,
+    # so the LEFTMOST prefix segments determine ancestry:
+    #
+    #   crystal-forge-hardening.slice
+    #       → parent: crystal-forge.slice   ✓  (what we want)
+    #
+    #   hardening-crystal-forge.slice
+    #       → parent: hardening.slice       ✗  (root level, NOT under crystal-forge)
+    #
+    # IMPORTANT: The slice attribute name and the Slice= assignment in
+    # crystal-forge-hardening.service MUST both use "crystal-forge-hardening"
+    # to achieve nesting under crystal-forge.slice.  Do not swap the words.
     systemd.slices.crystal-forge-hardening = lib.mkIf (cfg.server.enable && cfg.hardening.enable) {
       description = "Crystal Forge hardening worker resource boundary";
       sliceConfig = {
@@ -2391,9 +2417,16 @@ in {
         User = "crystal-forge";
         Group = "crystal-forge";
         WorkingDirectory = "/var/lib/crystal-forge";
+        # Must match the slice defined above.  "crystal-forge-hardening" nests
+        # under crystal-forge.slice.  "hardening-crystal-forge" would instead
+        # attach to the root-level hardening.slice — see slice hierarchy note.
         Slice = "crystal-forge-hardening.slice";
         EnvironmentFile = ["-${cfg.env-file}"];
+        # Kill all Nix subprocess descendants when the service stops or OOMs,
+        # not just the direct hardening-worker process.
         KillMode = "control-group";
+        # If the kernel OOM-kills something in this cgroup, stop the whole
+        # service rather than leaving a partially-alive worker.
         OOMPolicy = "stop";
         Restart = "on-failure";
         RestartSec = 30;
@@ -2508,6 +2541,9 @@ in {
         User = "crystal-forge";
         Group = "crystal-forge";
         WorkingDirectory = "/var/lib/crystal-forge";
+        # Place the API server in the aggregate crystal-forge.slice so its
+        # memory and the memory of all Nix subprocess descendants count toward
+        # the aggregate cap defined in systemd.slices.crystal-forge above.
         Slice = "crystal-forge.slice";
 
         EnvironmentFile = ["-${cfg.env-file}"];

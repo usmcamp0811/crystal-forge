@@ -53,9 +53,20 @@ impl From<anyhow::Error> for HardeningScanError {
     }
 }
 
-/// Trigger an immediate hardening scan for a derivation.
+/// Enqueue a hardening scan for a derivation.
 ///
-/// Returns the scan ID. If a scan is already active, returns the existing scan ID.
+/// This function only inserts a `pending` database row; it does **not** spawn
+/// any subprocess or Tokio task.  The actual `nix eval` runs later, exclusively
+/// inside the long-lived `run_hardening_scan_queue` worker loop.
+///
+/// IMPORTANT: The old design called `tokio::spawn` here, which caused a
+/// production OOM on 2026-07-28 because multiple commits each enqueued the
+/// entire derivation set and each insertion immediately spawned a full
+/// `nix eval` subprocess.  Do not re-introduce any `tokio::spawn` call in
+/// this function or in `trigger_commit_hardening_scans`.
+///
+/// Returns the scan ID. If a scan is already active for this derivation,
+/// returns the existing scan ID (idempotent).
 pub async fn trigger_immediate_hardening_scan(
     pool: PgPool,
     derivation_id: i32,
@@ -102,13 +113,23 @@ async fn run_hardening_scan(pool: &PgPool, claimed: ClaimedHardeningScan) -> Res
 
     let start_time = std::time::Instant::now();
     let scanner = HardeningScanner::new();
+
+    // Acquire the same PostgreSQL advisory lock that bulk evaluation holds for
+    // its entire run (see `evaluate_with_policies.rs::HEAVY_NIX_ADVISORY_LOCK`).
+    // This prevents a hardening `nix eval` from overlapping with bulk evaluation
+    // or with another hardening scan in a second server process.
+    //
+    // IMPORTANT: The lock is held only until `scan_config` returns (i.e. until
+    // the `nix eval` subprocess exits and its stdout is drained).  Persistence
+    // happens after the lock is released so we do not hold it during DB I/O.
+    // Do not move the `heavy_nix_db_lock.commit()` further down without
+    // understanding this trade-off.
     let mut heavy_nix_db_lock = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(HEAVY_NIX_ADVISORY_LOCK)
         .execute(&mut *heavy_nix_db_lock)
         .await?;
 
-    // Run the scan
     let scan_result = match scanner.scan_config(&flake_ref, &config_name).await {
         Ok(result) => result,
         Err(err) => {
@@ -117,6 +138,8 @@ async fn run_hardening_scan(pool: &PgPool, claimed: ClaimedHardeningScan) -> Res
             return Err(err);
         }
     };
+    // Subprocess finished — release the cross-process lock so bulk evaluation
+    // or the next hardening scan can proceed.
     heavy_nix_db_lock.commit().await?;
 
     let scan_duration_ms = start_time.elapsed().as_millis() as i32;
@@ -144,9 +167,28 @@ async fn run_hardening_scan(pool: &PgPool, claimed: ClaimedHardeningScan) -> Res
     Ok(())
 }
 
-/// Run the durable hardening queue with exactly one awaited scan at a time.
-/// Correctness depends on PostgreSQL state; polling ensures queued work
-/// survives process restarts without an in-memory notification fan-out.
+/// Durable hardening scan queue worker.
+///
+/// This is the ONLY place that actually runs a `nix eval` for hardening.
+/// It processes one scan at a time by awaiting `run_hardening_scan` before
+/// claiming the next row.  Concurrency is enforced at two levels:
+///
+/// 1. **Database**: `claim_next_hardening_scan` holds a PostgreSQL advisory
+///    lock during the claim and uses `FOR UPDATE SKIP LOCKED`, so a second
+///    worker process cannot claim the same row.  Migration 0188 also creates a
+///    partial unique index that prevents more than one globally `in_progress`
+///    row at any time.
+/// 2. **Process**: The single `tokio::spawn` in `server/mod.rs` starts exactly
+///    one instance of this loop.  Do not spawn additional instances.
+///
+/// IMPORTANT: This function must never call `tokio::spawn` for individual scan
+/// items.  The previous design spawned one task per scan and caused a
+/// production OOM on 2026-07-28 by launching nine concurrent `nix eval`
+/// processes.  Always `await` the scan inside the loop.
+///
+/// Correctness depends entirely on PostgreSQL state.  Polling (rather than
+/// in-memory notifications) means queued work survives process restarts without
+/// a fan-out event storm.
 pub async fn run_hardening_scan_queue(pool: PgPool) {
     info!("Starting serial hardening scan queue worker");
 

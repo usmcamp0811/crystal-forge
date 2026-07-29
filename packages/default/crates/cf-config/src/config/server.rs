@@ -54,8 +54,17 @@ pub struct ServerConfig {
     pub eval_check_cache: bool,
 
     /// Automatically enqueue hardening scans after successful commit evaluation.
-    /// Disabled by default because hardening scans perform expensive full NixOS
-    /// evaluations. Manual hardening scan requests remain available.
+    ///
+    /// IMPORTANT: Keep this `false` (the default) on memory-constrained deployments.
+    /// Each hardening scan launches a full `nix eval` subprocess that can consume
+    /// several GiB of memory.  When `false`, scans must be triggered manually via
+    /// the API; the durable `crystal-forge-hardening` queue worker still runs and
+    /// will pick up any manually-enqueued scans.
+    ///
+    /// Setting this to `true` caused a production OOM incident on 2026-07-28:
+    /// nine concurrent hardening `nix eval` processes overlapped a bulk
+    /// `nix-eval-jobs` evaluation, driving the server cgroup to 58.5 GiB with
+    /// 1.9 GiB of swap and making the API unresponsive.
     #[serde(default)]
     pub auto_hardening_scans: bool,
 

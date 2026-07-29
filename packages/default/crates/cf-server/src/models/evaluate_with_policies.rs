@@ -35,9 +35,37 @@ const CLOSURE_COUNT_MAX_CONCURRENT: usize = 2;
 const EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES: usize = 256 * 1024;
 const STANDALONE_STDOUT_MAX_BYTES: usize = 8 * 1024 * 1024;
 static CLOSURE_COUNT_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
-/// Process-wide permit shared by all full Nix evaluations. During incident
-/// diagnosis only one expensive evaluator tree may exist at a time.
+/// Process-wide in-process permit that limits concurrent heavy Nix evaluations
+/// within the same server process.  Currently set to 1 so that bulk evaluation
+/// and standalone/fallback evaluations are serialized inside a single process.
+///
+/// This permit alone is not enough for multi-process deployments; the
+/// corresponding `HEAVY_NIX_ADVISORY_LOCK` PostgreSQL advisory lock extends
+/// the same serialization to the `crystal-forge-hardening` worker process so
+/// that a bulk evaluation and a hardening `nix eval` can never run in
+/// overlapping cgroup-time.  Both locks must be held before spawning any
+/// expensive Nix subprocess.
+///
+/// IMPORTANT: Do not raise this limit without first auditing peak memory for
+/// each concurrent evaluation path.  A single campground evaluation can spike
+/// to 28+ GiB; multiple simultaneous evaluations risk host-wide OOM.
 static HEAVY_NIX_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+/// PostgreSQL transaction-scoped advisory lock key shared by the API server
+/// and the `crystal-forge-hardening` worker.  Because both processes run in
+/// the same database cluster, this lock serializes heavy Nix work
+/// cross-process — the in-process `HEAVY_NIX_LIMITER` semaphore alone cannot
+/// reach the separate hardening worker process.
+///
+/// The lock is held for the entire duration of bulk evaluation (including
+/// fallback and build-preparation phases) and released by committing the
+/// transaction.  The hardening worker acquires the same lock before starting
+/// a hardening `nix eval` subprocess.
+///
+/// IMPORTANT: If you add a new long-running Nix subprocess that should not
+/// overlap with evaluation or hardening, acquire this advisory lock in
+/// the same way.  A numeric constant is used so the value is visible in
+/// `pg_locks` system catalog queries for debugging.
 pub(crate) const HEAVY_NIX_ADVISORY_LOCK: i64 = 0x4346_4e49_5848;
 
 pub(crate) fn heavy_nix_limiter() -> Arc<Semaphore> {
@@ -2308,9 +2336,20 @@ pub async fn evaluate_with_nix_eval_jobs(
     // --impure is required because the Nix expression uses builtins.getFlake with a
     // remote git+ssh ref (e.g. git+git@github.com:...?rev=<hash>), which is only
     // permitted in impure evaluation mode.
-    // The transaction-scoped advisory lock extends serialization to a
-    // separately packaged hardening worker process. It remains held through
-    // fallback and build preparation so hardening cannot overlap evaluation.
+
+    // ── Cross-process heavy-Nix serialization ───────────────────────────────
+    // Acquire the PostgreSQL advisory lock BEFORE the in-process semaphore.
+    // This order matters: the hardening worker (a separate OS process) also
+    // acquires the advisory lock first.  Both sides holding their own semaphore
+    // first would create a classic ABBA deadlock.
+    //
+    // The advisory lock transaction is committed at the very end of this
+    // function (after fallback evaluation and build-preparation drain) so the
+    // lock covers the entire bulk-evaluation lifetime, not just the spawn.
+    //
+    // IMPORTANT: Do not remove this lock or shorten its scope without also
+    // updating `services/hardening_scans.rs::run_hardening_scan` and verifying
+    // that hardening evals can never overlap bulk evaluation.
     let mut heavy_nix_db_lock = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(HEAVY_NIX_ADVISORY_LOCK)
@@ -3826,6 +3865,9 @@ pub async fn evaluate_with_nix_eval_jobs(
         commit_id = commit.id,
         expected_attempt, "build_preparation_drain_completed"
     );
+    // Release the cross-process advisory lock now that all build preparations
+    // are drained.  Committing the transaction releases the lock atomically.
+    // The hardening worker can begin its next scan only after this commit.
     heavy_nix_db_lock.commit().await?;
 
     Ok(EvaluationPlan {
