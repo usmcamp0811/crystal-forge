@@ -955,7 +955,7 @@ body {
   font-weight: 600;
 }
 
-.commit-latest svg { margin-right: 3px; vertical-align: -1px; }
+.commit-latest svg { display: inline; vertical-align: -1px; }
 
 .btn-ghost:disabled {
   opacity: 0.55;

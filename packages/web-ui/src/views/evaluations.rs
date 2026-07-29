@@ -780,6 +780,19 @@ fn EvaluationsPage() -> Element {
                             "History"
                             span { class: "sd-tab-badge", "{history_count}" }
                         }
+                        // Push Latest per flake + search to the right (matches JSX MultiSelectHint margin-left:auto pattern)
+                        if (active_tab() == EvaluationsTab::ActiveQueue && active_domain_total > 0)
+                            || active_tab() == EvaluationsTab::History
+                        {
+                            span {
+                                class: "ms-hint",
+                                title: "⌘/Ctrl-click to toggle rows · Shift-click to select a range",
+                                kbd { "⌘" }
+                                "/"
+                                kbd { "⇧" }
+                                "-click to select"
+                            }
+                        }
                         button {
                             class: if latest_filter().enabled() {
                                 "btn btn-ghost xs focus-ring active-filter"
@@ -1182,9 +1195,11 @@ fn EvalActiveQueue(
                                     div { style: "font-weight: 600; font-size: 13px;", "{ev_clone.flake_name}" }
                                     div {
                                         class: if ev_clone.is_latest_per_flake { "mono commit-latest" } else { "mono" },
-                                        style: "font-size: 11px; color: var(--cf-text-muted);",
+                                        style: "font-size: 11px; color: var(--cf-text-muted); display: flex; align-items: center; gap: 0;",
                                         if ev_clone.is_latest_per_flake {
-                                            span { class: "latest-star", Icon { name: IconName::Star, size: 9 } }
+                                            span { class: "latest-star", style: "display: inline-flex; align-items: center; margin-right: 3px; flex-shrink: 0;",
+                                                Icon { name: IconName::Star, size: 9 }
+                                            }
                                         }
                                         "{ev_clone.commit_hash.chars().take(12).collect::<String>()}"
                                     }
@@ -1512,9 +1527,11 @@ fn EvalHistory(
                                                 }
                                                 div {
                                                     class: if ev.is_latest_per_flake { "mono commit-latest" } else { "mono" },
-                                                    style: "font-size: 11px; color: var(--cf-text-muted);",
+                                                    style: "font-size: 11px; color: var(--cf-text-muted); display: flex; align-items: center; gap: 0;",
                                                     if ev.is_latest_per_flake {
-                                                        span { class: "latest-star", Icon { name: IconName::Star, size: 9 } }
+                                                        span { class: "latest-star", style: "display: inline-flex; align-items: center; margin-right: 3px; flex-shrink: 0;",
+                                                            Icon { name: IconName::Star, size: 9 }
+                                                        }
                                                     }
                                                     "{ev.commit_hash.chars().take(12).collect::<String>()}"
                                                 }

@@ -364,17 +364,20 @@ pub fn BuildQueuePane(
                                             "{extract_system_name(&build.hostname)}"
                                         }
                                         div {
-                                            style: "font-size: 10px; color: var(--cf-text-muted);",
+                                            style: "font-size: 10px; color: var(--cf-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;",
                                             "{build.flake} · "
                                             span {
                                                 class: if build.is_latest_per_flake { "mono commit-latest" } else { "mono" },
+                                                style: "display: inline;",
                                                 if build.is_latest_per_flake {
-                                                    Icon { name: IconName::Star, size: 9 }
+                                                    span { class: "latest-star", style: "display: inline; margin-right: 2px; vertical-align: -1px;",
+                                                        Icon { name: IconName::Star, size: 9 }
+                                                    }
                                                 }
                                                 "{short_commit(&build.commit)}"
                                             }
                                             " · "
-                                            span { class: "mono", "{build.arch}" }
+                                            span { class: "mono", style: "display: inline;", "{build.arch}" }
                                         }
                                         if let Some(ref pkg) = build.current_pkg {
                                             div {
