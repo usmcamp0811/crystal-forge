@@ -6,11 +6,11 @@
 ALTER TABLE build_jobs ADD COLUMN IF NOT EXISTS queue_position bigint;
 
 -- Backfill existing queued builds with LIFO ordering.
--- Oldest build → position 1, newest → position N.
--- ORDER BY queue_position DESC then correctly places the newest item first.
+-- The most recently queued build gets the highest position so that
+-- ORDER BY queue_position DESC picks it first.
 WITH ordered AS (
     SELECT id,
-           ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS seq
+           ROW_NUMBER() OVER (ORDER BY created_at DESC, id DESC) AS seq
     FROM build_jobs
     WHERE status = 'queued'
 )
