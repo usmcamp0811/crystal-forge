@@ -44,42 +44,44 @@ pub enum BuildJobInsertOutcome {
 pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Result<usize> {
     let result = sqlx::query(
         r#"
+        WITH queue_base AS (
+            SELECT COALESCE(MAX(queue_position), 0) AS max_pos
+            FROM build_jobs
+            WHERE status = 'queued' OR status = 'building'
+        )
         INSERT INTO build_jobs (
             derivation_id,
             environment_id,
             priority_weight,
+            queue_position,
             status
         )
         SELECT 
             d.id as derivation_id,
             s.environment_id,
-            -- Priority calculation:
-            -- Base: 1.0
-            -- * 10 if system is tracked (in systems table)
-            -- * 2 if commit is newer (based on timestamp)
             CASE 
-                WHEN s.id IS NOT NULL THEN 10.0  -- Tracked system
-                ELSE 1.0  -- Untracked
+                WHEN s.id IS NOT NULL THEN 10.0
+                ELSE 1.0
             END *
             CASE
-                -- Newer commits get higher priority (decay over time)
-                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 3600 THEN 2.0  -- < 1 hour old
-                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5  -- < 1 day old
-                ELSE 1.0  -- Older commits
+                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 3600 THEN 2.0
+                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
+                ELSE 1.0
             END as priority_weight,
+            queue_base.max_pos + ROW_NUMBER() OVER (ORDER BY d.id) AS queue_position,
             'queued' as status
         FROM derivations d
+        CROSS JOIN queue_base
         INNER JOIN commits c ON d.commit_id = c.id
         LEFT JOIN systems s ON (
             d.derivation_target = s.hostname 
             AND s.flake_id = c.flake_id
         )
         WHERE d.commit_id = $1
-            AND d.status_id = 5  -- CRITICAL: DryRunComplete (see migration 0027_create_derivation_statuses.sql)
+            AND d.status_id = 5
             AND d.cf_agent_enabled = TRUE
-            AND d.policy_requirements_met = TRUE  -- Only queue policy-passing derivations
+            AND d.policy_requirements_met = TRUE
             AND NOT EXISTS (
-                -- Prevent duplicates: don't create job if one already exists
                 SELECT 1 FROM build_jobs bj 
                 WHERE bj.derivation_id = d.id
             )
@@ -110,10 +112,16 @@ pub async fn create_build_jobs_for_commit_tx(
 ) -> Result<Vec<QueuedBuild>> {
     let rows = sqlx::query_as::<_, QueuedBuild>(
         r#"
+        WITH queue_base AS (
+            SELECT COALESCE(MAX(queue_position), 0) AS max_pos
+            FROM build_jobs
+            WHERE status = 'queued' OR status = 'building'
+        )
         INSERT INTO build_jobs (
             derivation_id,
             environment_id,
             priority_weight,
+            queue_position,
             status
         )
         SELECT
@@ -128,8 +136,10 @@ pub async fn create_build_jobs_for_commit_tx(
                 WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
                 ELSE 1.0
             END as priority_weight,
+            queue_base.max_pos + ROW_NUMBER() OVER (ORDER BY d.id) AS queue_position,
             'queued' as status
         FROM derivations d
+        CROSS JOIN queue_base
         INNER JOIN commits c ON d.commit_id = c.id
         LEFT JOIN systems s ON (
             d.derivation_target = s.hostname
@@ -162,10 +172,16 @@ pub async fn create_build_job_for_derivation_tx(
 ) -> Result<Option<BuildJobInsertOutcome>> {
     let inserted: Option<(Uuid,)> = sqlx::query_as(
         r#"
+        WITH queue_base AS (
+            SELECT COALESCE(MAX(queue_position), 0) + 1 AS next_pos
+            FROM build_jobs
+            WHERE status = 'queued' OR status = 'building'
+        )
         INSERT INTO build_jobs (
             derivation_id,
             environment_id,
             priority_weight,
+            queue_position,
             status
         )
         SELECT
@@ -180,8 +196,10 @@ pub async fn create_build_job_for_derivation_tx(
                 WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
                 ELSE 1.0
             END AS priority_weight,
+            queue_base.next_pos AS queue_position,
             'queued' AS status
         FROM derivations d
+        CROSS JOIN queue_base
         INNER JOIN commits c ON d.commit_id = c.id
         LEFT JOIN systems s ON (
             d.derivation_target = s.hostname
@@ -240,10 +258,16 @@ pub async fn create_build_job_for_derivation_tx(
 pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32) -> Result<bool> {
     let result = sqlx::query(
         r#"
+        WITH queue_base AS (
+            SELECT COALESCE(MAX(queue_position), 0) + 1 AS next_pos
+            FROM build_jobs
+            WHERE status = 'queued' OR status = 'building'
+        )
         INSERT INTO build_jobs (
             derivation_id,
             environment_id,
             priority_weight,
+            queue_position,
             status
         )
         SELECT
@@ -258,8 +282,10 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
                 WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
                 ELSE 1.0
             END AS priority_weight,
+            queue_base.next_pos,
             'queued' AS status
         FROM derivations d
+        CROSS JOIN queue_base
         INNER JOIN commits c ON d.commit_id = c.id
         LEFT JOIN systems s ON (
             d.derivation_target = s.hostname
@@ -331,7 +357,7 @@ pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result
                     -- Job has no environment (can be built by any builder)
                     bj.environment_id IS NULL
                 )
-            ORDER BY bj.priority_weight DESC, bj.created_at ASC
+            ORDER BY bj.queue_position DESC NULLS LAST, bj.priority_weight DESC, bj.created_at ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         )

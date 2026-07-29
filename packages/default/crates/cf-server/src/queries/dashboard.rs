@@ -231,6 +231,7 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
                 WHEN bj.status = 'cancelling' THEN 1
                 ELSE 2
             END,
+            CASE WHEN bj.status = 'queued' THEN bj.queue_position ELSE NULL END DESC NULLS LAST,
             bj.priority_weight DESC,
             c.commit_timestamp DESC NULLS LAST,
             bj.created_at ASC
@@ -774,18 +775,17 @@ pub async fn list_build_queue_paginated(
                 WHEN status = 'queued'     THEN 2
                 ELSE 3
             END,
-            -- For queued jobs, sort by priority_weight DESC (higher = higher priority)
-            -- For non-queued jobs, sort by created_at DESC
+            -- For queued jobs, sort by queue_position DESC (LIFO: newest = front)
+            -- For non-queued jobs, NULL (sort after queued)
+            CASE
+                WHEN status = 'queued' THEN queue_position
+                ELSE NULL
+            END DESC NULLS LAST,
+            -- Within same queue_position (or NULL), priority_weight still acts as tiebreaker
             CASE
                 WHEN status = 'queued' THEN priority_weight
                 ELSE NULL
             END DESC NULLS LAST,
-            -- For queued jobs, older jobs first (matches move_up/move_down order)
-            -- For non-queued jobs, newer first
-            CASE
-                WHEN status = 'queued' THEN queued_at
-                ELSE NULL
-            END ASC NULLS LAST,
             queued_at DESC NULLS LAST,
             job_id DESC
         LIMIT $10
@@ -958,11 +958,18 @@ mod tests {
             .await
             .unwrap();
             let job_id = uuid::Uuid::from_u128(100 + flake_offset);
+            let qp: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM build_jobs WHERE status = 'queued'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
             sqlx::query(
-                "INSERT INTO build_jobs (id, derivation_id, status, created_at) VALUES ($1, $2, 'queued', $3)",
+                "INSERT INTO build_jobs (id, derivation_id, status, queue_position, created_at) VALUES ($1, $2, 'queued', $3, $4)",
             )
             .bind(job_id)
             .bind(derivation_id)
+            .bind(qp)
             .bind(queued_at)
             .execute(&pool)
             .await
@@ -979,11 +986,18 @@ mod tests {
         .await
         .unwrap();
         let newer_id = uuid::Uuid::from_u128(102);
+        let newer_qp: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM build_jobs WHERE status = 'queued'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         sqlx::query(
-            "INSERT INTO build_jobs (id, derivation_id, status, created_at) VALUES ($1, $2, 'queued', $3)",
+            "INSERT INTO build_jobs (id, derivation_id, status, queue_position, created_at) VALUES ($1, $2, 'queued', $3, $4)",
         )
         .bind(newer_id)
         .bind(newer_derivation_id)
+        .bind(newer_qp)
         .bind(queued_at)
         .execute(&pool)
         .await

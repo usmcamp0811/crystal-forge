@@ -1306,6 +1306,11 @@ body {
   display: none;
 }
 
+/* Card-embedded tab strips get a subtle header band */
+.card > .sd-tabs {
+  background: color-mix(in oklab, var(--cf-page-bg) 40%, var(--cf-card-bg));
+}
+
 /* Builds/Evals queue tab bar: vertically centers tabs + multi-select hint + search */
 .q-tabbar {
   display: flex;

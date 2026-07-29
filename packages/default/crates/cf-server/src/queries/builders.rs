@@ -33,10 +33,11 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
         FROM build_jobs
         JOIN derivations d ON d.id = build_jobs.derivation_id
         WHERE build_jobs.status = 'queued'
-          AND build_jobs.available_at <= NOW()
+            AND build_jobs.available_at <= NOW()
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
         ORDER BY
+            build_jobs.queue_position DESC NULLS LAST,
             build_jobs.priority_weight DESC,
             (
                 SELECT c.commit_timestamp
@@ -67,6 +68,7 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
         ORDER BY
+            build_jobs.queue_position DESC NULLS LAST,
             build_jobs.priority_weight DESC,
             (
                 SELECT c.commit_timestamp
@@ -107,6 +109,7 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL: &str = r#"
               )
           )
         ORDER BY
+            build_jobs.queue_position DESC NULLS LAST,
             build_jobs.priority_weight DESC,
             c.commit_timestamp DESC NULLS LAST,
             build_jobs.created_at ASC
@@ -144,6 +147,7 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
               )
           )
         ORDER BY
+            build_jobs.queue_position DESC NULLS LAST,
             build_jobs.priority_weight DESC,
             c.commit_timestamp DESC NULLS LAST,
             build_jobs.created_at ASC
@@ -1493,7 +1497,7 @@ async fn reorder_queued_build_job(pool: &PgPool, job_id: &Uuid, move_up: bool) -
         SELECT id
         FROM build_jobs
         WHERE status = 'queued'
-        ORDER BY priority_weight DESC, created_at ASC
+        ORDER BY queue_position DESC NULLS LAST, priority_weight DESC, created_at ASC
         FOR UPDATE
         "#,
     )
@@ -1519,20 +1523,20 @@ async fn reorder_queued_build_job(pool: &PgPool, job_id: &Uuid, move_up: bool) -
 
     let total = ids.len();
     for (index, id) in ids.iter().enumerate() {
-        let weight = (total - index) as f64;
+        let position = (total - index) as i64;
         sqlx::query(
             r#"
             UPDATE build_jobs
-            SET priority_weight = $2,
+            SET queue_position = $2,
                 updated_at = now()
             WHERE id = $1
             "#,
         )
         .bind(id)
-        .bind(weight)
+        .bind(position)
         .execute(&mut *tx)
         .await
-        .context("Failed updating reordered build priorities")?;
+        .context("Failed updating reordered build positions")?;
     }
 
     tx.commit()
@@ -1557,7 +1561,7 @@ pub async fn reorder_build_queue(pool: &PgPool, ordered_job_ids: &[Uuid]) -> Res
         SELECT id
         FROM build_jobs
         WHERE status = 'queued'
-        ORDER BY priority_weight DESC, created_at ASC
+        ORDER BY queue_position DESC NULLS LAST, priority_weight DESC, created_at ASC
         FOR UPDATE
         "#,
     )
@@ -1584,23 +1588,23 @@ pub async fn reorder_build_queue(pool: &PgPool, ordered_job_ids: &[Uuid]) -> Res
         }
     }
 
-    // Apply new priority weights
+    // Apply new queue positions — first in list = front (highest position with DESC sort)
     let total = ordered_job_ids.len();
     for (index, id) in ordered_job_ids.iter().enumerate() {
-        let weight = (total - index) as f64;
+        let position = (total - index) as i64;
         sqlx::query(
             r#"
             UPDATE build_jobs
-            SET priority_weight = $2,
+            SET queue_position = $2,
                 updated_at = now()
             WHERE id = $1
             "#,
         )
         .bind(id)
-        .bind(weight)
+        .bind(position)
         .execute(&mut *tx)
         .await
-        .context("Failed to update priority weight")?;
+        .context("Failed to update queue position")?;
     }
 
     tx.commit().await.context("Failed to commit bulk reorder")?;
@@ -1682,15 +1686,20 @@ pub async fn mark_job_failed_with_retry(
         {
             sqlx::query_as::<_, BuildJobRow>(
                 r#"
+            WITH queue_base AS (
+                SELECT COALESCE(MAX(queue_position), 0) + 1 AS next_pos
+                FROM build_jobs
+                WHERE status = 'queued' OR status = 'building'
+            )
             INSERT INTO build_jobs (
                 derivation_id, environment_id, status, retry_count, max_retries,
-                priority_weight, parent_job_id, root_job_id,
+                priority_weight, queue_position, parent_job_id, root_job_id,
                 automatic_retry_source_id, attempt_number, available_at
             )
-            VALUES (
-                $1, $2, 'queued', $3, $4, $5, $6, $7, $6, $8,
+            SELECT
+                $1, $2, 'queued', $3, $4, $5, queue_base.next_pos, $6, $7, $6, $8,
                 NOW() + make_interval(secs => $9)
-            )
+            FROM queue_base
             ON CONFLICT (automatic_retry_source_id)
                 WHERE automatic_retry_source_id IS NOT NULL DO NOTHING
             RETURNING *
@@ -1906,10 +1915,10 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
             FROM build_jobs
             WHERE id = $1
               AND status IN ('cancelled', 'failed', 'success')
-        ), queue_tail AS (
-            SELECT COALESCE(MIN(priority_weight) / 2.0, 1.0) AS tail_weight
+        ), queue_pos AS (
+            SELECT COALESCE(MAX(queue_position), 0) + 1 AS next_pos
             FROM build_jobs
-            WHERE status = 'queued'
+            WHERE status = 'queued' OR status = 'building'
         )
         INSERT INTO build_jobs (
             derivation_id,
@@ -1918,6 +1927,7 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
             retry_count,
             max_retries,
             priority_weight,
+            queue_position,
             parent_job_id,
             root_job_id,
             attempt_number,
@@ -1929,13 +1939,14 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
             'queued',
             0,
             COALESCE((SELECT max_build_retries FROM automatic_retry_policy WHERE id = 1), 2),
-            q.tail_weight,
+            1.0,
+            queue_pos.next_pos,
             s.id,
             s.root_job_id,
             s.attempt_number + 1,
             NOW()
         FROM source_job s
-        CROSS JOIN queue_tail q
+        CROSS JOIN queue_pos
         RETURNING *
         "#,
     )
@@ -2131,15 +2142,27 @@ mod tests {
         .await
         .expect("Failed to insert derivation");
 
+        let queue_position: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COALESCE(MAX(queue_position), 0) + 1
+            FROM build_jobs
+            WHERE status = 'queued' OR status = 'building'
+            "#,
+        )
+        .fetch_one(pool)
+        .await
+        .expect("Failed to compute queue position");
+
         let build_job_id = sqlx::query_scalar::<_, Uuid>(
             r#"
-            INSERT INTO build_jobs (derivation_id, status, priority_weight, created_at)
-            VALUES ($1, 'queued', $2, $3)
+            INSERT INTO build_jobs (derivation_id, status, priority_weight, queue_position, created_at)
+            VALUES ($1, 'queued', $2, $3, $4)
             RETURNING id
             "#,
         )
         .bind(derivation.id)
         .bind(priority_weight)
+        .bind(queue_position)
         .bind(created_at)
         .fetch_one(pool)
         .await
@@ -2166,7 +2189,7 @@ mod tests {
             SELECT id
             FROM build_jobs
             WHERE status = 'queued'
-            ORDER BY priority_weight DESC, created_at ASC
+            ORDER BY queue_position DESC NULLS LAST, priority_weight DESC, created_at ASC
             "#,
         )
         .fetch_all(pool)
