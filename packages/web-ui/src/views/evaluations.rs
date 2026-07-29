@@ -841,7 +841,8 @@ fn EvaluationsPage() -> Element {
                         } else if active_items.is_empty() {
                             div { class: "q-empty",
                                 Icon { name: IconName::Search, size: 20 }
-                                div { "No active evaluations match the active filters." }
+                                h3 { "No matching evaluations" }
+                                div { "Try adjusting your search or filters." }
                                 button {
                                     class: "btn btn-ghost xs focus-ring",
                                     onclick: move |_| {
@@ -1073,9 +1074,7 @@ fn EvalActiveQueue(
 
     if evals.is_empty() {
         return rsx! {
-            div {
-                class: "empty",
-                style: "margin: 24px;",
+            div { class: "q-empty",
                 h3 { "No active evaluations" }
                 div { "All flake evaluations are complete." }
             }
@@ -1656,13 +1655,14 @@ fn EvalHistory(
                     }
                     if page_data.domain_total == 0 {
                         div { class: "q-empty",
-                            h3 { "No evaluation history" }
-                            div { "No completed evaluations are available." }
+                            h3 { "No completed evaluations" }
+                            div { "Completed evaluations will appear here." }
                         }
                     } else if page_data.total_count == 0 {
                         div { class: "q-empty",
                             Icon { name: IconName::Search, size: 20 }
-                            div { "No evaluations match the active filters." }
+                            h3 { "No matching evaluations" }
+                            div { "Try adjusting your search or filters." }
                             button {
                                 class: "btn btn-ghost xs focus-ring",
                                 onclick: move |_| {

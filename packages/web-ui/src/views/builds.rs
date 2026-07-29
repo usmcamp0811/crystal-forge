@@ -1042,7 +1042,7 @@ pub fn BuildsView() -> Element {
                     div {
                         class: "q-empty",
                         h3 { if active_view() == BuildsTab::ActiveQueue { "No active builds" } else { "No completed builds" } }
-                        div { if active_view() == BuildsTab::ActiveQueue { "The build queue is empty." } else { "No build history is available." } }
+                        div { if active_view() == BuildsTab::ActiveQueue { "The build queue is empty." } else { "Completed builds will appear here." } }
                     }
                 } else if filtered_list.is_empty() {
                     div {
@@ -1055,7 +1055,8 @@ pub fn BuildsView() -> Element {
                             circle { cx: "11", cy: "11", r: "8" }
                             line { x1: "21", y1: "21", x2: "16.65", y2: "16.65" }
                         }
-                        div { "No builds match the active filters." }
+                        h3 { "No matching builds" }
+                        div { "Try adjusting your search or filters." }
                         button {
                             class: "btn btn-ghost xs focus-ring",
                             onclick: move |_| {

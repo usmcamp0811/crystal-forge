@@ -4890,6 +4890,30 @@ tr.kbd-focused > td {
 .dash-w-mini span { color: var(--cf-text-muted); }
 .dash-w-mini strong { font-weight: 600; font-variant-numeric: tabular-nums; }
 
+/* Empty state — inside a table-card body (replaces table rows) */
+.q-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 48px 20px;
+  min-height: 160px;
+  box-sizing: border-box;
+  color: var(--cf-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.q-empty h3 {
+  color: var(--cf-text-secondary);
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.q-empty > svg { color: var(--cf-text-disabled); }
+.q-empty > .btn { margin-top: 4px; }
+
 /* Empty state + widget library (ported from design reference) */
 .empty {
   padding: 48px 24px;
