@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-07-24 03:26'
-updated_date: '2026-07-25 02:24'
+updated_date: '2026-07-29 02:22'
 labels:
   - design-parity
   - web-ui
@@ -181,6 +181,28 @@ Branch pushed: TASK-399-automatic-retries-latest-flake (commit f9ddf15a).
 
 LOCK RELEASED: awaiting review (MR !310 open against dev, not yet merged).
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: gpt-5.5
+created: 2026-07-29 02:22
+---
+Post-rebase review fixes pushed in commit `7c483e8e`:
+
+- Updated stale ignored DB tests to the rebased attempt-number APIs for `mark_commit_evaluation_started`, `mark_commit_evaluation_failed`, and enum outcomes.
+- Made pending cancellation update commits and queued evaluation attempts in one transaction.
+- Made cooperative cancellation finalization update the active evaluation attempt to `cancelled` atomically with the commit transition.
+- Filtered `next_evaluation_available_at` to queued attempts whose commit is still pending.
+- Added/extended regression assertions for cooperative cancellation attempt state and manual reset after cancellation.
+
+Verification run locally:
+- `SQLX_OFFLINE=true nix develop ../.. --command cargo check -p cf-server --all-targets` passed.
+- `SQLX_OFFLINE=true nix develop ../.. --command cargo test -p cf-server --lib queries::commits -- --test-threads=1` passed: 4 passed, 23 ignored.
+
+Attempted live ignored DB tests with `DATABASE_URL=postgres://crystal_forge:password@localhost:3042/crystal_forge nix develop ../.. --command cargo test -p cf-server --lib queries::commits -- --ignored --test-threads=1`; the run was not verified because the dev DB connection timed out (`PoolTimedOut`).
+---
+<!-- COMMENTS:END -->
 
 ## Final Summary
 
