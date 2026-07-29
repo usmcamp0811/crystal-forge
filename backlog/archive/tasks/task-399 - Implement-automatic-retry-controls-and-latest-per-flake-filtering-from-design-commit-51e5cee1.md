@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-07-24 03:26'
-updated_date: '2026-07-29 02:22'
+updated_date: '2026-07-29 12:58'
 labels:
   - design-parity
   - web-ui
@@ -201,6 +201,22 @@ Verification run locally:
 - `SQLX_OFFLINE=true nix develop ../.. --command cargo test -p cf-server --lib queries::commits -- --test-threads=1` passed: 4 passed, 23 ignored.
 
 Attempted live ignored DB tests with `DATABASE_URL=postgres://crystal_forge:password@localhost:3042/crystal_forge nix develop ../.. --command cargo test -p cf-server --lib queries::commits -- --ignored --test-threads=1`; the run was not verified because the dev DB connection timed out (`PoolTimedOut`).
+---
+
+author: gpt-5.5
+created: 2026-07-29 12:58
+---
+Migration numbering corrected after the rebase in commit `01ad2bd2`.
+
+`origin/dev` already had migrations through `0188_queue_hardening_scans.sql`, so TASK-399 migrations were renamed as pure renames:
+
+- `0183_automatic_retry_policy.sql` → `0189_automatic_retry_policy.sql`
+- `0184_retry_attempt_lineage.sql` → `0190_retry_attempt_lineage.sql`
+- `0185_evaluation_enqueue_timestamp.sql` → `0191_evaluation_enqueue_timestamp.sql`
+
+Verification after renumbering:
+- `SQLX_OFFLINE=true nix develop ../.. --command cargo check -p cf-server --all-targets` passed.
+- `SQLX_OFFLINE=true nix develop ../.. --command cargo test -p cf-server --lib queries::commits -- --test-threads=1` passed: 4 passed, 23 ignored.
 ---
 <!-- COMMENTS:END -->
 
