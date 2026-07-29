@@ -2321,6 +2321,10 @@ async fn evaluate_with_nix_eval_jobs_inner(
     const BUILD_PREPARATION_CONCURRENCY: usize = 4;
     let build_preparation_limit = Arc::new(Semaphore::new(BUILD_PREPARATION_CONCURRENCY));
     let mut build_preparations: JoinSet<anyhow::Result<()>> = JoinSet::new();
+    // Count derivations that need actual build-queue activation (NeedsBuildPreparation
+    // outcome). Other outcomes (ExistingBuildJob, RecordedWithoutBuild) are not
+    // queued for build preparation and must not be included in this count.
+    let mut build_prep_count: usize = 0;
 
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     let allowed_systems = load_allowed_systems(pool, flake, target_system).await?;
@@ -2942,6 +2946,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                 derivation_id,
                                                 drv_path,
                                             } => {
+                                                build_prep_count += 1;
                                                 // Spawn bounded preparation: GC root → activate → notify.
                                                 // This keeps the stdout pipe unblocked while the
                                                 // nix-store subprocess and second transaction run.
@@ -3935,7 +3940,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
             .await;
         }
 
-        if successful_results.len() > 0 {
+        if build_prep_count > 0 {
             broadcast_and_persist_eval_log(
                 pool,
                 Some(state),
@@ -3951,8 +3956,8 @@ async fn evaluate_with_nix_eval_jobs_inner(
                 commit.id,
                 &mut log_sequence,
                 format!(
-                    "🚀 {} derivations eligible for build queue preparation",
-                    successful_results.len()
+                    "🚀 {} derivations evaluated and queued for build",
+                    build_prep_count
                 ),
             )
             .await;

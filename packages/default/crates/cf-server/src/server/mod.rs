@@ -29,7 +29,7 @@ use tracing::{debug, error, info, warn};
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
 use crate::derivations::utils::count_closure_packages;
 use crate::models::deployment_policies::{AssignedPolicy, PoliciesByConfiguration};
-use crate::queries::build_jobs::QueuedBuild;
+use crate::queries::build_jobs::{QueuedBuild, recover_orphaned_derivation_build_jobs};
 use crate::queries::builders::{
     cleanup_expired_build_logs, mark_stale_builders_offline,
     requeue_orphaned_building_jobs_with_reason,
@@ -1077,6 +1077,18 @@ pub async fn run_commit_evaluation_loop(
 
     if let Err(e) = cleanup_partial_derivations(&pool).await {
         error!("❌ Failed to reset partial derivations: {}", e);
+    }
+
+    // Recover any DryRunComplete derivations that have no build job, which can
+    // happen when the build-preparation task failed or the server restarted
+    // between derivation persistence and build-job activation.
+    match recover_orphaned_derivation_build_jobs(&pool).await {
+        Ok(count) if count > 0 => {
+            info!("🔄 Startup: queued {} orphaned build-eligible derivations", count);
+            queue_notifier.notify_build_queue();
+        }
+        Ok(_) => {}
+        Err(e) => error!("❌ Failed to recover orphaned derivation build jobs: {}", e),
     }
 
     // `PgPool` is cheap to clone; keep an owned copy in the task.
