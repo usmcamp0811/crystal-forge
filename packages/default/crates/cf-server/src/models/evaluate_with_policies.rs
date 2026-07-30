@@ -1527,7 +1527,14 @@ pub async fn persist_evaluated_system(
         // Mark the derivation as not requiring build preparation so the recovery
         // reconciler can distinguish it from a failed activation.
         sqlx::query(
-            "UPDATE derivations SET build_preparation_state = 'not_required' WHERE id = $1",
+            r#"
+            UPDATE derivations
+            SET build_preparation_state = 'not_required',
+                build_preparation_attempts = 0,
+                build_preparation_last_error = NULL,
+                build_preparation_next_attempt_at = NULL
+            WHERE id = $1
+            "#,
         )
         .bind(derivation_id)
         .execute(&mut *tx)
@@ -1551,7 +1558,14 @@ pub async fn persist_evaluated_system(
     if let Some((build_job_id, build_job_status)) = existing {
         // Already has a build job; mark as queued so the state is consistent.
         sqlx::query(
-            "UPDATE derivations SET build_preparation_state = 'queued' WHERE id = $1",
+            r#"
+            UPDATE derivations
+            SET build_preparation_state = 'queued',
+                build_preparation_attempts = 0,
+                build_preparation_last_error = NULL,
+                build_preparation_next_attempt_at = NULL
+            WHERE id = $1
+            "#,
         )
         .bind(derivation_id)
         .execute(&mut *tx)
@@ -1567,9 +1581,17 @@ pub async fn persist_evaluated_system(
 
     // Mark as pending — build-preparation task will complete the activation.
     // Recovery reconciler watches for 'pending' derivations whose commit is
-    // complete but whose build_jobs row is absent.
+    // complete but whose build_jobs row is absent. Clear any stale backoff
+    // metadata from a previous generation.
     sqlx::query(
-        "UPDATE derivations SET build_preparation_state = 'pending' WHERE id = $1",
+        r#"
+        UPDATE derivations
+        SET build_preparation_state = 'pending',
+            build_preparation_attempts = 0,
+            build_preparation_last_error = NULL,
+            build_preparation_next_attempt_at = NULL
+        WHERE id = $1
+        "#,
     )
     .bind(derivation_id)
     .execute(&mut *tx)
@@ -1865,36 +1887,65 @@ async fn handle_system_build_activation(
 
 /// Record a build-preparation failure with exponential backoff state.
 ///
-/// Sets `build_preparation_state = 'failed'`, increments the attempt counter,
-/// stores the error message, and computes the next retry time using
-/// exponential backoff: `2^(attempts) * 30 seconds` capped at 30 minutes.
+/// The update is guarded by:
+/// - derivation must be in `build_preparation_state = 'pending'`
+/// - `commit_id` must match the currently active evaluation
+/// - `evaluation_attempt_count` must match `expected_attempt`
+/// - `derivation_path` must match the expected path
+/// - no `build_jobs` row must exist for this derivation
 ///
-/// This is called by the streaming build-prep task, the fallback finalizer,
-/// and the recovery reconciler when GC-root or activation fails.
+/// If the row does not match all predicates, the update does nothing and no
+/// error is returned. This prevents a stale failure from overwriting a newer
+/// `queued`, `not_required`, or re-evaluated state.
 pub(crate) async fn record_preparation_failure(
     pool: &PgPool,
     derivation_id: i32,
+    commit_id: i32,
+    expected_attempt: i32,
+    derivation_path: &str,
     error: &str,
 ) {
-    if let Err(e) = sqlx::query(
+    let result = sqlx::query(
         r#"
-        UPDATE derivations
+        UPDATE derivations d
         SET build_preparation_state = 'failed',
-            build_preparation_attempts = COALESCE(build_preparation_attempts, 0) + 1,
-            build_preparation_last_error = $2,
+            build_preparation_attempts = COALESCE(d.build_preparation_attempts, 0) + 1,
+            build_preparation_last_error = $5,
             build_preparation_next_attempt_at = NOW() + LEAST(
-                POW(2, COALESCE(build_preparation_attempts, 0)) * interval '30 seconds',
+                POW(2, COALESCE(d.build_preparation_attempts, 0)) * interval '30 seconds',
                 interval '30 minutes'
             )
-        WHERE id = $1
+        FROM commits c
+        WHERE d.id = $1
+          AND d.commit_id = $2
+          AND d.build_preparation_state = 'pending'
+          AND d.derivation_path = $4
+          AND c.id = d.commit_id
+          AND c.evaluation_attempt_count = $3
+          AND NOT EXISTS (
+              SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = d.id
+          )
         "#,
     )
     .bind(derivation_id)
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .bind(derivation_path)
     .bind(error)
     .execute(pool)
-    .await
-    {
-        error!(derivation_id, "Failed to record preparation failure: {e:#}");
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() == 0 => {
+            debug!(
+                derivation_id,
+                "record_preparation_failure: stale guard prevented update (0 rows)"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            error!(derivation_id, "record_preparation_failure: query failed: {e:#}");
+        }
     }
 }
 
@@ -1948,7 +1999,10 @@ pub async fn finalize_evaluated_system(
                         derivation_id, drv_path,
                     );
                     warn!(derivation_id, "{}", msg);
-                    record_preparation_failure(pool, derivation_id, &msg).await;
+                    record_preparation_failure(
+                        pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                    )
+                    .await;
                     return Ok(SystemFinalizeOutcome::PreparationFailed {
                         derivation_id,
                         error: msg,
@@ -1957,7 +2011,10 @@ pub async fn finalize_evaluated_system(
                 Err(err) => {
                     let msg = format!("Failed to create GC root: {err:#}");
                     warn!(derivation_id, "{}", msg);
-                    record_preparation_failure(pool, derivation_id, &msg).await;
+                    record_preparation_failure(
+                        pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                    )
+                    .await;
                     return Ok(SystemFinalizeOutcome::PreparationFailed {
                         derivation_id,
                         error: msg,
@@ -2003,7 +2060,10 @@ pub async fn finalize_evaluated_system(
                             derivation_id,
                         );
                         warn!(derivation_id, "{}", msg);
-                        record_preparation_failure(pool, derivation_id, &msg).await;
+                        record_preparation_failure(
+                            pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                        )
+                        .await;
                         Ok(SystemFinalizeOutcome::PreparationFailed {
                             derivation_id,
                             error: msg,
@@ -3142,7 +3202,10 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                                 "build_prep_gc_root_error derivation_id={}: {err:#}",
                                                                 derivation_id,
                                                             );
-                                                            record_preparation_failure(&pool, derivation_id, &msg).await;
+                                                            record_preparation_failure(
+                                                                &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
+                                                            )
+                                                            .await;
                                                             return Err(err);
                                                         }
                                                     };
@@ -3153,7 +3216,10 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                                 "build_prep_not_valid derivation_id={} drv_path={}",
                                                                 derivation_id, drv_path,
                                                             );
-                                                            record_preparation_failure(&pool, derivation_id, &msg).await;
+                                                            record_preparation_failure(
+                                                                &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
+                                                            )
+                                                            .await;
                                                             bail!(
                                                                 "Derivation {} (drv={}) is not valid \
                                                                  in the server store; build activation aborted",
@@ -3178,7 +3244,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                     );
 
                                                     // Phase 3: activate build job (second transaction)
-                                                    let activation =
+                                                    let activation = match
                                                         activate_evaluated_system_build(
                                                             &pool,
                                                             commit_id,
@@ -3186,17 +3252,19 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                             derivation_id,
                                                         )
                                                         .await
-                                                        .map_err(|err| {
+                                                    {
+                                                        Ok(a) => a,
+                                                        Err(err) => {
                                                             let msg = format!(
                                                                 "build_prep_activation_error derivation_id={derivation_id}: {err:#}",
                                                             );
-                                                            // Best-effort since we are inside a map_err closure.
-                                                            let pool2 = pool.clone();
-                                                            tokio::spawn(async move {
-                                                                record_preparation_failure(&pool2, derivation_id, &msg).await;
-                                                            });
-                                                            err
-                                                        })?;
+                                                            record_preparation_failure(
+                                                                &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
+                                                            )
+                                                            .await;
+                                                            return Err(err);
+                                                        }
+                                                    };
 
                                                     match &activation {
                                                         SystemBuildActivationOutcome::Queued { .. }

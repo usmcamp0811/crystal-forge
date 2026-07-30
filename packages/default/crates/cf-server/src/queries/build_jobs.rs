@@ -440,22 +440,30 @@ struct RecoveryCandidate {
     flake_id: Option<i32>,
 }
 
-/// Set backoff state for a failed build-preparation attempt.
-/// Increments the attempt counter, stores the error, and computes the next
-/// retry time using exponential backoff: `2^(attempts) * 30 seconds` capped
-/// at 30 minutes.  PENDING rows become FAILED on their first failure.
+/// Set backoff state for a failed recovery attempt.
+///
+/// The update is guarded by:
+/// - `build_preparation_state IN ('pending', 'failed')` — never touches
+///   `not_required`, `queued`, or `NULL` rows.
+/// - No `build_jobs` row exists for this derivation.
+///
+/// If the guard fails, the update does nothing and no error is returned.
 async fn record_recovery_failure(pool: &PgPool, derivation_id: i32, error: &str) {
     let result = sqlx::query(
         r#"
-        UPDATE derivations
+        UPDATE derivations d
         SET build_preparation_state = 'failed',
-            build_preparation_attempts = COALESCE(build_preparation_attempts, 0) + 1,
+            build_preparation_attempts = COALESCE(d.build_preparation_attempts, 0) + 1,
             build_preparation_last_error = $2,
             build_preparation_next_attempt_at = NOW() + LEAST(
-                POW(2, COALESCE(build_preparation_attempts, 0)) * interval '30 seconds',
+                POW(2, COALESCE(d.build_preparation_attempts, 0)) * interval '30 seconds',
                 interval '30 minutes'
             )
-        WHERE id = $1
+        WHERE d.id = $1
+          AND d.build_preparation_state IN ('pending', 'failed')
+          AND NOT EXISTS (
+              SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = d.id
+          )
         "#,
     )
     .bind(derivation_id)
@@ -463,29 +471,17 @@ async fn record_recovery_failure(pool: &PgPool, derivation_id: i32, error: &str)
     .execute(pool)
     .await;
 
-    if let Err(e) = result {
-        warn!(derivation_id, "record_recovery_failure: update failed: {e:#}");
-    }
-}
-
-/// Mark a derivation's build-preparation as successfully completed.
-async fn reset_preparation_state(pool: &PgPool, derivation_id: i32) {
-    let result = sqlx::query(
-        r#"
-        UPDATE derivations
-        SET build_preparation_state = 'queued',
-            build_preparation_attempts = 0,
-            build_preparation_last_error = NULL,
-            build_preparation_next_attempt_at = NULL
-        WHERE id = $1
-        "#,
-    )
-    .bind(derivation_id)
-    .execute(pool)
-    .await;
-
-    if let Err(e) = result {
-        warn!(derivation_id, "reset_preparation_state: update failed: {e:#}");
+    match result {
+        Ok(r) if r.rows_affected() == 0 => {
+            debug!(
+                derivation_id,
+                "record_recovery_failure: stale guard prevented update (0 rows)"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            warn!(derivation_id, "record_recovery_failure: update failed: {e:#}");
+        }
     }
 }
 
@@ -579,7 +575,13 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
             continue;
         }
 
-        // Phase 2: inside a transaction, revalidate the candidate with FOR UPDATE.
+        // Phase 2: Validated lock-stage activation in correct lock order.
+        //
+        // Lock order (must match normal activation to prevent deadlock):
+        //   1. Commit row FOR UPDATE (verify still complete)
+        //   2. Advisory queue-position lock
+        //   3. Derivation row FOR UPDATE (revalidate path/state/eligible)
+        //   4. Read MAX(queue_position), insert, update state
         let mut tx = match pool.begin().await {
             Ok(t) => t,
             Err(err) => {
@@ -590,21 +592,54 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
             }
         };
 
-        // Revalidate: verify the candidate is still in preparable state,
-        // the path hasn't changed, and the commit is still complete.
-        // This prevents races with re-evaluation resetting the derivation.
-        let revalidated: Option<(String,)> = match sqlx::query_scalar(
+        // Step 1: lock and validate the commit row.
+        match sqlx::query_scalar::<_, bool>(
             r#"
-            SELECT d.derivation_path
+            SELECT TRUE FROM commits c
+            WHERE c.id = $1
+              AND c.evaluation_status = 'complete'
+            FOR UPDATE
+            "#,
+        )
+        .bind(candidate.commit_id)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(Some(_)) => {} // commit still complete, proceed
+            Ok(None) => {
+                warn!(derivation_id, "Recovery: commit no longer complete (skipping)");
+                let _ = tx.rollback().await;
+                continue;
+            }
+            Err(err) => {
+                let msg = format!("Recovery: commit lock query failed: {err:#}");
+                warn!(derivation_id, "{msg}");
+                let _ = tx.rollback().await;
+                record_recovery_failure(pool, derivation_id, &msg).await;
+                continue;
+            }
+        };
+
+        // Step 2: acquire build queue position lock.
+        if let Err(err) = lock_build_queue_order(&mut tx).await {
+            let msg = format!("Recovery: failed to acquire queue lock: {err:#}");
+            warn!(derivation_id, "{msg}");
+            let _ = tx.rollback().await;
+            record_recovery_failure(pool, derivation_id, &msg).await;
+            continue;
+        }
+
+        // Step 3: lock and revalidate the derivation row.
+        let revalidated: Option<()> = match sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT TRUE
             FROM derivations d
-            INNER JOIN commits c ON c.id = d.commit_id
             WHERE d.id = $1
               AND d.build_preparation_state IN ('pending', 'failed')
               AND d.derivation_path = $2
               AND d.status_id = 5
               AND d.cf_agent_enabled = TRUE
               AND d.policy_requirements_met = TRUE
-              AND c.evaluation_status = 'complete'
             FOR UPDATE OF d
             "#,
         )
@@ -613,9 +648,10 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
         .fetch_optional(&mut *tx)
         .await
         {
-            Ok(r) => r,
+            Ok(Some(_)) => Some(()),
+            Ok(None) => None,
             Err(err) => {
-                let msg = format!("Recovery: revalidation query failed: {err:#}");
+                let msg = format!("Recovery: derivation revalidation failed: {err:#}");
                 warn!(derivation_id, "{msg}");
                 let _ = tx.rollback().await;
                 record_recovery_failure(pool, derivation_id, &msg).await;
@@ -624,21 +660,12 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
         };
 
         let Some(_) = revalidated else {
-            // Candidate became stale (re-evaluation, cancellation, or path change).
-            warn!(derivation_id, "Recovery: candidate stale (skipping)");
+            warn!(derivation_id, "Recovery: derivation state stale (skipping)");
             let _ = tx.rollback().await;
             continue;
         };
 
-        // Acquire the build queue lock and compute position.
-        if let Err(err) = lock_build_queue_order(&mut tx).await {
-            let msg = format!("Recovery: failed to acquire lock: {err:#}");
-            warn!(derivation_id, "{msg}");
-            let _ = tx.rollback().await;
-            record_recovery_failure(pool, derivation_id, &msg).await;
-            continue;
-        }
-
+        // Step 4: read queue position and insert.
         let next_pos: i64 = match sqlx::query_scalar(
             "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM build_jobs WHERE status = 'queued' OR status = 'building'",
         )
@@ -692,8 +719,9 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
 
         match inserted {
             Ok(Some(true)) => {
-                // Successfully inserted. Clear prep state inside the tx.
-                let state_update = sqlx::query(
+                // Successfully inserted. Update state inside the same tx
+                // (never use a separate pooled connection while holding row locks).
+                match sqlx::query(
                     r#"
                     UPDATE derivations
                     SET build_preparation_state = 'queued',
@@ -705,13 +733,16 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 )
                 .bind(derivation_id)
                 .execute(&mut *tx)
-                .await;
-
-                if state_update.is_err() {
-                    let msg = format!("Recovery: state update failed after insert");
-                    let _ = tx.rollback().await;
-                    record_recovery_failure(pool, derivation_id, &msg).await;
-                    continue;
+                .await
+                {
+                    Ok(_) => {}
+                    Err(err) => {
+                        let msg = format!("Recovery: state update failed after insert: {err:#}");
+                        warn!(derivation_id, "{msg}");
+                        let _ = tx.rollback().await;
+                        record_recovery_failure(pool, derivation_id, &msg).await;
+                        continue;
+                    }
                 }
 
                 if let Err(err) = tx.commit().await {
@@ -728,9 +759,9 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 recovered += 1;
             }
             Ok(Some(false)) | Ok(None) => {
-                // No job was inserted — either a duplicate already exists or
-                // one of the eligibility predicates changed between revalidation
-                // and INSERT. Check for existing job to distinguish.
+                // INSERT returned no row. Check whether a build job exists
+                // (INSERT was blocked by ON CONFLICT DO NOTHING) or eligibility
+                // changed between revalidation and INSERT.
                 let exists: bool = sqlx::query_scalar(
                     "SELECT EXISTS(SELECT 1 FROM build_jobs WHERE derivation_id = $1)",
                 )
@@ -740,9 +771,30 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 .unwrap_or(false);
 
                 if exists {
-                    // Job already exists — update state and move on.
-                    reset_preparation_state(pool, derivation_id).await;
-                    let _ = tx.commit().await;
+                    // Job already exists — update state inside this tx.
+                    // DO NOT use a pool-based helper while holding row locks.
+                    sqlx::query(
+                        r#"
+                        UPDATE derivations
+                        SET build_preparation_state = 'queued',
+                            build_preparation_attempts = 0,
+                            build_preparation_last_error = NULL,
+                            build_preparation_next_attempt_at = NULL
+                        WHERE id = $1
+                        "#,
+                    )
+                    .bind(derivation_id)
+                    .execute(&mut *tx)
+                    .await
+                    .context("Failed to reconcile existing build job")?;
+
+                    if let Err(err) = tx.commit().await {
+                        let msg = format!("Recovery: commit failed: {err:#}");
+                        warn!(derivation_id, "{msg}");
+                        record_recovery_failure(pool, derivation_id, &msg).await;
+                        continue;
+                    }
+
                     info!(
                         derivation_id,
                         "Recovery: build job already exists for derivation {derivation_id}"
