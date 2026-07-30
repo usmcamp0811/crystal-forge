@@ -12,6 +12,27 @@ fn attic_streaming_push_args(effective_args: &[String]) -> Vec<String> {
     effective_args.to_vec()
 }
 
+fn shell_quote_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "''".to_string();
+    }
+
+    if arg.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/' | b':' | b'=')
+    }) {
+        return arg.to_string();
+    }
+
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+fn format_command_for_log(command: &str, args: &[String]) -> String {
+    std::iter::once(command.to_string())
+        .chain(args.iter().map(|arg| shell_quote_arg(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl Derivation {
     pub async fn push_to_cache_with_retry(
         &self,
@@ -158,6 +179,7 @@ impl Derivation {
                 effective_command,
                 effective_args.join(" ")
             );
+            let attic_push_command = format_command_for_log("attic", &effective_args);
 
             // Preflight: whoami
             {
@@ -253,7 +275,11 @@ impl Derivation {
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     error!("attic (direct) failed: {}", stderr.trim());
-                    anyhow::bail!("attic failed (direct): {}", stderr.trim());
+                    anyhow::bail!(
+                        "attic failed (direct): command: {}\n{}",
+                        attic_push_command,
+                        stderr.trim()
+                    );
                 }
             }
 
@@ -315,7 +341,7 @@ impl Derivation {
 
 #[cfg(test)]
 mod tests {
-    use super::attic_streaming_push_args;
+    use super::{attic_streaming_push_args, format_command_for_log};
 
     #[test]
     fn attic_streaming_push_args_do_not_add_verbose_flags() {
@@ -329,6 +355,20 @@ mod tests {
 
         assert_eq!(push_args, args);
         assert!(!push_args.iter().any(|arg| arg == "-v" || arg == "-vv"));
+    }
+
+    #[test]
+    fn attic_push_command_for_logs_is_copy_pasteable_without_verbose_flags() {
+        let args = vec![
+            "push".to_string(),
+            "local:campground".to_string(),
+            "/nix/store/example path".to_string(),
+        ];
+
+        assert_eq!(
+            format_command_for_log("attic", &args),
+            "attic push local:campground '/nix/store/example path'"
+        );
     }
 }
 
