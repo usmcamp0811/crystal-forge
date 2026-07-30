@@ -5475,8 +5475,31 @@ const steps = [
         }
 
         await historySearch.fill("no-such-build");
-        await assertVisible(page.getByText("No builds match the active filters."), "Expected filter-aware build empty state");
-        const clear = page.getByRole("button", { name: "Clear active filters" });
+        const buildEmptyState = page.locator(".q-empty").filter({
+          has: page.getByRole("heading", {
+            name: "No matching builds",
+            exact: true,
+          }),
+        });
+
+        await assertVisible(
+          buildEmptyState,
+          "Expected filter-aware build empty state",
+        );
+
+        await assertVisible(
+          buildEmptyState.getByText(
+            "Try adjusting your search or filters.",
+            { exact: true },
+          ),
+          "Expected build filtered-empty guidance",
+        );
+
+        const clear = buildEmptyState.getByRole("button", {
+          name: "Clear active filters",
+          exact: true,
+        });
+
         await assertVisible(clear, "Expected clear action for filtered build empty state");
         await clear.click();
         await assertVisible(page.getByText("platform-old-history").first(), "Clearing build filters should restore non-latest rows");
@@ -6733,8 +6756,31 @@ const steps = [
         }
 
         await historySearch.fill("no-such-evaluation");
-        await assertVisible(page.getByText("No evaluations match the active filters."), "Expected filter-aware evaluation empty state");
-        const clear = page.getByRole("button", { name: "Clear active filters" });
+        const evaluationEmptyState = page.locator(".q-empty").filter({
+          has: page.getByRole("heading", {
+            name: "No matching evaluations",
+            exact: true,
+          }),
+        });
+
+        await assertVisible(
+          evaluationEmptyState,
+          "Expected filter-aware evaluation empty state",
+        );
+
+        await assertVisible(
+          evaluationEmptyState.getByText(
+            "Try adjusting your search or filters.",
+            { exact: true },
+          ),
+          "Expected evaluation filtered-empty guidance",
+        );
+
+        const clear = evaluationEmptyState.getByRole("button", {
+          name: "Clear active filters",
+          exact: true,
+        });
+
         await assertVisible(clear, "Expected clear action for filtered evaluation empty state");
         await clear.click();
         await assertVisible(page.getByText("bbbbbbbbbbbb", { exact: true }), "Clearing evaluation filters should restore non-latest rows");
