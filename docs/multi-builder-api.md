@@ -54,6 +54,17 @@ such as `X-Forwarded-Proto: https`, `Forwarded: proto=https`, or
 credential-bearing builder cache-push jobs are rejected with HTTP `426 Upgrade
 Required` before any credentials are sent.
 
+Some flakes require Nix import-from-derivation (IFD) while evaluating
+`config.system.build.toplevel.drvPath`. Verified source re-evaluation disables
+IFD by default so remote builders do not run evaluation-time builds unless the
+operator opts in. If a builder log fails during the pre-build evaluation phase
+with `allow-import-from-derivation is disabled`, enable it explicitly for that
+deployment:
+
+```nix
+services.crystal-forge.build.allow_import_from_derivation = true;
+```
+
 ### `server_derivation` — when to use it
 
 `server_derivation` is simpler and appropriate when you trust the server's evaluation completely and do not need the builder-side re-evaluation check. It is also the only option if the builder cannot run `nix eval` for some reason.

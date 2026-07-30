@@ -61,6 +61,11 @@ pub struct BuilderConfig {
     /// Whether to remove detached source worktrees after the build/reporting
     /// path finishes. Defaults to true to avoid unbounded growth.
     pub cleanup_source_worktrees: bool,
+
+    /// Allow Nix import-from-derivation during builder-side verified source
+    /// re-evaluation. Defaults to false so verified source builds do not run
+    /// evaluation-time builds unless the operator explicitly opts in.
+    pub allow_import_from_derivation: bool,
 }
 
 impl Default for BuilderConfig {
@@ -79,6 +84,7 @@ impl Default for BuilderConfig {
             source_mirror_root: PathBuf::from("/var/lib/crystal-forge/flake-mirrors"),
             source_worktree_root: PathBuf::from("/var/lib/crystal-forge/flake-worktrees"),
             cleanup_source_worktrees: true,
+            allow_import_from_derivation: false,
         }
     }
 }
@@ -138,6 +144,7 @@ mod tests {
         let config = BuilderConfig::default();
 
         assert!(config.supports_execution_strategy(RemoteBuildExecutionStrategy::ServerDerivation));
+        assert!(!config.allow_import_from_derivation);
         assert!(
             !config.supports_execution_strategy(
                 RemoteBuildExecutionStrategy::SourceReEvaluateVerified

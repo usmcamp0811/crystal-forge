@@ -143,6 +143,7 @@
           source_mirror_root = toString cfg.build.source_mirror_root;
           source_worktree_root = toString cfg.build.source_worktree_root;
           cleanup_source_worktrees = cfg.build.cleanup_source_worktrees;
+          allow_import_from_derivation = cfg.build.allow_import_from_derivation;
         }
         // lib.optionalAttrs cfg.build.api_mode {
           private_key_path =
@@ -1171,6 +1172,20 @@ in {
         description = lib.mdDoc ''
           Remove detached source worktrees under `source_worktree_root` after a
           build and its reporting/cache-push lifecycle complete.
+        '';
+      };
+
+      allow_import_from_derivation = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = lib.mdDoc ''
+          Allow builder-side verified source re-evaluation to run Nix
+          import-from-derivation (IFD) during `nix eval`.
+
+          The default is `false` so remote builders do not perform
+          evaluation-time builds unless the operator explicitly opts in. Set to
+          `true` only for flakes whose NixOS configurations require IFD during
+          evaluation, such as generated package metadata or domain lists.
         '';
       };
     };

@@ -210,6 +210,7 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
                 source_mirror_root: builder_config.source_mirror_root.clone(),
                 source_worktree_root: builder_config.source_worktree_root.clone(),
                 cleanup_source_worktrees: builder_config.cleanup_source_worktrees,
+                allow_import_from_derivation: builder_config.allow_import_from_derivation,
             },
         ) => {
             error!("Job loop exited unexpectedly: {:?}", result);
@@ -231,6 +232,7 @@ struct RemoteBuildRuntime {
     source_mirror_root: PathBuf,
     source_worktree_root: PathBuf,
     cleanup_source_worktrees: bool,
+    allow_import_from_derivation: bool,
 }
 
 /// Heartbeat loop - sends metrics to server periodically
@@ -1103,6 +1105,7 @@ async fn evaluate_verified_source_drv(
     job_id: uuid::Uuid,
     pre_build_phase: &AtomicU8,
     client: Option<&cf_builder::builder::api_client::BuilderApiClient>,
+    allow_import_from_derivation: bool,
 ) -> Result<String, PreBuildFailure> {
     let source_ref = if delivery == SourceInputDeliveryMode::ServerBundledArchive {
         // ServerBundledArchive: download the source archive from the server API,
@@ -1212,7 +1215,11 @@ async fn evaluate_verified_source_drv(
         .arg("--no-write-lock-file")
         .arg("--option")
         .arg("allow-import-from-derivation")
-        .arg("false")
+        .arg(if allow_import_from_derivation {
+            "true"
+        } else {
+            "false"
+        })
         .arg(&eval_attr)
         .output()
         .await
@@ -1243,6 +1250,7 @@ async fn verify_source_build_plan(
     job_id: uuid::Uuid,
     pre_build_phase: &AtomicU8,
     client: Option<&cf_builder::builder::api_client::BuilderApiClient>,
+    allow_import_from_derivation: bool,
 ) -> Result<String, PreBuildFailure> {
     let expected = expected_drv_path(payload)?.to_string();
     let source = payload.source.as_ref().ok_or_else(|| PreBuildFailure {
@@ -1258,6 +1266,7 @@ async fn verify_source_build_plan(
         job_id,
         pre_build_phase,
         client,
+        allow_import_from_derivation,
     )
     .await?;
     verify_drv_identity(&expected, &actual)?;
@@ -1318,6 +1327,7 @@ async fn execute_build_job(
                 job_id,
                 &pre_build_phase,
                 Some(&client),
+                remote_runtime.allow_import_from_derivation,
             );
             wait_for_pre_build_verification(verification_future, build_timeout, &pre_build_phase, || {
                 let client = client.clone();
