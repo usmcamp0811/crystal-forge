@@ -440,16 +440,67 @@ struct RecoveryCandidate {
     flake_id: Option<i32>,
 }
 
+/// Set backoff state for a failed build-preparation attempt.
+/// Increments the attempt counter, stores the error, and computes the next
+/// retry time using exponential backoff: `2^(attempts) * 30 seconds` capped
+/// at 30 minutes.  PENDING rows become FAILED on their first failure.
+async fn record_recovery_failure(pool: &PgPool, derivation_id: i32, error: &str) {
+    let result = sqlx::query(
+        r#"
+        UPDATE derivations
+        SET build_preparation_state = 'failed',
+            build_preparation_attempts = COALESCE(build_preparation_attempts, 0) + 1,
+            build_preparation_last_error = $2,
+            build_preparation_next_attempt_at = NOW() + LEAST(
+                POW(2, COALESCE(build_preparation_attempts, 0)) * interval '30 seconds',
+                interval '30 minutes'
+            )
+        WHERE id = $1
+        "#,
+    )
+    .bind(derivation_id)
+    .bind(error)
+    .execute(pool)
+    .await;
+
+    if let Err(e) = result {
+        warn!(derivation_id, "record_recovery_failure: update failed: {e:#}");
+    }
+}
+
+/// Mark a derivation's build-preparation as successfully completed.
+async fn reset_preparation_state(pool: &PgPool, derivation_id: i32) {
+    let result = sqlx::query(
+        r#"
+        UPDATE derivations
+        SET build_preparation_state = 'queued',
+            build_preparation_attempts = 0,
+            build_preparation_last_error = NULL,
+            build_preparation_next_attempt_at = NULL
+        WHERE id = $1
+        "#,
+    )
+    .bind(derivation_id)
+    .execute(pool)
+    .await;
+
+    if let Err(e) = result {
+        warn!(derivation_id, "reset_preparation_state: update failed: {e:#}");
+    }
+}
+
 /// Recover derivations whose build-queue preparation failed or was interrupted.
 ///
 /// Only derivations explicitly marked `build_preparation_state = 'pending'` or
 /// `'failed'` are eligible. `'not_required'` (scope-excluded, policy-excluded) and
 /// `NULL` (rows pre-dating this state machine) are never recovered.
+/// Failed rows are subject to exponential backoff via `next_attempt_at`.
 ///
 /// For each candidate:
-/// 1. Creates or verifies the derivation GC root.
-/// 2. Inserts the build job under the advisory lock (only after rooting).
-/// 3. Sets `build_preparation_state = 'queued'` on success or `'failed'` on error.
+/// 1. Creates or verifies the derivation GC root (prevents GC of the drv).
+/// 2. Revalidates the candidate state inside a transaction with `FOR UPDATE`.
+/// 3. Inserts the build job under the advisory lock (only after rooting).
+/// 4. Sets `build_preparation_state = 'queued'` on success or `'failed'` on error.
 ///
 /// Idempotent: `ON CONFLICT (derivation_id) DO NOTHING` prevents duplicate jobs.
 ///
@@ -457,6 +508,7 @@ struct RecoveryCandidate {
 pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usize> {
     // Find derivations that need recovery. Only those with explicit 'pending' or
     // 'failed' state — never NULL (pre-migration rows) or 'not_required'.
+    // Failed rows are subject to exponential backoff via next_attempt_at.
     let candidates: Vec<RecoveryCandidate> = sqlx::query_as(
         r#"
         SELECT
@@ -472,6 +524,8 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
           AND d.cf_agent_enabled = TRUE
           AND d.policy_requirements_met = TRUE
           AND c.evaluation_status = 'complete'      -- commit fully evaluated
+          AND (d.build_preparation_next_attempt_at IS NULL
+               OR d.build_preparation_next_attempt_at <= NOW())  -- backoff gate
           AND NOT EXISTS (
               SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = d.id
           )
@@ -498,10 +552,9 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
         let drv_path = match &candidate.derivation_path {
             Some(p) => p.clone(),
             None => {
-                warn!(
-                    derivation_id,
-                    "Skipping recovery for derivation with no drv path"
-                );
+                let msg = "Skipping recovery: no drv path on derivation";
+                warn!(derivation_id, "{msg}");
+                record_recovery_failure(pool, derivation_id, msg).await;
                 continue;
             }
         };
@@ -510,44 +563,79 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
         let rooted = match crate::builder::create_drv_gc_root(&drv_path, derivation_id).await {
             Ok(r) => r,
             Err(err) => {
-                warn!(
-                    derivation_id,
-                    "Recovery: GC root creation failed for derivation {}: {:#}", derivation_id, err
-                );
-                // Leave state as 'failed'; it will be retried on the next reconciliation.
+                let msg = format!("Recovery: GC root failed for derivation {derivation_id}: {err:#}");
+                warn!("{msg}");
+                record_recovery_failure(pool, derivation_id, &msg).await;
                 continue;
             }
         };
 
         if !rooted {
-            warn!(
-                derivation_id,
-                "Recovery: derivation {} drv path {} is not valid in the store; skipping",
-                derivation_id,
-                drv_path,
+            let msg = format!(
+                "Recovery: derivation {derivation_id} drv path {drv_path} not valid in store"
             );
-            // Mark as failed so it is not retried indefinitely against a missing path.
-            let _ = sqlx::query(
-                "UPDATE derivations SET build_preparation_state = 'failed' WHERE id = $1",
-            )
-            .bind(derivation_id)
-            .execute(pool)
-            .await;
+            warn!("{msg}");
+            record_recovery_failure(pool, derivation_id, &msg).await;
             continue;
         }
 
-        // Phase 2: insert build job under advisory lock.
+        // Phase 2: inside a transaction, revalidate the candidate with FOR UPDATE.
         let mut tx = match pool.begin().await {
             Ok(t) => t,
             Err(err) => {
-                warn!(derivation_id, "Recovery: failed to begin tx: {:#}", err);
+                let msg = format!("Recovery: failed to begin tx: {err:#}");
+                warn!(derivation_id, "{msg}");
+                record_recovery_failure(pool, derivation_id, &msg).await;
                 continue;
             }
         };
 
-        if let Err(err) = lock_build_queue_order(&mut tx).await {
-            warn!(derivation_id, "Recovery: failed to acquire lock: {:#}", err);
+        // Revalidate: verify the candidate is still in preparable state,
+        // the path hasn't changed, and the commit is still complete.
+        // This prevents races with re-evaluation resetting the derivation.
+        let revalidated: Option<(String,)> = match sqlx::query_scalar(
+            r#"
+            SELECT d.derivation_path
+            FROM derivations d
+            INNER JOIN commits c ON c.id = d.commit_id
+            WHERE d.id = $1
+              AND d.build_preparation_state IN ('pending', 'failed')
+              AND d.derivation_path = $2
+              AND d.status_id = 5
+              AND d.cf_agent_enabled = TRUE
+              AND d.policy_requirements_met = TRUE
+              AND c.evaluation_status = 'complete'
+            FOR UPDATE OF d
+            "#,
+        )
+        .bind(derivation_id)
+        .bind(&drv_path)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(r) => r,
+            Err(err) => {
+                let msg = format!("Recovery: revalidation query failed: {err:#}");
+                warn!(derivation_id, "{msg}");
+                let _ = tx.rollback().await;
+                record_recovery_failure(pool, derivation_id, &msg).await;
+                continue;
+            }
+        };
+
+        let Some(_) = revalidated else {
+            // Candidate became stale (re-evaluation, cancellation, or path change).
+            warn!(derivation_id, "Recovery: candidate stale (skipping)");
             let _ = tx.rollback().await;
+            continue;
+        };
+
+        // Acquire the build queue lock and compute position.
+        if let Err(err) = lock_build_queue_order(&mut tx).await {
+            let msg = format!("Recovery: failed to acquire lock: {err:#}");
+            warn!(derivation_id, "{msg}");
+            let _ = tx.rollback().await;
+            record_recovery_failure(pool, derivation_id, &msg).await;
             continue;
         }
 
@@ -559,13 +647,16 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
         {
             Ok(p) => p,
             Err(err) => {
-                warn!(derivation_id, "Recovery: failed to read max position: {:#}", err);
+                let msg = format!("Recovery: failed to read max position: {err:#}");
+                warn!(derivation_id, "{msg}");
                 let _ = tx.rollback().await;
+                record_recovery_failure(pool, derivation_id, &msg).await;
                 continue;
             }
         };
 
-        let inserted: Result<bool, _> = sqlx::query_scalar(
+        // Insert or detect existing build job.
+        let inserted: Result<Option<bool>, _> = sqlx::query_scalar(
             r#"
             INSERT INTO build_jobs (
                 derivation_id, environment_id, priority_weight, queue_position, status
@@ -597,52 +688,81 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
         .bind(derivation_id)
         .bind(next_pos)
         .fetch_optional(&mut *tx)
-        .await
-        .map(|opt| opt.unwrap_or(false));
+        .await;
 
         match inserted {
-            Ok(true) => {
-                // Update preparation state inside the same transaction.
-                let state_result = sqlx::query(
-                    "UPDATE derivations SET build_preparation_state = 'queued' WHERE id = $1",
+            Ok(Some(true)) => {
+                // Successfully inserted. Clear prep state inside the tx.
+                let state_update = sqlx::query(
+                    r#"
+                    UPDATE derivations
+                    SET build_preparation_state = 'queued',
+                        build_preparation_attempts = 0,
+                        build_preparation_last_error = NULL,
+                        build_preparation_next_attempt_at = NULL
+                    WHERE id = $1
+                    "#,
                 )
                 .bind(derivation_id)
                 .execute(&mut *tx)
                 .await;
 
-                if state_result.is_err() {
+                if state_update.is_err() {
+                    let msg = format!("Recovery: state update failed after insert");
                     let _ = tx.rollback().await;
-                    warn!(derivation_id, "Recovery: failed to update prep state");
+                    record_recovery_failure(pool, derivation_id, &msg).await;
                     continue;
                 }
 
                 if let Err(err) = tx.commit().await {
-                    warn!(derivation_id, "Recovery: commit failed: {:#}", err);
+                    let msg = format!("Recovery: commit failed: {err:#}");
+                    warn!(derivation_id, "{msg}");
+                    record_recovery_failure(pool, derivation_id, &msg).await;
                     continue;
                 }
 
-                warn!(
+                info!(
                     derivation_id,
-                    "🔄 Recovery: created missing build job for derivation {}", derivation_id
+                    "🔄 Recovery: created missing build job for derivation {derivation_id}"
                 );
                 recovered += 1;
             }
-            Ok(false) => {
-                // Already has a build job (idempotent). Update state.
-                let _ = sqlx::query(
-                    "UPDATE derivations SET build_preparation_state = 'queued' WHERE id = $1",
+            Ok(Some(false)) | Ok(None) => {
+                // No job was inserted — either a duplicate already exists or
+                // one of the eligibility predicates changed between revalidation
+                // and INSERT. Check for existing job to distinguish.
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM build_jobs WHERE derivation_id = $1)",
                 )
                 .bind(derivation_id)
-                .execute(&mut *tx)
-                .await;
-                let _ = tx.commit().await;
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap_or(false);
+
+                if exists {
+                    // Job already exists — update state and move on.
+                    reset_preparation_state(pool, derivation_id).await;
+                    let _ = tx.commit().await;
+                    info!(
+                        derivation_id,
+                        "Recovery: build job already exists for derivation {derivation_id}"
+                    );
+                    recovered += 1;
+                } else {
+                    // Eligibility changed — derivation is no longer eligible.
+                    // Leave it with its current state (don't reset, don't fail).
+                    warn!(
+                        derivation_id,
+                        "Recovery: derivation {derivation_id} no longer eligible for queue",
+                    );
+                    let _ = tx.rollback().await;
+                }
             }
             Err(err) => {
+                let msg = format!("Recovery: insert query failed: {err:#}");
+                warn!(derivation_id, "{msg}");
                 let _ = tx.rollback().await;
-                warn!(
-                    derivation_id,
-                    "Recovery: insert failed for derivation {}: {:#}", derivation_id, err
-                );
+                record_recovery_failure(pool, derivation_id, &msg).await;
             }
         }
     }

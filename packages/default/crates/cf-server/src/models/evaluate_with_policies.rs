@@ -1238,6 +1238,13 @@ pub enum SystemFinalizeOutcome {
         derivation_id: i32,
         reason: SystemNotQueuedReason,
     },
+    /// GC-root or build-job activation failed after the derivation was
+    /// persisted.  `build_preparation_state` is set to `'failed'` and the
+    /// recovery reconciler will retry with exponential backoff.
+    PreparationFailed {
+        derivation_id: i32,
+        error: String,
+    },
     BuildAlreadyExists {
         derivation_id: i32,
         build_job_id: uuid::Uuid,
@@ -1856,6 +1863,41 @@ async fn handle_system_build_activation(
     Ok(())
 }
 
+/// Record a build-preparation failure with exponential backoff state.
+///
+/// Sets `build_preparation_state = 'failed'`, increments the attempt counter,
+/// stores the error message, and computes the next retry time using
+/// exponential backoff: `2^(attempts) * 30 seconds` capped at 30 minutes.
+///
+/// This is called by the streaming build-prep task, the fallback finalizer,
+/// and the recovery reconciler when GC-root or activation fails.
+pub(crate) async fn record_preparation_failure(
+    pool: &PgPool,
+    derivation_id: i32,
+    error: &str,
+) {
+    if let Err(e) = sqlx::query(
+        r#"
+        UPDATE derivations
+        SET build_preparation_state = 'failed',
+            build_preparation_attempts = COALESCE(build_preparation_attempts, 0) + 1,
+            build_preparation_last_error = $2,
+            build_preparation_next_attempt_at = NOW() + LEAST(
+                POW(2, COALESCE(build_preparation_attempts, 0)) * interval '30 seconds',
+                interval '30 minutes'
+            )
+        WHERE id = $1
+        "#,
+    )
+    .bind(derivation_id)
+    .bind(error)
+    .execute(pool)
+    .await
+    {
+        error!(derivation_id, "Failed to record preparation failure: {e:#}");
+    }
+}
+
 /// Full combined helper that persists, roots, activates, and notifies.
 ///
 /// Used by the fallback evaluation path and tests.  The bulk streaming
@@ -1885,49 +1927,94 @@ pub async fn finalize_evaluated_system(
             derivation_id,
             drv_path,
         } => {
-            // Phase 2: GC root
-            let rooted = crate::builder::create_drv_gc_root(&drv_path, derivation_id)
-                .await
-                .with_context(|| {
-                    format!("Failed to create GC root for derivation {}", derivation_id)
-                })?;
-            if !rooted {
-                #[cfg(not(test))]
-                bail!(
-                    "Derivation {} (drv={}) is not valid in the server store; \
-                     cannot proceed with build activation",
-                    derivation_id,
-                    drv_path,
-                );
-                #[cfg(test)]
-                warn!(
-                    "⚠️  Skipping GC-root requirement for derivation {} (drv={}) in test mode",
-                    derivation_id, drv_path,
-                );
+            // Phase 2: GC root (required in production; relaxed in tests)
+            let gc_root_result = crate::builder::create_drv_gc_root(&drv_path, derivation_id).await;
+            let mut gc_root_ok = false;
+
+            match gc_root_result {
+                Ok(true) => {
+                    gc_root_ok = true;
+                }
+                Ok(false) if cfg!(test) => {
+                    warn!(
+                        "⚠️  Skipping GC-root requirement for derivation {} (drv={}) in test mode",
+                        derivation_id, drv_path,
+                    );
+                    gc_root_ok = true; // allow activation in test
+                }
+                Ok(false) => {
+                    let msg = format!(
+                        "Derivation {} (drv={}) is not valid in the server store",
+                        derivation_id, drv_path,
+                    );
+                    warn!(derivation_id, "{}", msg);
+                    record_preparation_failure(pool, derivation_id, &msg).await;
+                    return Ok(SystemFinalizeOutcome::PreparationFailed {
+                        derivation_id,
+                        error: msg,
+                    });
+                }
+                Err(err) => {
+                    let msg = format!("Failed to create GC root: {err:#}");
+                    warn!(derivation_id, "{}", msg);
+                    record_preparation_failure(pool, derivation_id, &msg).await;
+                    return Ok(SystemFinalizeOutcome::PreparationFailed {
+                        derivation_id,
+                        error: msg,
+                    });
+                }
             }
 
-            // Phase 3: activate build job
-            let activation =
-                activate_evaluated_system_build(pool, commit_id, expected_attempt, derivation_id)
-                    .await?;
-
-            match activation {
-                SystemBuildActivationOutcome::Queued { build_job_id } => {
-                    Ok(SystemFinalizeOutcome::Queued {
-                        derivation_id,
-                        build_job_id,
-                    })
-                }
-                SystemBuildActivationOutcome::AlreadyExists {
-                    build_job_id,
-                    status,
-                } => Ok(SystemFinalizeOutcome::BuildAlreadyExists {
+            if gc_root_ok {
+                // Phase 3: activate build job
+                match activate_evaluated_system_build(
+                    pool,
+                    commit_id,
+                    expected_attempt,
                     derivation_id,
-                    build_job_id,
-                    build_job_status: status,
-                }),
-                SystemBuildActivationOutcome::Cancelled => Ok(SystemFinalizeOutcome::Cancelled),
-                SystemBuildActivationOutcome::Superseded => Ok(SystemFinalizeOutcome::Superseded),
+                )
+                .await
+                {
+                    Ok(activation) => match activation {
+                        SystemBuildActivationOutcome::Queued { build_job_id } => {
+                            Ok(SystemFinalizeOutcome::Queued {
+                                derivation_id,
+                                build_job_id,
+                            })
+                        }
+                        SystemBuildActivationOutcome::AlreadyExists {
+                            build_job_id,
+                            status,
+                        } => Ok(SystemFinalizeOutcome::BuildAlreadyExists {
+                            derivation_id,
+                            build_job_id,
+                            build_job_status: status,
+                        }),
+                        SystemBuildActivationOutcome::Cancelled => {
+                            Ok(SystemFinalizeOutcome::Cancelled)
+                        }
+                        SystemBuildActivationOutcome::Superseded => {
+                            Ok(SystemFinalizeOutcome::Superseded)
+                        }
+                    },
+                    Err(err) => {
+                        let msg = format!(
+                            "Build activation failed for derivation {}: {err:#}",
+                            derivation_id,
+                        );
+                        warn!(derivation_id, "{}", msg);
+                        record_preparation_failure(pool, derivation_id, &msg).await;
+                        Ok(SystemFinalizeOutcome::PreparationFailed {
+                            derivation_id,
+                            error: msg,
+                        })
+                    }
+                }
+            } else {
+                // GC root failed and not in test mode — already returned
+                // PreparationFailed above. This arm is unreachable but
+                // required by exhaustiveness.
+                unreachable!()
             }
         }
 
@@ -2260,6 +2347,15 @@ async fn handle_system_finalize_outcome(
 
         SystemFinalizeOutcome::RecordedWithoutBuild { ref reason, .. } => {
             debug!("Recorded {} without build: {:?}", system_name, reason);
+            Ok(SystemFinalizeAction::Recorded)
+        }
+
+        SystemFinalizeOutcome::PreparationFailed {
+            ref error, ..
+        } => {
+            warn!("{}: build queue preparation failed: {}", system_name, error);
+            // The derivation was persisted and build-eligible; the recovery
+            // reconciler will retry activation with backoff.
             Ok(SystemFinalizeAction::Recorded)
         }
 
@@ -3042,33 +3138,29 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                     let rooted = match gc_root_result {
                                                         Ok(r) => r,
                                                         Err(err) => {
-                                                            // Mark preparation as failed so the recovery
-                                                            // reconciler can retry after a server restart.
-                                                            let _ = sqlx::query(
-                                                                "UPDATE derivations SET build_preparation_state = 'failed' WHERE id = $1",
-                                                            )
-                                                            .bind(derivation_id)
-                                                            .execute(&pool)
-                                                            .await;
+                                                            let msg = format!(
+                                                                "build_prep_gc_root_error derivation_id={}: {err:#}",
+                                                                derivation_id,
+                                                            );
+                                                            record_preparation_failure(&pool, derivation_id, &msg).await;
                                                             return Err(err);
                                                         }
                                                     };
                                                     if !rooted {
-                                                        // Derivation path is not valid in the store —
-                                                        // mark as failed so recovery can detect this.
-                                                        let _ = sqlx::query(
-                                                            "UPDATE derivations SET build_preparation_state = 'failed' WHERE id = $1",
-                                                        )
-                                                        .bind(derivation_id)
-                                                        .execute(&pool)
-                                                        .await;
                                                         #[cfg(not(test))]
-                                                        bail!(
-                                                            "Derivation {} (drv={}) is not valid \
-                                                             in the server store; build activation aborted",
-                                                            derivation_id,
-                                                            drv_path,
-                                                        );
+                                                        {
+                                                            let msg = format!(
+                                                                "build_prep_not_valid derivation_id={} drv_path={}",
+                                                                derivation_id, drv_path,
+                                                            );
+                                                            record_preparation_failure(&pool, derivation_id, &msg).await;
+                                                            bail!(
+                                                                "Derivation {} (drv={}) is not valid \
+                                                                 in the server store; build activation aborted",
+                                                                derivation_id,
+                                                                drv_path,
+                                                            );
+                                                        }
                                                         #[cfg(test)]
                                                         warn!(
                                                             "⚠️  Skipping GC-root requirement for \
@@ -3095,15 +3187,13 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                         )
                                                         .await
                                                         .map_err(|err| {
-                                                            // Mark as failed for recovery. Best-effort; ignore errors.
+                                                            let msg = format!(
+                                                                "build_prep_activation_error derivation_id={derivation_id}: {err:#}",
+                                                            );
+                                                            // Best-effort since we are inside a map_err closure.
                                                             let pool2 = pool.clone();
                                                             tokio::spawn(async move {
-                                                                let _ = sqlx::query(
-                                                                    "UPDATE derivations SET build_preparation_state = 'failed' WHERE id = $1",
-                                                                )
-                                                                .bind(derivation_id)
-                                                                .execute(&pool2)
-                                                                .await;
+                                                                record_preparation_failure(&pool2, derivation_id, &msg).await;
                                                             });
                                                             err
                                                         })?;
