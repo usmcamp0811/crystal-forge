@@ -456,7 +456,7 @@ async fn record_recovery_failure(
     derivation_id: i32,
     commit_id: i32,
     expected_attempt: i32,
-    derivation_path: &str,
+    derivation_path: Option<&str>,
     error: &str,
 ) {
     let result = sqlx::query(
@@ -576,7 +576,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 let msg = "Skipping recovery: no drv path on derivation";
                 warn!(derivation_id, "{msg}");
                 record_recovery_failure(
-                    pool, derivation_id, commit_id, expected_attempt, "", msg,
+                    pool, derivation_id, commit_id, expected_attempt, None, msg,
                 )
                 .await;
                 continue;
@@ -590,7 +590,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 let msg = format!("Recovery: GC root failed for derivation {derivation_id}: {err:#}");
                 warn!("{msg}");
                 record_recovery_failure(
-                    pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                    pool, derivation_id, commit_id, expected_attempt, Some(drv_path.as_str()), &msg,
                 )
                 .await;
                 continue;
@@ -603,7 +603,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
             );
             warn!("{msg}");
             record_recovery_failure(
-                pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                pool, derivation_id, commit_id, expected_attempt, Some(drv_path.as_str()), &msg,
             )
             .await;
             continue;
@@ -622,7 +622,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 let msg = format!("Recovery: failed to begin tx: {err:#}");
                 warn!(derivation_id, "{msg}");
                 record_recovery_failure(
-                    pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                    pool, derivation_id, commit_id, expected_attempt, Some(drv_path.as_str()), &msg,
                 )
                 .await;
                 continue;
@@ -653,7 +653,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 warn!(derivation_id, "{msg}");
                 let _ = tx.rollback().await;
                 record_recovery_failure(
-                    pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                    pool, derivation_id, commit_id, expected_attempt, Some(drv_path.as_str()), &msg,
                 )
                 .await;
                 continue;
@@ -666,7 +666,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
             warn!(derivation_id, "{msg}");
             let _ = tx.rollback().await;
             record_recovery_failure(
-                pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                pool, derivation_id, commit_id, expected_attempt, Some(drv_path.as_str()), &msg,
             )
             .await;
             continue;
@@ -698,7 +698,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 warn!(derivation_id, "{msg}");
                 let _ = tx.rollback().await;
                 record_recovery_failure(
-                    pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                    pool, derivation_id, commit_id, expected_attempt, Some(drv_path.as_str()), &msg,
                 )
                 .await;
                 continue;
@@ -724,7 +724,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 warn!(derivation_id, "{msg}");
                 let _ = tx.rollback().await;
                 record_recovery_failure(
-                    pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                    pool, derivation_id, commit_id, expected_attempt, Some(drv_path.as_str()), &msg,
                 )
                 .await;
                 continue;
@@ -790,7 +790,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                         warn!(derivation_id, "{msg}");
                         let _ = tx.rollback().await;
                         record_recovery_failure(
-                            pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                            pool, derivation_id, commit_id, expected_attempt, Some(drv_path.as_str()), &msg,
                         )
                         .await;
                         continue;
@@ -801,7 +801,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                     let msg = format!("Recovery: commit failed: {err:#}");
                     warn!(derivation_id, "{msg}");
                     record_recovery_failure(
-                        pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                        pool, derivation_id, commit_id, expected_attempt, Some(drv_path.as_str()), &msg,
                     )
                     .await;
                     continue;
@@ -847,7 +847,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                         let msg = format!("Recovery: commit failed: {err:#}");
                         warn!(derivation_id, "{msg}");
                         record_recovery_failure(
-                            pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                            pool, derivation_id, commit_id, expected_attempt, Some(drv_path.as_str()), &msg,
                         )
                         .await;
                         continue;
@@ -873,7 +873,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 warn!(derivation_id, "{msg}");
                 let _ = tx.rollback().await;
                 record_recovery_failure(
-                    pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                    pool, derivation_id, commit_id, expected_attempt, Some(drv_path.as_str()), &msg,
                 )
                 .await;
             }
