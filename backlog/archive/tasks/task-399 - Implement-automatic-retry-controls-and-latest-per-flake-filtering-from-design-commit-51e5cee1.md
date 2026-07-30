@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-07-24 03:26'
-updated_date: '2026-07-30 04:02'
+updated_date: '2026-07-30 13:43'
 labels:
   - design-parity
   - web-ui
@@ -247,6 +247,22 @@ Verification run locally:
 - `SQLX_OFFLINE=true nix develop ../.. --command cargo test -p cf-builder --lib attic_streaming_push_args_do_not_add_verbose_flags -- --test-threads=1` passed.
 - `SQLX_OFFLINE=true nix develop ../.. --command cargo test -p cf-server --lib build_log_append_status_allows_cancelling_but_rejects_terminal -- --test-threads=1` passed.
 - `SQLX_OFFLINE=true nix develop ../.. --command cargo check -p cf-builder -p cf-server --all-targets` passed (existing warnings only).
+- `git diff --check` passed.
+---
+
+author: gpt-5.5
+created: 2026-07-30 13:43
+---
+Follow-up diagnostic logging fix pushed in `fc449627` on MR !310.
+
+Change:
+- When Attic direct push fails, include the exact `attic push ...` command in the error that is copied to build logs. The command is shell-quoted for copy/paste and does not include the Attic token or secret environment variables. This makes HTTP 500 push failures easier to reproduce from the builder host/service context.
+
+Verification run locally:
+- `nix develop ../.. --command cargo fmt --package cf-builder` passed.
+- `SQLX_OFFLINE=true nix develop ../.. --command cargo test -p cf-builder --lib attic_push_command_for_logs_is_copy_pasteable_without_verbose_flags -- --test-threads=1` passed.
+- `SQLX_OFFLINE=true nix develop ../.. --command cargo test -p cf-builder --lib attic_streaming_push_args_do_not_add_verbose_flags -- --test-threads=1` passed.
+- `SQLX_OFFLINE=true nix develop ../.. --command cargo check -p cf-builder --all-targets` passed (existing warnings only).
 - `git diff --check` passed.
 ---
 <!-- COMMENTS:END -->
