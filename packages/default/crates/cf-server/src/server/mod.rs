@@ -29,14 +29,15 @@ use tracing::{debug, error, info, warn};
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
 use crate::derivations::utils::count_closure_packages;
 use crate::models::deployment_policies::{AssignedPolicy, PoliciesByConfiguration};
-use crate::queries::build_jobs::QueuedBuild;
+use crate::queries::build_jobs::{QueuedBuild, recover_orphaned_derivation_build_jobs};
 use crate::queries::builders::{
     cleanup_expired_build_logs, mark_stale_builders_offline,
     requeue_orphaned_building_jobs_with_reason,
 };
 use crate::queries::commits::{
     EvalCancellationOutcome, EvalFailureOutcome, EvalStartOutcome, get_commits_pending_evaluation,
-    mark_commit_evaluation_failed, mark_commit_evaluation_started, reset_stuck_commit_evaluations,
+    mark_commit_evaluation_failed, mark_commit_evaluation_started, next_evaluation_available_at,
+    reset_stuck_commit_evaluations,
 };
 use crate::queries::deployment_policies::{
     list_enabled_deployment_policies, list_enabled_policies_for_flake,
@@ -218,14 +219,15 @@ async fn handle_evaluation_attempt_failure(
     cf_state: &crate::handlers::agent_request::CFState,
     commit: &Commit,
     attempt: i32,
-    error: &anyhow::Error,
+    error: &str,
+    failure_class: crate::models::retry_policy::RetryFailureClass,
 ) -> Result<()> {
     error!(
         "❌ Failed to evaluate commit {}: {}",
         commit.git_commit_hash, error
     );
 
-    match mark_commit_evaluation_failed(pool, commit.id, &error.to_string(), attempt).await {
+    match mark_commit_evaluation_failed(pool, commit.id, error, attempt, failure_class).await {
         Err(mark_err) => {
             crate::handlers::api::commits::cleanup_eval_channel(cf_state, commit.id).await;
             return Err(mark_err).with_context(|| {
@@ -1077,6 +1079,18 @@ pub async fn run_commit_evaluation_loop(
         error!("❌ Failed to reset partial derivations: {}", e);
     }
 
+    // Recover any DryRunComplete derivations that have no build job, which can
+    // happen when the build-preparation task failed or the server restarted
+    // between derivation persistence and build-job activation.
+    match recover_orphaned_derivation_build_jobs(&pool).await {
+        Ok(count) if count > 0 => {
+            info!("🔄 Startup: queued {} orphaned build-eligible derivations", count);
+            queue_notifier.notify_build_queue();
+        }
+        Ok(_) => {}
+        Err(e) => error!("❌ Failed to recover orphaned derivation build jobs: {}", e),
+    }
+
     // `PgPool` is cheap to clone; keep an owned copy in the task.
     let pool = pool.clone();
 
@@ -1089,7 +1103,18 @@ pub async fn run_commit_evaluation_loop(
             error!("❌ Error in commit evaluation cycle: {e}");
         }
 
-        // Wait for either a notification or the periodic ticker before checking again
+        let due_delay = match next_evaluation_available_at(&pool).await {
+            Ok(Some(available_at)) => evaluation_due_delay(chrono::Utc::now(), available_at),
+            Ok(None) => interval,
+            Err(e) => {
+                warn!("Failed to load next evaluation due time: {e:#}");
+                interval
+            }
+        };
+        let due_wakeup = time::sleep(due_delay);
+        tokio::pin!(due_wakeup);
+
+        // Wait for a notification, durable retry due time, or fallback ticker.
         tokio::select! {
             _ = ticker.tick() => {
                 debug!("⏰ Eval loop: periodic tick (fallback polling)");
@@ -1097,8 +1122,21 @@ pub async fn run_commit_evaluation_loop(
             _ = queue_notifier.wait_for_eval_work() => {
                 debug!("🔔 Eval loop: notified of new work");
             }
+            _ = &mut due_wakeup => {
+                debug!("⏰ Eval loop: next delayed evaluation is due");
+            }
         }
     }
+}
+
+fn evaluation_due_delay(
+    now: chrono::DateTime<chrono::Utc>,
+    available_at: chrono::DateTime<chrono::Utc>,
+) -> Duration {
+    available_at
+        .signed_duration_since(now)
+        .to_std()
+        .unwrap_or(Duration::ZERO)
 }
 
 fn builder_stale_timeout_secs(heartbeat_interval: Duration) -> i64 {
@@ -1168,6 +1206,19 @@ async fn run_builder_recovery_loop(
         {
             error!("❌ Builder recovery cycle failed: {:#}", err);
         }
+
+        // Periodically recover derivations whose build-preparation task failed.
+        // This runs regardless of service restarts so a build job is eventually
+        // created without requiring manual intervention or a service restart.
+        match recover_orphaned_derivation_build_jobs(&pool).await {
+            Ok(count) if count > 0 => {
+                info!("🔄 Periodic recovery: queued {} orphaned build-eligible derivations", count);
+                queue_notifier.notify_build_queue();
+            }
+            Ok(_) => {}
+            Err(e) => error!("❌ Periodic build-preparation recovery failed: {}", e),
+        }
+
         ticker.tick().await;
     }
 }
@@ -1227,8 +1278,14 @@ async fn process_pending_commits(
                     "❌ Failed to get flake for commit {}: {}",
                     commit.git_commit_hash, e
                 );
-                let _ =
-                    mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt).await;
+                let _ = mark_commit_evaluation_failed(
+                    pool,
+                    commit.id,
+                    &e.to_string(),
+                    attempt,
+                    crate::models::retry_policy::RetryFailureClass::Deterministic,
+                )
+                .await;
                 return Ok(());
             }
         };
@@ -1238,8 +1295,14 @@ async fn process_pending_commits(
             Ok(cfg) => cfg,
             Err(e) => {
                 error!("❌ Failed to load config: {}", e);
-                let _ =
-                    mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt).await;
+                let _ = mark_commit_evaluation_failed(
+                    pool,
+                    commit.id,
+                    &e.to_string(),
+                    attempt,
+                    crate::models::retry_policy::RetryFailureClass::Deterministic,
+                )
+                .await;
                 return Ok(());
             }
         };
@@ -1266,8 +1329,14 @@ async fn process_pending_commits(
                         flake.id, commit.git_commit_hash,
                     ));
                     error!("{:#}", e);
-                    let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string(), attempt)
-                        .await;
+                    let _ = mark_commit_evaluation_failed(
+                        pool,
+                        commit.id,
+                        &e.to_string(),
+                        attempt,
+                        crate::models::retry_policy::RetryFailureClass::Deterministic,
+                    )
+                    .await;
                     return Ok(());
                 }
             };
@@ -1386,8 +1455,14 @@ async fn process_pending_commits(
                             "Failed to atomically finalize commit {} evaluation (attempt {})",
                             commit.git_commit_hash, attempt
                         ));
+                        let error_text = error.to_string();
                         return handle_evaluation_attempt_failure(
-                            pool, &cf_state, &commit, attempt, &error,
+                            pool,
+                            &cf_state,
+                            &commit,
+                            attempt,
+                            &error_text,
+                            crate::models::retry_policy::RetryFailureClass::Unknown,
                         )
                         .await;
                     }
@@ -1528,8 +1603,16 @@ async fn process_pending_commits(
                 }
             }
             Err(e) => {
-                return handle_evaluation_attempt_failure(pool, &cf_state, &commit, attempt, &e)
-                    .await;
+                let error_text = e.to_string();
+                return handle_evaluation_attempt_failure(
+                    pool,
+                    &cf_state,
+                    &commit,
+                    attempt,
+                    &error_text,
+                    e.class,
+                )
+                .await;
             }
         }
     }
@@ -1544,13 +1627,28 @@ fn select_next_pending_commit_id_for_cycle(
 #[cfg(test)]
 mod tests {
     use super::{
-        builder_stale_timeout_secs, normalize_custom_policy_expression,
+        builder_stale_timeout_secs, evaluation_due_delay, normalize_custom_policy_expression,
         parse_deployment_policy_record, select_next_pending_commit_id_for_cycle,
     };
     use crate::models::deployment_policies::{DeploymentPolicy, DeploymentPolicyRecord};
     use chrono::Utc;
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn evaluation_due_wakeup_respects_zero_ten_and_thirty_second_backoffs() {
+        let now = Utc::now();
+        for seconds in [0, 10, 30] {
+            assert_eq!(
+                evaluation_due_delay(now, now + chrono::Duration::seconds(seconds)),
+                std::time::Duration::from_secs(seconds as u64)
+            );
+        }
+        assert_eq!(
+            evaluation_due_delay(now, now - chrono::Duration::seconds(1)),
+            std::time::Duration::ZERO
+        );
+    }
 
     #[test]
     fn select_next_pending_commit_id_honors_latest_reordered_snapshot() {

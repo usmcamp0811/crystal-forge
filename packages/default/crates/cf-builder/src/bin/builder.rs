@@ -1,13 +1,14 @@
 use anyhow::Context;
 use cf_builder::build::{BuildCancelledError, Derivation, LogSink};
+use cf_builder::builder::api_client::{AppendLogsOutcome, job_status_requests_cancellation};
 use cf_builder::builder::{ApiBuildReporter, BuilderApiClient, SystemMetrics};
 use cf_builder::cache::builder_cache_to_config;
 // Bring in the build execution and cache methods on Derivation
 use cf_builder::derivations;
 use cf_config::config::{CacheConfig, CacheType, CrystalForgeConfig};
 use cf_protocol::builder::{
-    BuildFailurePhase, BuildJobDerivation, BuilderCachePushConfig, NextJobResponse,
-    RemoteBuildExecutionStrategy, ReportMetricsRequest, SourceInputDeliveryMode,
+    BuildFailureClass, BuildFailurePhase, BuildJobDerivation, BuilderCachePushConfig,
+    NextJobResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest, SourceInputDeliveryMode,
     VerifiedSourceIdentity,
 };
 #[allow(deprecated)]
@@ -36,6 +37,50 @@ use tracing_subscriber::EnvFilter;
 const LOG_CHANNEL_CAPACITY: usize = 64;
 const LOG_DRAIN_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
 const DERIVATION_DELTA_ARCHIVE_REQUEST_MAX_BYTES: usize = 512 * 1024;
+
+fn classify_nix_failure(message: &str) -> BuildFailureClass {
+    let message = message.to_ascii_lowercase();
+    if [
+        "unauthorized",
+        "forbidden",
+        "authentication",
+        "permission denied",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        BuildFailureClass::Authorization
+    } else if [
+        "assertion failed",
+        "attribute '",
+        "does not exist",
+        "commit not found",
+        "is not a derivation",
+        "infinite recursion",
+        "syntax error",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        BuildFailureClass::Deterministic
+    } else if [
+        "timed out",
+        "timeout",
+        "temporary failure",
+        "connection reset",
+        "connection refused",
+        "could not resolve host",
+        "network is unreachable",
+        "service unavailable",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        BuildFailureClass::Transient
+    } else {
+        BuildFailureClass::Unknown
+    }
+}
 
 fn required_cache_push_reference(
     cache_config: &CacheConfig,
@@ -166,6 +211,7 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
                 source_mirror_root: builder_config.source_mirror_root.clone(),
                 source_worktree_root: builder_config.source_worktree_root.clone(),
                 cleanup_source_worktrees: builder_config.cleanup_source_worktrees,
+                allow_import_from_derivation: builder_config.allow_import_from_derivation,
             },
         ) => {
             error!("Job loop exited unexpectedly: {:?}", result);
@@ -187,6 +233,7 @@ struct RemoteBuildRuntime {
     source_mirror_root: PathBuf,
     source_worktree_root: PathBuf,
     cleanup_source_worktrees: bool,
+    allow_import_from_derivation: bool,
 }
 
 /// Heartbeat loop - sends metrics to server periodically
@@ -266,7 +313,12 @@ async fn run_api_job_loop(
                     );
                     error!("❌ Job #{} rejected: {}", job.id, message);
                     if let Err(report_err) = client
-                        .fail_job_with_phase(job.id, BuildFailurePhase::Build, &message)
+                        .fail_job_with_phase(
+                            job.id,
+                            BuildFailurePhase::Build,
+                            BuildFailureClass::Deterministic,
+                            &message,
+                        )
                         .await
                     {
                         error!(
@@ -316,6 +368,7 @@ async fn run_api_job_loop(
 #[derive(Debug)]
 struct PreBuildFailure {
     phase: BuildFailurePhase,
+    class: BuildFailureClass,
     message: String,
 }
 
@@ -351,6 +404,7 @@ where
                 };
                 break VerificationOutcome::Completed(Err(PreBuildFailure {
                     phase,
+                    class: BuildFailureClass::Transient,
                     message: format!(
                         "verified source pre-build {} timed out after {:?}",
                         if phase == BuildFailurePhase::Evaluation {
@@ -371,6 +425,40 @@ where
     }
 }
 
+async fn remote_job_cancellation_requested(client: &BuilderApiClient, job_id: uuid::Uuid) -> bool {
+    match client.get_job_status(job_id).await {
+        Ok(status) => job_status_requests_cancellation(status.as_deref()),
+        Err(err) => {
+            warn!(
+                "⚠️ Failed to poll cancellation status for job #{}: {}",
+                job_id, err
+            );
+            false
+        }
+    }
+}
+
+async fn abort_cancelled_remote_job(
+    client: &BuilderApiClient,
+    job_id: uuid::Uuid,
+    ws_shared: &mut Option<
+        std::sync::Arc<
+            tokio::sync::Mutex<
+                tokio_tungstenite::WebSocketStream<
+                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                >,
+            >,
+        >,
+    >,
+    message: &str,
+) {
+    info!("🛑 Job #{} cancelled by operator — finalizing", job_id);
+    send_log_with_fallback(client, job_id, ws_shared, message).await;
+    if let Err(e) = client.finalize_cancelled_job(job_id).await {
+        error!("❌ Failed to finalize cancelled job #{}: {}", job_id, e);
+    }
+}
+
 fn expected_drv_path(payload: &BuildJobDerivation) -> Result<&str, PreBuildFailure> {
     payload
         .expected_drv_path
@@ -379,6 +467,7 @@ fn expected_drv_path(payload: &BuildJobDerivation) -> Result<&str, PreBuildFailu
         .filter(|drv| drv.ends_with(".drv"))
         .ok_or_else(|| PreBuildFailure {
             phase: BuildFailurePhase::Evaluation,
+            class: BuildFailureClass::Deterministic,
             message: "verified source job is missing expected .drvPath".to_string(),
         })
 }
@@ -412,11 +501,13 @@ fn source_flake_ref(
         }
         SourceInputDeliveryMode::ServerBundledArchive => Err(PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Deterministic,
             message: "server-bundled source delivery selected but archive_url is missing"
                 .to_string(),
         }),
         SourceInputDeliveryMode::None => Err(PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Deterministic,
             message: "verified source job is missing source delivery metadata".to_string(),
         }),
     }
@@ -451,6 +542,7 @@ fn source_workspace_paths_for_job(
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Deterministic,
             message: "local git worktree delivery is missing mirror_id".to_string(),
         })?;
 
@@ -505,6 +597,7 @@ async fn acquire_mirror_lock(mirror_path: &Path) -> Result<MirrorLock, PreBuildF
             .await
             .map_err(|e| PreBuildFailure {
                 phase: BuildFailurePhase::SourceFetch,
+                class: BuildFailureClass::Unknown,
                 message: format!(
                     "failed to create source mirror lock parent {}: {e}",
                     parent.display()
@@ -519,6 +612,7 @@ async fn acquire_mirror_lock(mirror_path: &Path) -> Result<MirrorLock, PreBuildF
         .open(&lock_path)
         .map_err(|e| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
             message: format!(
                 "failed to open source mirror lock {}: {e}",
                 lock_path.display()
@@ -535,6 +629,7 @@ async fn acquire_mirror_lock(mirror_path: &Path) -> Result<MirrorLock, PreBuildF
             Err(e) => {
                 return Err(PreBuildFailure {
                     phase: BuildFailurePhase::SourceFetch,
+                    class: BuildFailureClass::Unknown,
                     message: format!(
                         "failed to acquire source mirror lock {}: {e}",
                         lock_path.display()
@@ -559,6 +654,7 @@ async fn ensure_mirror_has_commit(
     let _lock = acquire_mirror_lock(mirror_path).await?;
     let source_fetch = |message: String| PreBuildFailure {
         phase: BuildFailurePhase::SourceFetch,
+        class: classify_nix_failure(&message),
         message,
     };
 
@@ -716,6 +812,7 @@ async fn ensure_source_worktree(
             .await
             .map_err(|e| PreBuildFailure {
                 phase: BuildFailurePhase::SourceFetch,
+                class: BuildFailureClass::Unknown,
                 message: format!(
                     "failed to create source worktree parent {}: {e}",
                     parent.display()
@@ -736,6 +833,7 @@ async fn ensure_source_worktree(
         .await
         .map_err(|e| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
             message: format!("failed to spawn git worktree add: {e}"),
         })?;
 
@@ -743,6 +841,7 @@ async fn ensure_source_worktree(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
             message: format!("git worktree add failed: {stderr}"),
         });
     }
@@ -776,6 +875,7 @@ async fn ensure_source_worktree_from_mirror(
         .filter(|v| !v.is_empty())
         .ok_or_else(|| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Deterministic,
             message: "ServerBundledArchive delivery is missing mirror_id for worktree path"
                 .to_string(),
         })?;
@@ -801,6 +901,7 @@ async fn ensure_source_worktree_from_mirror(
             .await
             .map_err(|e| PreBuildFailure {
                 phase: BuildFailurePhase::SourceFetch,
+                class: BuildFailureClass::Unknown,
                 message: format!(
                     "failed to create source worktree parent {}: {e}",
                     parent.display()
@@ -821,6 +922,7 @@ async fn ensure_source_worktree_from_mirror(
         .await
         .map_err(|e| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
             message: format!("failed to spawn git worktree add: {e}"),
         })?;
 
@@ -828,6 +930,7 @@ async fn ensure_source_worktree_from_mirror(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
             message: format!("git worktree add failed: {stderr}"),
         });
     }
@@ -851,6 +954,7 @@ async fn verify_worktree_head(
         .await
         .map_err(|e| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
             message: format!(
                 "failed to inspect source worktree {}: {e}",
                 worktree_path.display()
@@ -861,6 +965,7 @@ async fn verify_worktree_head(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
             message: format!(
                 "git rev-parse failed for {}: {stderr}",
                 worktree_path.display()
@@ -874,6 +979,7 @@ async fn verify_worktree_head(
     } else {
         Err(PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Deterministic,
             message: format!(
                 "source worktree {} is at {}, expected {}",
                 worktree_path.display(),
@@ -1012,12 +1118,29 @@ fn drv_path_eval_attr(source_ref: &str, flake_target: &str) -> String {
     format!("{source_ref}#{attr}.drvPath")
 }
 
+fn verified_source_eval_args(eval_attr: &str, allow_import_from_derivation: bool) -> Vec<String> {
+    vec![
+        "eval".to_string(),
+        "--raw".to_string(),
+        "--no-write-lock-file".to_string(),
+        "--option".to_string(),
+        "allow-import-from-derivation".to_string(),
+        if allow_import_from_derivation {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        },
+        eval_attr.to_string(),
+    ]
+}
+
 fn verify_drv_identity(expected: &str, actual: &str) -> Result<(), PreBuildFailure> {
     if expected == actual {
         Ok(())
     } else {
         Err(PreBuildFailure {
             phase: BuildFailurePhase::DerivationMismatch,
+            class: BuildFailureClass::Deterministic,
             message: format!(
                 "builder evaluated drvPath {actual}, expected server-authorized drvPath {expected}"
             ),
@@ -1033,12 +1156,14 @@ async fn evaluate_verified_source_drv(
     job_id: uuid::Uuid,
     pre_build_phase: &AtomicU8,
     client: Option<&cf_builder::builder::api_client::BuilderApiClient>,
+    allow_import_from_derivation: bool,
 ) -> Result<String, PreBuildFailure> {
     let source_ref = if delivery == SourceInputDeliveryMode::ServerBundledArchive {
         // ServerBundledArchive: download the source archive from the server API,
         // extract it to the mirror path, then create a worktree from the mirror.
         let source_err = |msg: String| PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
+            class: classify_nix_failure(&msg),
             message: msg,
         };
 
@@ -1134,26 +1259,24 @@ async fn evaluate_verified_source_drv(
     // Transition phase tracker to evaluation phase so timeouts are reported correctly.
     pre_build_phase.store(PRE_BUILD_EVALUATION, Ordering::SeqCst);
 
-    let output = tokio::process::Command::new("nix")
-        .kill_on_drop(true)
-        .arg("eval")
-        .arg("--raw")
-        .arg("--no-write-lock-file")
-        .arg("--option")
-        .arg("allow-import-from-derivation")
-        .arg("false")
-        .arg(&eval_attr)
-        .output()
-        .await
-        .map_err(|e| PreBuildFailure {
-            phase: BuildFailurePhase::Evaluation,
-            message: format!("failed to spawn nix eval for {eval_attr}: {e}"),
-        })?;
+    let mut command = tokio::process::Command::new("nix");
+    command.kill_on_drop(true);
+    command.args(verified_source_eval_args(
+        &eval_attr,
+        allow_import_from_derivation,
+    ));
+
+    let output = command.output().await.map_err(|e| PreBuildFailure {
+        phase: BuildFailurePhase::Evaluation,
+        class: BuildFailureClass::Unknown,
+        message: format!("failed to spawn nix eval for {eval_attr}: {e}"),
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(PreBuildFailure {
             phase: BuildFailurePhase::Evaluation,
+            class: classify_nix_failure(&stderr),
             message: format!("nix eval failed for {eval_attr}: {stderr}"),
         });
     }
@@ -1170,10 +1293,12 @@ async fn verify_source_build_plan(
     job_id: uuid::Uuid,
     pre_build_phase: &AtomicU8,
     client: Option<&cf_builder::builder::api_client::BuilderApiClient>,
+    allow_import_from_derivation: bool,
 ) -> Result<String, PreBuildFailure> {
     let expected = expected_drv_path(payload)?.to_string();
     let source = payload.source.as_ref().ok_or_else(|| PreBuildFailure {
         phase: BuildFailurePhase::SourceFetch,
+        class: BuildFailureClass::Deterministic,
         message: "verified source job is missing immutable source identity".to_string(),
     })?;
     let actual = evaluate_verified_source_drv(
@@ -1184,6 +1309,7 @@ async fn verify_source_build_plan(
         job_id,
         pre_build_phase,
         client,
+        allow_import_from_derivation,
     )
     .await?;
     verify_drv_identity(&expected, &actual)?;
@@ -1244,23 +1370,17 @@ async fn execute_build_job(
                 job_id,
                 &pre_build_phase,
                 Some(&client),
+                remote_runtime.allow_import_from_derivation,
             );
-            wait_for_pre_build_verification(verification_future, build_timeout, &pre_build_phase, || {
-                let client = client.clone();
-                async move {
-                    match client.get_job_status(job_id).await {
-                        Ok(Some(status)) if status == "cancelling" => true,
-                        Ok(_) => false,
-                        Err(err) => {
-                            warn!(
-                                "⚠️ Failed to poll cancellation during verified source pre-build phase for job #{}: {}",
-                                job_id, err
-                            );
-                            false
-                        }
-                    }
-                }
-            })
+            wait_for_pre_build_verification(
+                verification_future,
+                build_timeout,
+                &pre_build_phase,
+                || {
+                    let client = client.clone();
+                    async move { remote_job_cancellation_requested(&client, job_id).await }
+                },
+            )
             .await
         };
 
@@ -1278,7 +1398,7 @@ async fn execute_build_job(
                     job_id, failure.phase, failure.message
                 );
                 if let Err(report_err) = client
-                    .fail_job_with_phase(job_id, failure.phase, &failure.message)
+                    .fail_job_with_phase(job_id, failure.phase, failure.class, &failure.message)
                     .await
                 {
                     error!(
@@ -1354,6 +1474,7 @@ async fn execute_build_job(
                 .fail_job_with_phase(
                     job_id,
                     BuildFailurePhase::PathMaterialization,
+                    classify_nix_failure(&e.to_string()),
                     &e.to_string(),
                 )
                 .await
@@ -1420,7 +1541,15 @@ async fn execute_build_job(
     let log_forward_task = tokio::spawn(async move {
         let mut ws_local = fwd_ws;
         while let Some(batch) = log_rx.recv().await {
-            send_log_with_fallback(&fwd_client, fwd_job_id, &mut ws_local, &batch).await;
+            if send_log_with_fallback(&fwd_client, fwd_job_id, &mut ws_local, &batch).await
+                == AppendLogsOutcome::TerminalJob
+            {
+                warn!(
+                    "stopping log forwarding for job {} because server reports terminal status",
+                    fwd_job_id
+                );
+                break;
+            }
         }
     });
 
@@ -1500,6 +1629,17 @@ async fn execute_build_job(
                 store_path
             );
 
+            if remote_job_cancellation_requested(&client, job_id).await {
+                abort_cancelled_remote_job(
+                    &client,
+                    job_id,
+                    &mut ws_shared,
+                    "[crystal-forge] Build cancelled by operator after nix process exited; skipping signing and cache push\n",
+                )
+                .await;
+                return;
+            }
+
             // Send success log
             let success_msg = format!(
                 "✅ Build completed successfully in {:.1}s\n",
@@ -1521,6 +1661,17 @@ async fn execute_build_job(
                     )
                     .await;
             } else {
+                if remote_job_cancellation_requested(&client, job_id).await {
+                    abort_cancelled_remote_job(
+                        &client,
+                        job_id,
+                        &mut ws_shared,
+                        "[crystal-forge] Build cancelled by operator before signing; skipping signing and cache push\n",
+                    )
+                    .await;
+                    return;
+                }
+
                 // Sign the derivation locally before reporting completion.
                 let _ = client
                     .append_logs(job_id, "🔐 Signing derivation...\n")
@@ -1539,6 +1690,17 @@ async fn execute_build_job(
             }
 
             if !execution_mode.is_mock() {
+                if remote_job_cancellation_requested(&client, job_id).await {
+                    abort_cancelled_remote_job(
+                        &client,
+                        job_id,
+                        &mut ws_shared,
+                        "[crystal-forge] Build cancelled by operator before cache publication; skipping cache push\n",
+                    )
+                    .await;
+                    return;
+                }
+
                 let _cache_reference = match required_cache_push_reference(
                     &cache_config,
                     &derivation.derivation_name,
@@ -1557,8 +1719,10 @@ async fn execute_build_job(
                             )
                             .await;
                         if let Err(report_error) = client
-                            .fail_job(
+                            .fail_job_with_phase(
                                 job_id,
+                                BuildFailurePhase::Build,
+                                BuildFailureClass::Deterministic,
                                 &format!("Cache push is required but not configured: {:#}", e),
                             )
                             .await
@@ -1576,10 +1740,33 @@ async fn execute_build_job(
                     .append_logs(job_id, "📤 Pushing build output to cache...\n")
                     .await;
 
-                match derivation
-                    .push_to_cache_with_retry(&store_path, &cache_config, &build_config)
-                    .await
-                {
+                let cache_push =
+                    derivation.push_to_cache_with_retry(&store_path, &cache_config, &build_config);
+                tokio::pin!(cache_push);
+
+                let cache_push_result = tokio::select! {
+                    result = &mut cache_push => result,
+                    _ = async {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            if remote_job_cancellation_requested(&client, job_id).await {
+                                break;
+                            }
+                        }
+                    } => {
+                        drop(cache_push);
+                        abort_cancelled_remote_job(
+                            &client,
+                            job_id,
+                            &mut ws_shared,
+                            "[crystal-forge] Build cancelled by operator during cache publication; stopped cache push\n",
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                match cache_push_result {
                     Ok(()) => {
                         let _ = client
                             .append_logs(job_id, "✅ Build output pushed to cache\n")
@@ -1591,8 +1778,10 @@ async fn execute_build_job(
                             .append_logs(job_id, &format!("❌ Cache push failed: {:#}\n", e))
                             .await;
                         if let Err(report_error) = client
-                            .fail_job(
+                            .fail_job_with_phase(
                                 job_id,
+                                BuildFailurePhase::Build,
+                                classify_nix_failure(&e.to_string()),
                                 &format!("Cache push failed after successful build: {:#}", e),
                             )
                             .await
@@ -1628,6 +1817,17 @@ async fn execute_build_job(
                     }
                 }
             };
+
+            if remote_job_cancellation_requested(&client, job_id).await {
+                abort_cancelled_remote_job(
+                    &client,
+                    job_id,
+                    &mut ws_shared,
+                    "[crystal-forge] Build cancelled by operator before completion report; not reporting success\n",
+                )
+                .await;
+                return;
+            }
 
             if let Err(e) = client
                 .complete_job(job_id, &store_path, cache_reference.as_deref())
@@ -1686,7 +1886,15 @@ async fn execute_build_job(
 
             // Report failure to the server, which records the derivation-level
             // failure server-side (no builder DB access).
-            if let Err(report_err) = client.fail_job(job_id, &e.to_string()).await {
+            if let Err(report_err) = client
+                .fail_job_with_phase(
+                    job_id,
+                    BuildFailurePhase::Build,
+                    classify_nix_failure(&e.to_string()),
+                    &e.to_string(),
+                )
+                .await
+            {
                 error!(
                     "❌ Failed to report job #{} failure: {}",
                     job_id, report_err
@@ -1715,7 +1923,15 @@ async fn execute_build_job(
             .await;
 
             // Report timeout failure to the server (server records derivation failure).
-            if let Err(report_err) = client.fail_job(job_id, &timeout_msg).await {
+            if let Err(report_err) = client
+                .fail_job_with_phase(
+                    job_id,
+                    BuildFailurePhase::Build,
+                    BuildFailureClass::Transient,
+                    &timeout_msg,
+                )
+                .await
+            {
                 error!(
                     "❌ Failed to report job #{} timeout failure: {}",
                     job_id, report_err
@@ -2098,7 +2314,7 @@ async fn send_log_with_fallback(
         >,
     >,
     message: &str,
-) {
+) -> AppendLogsOutcome {
     if let Some(ws) = ws_shared.as_ref() {
         let mut ws_lock = ws.lock().await;
         let sent_ok = cf_builder::builder::api_client::BuilderApiClient::send_log_line(
@@ -2110,7 +2326,7 @@ async fn send_log_with_fallback(
         drop(ws_lock);
 
         if sent_ok {
-            return;
+            return AppendLogsOutcome::Appended;
         }
 
         warn!(
@@ -2120,7 +2336,10 @@ async fn send_log_with_fallback(
         *ws_shared = None;
     }
 
-    let _ = client.append_logs(job_id, message).await;
+    client
+        .append_logs(job_id, message)
+        .await
+        .unwrap_or(AppendLogsOutcome::Rejected)
 }
 
 fn is_local_db_host(host: &str) -> bool {
@@ -2129,11 +2348,34 @@ fn is_local_db_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::classify_nix_failure;
+    use cf_protocol::builder::BuildFailureClass;
+
+    #[test]
+    fn builder_failure_classification_is_explicit_and_fail_closed() {
+        for (message, expected) in [
+            (
+                "connection reset while downloading source",
+                BuildFailureClass::Transient,
+            ),
+            ("build timed out", BuildFailureClass::Transient),
+            ("assertion failed", BuildFailureClass::Deterministic),
+            ("path is not a derivation", BuildFailureClass::Deterministic),
+            (
+                "repository authentication failed",
+                BuildFailureClass::Authorization,
+            ),
+            ("unexpected nix failure", BuildFailureClass::Unknown),
+        ] {
+            assert_eq!(classify_nix_failure(message), expected, "{message}");
+        }
+    }
+
     use super::{
         PRE_BUILD_SOURCE_FETCH, cleanup_candidate_worktree, drv_path_eval_attr,
         ensure_mirror_has_commit, mock_store_path, should_mock_build_fail, source_flake_ref,
-        source_workspace_paths, source_workspace_paths_for_job, verify_drv_identity,
-        wait_for_pre_build_verification,
+        source_workspace_paths, source_workspace_paths_for_job, verified_source_eval_args,
+        verify_drv_identity, wait_for_pre_build_verification,
     };
     use cf_protocol::builder::{
         BuildFailurePhase, SourceInputDeliveryMode, VerifiedSourceIdentity,
@@ -2230,6 +2472,37 @@ mod tests {
                 "nixosConfigurations.host.config.system.build.toplevel.drvPath"
             ),
             "/tmp/source#nixosConfigurations.host.config.system.build.toplevel.drvPath"
+        );
+    }
+
+    #[test]
+    fn verified_source_eval_args_pass_ifd_setting_to_nix_eval() {
+        let eval_attr = "/tmp/source#nixosConfigurations.host.config.system.build.toplevel.drvPath";
+
+        assert_eq!(
+            verified_source_eval_args(eval_attr, false),
+            vec![
+                "eval",
+                "--raw",
+                "--no-write-lock-file",
+                "--option",
+                "allow-import-from-derivation",
+                "false",
+                eval_attr,
+            ]
+        );
+
+        assert_eq!(
+            verified_source_eval_args(eval_attr, true),
+            vec![
+                "eval",
+                "--raw",
+                "--no-write-lock-file",
+                "--option",
+                "allow-import-from-derivation",
+                "true",
+                eval_attr,
+            ]
         );
     }
 

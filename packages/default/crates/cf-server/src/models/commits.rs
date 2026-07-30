@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use sqlx::PgPool;
 use std::fmt;
+use uuid::Uuid;
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Commit {
@@ -13,6 +14,21 @@ pub struct Commit {
     pub git_commit_hash: String,
     pub commit_timestamp: DateTime<Utc>,
     pub attempt_count: i32, // Add this field to match your database schema
+    #[serde(default)]
+    #[sqlx(default)]
+    pub evaluation_attempt_id: Option<Uuid>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub evaluation_attempt_number: i32,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub evaluation_parent_attempt_id: Option<Uuid>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub evaluation_root_attempt_id: Option<Uuid>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub evaluation_available_at: Option<DateTime<Utc>>,
 }
 
 impl Commit {

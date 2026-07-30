@@ -562,8 +562,15 @@ in pkgs.testers.runNixOSTest {
       "05-login-submit",
       "12-systems",
       "13-flakes",
+      "15j-builds-latest-per-flake-populated",
+      "15k-builds-latest-combined-filters-empty-clear",
       "16-cves",
       "16b-cves-severity-filter",
+      "26c-evaluations-latest-per-flake-populated",
+      "26d-evaluations-latest-combined-filters-empty-clear",
+      "30a-admin-automatic-retries-defaults-reset",
+      "30b-admin-automatic-retries-save-reload",
+      "30c-admin-automatic-retries-failed-save-retains-draft",
     ]
     failed_critical = [r['name'] for r in results if r['name'] in critical_tests and not r.get('ok')]
     if failed_critical:

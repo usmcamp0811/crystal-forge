@@ -11,14 +11,16 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    AdminUserSummary, ApiError, AuditAction, AuditEvent, ClassificationBannerConfig,
-    DatabaseRuntimeInfo, IdentitySource, OidcGroupMapping, PaginatedResponse, Role,
-    ServerRuntimeInfoResponse, UpdateClassificationBannerRequest,
+    AdminUserSummary, ApiError, AuditAction, AuditEvent, AutomaticRetryPolicyResponse,
+    ClassificationBannerConfig, DatabaseRuntimeInfo, IdentitySource, OidcGroupMapping,
+    PaginatedResponse, Role, ServerRuntimeInfoResponse, UpdateAutomaticRetryPolicyRequest,
+    UpdateClassificationBannerRequest,
 };
 use crate::auth::password::hash_password;
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{extract_request_origin, require_admin as require_admin_user};
 use crate::models::auth_identity::AuthRole;
+use crate::models::retry_policy::{AutomaticRetryPolicy, RetryPolicyValidationError};
 use crate::queries::admin::{self, GuardedMutationOutcome, OidcMappingRow};
 use crate::queries::auth_identity::{assign_role_to_user, get_user_roles};
 use crate::queries::users::{insert_user, update_password_hash_by_user_id};
@@ -1088,6 +1090,20 @@ fn bad_request(message: &str) -> axum::response::Response {
         .into_response()
 }
 
+fn retry_policy_validation_error(
+    errors: Vec<RetryPolicyValidationError>,
+) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError {
+            error: "validation_error".to_string(),
+            message: "Automatic retry policy is invalid".to_string(),
+            details: Some(serde_json::json!({ "fields": errors })),
+        }),
+    )
+        .into_response()
+}
+
 fn conflict(message: &str) -> axum::response::Response {
     (
         StatusCode::CONFLICT,
@@ -1508,6 +1524,54 @@ pub async fn update_classification_config(
     }
 }
 
+pub async fn get_automatic_retry_policy(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(_admin_user) = require_admin_user(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    match admin::get_automatic_retry_policy(&pool).await {
+        Ok(policy) => (StatusCode::OK, Json(to_retry_policy_response(policy))).into_response(),
+        Err(_) => internal_error("Failed to load automatic retry policy"),
+    }
+}
+
+pub async fn update_automatic_retry_policy(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateAutomaticRetryPolicyRequest>,
+) -> impl IntoResponse {
+    let Some(_admin_user) = require_admin_user(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let policy = AutomaticRetryPolicy {
+        max_build_retries: payload.max_build_retries,
+        max_evaluation_retries: payload.max_evaluation_retries,
+        backoff_seconds: payload.backoff_seconds,
+        transient_only: payload.transient_only,
+    };
+    if let Err(errors) = policy.validate() {
+        return retry_policy_validation_error(errors);
+    }
+
+    match admin::upsert_automatic_retry_policy(&pool, policy).await {
+        Ok(saved) => (StatusCode::OK, Json(to_retry_policy_response(saved))).into_response(),
+        Err(_) => internal_error("Failed to save automatic retry policy"),
+    }
+}
+
+fn to_retry_policy_response(policy: AutomaticRetryPolicy) -> AutomaticRetryPolicyResponse {
+    AutomaticRetryPolicyResponse {
+        max_build_retries: policy.max_build_retries,
+        max_evaluation_retries: policy.max_evaluation_retries,
+        backoff_seconds: policy.backoff_seconds,
+        transient_only: policy.transient_only,
+    }
+}
+
 // ── Classification config validation ─────────────────────────────────────────
 
 fn valid_classification_level(level: &str) -> bool {
@@ -1590,6 +1654,44 @@ mod classification_tests {
     }
 
     fn lazy_pool() -> sqlx::PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct")
+    }
+}
+
+#[cfg(test)]
+mod automatic_retry_policy_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn get_automatic_retry_policy_requires_admin_session() {
+        let response = get_automatic_retry_policy(State(lazy_pool()), HeaderMap::new())
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn update_automatic_retry_policy_requires_admin_session() {
+        let response = update_automatic_retry_policy(
+            State(lazy_pool()),
+            HeaderMap::new(),
+            Json(UpdateAutomaticRetryPolicyRequest {
+                max_build_retries: 2,
+                max_evaluation_retries: 1,
+                backoff_seconds: 30,
+                transient_only: true,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    fn lazy_pool() -> PgPool {
         sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
             .expect("lazy pool should construct")

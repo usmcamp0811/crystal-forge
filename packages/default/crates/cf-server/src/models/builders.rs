@@ -34,13 +34,13 @@ use crate::models::public_key::PublicKey;
 // directly. The server maps BuildJob → cf_protocol::builder::BuildJob when
 // building NextJobResponse.
 pub use cf_protocol::builder::{
-    AppendLogsRequest, BuildFailurePhase, BuildJobDerivation, BuildProgressRequest,
-    BuilderCachePushConfig, CachePushCompleteRequest, CachePushFailRequest, CachePushJobPayload,
-    CveScanFailRequest, CveScanResultsRequest, CveScanTarget, DerivationArchiveRequest,
-    DerivationManifestResponse, EstablishBuilderSessionRequest, EstablishBuilderSessionResponse,
-    EvaluatorFingerprint, NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest,
-    ResolveBuilderIdRequest, ResolveBuilderIdResponse, SourceInputDeliveryMode,
-    VerifiedSourceIdentity,
+    AppendLogsRequest, BuildFailureClass, BuildFailurePhase, BuildJobDerivation,
+    BuildProgressRequest, BuilderCachePushConfig, CachePushCompleteRequest, CachePushFailRequest,
+    CachePushJobPayload, CveScanFailRequest, CveScanResultsRequest, CveScanTarget,
+    DerivationArchiveRequest, DerivationManifestResponse, EstablishBuilderSessionRequest,
+    EstablishBuilderSessionResponse, EvaluatorFingerprint, NextJobRequest,
+    RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
+    ResolveBuilderIdResponse, SourceInputDeliveryMode, VerifiedSourceIdentity,
 };
 
 // Re-export NextJobResponse as an alias using the protocol's BuildJob type.
@@ -130,6 +130,21 @@ pub struct BuildJob {
     pub status: String,
     pub retry_count: i32,
     pub max_retries: i32,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub parent_job_id: Option<Uuid>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub root_job_id: Option<Uuid>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub automatic_retry_source_id: Option<Uuid>,
+    #[serde(default = "default_attempt_number")]
+    #[sqlx(default)]
+    pub attempt_number: i32,
+    #[serde(default = "Utc::now")]
+    #[sqlx(default)]
+    pub available_at: DateTime<Utc>,
     pub priority_weight: f64,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -152,6 +167,10 @@ impl From<BuildJob> for cf_protocol::builder::BuildJob {
             status: job.status,
             retry_count: job.retry_count,
             max_retries: job.max_retries,
+            parent_job_id: job.parent_job_id,
+            root_job_id: job.root_job_id,
+            attempt_number: job.attempt_number,
+            available_at: job.available_at,
             priority_weight: job.priority_weight,
             started_at: job.started_at,
             completed_at: job.completed_at,
@@ -160,6 +179,10 @@ impl From<BuildJob> for cf_protocol::builder::BuildJob {
             updated_at: job.updated_at,
         }
     }
+}
+
+fn default_attempt_number() -> i32 {
+    1
 }
 
 /// Internal alias for backward compatibility with query code.

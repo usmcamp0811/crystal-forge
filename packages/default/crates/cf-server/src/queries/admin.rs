@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::models::auth_identity::AuthRole;
+use crate::models::retry_policy::AutomaticRetryPolicy;
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct AdminUserRow {
@@ -617,4 +618,84 @@ pub async fn upsert_classification_banner_config(
     .fetch_one(pool)
     .await?;
     Ok(row)
+}
+
+pub async fn get_automatic_retry_policy(pool: &PgPool) -> Result<AutomaticRetryPolicy> {
+    let policy = sqlx::query_as::<_, AutomaticRetryPolicy>(
+        "SELECT max_build_retries, max_evaluation_retries, backoff_seconds, transient_only
+         FROM automatic_retry_policy
+         WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(policy.unwrap_or_default())
+}
+
+pub async fn upsert_automatic_retry_policy(
+    pool: &PgPool,
+    policy: AutomaticRetryPolicy,
+) -> Result<AutomaticRetryPolicy> {
+    let policy = sqlx::query_as::<_, AutomaticRetryPolicy>(
+        "INSERT INTO automatic_retry_policy (
+             id, max_build_retries, max_evaluation_retries, backoff_seconds, transient_only
+         )
+         VALUES (1, $1, $2, $3, $4)
+         ON CONFLICT (id) DO UPDATE SET
+             max_build_retries = EXCLUDED.max_build_retries,
+             max_evaluation_retries = EXCLUDED.max_evaluation_retries,
+             backoff_seconds = EXCLUDED.backoff_seconds,
+             transient_only = EXCLUDED.transient_only,
+             updated_at = NOW()
+         RETURNING max_build_retries, max_evaluation_retries, backoff_seconds, transient_only",
+    )
+    .bind(policy.max_build_retries)
+    .bind(policy.max_evaluation_retries)
+    .bind(policy.backoff_seconds)
+    .bind(policy.transient_only)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(policy)
+}
+
+#[cfg(test)]
+mod retry_policy_tests {
+    use super::*;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn automatic_retry_policy_round_trips(pool: PgPool) {
+        let expected = AutomaticRetryPolicy {
+            max_build_retries: 5,
+            max_evaluation_retries: 0,
+            backoff_seconds: 120,
+            transient_only: false,
+        };
+
+        let saved = upsert_automatic_retry_policy(&pool, expected)
+            .await
+            .expect("policy should save");
+        let loaded = get_automatic_retry_policy(&pool)
+            .await
+            .expect("policy should load");
+
+        assert_eq!(saved, expected);
+        assert_eq!(loaded, expected);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn automatic_retry_policy_defaults_when_row_is_absent(pool: PgPool) {
+        sqlx::query("DELETE FROM automatic_retry_policy")
+            .execute(&pool)
+            .await
+            .expect("seed policy should delete");
+
+        let loaded = get_automatic_retry_policy(&pool)
+            .await
+            .expect("fallback policy should load");
+
+        assert_eq!(loaded, AutomaticRetryPolicy::default());
+    }
 }

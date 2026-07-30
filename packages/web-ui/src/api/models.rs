@@ -1368,12 +1368,16 @@ pub struct BuildQueueParams {
     pub config_name: Option<String>,
     pub queued_after: Option<DateTime<Utc>>,
     pub queued_before: Option<DateTime<Utc>>,
+    pub search: Option<String>,
+    pub latest_only: bool,
 }
 
 /// Paginated response for the build queue listing endpoint.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BuildQueuePageResponse {
     pub total: i64,
+    #[serde(default)]
+    pub domain_total: i64,
     pub page: i64,
     pub limit: i64,
     pub items: Vec<BuildQueueItem>,
@@ -1399,6 +1403,10 @@ pub struct BuildQueueItem {
     pub job_id: Option<Uuid>,
     #[serde(default)]
     pub system_id: Option<Uuid>,
+    #[serde(default)]
+    pub flake_id: Option<i32>,
+    #[serde(default)]
+    pub is_latest_per_flake: bool,
     /// The hostname/system being built.
     pub hostname: String,
     /// The flake name this build belongs to.
@@ -1411,6 +1419,9 @@ pub struct BuildQueueItem {
     pub status: BuildStatus,
     #[serde(default)]
     pub builder_name: Option<String>,
+    /// 1-indexed attempt number within this job's retry lineage.
+    #[serde(default = "default_attempt_number")]
+    pub attempt_number: i32,
     /// When the build was queued.
     pub queued_at: DateTime<Utc>,
     /// When the build started (None if still queued).
@@ -1435,12 +1446,20 @@ pub struct BuildQueueItem {
     pub cached_derivs: i64,
 }
 
+fn default_attempt_number() -> i32 {
+    1
+}
+
 /// Summary of the evaluation queue for the evaluations page.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalQueueSummary {
     pub active_count: i64,
     pub completed_count: i64,
     pub failed_count: i64,
+    #[serde(default)]
+    pub domain_total: i64,
+    #[serde(default)]
+    pub filtered_total: i64,
     pub execution_mode: String,
     pub items: Vec<EvalQueueItem>,
     pub timestamp: DateTime<Utc>,
@@ -1457,6 +1476,9 @@ pub struct EvalQueueItem {
     pub commit_message: Option<String>,
     pub author: Option<String>,
     pub committed_at: DateTime<Utc>,
+    pub enqueued_at: DateTime<Utc>,
+    #[serde(default)]
+    pub is_latest_per_flake: bool,
     pub evaluation_status: String,
     pub queue_position: i64,
     pub systems: Vec<String>,
@@ -1464,6 +1486,9 @@ pub struct EvalQueueItem {
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
+    /// 1-indexed attempt number within this evaluation's retry lineage.
+    #[serde(default = "default_attempt_number")]
+    pub attempt_number: i32,
 }
 
 /// Request payload for persisting evaluation queue ordering.
@@ -1483,6 +1508,9 @@ pub struct EvalHistoryItem {
     pub commit_message: Option<String>,
     pub author: Option<String>,
     pub committed_at: DateTime<Utc>,
+    pub enqueued_at: DateTime<Utc>,
+    #[serde(default)]
+    pub is_latest_per_flake: bool,
     pub evaluation_status: String,
     pub evaluation_completed_at: Option<DateTime<Utc>>,
     pub evaluation_duration_ms: Option<i64>,
@@ -1492,12 +1520,17 @@ pub struct EvalHistoryItem {
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
     pub alert_occurrence_id: String,
+    /// 1-indexed attempt number within this evaluation's retry lineage.
+    #[serde(default = "default_attempt_number")]
+    pub attempt_number: i32,
 }
 
 /// Paginated response for GET /api/v1/commits/eval-history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalHistoryPage {
     pub total_count: i64,
+    #[serde(default)]
+    pub domain_total: i64,
     pub page: i64,
     pub limit: i64,
     pub items: Vec<EvalHistoryItem>,
@@ -2696,6 +2729,35 @@ pub struct UpdateClassificationBannerRequest {
     pub enabled: bool,
     pub level: String,
     pub custom_text: String,
+}
+
+/// Persisted server-wide automatic retry policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomaticRetryPolicy {
+    pub max_build_retries: i16,
+    pub max_evaluation_retries: i16,
+    pub backoff_seconds: i32,
+    pub transient_only: bool,
+}
+
+impl Default for AutomaticRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_build_retries: 2,
+            max_evaluation_retries: 1,
+            backoff_seconds: 30,
+            transient_only: true,
+        }
+    }
+}
+
+/// Complete replacement payload for the automatic retry policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateAutomaticRetryPolicyRequest {
+    pub max_build_retries: i16,
+    pub max_evaluation_retries: i16,
+    pub backoff_seconds: i32,
+    pub transient_only: bool,
 }
 
 #[cfg(test)]

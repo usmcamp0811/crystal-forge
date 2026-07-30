@@ -6,6 +6,7 @@
 use dioxus::prelude::*;
 
 use crate::alerts::{attention_row_class, dismiss_attention_item, occurrence_id_for_subject};
+use crate::components::{Icon, IconName};
 
 use super::helpers::{BuildAction, BuildItem, BuildStatus, extract_system_name, short_commit};
 
@@ -38,6 +39,7 @@ pub fn BuildQueuePane(
     /// When true, failed rows receive the attention-flash CSS class (one-shot).
     flash_failed: bool,
     can_requeue: bool,
+    allow_reorder: bool,
     on_build_action: EventHandler<(uuid::Uuid, BuildAction)>,
     on_log: EventHandler<uuid::Uuid>,
     /// Bulk re-queue selected builds (Completed tab).
@@ -49,14 +51,19 @@ pub fn BuildQueuePane(
 ) -> Element {
     // Multi-select state: set of selected build IDs (only operator-cancellable ones).
     let mut selected_ids: Signal<Vec<uuid::Uuid>> = use_signal(Vec::new);
-    let reorderable = builds
-        .iter()
-        .any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building));
+    let reorderable = allow_reorder
+        && builds
+            .iter()
+            .any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building));
     let queued_ids: Vec<uuid::Uuid> = builds
         .iter()
         .filter(|b| b.status == BuildStatus::Queued)
         .filter_map(|b| b.job_id)
         .collect();
+    let visible_ids = builds
+        .iter()
+        .filter_map(|build| build.job_id)
+        .collect::<std::collections::HashSet<_>>();
 
     #[cfg(target_arch = "wasm32")]
     {
@@ -74,7 +81,35 @@ pub fn BuildQueuePane(
         }
     }
 
-    let bulk_count = selected_ids.read().len();
+    let selected_visible_ids = selected_ids
+        .read()
+        .iter()
+        .copied()
+        .filter(|id| visible_ids.contains(id))
+        .collect::<Vec<_>>();
+    let bulk_count = selected_visible_ids.len();
+    let cancel_ids = selected_visible_ids.clone();
+    let rerun_ids = selected_visible_ids.clone();
+    let download_ids = selected_visible_ids.clone();
+    let delete_ids = selected_visible_ids.clone();
+    let active_cancel_ids = selected_visible_ids;
+
+    let selection_builds = builds.clone();
+    use_effect(move || {
+        let visible = selection_builds
+            .iter()
+            .filter_map(|build| build.job_id)
+            .collect::<std::collections::HashSet<_>>();
+        let current = selected_ids.read().clone();
+        let next = current
+            .iter()
+            .copied()
+            .filter(|id| visible.contains(id))
+            .collect::<Vec<_>>();
+        if next != current {
+            selected_ids.set(next);
+        }
+    });
 
     // Drag-to-reorder state (JSX: dragId, overIdx). IDs identify backend
     // jobs, but movement must be calculated from queue positions because IDs
@@ -329,11 +364,20 @@ pub fn BuildQueuePane(
                                             "{extract_system_name(&build.hostname)}"
                                         }
                                         div {
-                                            style: "font-size: 10px; color: var(--cf-text-muted);",
+                                            style: "font-size: 10px; color: var(--cf-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;",
                                             "{build.flake} · "
-                                            span { class: "mono", "{short_commit(&build.commit)}" }
+                                            span {
+                                                class: if build.is_latest_per_flake { "mono commit-latest" } else { "mono" },
+                                                style: "display: inline;",
+                                                if build.is_latest_per_flake {
+                                                    span { class: "latest-star", style: "display: inline; margin-right: 2px; vertical-align: -1px;",
+                                                        Icon { name: IconName::Star, size: 9 }
+                                                    }
+                                                }
+                                                "{short_commit(&build.commit)}"
+                                            }
                                             " · "
-                                            span { class: "mono", "{build.arch}" }
+                                            span { class: "mono", style: "display: inline;", "{build.arch}" }
                                         }
                                         if let Some(ref pkg) = build.current_pkg {
                                             div {
@@ -570,7 +614,7 @@ pub fn BuildQueuePane(
                 BulkBar {
                     count: bulk_count,
                     on_cancel: move |_| {
-                        let ids = selected_ids.read().clone();
+                        let ids = cancel_ids.clone();
                         for id in &ids {
                             on_build_action.call((*id, BuildAction::Stop));
                         }
@@ -580,7 +624,7 @@ pub fn BuildQueuePane(
                     button {
                         class: "btn btn-primary xs focus-ring",
                         onclick: {
-                            let ids = selected_ids.read().clone();
+                            let ids = rerun_ids.clone();
                             let rerun = on_bulk_rerun;
                             move |_| {
                                 rerun.call(ids.clone());
@@ -601,7 +645,7 @@ pub fn BuildQueuePane(
                     button {
                         class: "btn btn-ghost xs focus-ring",
                         onclick: {
-                            let ids = selected_ids.read().clone();
+                            let ids = download_ids.clone();
                             let dl = on_bulk_download_logs;
                             move |_| {
                                 dl.call(ids.clone());
@@ -622,7 +666,7 @@ pub fn BuildQueuePane(
                     button {
                         class: "btn btn-ghost xs focus-ring",
                         onclick: {
-                            let ids = selected_ids.read().clone();
+                            let ids = delete_ids.clone();
                             let del = on_bulk_delete;
                             move |_| {
                                 del.call(ids.clone());
@@ -645,7 +689,7 @@ pub fn BuildQueuePane(
                 BulkBar {
                     count: bulk_count,
                     on_cancel: move |_| {
-                        let ids = selected_ids.read().clone();
+                        let ids = active_cancel_ids.clone();
                         for id in &ids {
                             on_build_action.call((*id, BuildAction::Stop));
                         }

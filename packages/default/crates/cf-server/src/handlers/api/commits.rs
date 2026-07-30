@@ -14,8 +14,8 @@ use tokio::time::{Duration, interval};
 
 use crate::api::models::{
     ApiError, CancelEvalOutcome, EvalDependencyGraphResponse, EvalDependencyPackageRow,
-    EvalHistoryPage, EvalPolicyMatrixResponse, EvalPolicySystemRow, EvalQueueItem,
-    EvalQueueSummary, ReorderEvalQueueRequest,
+    EvalHistoryPage, EvalHistoryParams, EvalPolicyMatrixResponse, EvalPolicySystemRow,
+    EvalQueueItem, EvalQueueParams, EvalQueueSummary, ReorderEvalQueueRequest,
 };
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
@@ -61,7 +61,7 @@ fn reorder_validation_details(message: &str) -> Option<serde_json::Value> {
 pub async fn list_eval_queue(
     State(state): State<CFState>,
     headers: HeaderMap,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(mut params): axum::extract::Query<EvalQueueParams>,
 ) -> impl IntoResponse {
     if require_viewer_or_above(&state.pool, &headers)
         .await
@@ -70,29 +70,18 @@ pub async fn list_eval_queue(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let limit: i64 = params
-        .get("limit")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(200)
-        .max(1)
-        .min(crate::api::models::LIMIT_MAX);
+    params.limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
 
-    let rows = match crate::queries::commits::list_eval_queue(&state.pool, limit).await {
-        Ok(rows) => rows,
+    let result = match crate::queries::commits::list_eval_queue(&state.pool, &params).await {
+        Ok(result) => result,
         Err(err) => {
             tracing::error!("Failed to list eval queue: {}", err);
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
 
-    let active_count = rows.first().map(|row| row.active_total_count).unwrap_or(0);
-    let completed_count = rows
-        .first()
-        .map(|row| row.completed_total_count)
-        .unwrap_or(0);
-    let failed_count = rows.first().map(|row| row.failed_total_count).unwrap_or(0);
-
-    let items = rows
+    let items = result
+        .rows
         .into_iter()
         .map(|row| EvalQueueItem {
             commit_id: row.commit_id,
@@ -103,6 +92,8 @@ pub async fn list_eval_queue(
             commit_message: row.commit_message,
             author: row.author,
             committed_at: row.committed_at,
+            enqueued_at: row.enqueued_at,
+            is_latest_per_flake: row.is_latest_per_flake,
             evaluation_status: row.evaluation_status,
             queue_position: row.queue_position,
             systems: row.systems,
@@ -110,13 +101,19 @@ pub async fn list_eval_queue(
             passed_count: row.passed_count,
             policy_failed_count: row.policy_failed_count,
             eval_failed_count: row.eval_failed_count,
+            attempt_number: row.attempt_number,
+            parent_attempt_id: row.parent_attempt_id,
+            root_attempt_id: row.root_attempt_id,
+            available_at: row.available_at,
         })
         .collect::<Vec<_>>();
 
     Json(EvalQueueSummary {
-        active_count,
-        completed_count,
-        failed_count,
+        active_count: result.active_count,
+        completed_count: result.completed_count,
+        failed_count: result.failed_count,
+        domain_total: result.domain_total,
+        filtered_total: result.filtered_total,
         execution_mode: state.server_config.execution_mode.as_str().to_string(),
         items,
         timestamp: chrono::Utc::now(),
@@ -803,7 +800,7 @@ pub async fn force_cancel_commit_evaluation(
 pub async fn list_eval_history(
     State(state): State<CFState>,
     headers: HeaderMap,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(mut params): axum::extract::Query<EvalHistoryParams>,
 ) -> impl IntoResponse {
     if require_viewer_or_above(&state.pool, &headers)
         .await
@@ -812,34 +809,14 @@ pub async fn list_eval_history(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let page: i64 = params
-        .get("page")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1)
-        .max(1);
-    let limit: i64 = params
-        .get("limit")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(50)
-        .max(1)
-        .min(crate::api::models::LIMIT_MAX);
+    params.page = params.page.max(1);
+    params.limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
 
-    if (page - 1).checked_mul(limit).is_none() {
+    if (params.page - 1).checked_mul(params.limit).is_none() {
         return StatusCode::BAD_REQUEST.into_response();
     }
 
-    let status_filter = params.get("status").map(|s| s.as_str());
-    let flake_filter = params.get("flake").map(|s| s.as_str());
-
-    match crate::queries::commits::list_eval_history(
-        &state.pool,
-        page,
-        limit,
-        status_filter,
-        flake_filter,
-    )
-    .await
-    {
+    match crate::queries::commits::list_eval_history(&state.pool, &params).await {
         Ok(page_result) => {
             let body: EvalHistoryPage = page_result;
             (StatusCode::OK, Json(body)).into_response()

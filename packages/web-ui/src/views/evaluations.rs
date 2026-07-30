@@ -21,6 +21,9 @@ use crate::components::{Icon, IconName};
 use crate::hooks::{InfiniteScroll, use_infinite_scroll};
 use crate::routes::Route;
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
+use crate::views::latest_filter::{
+    LatestFilterState, marker_matches, replace_unique_by, request_state, reset_key, retain_visible,
+};
 
 const FETCH_LIMIT_MAX: i64 = 10_000; // must match backend LIMIT_MAX
 
@@ -34,6 +37,46 @@ enum EvaluationsTab {
 enum EvalDrawerTarget {
     Queue(EvalQueueItem),
     History(EvalHistoryItem),
+}
+
+fn queue_item_matches_search(item: &EvalQueueItem, search: &str) -> bool {
+    search.is_empty()
+        || [
+            item.flake_name.as_str(),
+            item.branch.as_str(),
+            item.commit_hash.as_str(),
+            item.commit_message.as_deref().unwrap_or_default(),
+            item.author.as_deref().unwrap_or_default(),
+            item.evaluation_status.as_str(),
+        ]
+        .into_iter()
+        .chain(item.systems.iter().map(String::as_str))
+        .any(|value| value.to_lowercase().contains(search))
+}
+
+fn history_item_matches_filters(
+    item: &EvalHistoryItem,
+    status: &str,
+    flake: &str,
+    search: &str,
+) -> bool {
+    (status == "all" || item.evaluation_status == status)
+        && (flake == "all"
+            || item
+                .flake_name
+                .to_lowercase()
+                .contains(&flake.to_lowercase()))
+        && (search.is_empty()
+            || [
+                item.flake_name.as_str(),
+                item.branch.as_str(),
+                item.commit_hash.as_str(),
+                item.commit_message.as_deref().unwrap_or_default(),
+                item.author.as_deref().unwrap_or_default(),
+                item.evaluation_status.as_str(),
+            ]
+            .into_iter()
+            .any(|value| value.to_lowercase().contains(search)))
 }
 
 #[component]
@@ -56,6 +99,8 @@ fn EvaluationsPage() -> Element {
     let mut active_refresh = use_signal(|| 0_u64);
     let mut history_refresh = use_signal(|| 0_u64);
     let mut active_tab = use_signal(|| EvaluationsTab::ActiveQueue);
+    let mut latest_filter = use_signal(LatestFilterState::default);
+    let mut search_query = use_signal(String::new);
     let mut drawer_target = use_signal(|| None::<EvalDrawerTarget>);
     let mut history_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
     // Keyboard navigation: index into the currently visible list (queue or history).
@@ -78,12 +123,30 @@ fn EvaluationsPage() -> Element {
     // Accumulated history items across the current page-1 fetch window.
     let mut history_items_acc: Signal<Vec<EvalHistoryItem>> = use_signal(Vec::new);
     let mut history_total_acc = use_signal(|| 0_i64);
+    let mut history_domain_total = use_signal(|| 0_i64);
+
+    use_effect(move || {
+        let _ = (search_query(), latest_filter().enabled());
+        active_fetch_limit.set(200);
+    });
+
+    use_effect(move || {
+        let _ = (
+            history_status_filter(),
+            history_flake_filter(),
+            search_query(),
+            latest_filter().enabled(),
+        );
+        history_fetch_limit.set(50);
+    });
 
     let history_resource = use_resource(move || async move {
         let _ = history_refresh();
         let limit = history_fetch_limit();
         let status = history_status_filter();
         let flake = history_flake_filter();
+        let search = search_query();
+        let (search, latest_only) = request_state(&search, latest_filter());
         fetch_eval_history(
             1,
             limit,
@@ -97,13 +160,17 @@ fn EvaluationsPage() -> Element {
             } else {
                 Some(flake.as_str())
             },
+            search.as_deref(),
+            latest_only,
         )
         .await
     });
 
     let queue_resource = use_resource(move || async move {
         let _ = active_refresh();
-        fetch_eval_queue(active_fetch_limit()).await
+        let search = search_query();
+        let (search, latest_only) = request_state(&search, latest_filter());
+        fetch_eval_queue(active_fetch_limit(), search.as_deref(), latest_only).await
     });
 
     {
@@ -133,7 +200,9 @@ fn EvaluationsPage() -> Element {
 
     use_effect(move || {
         if let Some(Ok(summary)) = &*queue_resource.read() {
-            queue_items.set(summary.items.clone());
+            queue_items.set(replace_unique_by(summary.items.clone(), |item| {
+                item.commit_id
+            }));
         }
     });
 
@@ -213,13 +282,10 @@ fn EvaluationsPage() -> Element {
     use_effect(move || {
         if let Some(Ok(page_data)) = &*history_resource.read() {
             history_total_acc.set(page_data.total_count);
-            history_items_acc.set(page_data.items.clone());
-        }
-    });
-
-    // Track cursor for attention acknowledgement.
-    use_effect(move || {
-        if let Some(Ok(_page_data)) = &*history_resource.read() {
+            history_domain_total.set(page_data.domain_total);
+            history_items_acc.set(replace_unique_by(page_data.items.clone(), |item| {
+                item.commit_id
+            }));
             history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
         }
     });
@@ -227,12 +293,38 @@ fn EvaluationsPage() -> Element {
     // Infinite-scroll paging for history — created in the parent so the
     // parent knows the visible row count for keyboard navigation (review
     // finding #4) and can own the server-page advancement effect.
-    let hist_reset_key = format!(
-        "hist|{}|{}",
-        history_status_filter(),
-        history_flake_filter()
+    let hist_reset_key = reset_key(
+        "hist",
+        &[
+            history_status_filter().as_str(),
+            history_flake_filter().as_str(),
+            search_query().trim(),
+        ],
+        latest_filter().enabled(),
     );
     let hist_paging = use_infinite_scroll(hist_reset_key, 20);
+
+    use_effect(move || {
+        if let Some(Ok(page_data)) = &*history_resource.read() {
+            history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
+            if history_select_all_loaded() {
+                let search = search_query().trim().to_lowercase();
+                let status = history_status_filter();
+                let flake = history_flake_filter();
+                let ids = page_data
+                    .items
+                    .iter()
+                    .filter(|item| history_item_matches_filters(item, &status, &flake, &search))
+                    .filter(|item| {
+                        marker_matches(latest_filter().enabled(), item.is_latest_per_flake)
+                    })
+                    .take(hist_paging.count())
+                    .map(|item| item.commit_id)
+                    .collect::<std::collections::HashSet<_>>();
+                history_selected_ids.set(ids);
+            }
+        }
+    });
 
     // Grow the server fetch limit for history, reactive because all signal
     // reads are inside the closure (review finding #1).
@@ -259,11 +351,20 @@ fn EvaluationsPage() -> Element {
         .read()
         .iter()
         .filter(|item| is_active_eval_status(&item.evaluation_status))
+        .filter(|item| queue_item_matches_search(item, &search_query().trim().to_lowercase()))
+        .filter(|item| marker_matches(latest_filter().enabled(), item.is_latest_per_flake))
         .cloned()
         .collect::<Vec<_>>();
 
     // Infinite-scroll paging for the active queue.
-    let active_paging = use_infinite_scroll("active".to_string(), 20);
+    let active_paging = use_infinite_scroll(
+        reset_key(
+            "active",
+            &[search_query().trim()],
+            latest_filter().enabled(),
+        ),
+        20,
+    );
     let paged_active_items: Vec<EvalQueueItem> = active_items
         .iter()
         .take(active_paging.count())
@@ -273,7 +374,7 @@ fn EvaluationsPage() -> Element {
         .read()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
-        .map(|summary| summary.active_count)
+        .map(|summary| summary.filtered_total)
         .unwrap_or(0);
     let active_has_more = active_paging.count() < active_items.len()
         || (active_items.len() as i64) < active_total.min(FETCH_LIMIT_MAX);
@@ -290,7 +391,7 @@ fn EvaluationsPage() -> Element {
                 .read()
                 .as_ref()
                 .and_then(|result| result.as_ref().ok())
-                .map(|summary| summary.active_count)
+                .map(|summary| summary.filtered_total)
                 .unwrap_or(0);
             if (loaded_active_len as i64) >= requested_len
                 && active_paging.count() >= loaded_active_len
@@ -315,6 +416,10 @@ fn EvaluationsPage() -> Element {
         .as_ref()
         .map(|s| s.active_count)
         .unwrap_or(0);
+    let active_domain_total = summary_snapshot
+        .as_ref()
+        .map(|s| s.domain_total)
+        .unwrap_or(0);
     let completed_count = summary_snapshot
         .as_ref()
         .map(|s| s.completed_count)
@@ -330,6 +435,44 @@ fn EvaluationsPage() -> Element {
         .and_then(|result| result.as_ref().ok())
         .map(|page| page.total_count)
         .unwrap_or(0);
+
+    use_effect(move || {
+        let visible = queue_items
+            .read()
+            .iter()
+            .filter(|item| is_active_eval_status(&item.evaluation_status))
+            .filter(|item| queue_item_matches_search(item, &search_query().trim().to_lowercase()))
+            .filter(|item| marker_matches(latest_filter().enabled(), item.is_latest_per_flake))
+            .take(active_paging.count())
+            .map(|item| item.commit_id)
+            .collect::<Vec<_>>();
+        let mut selected = active_selected_ids.read().clone();
+        if retain_visible(&mut selected, visible) {
+            active_selected_ids.set(selected);
+        }
+    });
+
+    use_effect(move || {
+        let visible = history_items_acc
+            .read()
+            .iter()
+            .filter(|item| {
+                history_item_matches_filters(
+                    item,
+                    &history_status_filter(),
+                    &history_flake_filter(),
+                    &search_query().trim().to_lowercase(),
+                )
+            })
+            .filter(|item| marker_matches(latest_filter().enabled(), item.is_latest_per_flake))
+            .take(hist_paging.count())
+            .map(|item| item.commit_id)
+            .collect::<Vec<_>>();
+        let mut selected = history_selected_ids.read().clone();
+        if retain_visible(&mut selected, visible) {
+            history_selected_ids.set(selected);
+        }
+    });
     use_effect(move || {
         if active_tab() == EvaluationsTab::History {
             if let Some(Ok(page_data)) = history_resource.read().as_ref() {
@@ -360,25 +503,44 @@ fn EvaluationsPage() -> Element {
                     let occurrence_ids =
                         occurrence_ids_for_rendered_subjects("evals", &rendered_commit_ids);
                     spawn(async move {
-                        let _ = acknowledge_with_cursor_and_ids_async(
-                            "evals", cursor, occurrence_ids,
-                        )
-                        .await;
+                        let _ =
+                            acknowledge_with_cursor_and_ids_async("evals", cursor, occurrence_ids)
+                                .await;
                     });
                 }
             }
         }
     });
-    let selected_count = history_selected_ids.read().len();
+    let history_visible_rows = history_items_acc
+        .read()
+        .iter()
+        .filter(|item| {
+            history_item_matches_filters(
+                item,
+                &history_status_filter(),
+                &history_flake_filter(),
+                &search_query().trim().to_lowercase(),
+            )
+        })
+        .filter(|item| marker_matches(latest_filter().enabled(), item.is_latest_per_flake))
+        .take(hist_paging.count())
+        .cloned()
+        .collect::<Vec<_>>();
     let selected_history_rows = {
-        let items = history_items_acc.read();
         let ids = history_selected_ids.read();
-        items
+        history_visible_rows
             .iter()
             .filter(|item| ids.contains(&item.commit_id))
             .cloned()
             .collect::<Vec<_>>()
     };
+    let selected_count = selected_history_rows.len();
+    let active_selected_visible_ids = paged_active_items
+        .iter()
+        .map(|item| item.commit_id)
+        .filter(|id| active_selected_ids.read().contains(id))
+        .collect::<Vec<_>>();
+    let active_selected_visible_count = active_selected_visible_ids.len();
     let same_flake_pair = selected_history_rows.len() == 2
         && selected_history_rows[0].flake_name == selected_history_rows[1].flake_name;
     let compare_disabled = selected_count != 2 || !same_flake_pair;
@@ -588,7 +750,7 @@ fn EvaluationsPage() -> Element {
                     style: "overflow: hidden;",
 
                     div {
-                        class: "sd-tabs",
+                        class: "sd-tabs q-tabbar",
                         style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border);",
                         button {
                             class: if active_tab() == EvaluationsTab::ActiveQueue {
@@ -618,17 +780,89 @@ fn EvaluationsPage() -> Element {
                             "History"
                             span { class: "sd-tab-badge", "{history_count}" }
                         }
+                        div { class: "q-tabbar-actions",
+                            // Show a Shift-click hint only on History where Shift-click
+                            // actually toggles row selection.
+                            if active_tab() == EvaluationsTab::History && history_total_acc() > 0 {
+                                span {
+                                    class: "ms-hint",
+                                    title: "Shift-click to toggle row selection",
+                                    kbd { "⇧" }
+                                    "-click to select"
+                                }
+                            }
+                            button {
+                                class: if latest_filter().enabled() {
+                                    "btn btn-ghost xs focus-ring active-filter"
+                                } else {
+                                    "btn btn-ghost xs focus-ring"
+                                },
+                                title: "Show only the most recent evaluation per flake",
+                                aria_pressed: latest_filter().enabled(),
+                                onclick: move |_| latest_filter.with_mut(LatestFilterState::toggle),
+                                Icon { name: IconName::Star, size: 12 }
+                                "Latest per flake"
+                            }
+                            div {
+                                class: "q-search",
+                            Icon { name: IconName::Search, size: 13 }
+                            input {
+                                class: "q-search-input",
+                                placeholder: if active_tab() == EvaluationsTab::ActiveQueue { "Search queue…" } else { "Search history…" },
+                                value: "{search_query}",
+                                oninput: move |event| search_query.set(event.value()),
+                            }
+                            if !search_query.read().trim().is_empty() {
+                                span {
+                                    class: "q-search-count",
+                                    if active_tab() == EvaluationsTab::ActiveQueue {
+                                        "{active_count} of {active_domain_total}"
+                                    } else {
+                                        "{history_count} of {history_domain_total()}"
+                                    }
+                                }
+                                button {
+                                    class: "btn-icon xs focus-ring",
+                                    title: "Clear search",
+                                    onclick: move |_| search_query.set(String::new()),
+                                    Icon { name: IconName::X, size: 13 }
+                                }
+                            }
+                        }
+                    }
                     }
 
                     if active_tab() == EvaluationsTab::ActiveQueue {
-                        EvalActiveQueue {
-                            evals: paged_active_items.clone(),
-                            refresh: active_refresh,
-                            queue_items: queue_items,
-                            drawer_target: drawer_target,
-                            focused_index: focused_index,
-                            active_selected_ids: active_selected_ids,
-                            toast_msg: toast_msg,
+                        if active_domain_total == 0 {
+                            div { class: "q-empty",
+                                h3 { "No active evaluations" }
+                                div { "All flake evaluations are complete." }
+                            }
+                        } else if active_items.is_empty() {
+                            div { class: "q-empty",
+                                Icon { name: IconName::Search, size: 20 }
+                                h3 { "No matching evaluations" }
+                                div { "Try adjusting your search or filters." }
+                                button {
+                                    class: "btn btn-ghost xs focus-ring",
+                                    onclick: move |_| {
+                                        search_query.set(String::new());
+                                        latest_filter.with_mut(LatestFilterState::clear);
+                                    },
+                                    "Clear active filters"
+                                }
+                            }
+                        } else {
+                            EvalActiveQueue {
+                                evals: paged_active_items.clone(),
+                                refresh: active_refresh,
+                                queue_items: queue_items,
+                                drawer_target: drawer_target,
+                                focused_index: focused_index,
+                                active_selected_ids: active_selected_ids,
+                                toast_msg: toast_msg,
+                                allow_reorder: !latest_filter().enabled() && search_query.read().trim().is_empty(),
+                            }
                         }
                         if active_has_more {
                             div {
@@ -641,7 +875,7 @@ fn EvaluationsPage() -> Element {
                     }
 
                     if active_tab() == EvaluationsTab::History {
-                        if !history_selected_ids.read().is_empty() {
+                        if selected_count > 0 {
                             div {
                                 class: "ed-bulkbar",
                                 span {
@@ -652,27 +886,31 @@ fn EvaluationsPage() -> Element {
                                 button {
                                     class: "btn btn-ghost focus-ring xs",
                                     onclick: move |_| {
-                                         let selected_ids: Vec<i32> = history_selected_ids.read().iter().copied().collect();
-                                         let mut refresh_sig = history_refresh.clone();
-                                         let mut selected_sig = history_selected_ids.clone();
-                                         let mut toast = toast_msg.clone();
-                                         spawn(async move {
-                                             let mut success = 0u32;
-                                             let mut failed: Vec<i32> = Vec::new();
-                                             for commit_id in selected_ids {
-                                                 match re_evaluate_commit(commit_id).await {
-                                                     Ok(_) => success += 1,
-                                                     Err(_) => failed.push(commit_id),
-                                                 }
-                                             }
-                                             if success > 0 {
-                                                 toast.set(Some(format!("Re-queued {} evaluation{}", success, if success == 1 { "" } else { "s" })));
-                                                 selected_sig.set(failed.into_iter().collect());
-                                             } else {
-                                                 toast.set(Some("Re-evaluate failed — see server logs".to_string()));
-                                             }
-                                             refresh_sig.set(refresh_sig() + 1);
-                                         });
+                                        let selected_ids = selected_history_rows.iter().map(|item| item.commit_id).collect::<Vec<_>>();
+                                        let mut refresh_sig = history_refresh.clone();
+                                        let mut selected_sig = history_selected_ids.clone();
+                                        let mut select_all_sig = history_select_all_loaded.clone();
+                                        let mut toast = toast_msg.clone();
+                                        spawn(async move {
+                                            let mut success = 0u32;
+                                            let mut failed: Vec<i32> = Vec::new();
+                                            for commit_id in selected_ids {
+                                                match re_evaluate_commit(commit_id).await {
+                                                    Ok(_) => success += 1,
+                                                    Err(_) => failed.push(commit_id),
+                                                }
+                                            }
+                                            if success > 0 {
+                                                toast.set(Some(format!("Re-queued {} evaluation{}", success, if success == 1 { "" } else { "s" })));
+                                                selected_sig.set(failed.into_iter().collect());
+                                                // Disable auto-select so the next poll doesn't repopulate
+                                                // the selection with successful rows (review finding #3).
+                                                select_all_sig.set(false);
+                                            } else {
+                                                toast.set(Some("Re-evaluate failed — see server logs".to_string()));
+                                            }
+                                            refresh_sig.set(refresh_sig() + 1);
+                                        });
                                     },
                                     Icon { name: IconName::Sync, size: 11 }
                                     " Re-evaluate"
@@ -717,8 +955,11 @@ fn EvaluationsPage() -> Element {
                             flash_evals: flash_evals,
                             history_items_acc: history_items_acc,
                             history_total_acc: history_total_acc,
+                            history_domain_total: history_domain_total,
                             hist_paging: hist_paging,
                             toast_msg: toast_msg,
+                            search_query: search_query,
+                            latest_filter: latest_filter,
                         }
                     }
                 }
@@ -743,18 +984,18 @@ fn EvaluationsPage() -> Element {
                 }
 
                 // Bulk cancel bar for active queue multi-select (matching JSX BulkBar)
-                if active_tab() == EvaluationsTab::ActiveQueue && !active_selected_ids.read().is_empty() {
+                if active_tab() == EvaluationsTab::ActiveQueue && active_selected_visible_count > 0 {
                     div {
                         class: "ed-bulkbar",
                         span {
                             style: "font-size: 13px; font-weight: 600;",
-                            "{active_selected_ids.read().len()} selected"
+                            "{active_selected_visible_count} selected"
                         }
                         div { style: "flex: 1;" }
                         button {
                             class: "btn btn-danger xs focus-ring",
                             onclick: move |_| {
-                                let ids: Vec<i32> = active_selected_ids.read().iter().copied().collect();
+                                let ids = active_selected_visible_ids.clone();
                                 let mut refresh_sig = active_refresh.clone();
                                 let mut selected_sig = active_selected_ids.clone();
                                 let mut toast = toast_msg.clone();
@@ -778,7 +1019,7 @@ fn EvaluationsPage() -> Element {
                             },
                             Icon { name: IconName::X, size: 12 }
                             {
-                                let n = active_selected_ids.read().len();
+                                let n = active_selected_visible_count;
                                 format!(" Cancel {} eval{}", n, if n == 1 { "" } else { "s" })
                             }
                         }
@@ -825,6 +1066,7 @@ fn EvalActiveQueue(
     focused_index: Signal<Option<usize>>,
     mut active_selected_ids: Signal<std::collections::HashSet<i32>>,
     mut toast_msg: Signal<Option<String>>,
+    allow_reorder: bool,
 ) -> Element {
     // Drag-and-drop reorder state (matching JSX dragId/overIdx)
     let mut drag_id = use_signal(|| None::<i32>);
@@ -832,9 +1074,7 @@ fn EvalActiveQueue(
 
     if evals.is_empty() {
         return rsx! {
-            div {
-                class: "empty",
-                style: "margin: 24px;",
+            div { class: "q-empty",
                 h3 { "No active evaluations" }
                 div { "All flake evaluations are complete." }
             }
@@ -892,15 +1132,17 @@ fn EvalActiveQueue(
                             tr {
                                 key: "{commit_id}",
                                 class: "{row_classes}",
-                                draggable: "true",
-                                ondragstart: move |_| { drag_id.set(Some(commit_id)); },
+                                draggable: if allow_reorder { "true" } else { "false" },
+                                ondragstart: move |_| {
+                                    if allow_reorder { drag_id.set(Some(commit_id)); }
+                                },
                                 ondragover: move |evt| {
                                     evt.prevent_default();
-                                    if over_idx() != Some(i) { over_idx.set(Some(i)); }
+                                    if allow_reorder && over_idx() != Some(i) { over_idx.set(Some(i)); }
                                 },
                                 ondrop: move |evt| {
                                     evt.prevent_default();
-                                    let src_id = drag_id();
+                                    let src_id = allow_reorder.then(|| drag_id()).flatten();
                                     if let Some(src_id) = src_id {
                                         let target_cid = commit_id;
                                         if src_id == target_cid { return; }
@@ -938,7 +1180,7 @@ fn EvalActiveQueue(
                                     div { style: "display: flex; align-items: center; gap: 6px;",
                                         span {
                                             class: "q-drag-handle",
-                                            title: "Drag to reorder",
+                                            title: if allow_reorder { "Drag to reorder" } else { "Reordering is unavailable while filtering" },
                                             Icon { name: IconName::Grip, size: 15 }
                                         }
                                         span {
@@ -949,7 +1191,14 @@ fn EvalActiveQueue(
                                 }
                                 td {
                                     div { style: "font-weight: 600; font-size: 13px;", "{ev_clone.flake_name}" }
-                                    div { class: "mono", style: "font-size: 11px; color: var(--cf-text-muted);",
+                                    div {
+                                        class: if ev_clone.is_latest_per_flake { "mono commit-latest" } else { "mono" },
+                                        style: "font-size: 11px; color: var(--cf-text-muted); display: flex; align-items: center; gap: 0;",
+                                        if ev_clone.is_latest_per_flake {
+                                            span { class: "latest-star", style: "display: inline-flex; align-items: center; margin-right: 3px; flex-shrink: 0;",
+                                                Icon { name: IconName::Star, size: 9 }
+                                            }
+                                        }
                                         "{ev_clone.commit_hash.chars().take(12).collect::<String>()}"
                                     }
                                 }
@@ -980,9 +1229,9 @@ fn EvalActiveQueue(
                                             button {
                                                 class: "q-move-btn focus-ring",
                                                 title: "Move up",
-                                                disabled: is_first,
+                                                disabled: is_first || !allow_reorder,
                                                 onclick: move |_| {
-                                                    if is_first { return; }
+                                                    if is_first || !allow_reorder { return; }
                                                     let items = queue_items.clone();
                                                     let mut refresh_sig = refresh.clone();
                                                     let mut toast = toast_msg.clone();
@@ -1010,9 +1259,9 @@ fn EvalActiveQueue(
                                             button {
                                                 class: "q-move-btn focus-ring",
                                                 title: "Move down",
-                                                disabled: is_last,
+                                                disabled: is_last || !allow_reorder,
                                                 onclick: move |_| {
-                                                    if is_last { return; }
+                                                    if is_last || !allow_reorder { return; }
                                                     let items = queue_items.clone();
                                                     let mut refresh_sig = refresh.clone();
                                                     let mut toast = toast_msg.clone();
@@ -1081,8 +1330,11 @@ fn EvalHistory(
     flash_evals: bool,
     history_items_acc: Signal<Vec<EvalHistoryItem>>,
     history_total_acc: Signal<i64>,
+    history_domain_total: Signal<i64>,
     hist_paging: InfiniteScroll,
     mut toast_msg: Signal<Option<String>>,
+    mut search_query: Signal<String>,
+    mut latest_filter: Signal<LatestFilterState>,
 ) -> Element {
     let history_snapshot = history_resource.read();
 
@@ -1158,7 +1410,7 @@ fn EvalHistory(
                 if history_total_acc() > 0 {
                     span {
                         class: "filter-count",
-                        "{history_total_acc()} entries"
+                        "{history_total_acc()} of {history_domain_total()} entries"
                     }
                 }
             }
@@ -1170,11 +1422,25 @@ fn EvalHistory(
                         // Use accumulated items (across server pages) for the table.
                         // page_data is still used for the flake filter dropdown above
                         // and for loading/error state detection.
-                        let all_loaded = history_items_acc.read().clone();
+                        let all_loaded = history_items_acc
+                            .read()
+                            .iter()
+                            .filter(|item| history_item_matches_filters(
+                                item,
+                                &history_status_filter(),
+                                &history_flake_filter(),
+                                &search_query().trim().to_lowercase(),
+                            ))
+                            .filter(|item| marker_matches(latest_filter().enabled(), item.is_latest_per_flake))
+                            .cloned()
+                            .collect::<Vec<_>>();
                         let paged_items: Vec<EvalHistoryItem> = all_loaded.iter().take(hist_paging.count()).cloned().collect();
                         let hist_has_more = hist_paging.count() < all_loaded.len() || hist_server_has_more;
                         // Select-all operates on all loaded rows (not just the visible page)
                         // so check/uncheck is symmetric and consistent (fixes review finding #5).
+                        let all_loaded_ids: Vec<i32> = paged_items.iter().map(|item| item.commit_id).collect();
+                        let all_checked = !all_loaded_ids.is_empty()
+                            && all_loaded_ids.iter().all(|id| history_selected_ids.read().contains(id));
                         rsx! {
                     table {
                         class: "sys-table",
@@ -1258,8 +1524,13 @@ fn EvalHistory(
                                                     "{ev.flake_name}"
                                                 }
                                                 div {
-                                                    class: "mono",
-                                                    style: "font-size: 11px; color: var(--cf-text-muted);",
+                                                    class: if ev.is_latest_per_flake { "mono commit-latest" } else { "mono" },
+                                                    style: "font-size: 11px; color: var(--cf-text-muted); display: flex; align-items: center; gap: 0;",
+                                                    if ev.is_latest_per_flake {
+                                                        span { class: "latest-star", style: "display: inline-flex; align-items: center; margin-right: 3px; flex-shrink: 0;",
+                                                            Icon { name: IconName::Star, size: 9 }
+                                                        }
+                                                    }
                                                     "{ev.commit_hash.chars().take(12).collect::<String>()}"
                                                 }
                                             }
@@ -1382,6 +1653,28 @@ fn EvalHistory(
                             "Loading more…"
                         }
                     }
+                    if page_data.domain_total == 0 {
+                        div { class: "q-empty",
+                            h3 { "No completed evaluations" }
+                            div { "Completed evaluations will appear here." }
+                        }
+                    } else if page_data.total_count == 0 {
+                        div { class: "q-empty",
+                            Icon { name: IconName::Search, size: 20 }
+                            h3 { "No matching evaluations" }
+                            div { "Try adjusting your search or filters." }
+                            button {
+                                class: "btn btn-ghost xs focus-ring",
+                                onclick: move |_| {
+                                    history_status_filter.set("all".to_string());
+                                    history_flake_filter.set("all".to_string());
+                                    search_query.set(String::new());
+                                    latest_filter.with_mut(LatestFilterState::clear);
+                                },
+                                "Clear active filters"
+                            }
+                        }
+                    }
                         }
                     }
                 },
@@ -1448,6 +1741,14 @@ fn EvalDrawer(
                             div {
                                 class: "fqdn",
                                 "{ev.commit_hash} · {ev.commit_id}"
+                                if ev.attempt_number > 1 {
+                                    span {
+                                        class: "chip chip-unknown",
+                                        style: "font-size: 10px; margin-left: 6px;",
+                                        title: "Automatic/manual retry attempt {ev.attempt_number}",
+                                        "attempt {ev.attempt_number}"
+                                    }
+                                }
                             }
                             }
                         }
@@ -1596,6 +1897,14 @@ fn EvalDrawer(
                             div {
                                 class: "fqdn",
                                 "{ev.commit_hash} · {ev.commit_id}"
+                                if ev.attempt_number > 1 {
+                                    span {
+                                        class: "chip chip-unknown",
+                                        style: "font-size: 10px; margin-left: 6px;",
+                                        title: "Automatic/manual retry attempt {ev.attempt_number}",
+                                        "attempt {ev.attempt_number}"
+                                    }
+                                }
                             }
                             }
                         }
