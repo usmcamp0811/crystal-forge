@@ -438,35 +438,57 @@ struct RecoveryCandidate {
     derivation_target: Option<String>,
     commit_id: Option<i32>,
     flake_id: Option<i32>,
+    evaluation_attempt_count: Option<i32>,
 }
 
 /// Set backoff state for a failed recovery attempt.
 ///
-/// The update is guarded by:
-/// - `build_preparation_state IN ('pending', 'failed')` — never touches
-///   `not_required`, `queued`, or `NULL` rows.
-/// - No `build_jobs` row exists for this derivation.
+/// The update is guarded to prevent a stale failure from overwriting a newer
+/// preparation generation:
+/// - `build_preparation_state IN ('pending', 'failed')`
+/// - derivation path, commit_id, and evaluation_attempt_count must match
+/// - the commit must still be complete
+/// - no build job must exist for this derivation
 ///
 /// If the guard fails, the update does nothing and no error is returned.
-async fn record_recovery_failure(pool: &PgPool, derivation_id: i32, error: &str) {
+async fn record_recovery_failure(
+    pool: &PgPool,
+    derivation_id: i32,
+    commit_id: i32,
+    expected_attempt: i32,
+    derivation_path: &str,
+    error: &str,
+) {
     let result = sqlx::query(
         r#"
         UPDATE derivations d
         SET build_preparation_state = 'failed',
             build_preparation_attempts = COALESCE(d.build_preparation_attempts, 0) + 1,
-            build_preparation_last_error = $2,
+            build_preparation_last_error = $5,
             build_preparation_next_attempt_at = NOW() + LEAST(
                 POW(2, COALESCE(d.build_preparation_attempts, 0)) * interval '30 seconds',
                 interval '30 minutes'
             )
+        FROM commits c
         WHERE d.id = $1
+          AND d.commit_id = $2
           AND d.build_preparation_state IN ('pending', 'failed')
+          AND d.derivation_path IS NOT DISTINCT FROM $4
+          AND d.status_id = 5
+          AND d.cf_agent_enabled = TRUE
+          AND d.policy_requirements_met = TRUE
+          AND c.id = d.commit_id
+          AND c.evaluation_status = 'complete'
+          AND c.evaluation_attempt_count = $3
           AND NOT EXISTS (
               SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = d.id
           )
         "#,
     )
     .bind(derivation_id)
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .bind(derivation_path)
     .bind(error)
     .execute(pool)
     .await;
@@ -512,7 +534,8 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
             d.derivation_path,
             d.derivation_target,
             d.commit_id,
-            c.flake_id
+            c.flake_id,
+            c.evaluation_attempt_count
         FROM derivations d
         LEFT JOIN commits c ON c.id = d.commit_id
         WHERE d.build_preparation_state IN ('pending', 'failed')
@@ -545,12 +568,17 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
 
     for candidate in &candidates {
         let derivation_id = candidate.derivation_id;
+        let commit_id = candidate.commit_id.unwrap_or(0);
+        let expected_attempt = candidate.evaluation_attempt_count.unwrap_or(0);
         let drv_path = match &candidate.derivation_path {
             Some(p) => p.clone(),
             None => {
                 let msg = "Skipping recovery: no drv path on derivation";
                 warn!(derivation_id, "{msg}");
-                record_recovery_failure(pool, derivation_id, msg).await;
+                record_recovery_failure(
+                    pool, derivation_id, commit_id, expected_attempt, "", msg,
+                )
+                .await;
                 continue;
             }
         };
@@ -561,7 +589,10 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
             Err(err) => {
                 let msg = format!("Recovery: GC root failed for derivation {derivation_id}: {err:#}");
                 warn!("{msg}");
-                record_recovery_failure(pool, derivation_id, &msg).await;
+                record_recovery_failure(
+                    pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                )
+                .await;
                 continue;
             }
         };
@@ -571,7 +602,10 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 "Recovery: derivation {derivation_id} drv path {drv_path} not valid in store"
             );
             warn!("{msg}");
-            record_recovery_failure(pool, derivation_id, &msg).await;
+            record_recovery_failure(
+                pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+            )
+            .await;
             continue;
         }
 
@@ -587,7 +621,10 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
             Err(err) => {
                 let msg = format!("Recovery: failed to begin tx: {err:#}");
                 warn!(derivation_id, "{msg}");
-                record_recovery_failure(pool, derivation_id, &msg).await;
+                record_recovery_failure(
+                    pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                )
+                .await;
                 continue;
             }
         };
@@ -615,7 +652,10 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 let msg = format!("Recovery: commit lock query failed: {err:#}");
                 warn!(derivation_id, "{msg}");
                 let _ = tx.rollback().await;
-                record_recovery_failure(pool, derivation_id, &msg).await;
+                record_recovery_failure(
+                    pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                )
+                .await;
                 continue;
             }
         };
@@ -625,7 +665,10 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
             let msg = format!("Recovery: failed to acquire queue lock: {err:#}");
             warn!(derivation_id, "{msg}");
             let _ = tx.rollback().await;
-            record_recovery_failure(pool, derivation_id, &msg).await;
+            record_recovery_failure(
+                pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+            )
+            .await;
             continue;
         }
 
@@ -654,7 +697,10 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 let msg = format!("Recovery: derivation revalidation failed: {err:#}");
                 warn!(derivation_id, "{msg}");
                 let _ = tx.rollback().await;
-                record_recovery_failure(pool, derivation_id, &msg).await;
+                record_recovery_failure(
+                    pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                )
+                .await;
                 continue;
             }
         };
@@ -677,7 +723,10 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 let msg = format!("Recovery: failed to read max position: {err:#}");
                 warn!(derivation_id, "{msg}");
                 let _ = tx.rollback().await;
-                record_recovery_failure(pool, derivation_id, &msg).await;
+                record_recovery_failure(
+                    pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                )
+                .await;
                 continue;
             }
         };
@@ -740,7 +789,10 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                         let msg = format!("Recovery: state update failed after insert: {err:#}");
                         warn!(derivation_id, "{msg}");
                         let _ = tx.rollback().await;
-                        record_recovery_failure(pool, derivation_id, &msg).await;
+                        record_recovery_failure(
+                            pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                        )
+                        .await;
                         continue;
                     }
                 }
@@ -748,7 +800,10 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 if let Err(err) = tx.commit().await {
                     let msg = format!("Recovery: commit failed: {err:#}");
                     warn!(derivation_id, "{msg}");
-                    record_recovery_failure(pool, derivation_id, &msg).await;
+                    record_recovery_failure(
+                        pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                    )
+                    .await;
                     continue;
                 }
 
@@ -791,7 +846,10 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                     if let Err(err) = tx.commit().await {
                         let msg = format!("Recovery: commit failed: {err:#}");
                         warn!(derivation_id, "{msg}");
-                        record_recovery_failure(pool, derivation_id, &msg).await;
+                        record_recovery_failure(
+                            pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                        )
+                        .await;
                         continue;
                     }
 
@@ -814,7 +872,10 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 let msg = format!("Recovery: insert query failed: {err:#}");
                 warn!(derivation_id, "{msg}");
                 let _ = tx.rollback().await;
-                record_recovery_failure(pool, derivation_id, &msg).await;
+                record_recovery_failure(
+                    pool, derivation_id, commit_id, expected_attempt, &drv_path, &msg,
+                )
+                .await;
             }
         }
     }

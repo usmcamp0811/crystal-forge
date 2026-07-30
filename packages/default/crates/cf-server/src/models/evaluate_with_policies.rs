@@ -1671,9 +1671,17 @@ pub async fn activate_evaluated_system_build(
                 %build_job_id,
                 "system_build_job_activated"
             );
-            // Mark preparation complete so the recovery reconciler skips it.
+            // Mark preparation complete and clear any stale backoff metadata
+            // from a previous generation so diagnostics are not misleading.
             sqlx::query(
-                "UPDATE derivations SET build_preparation_state = 'queued' WHERE id = $1",
+                r#"
+                UPDATE derivations
+                SET build_preparation_state = 'queued',
+                    build_preparation_attempts = 0,
+                    build_preparation_last_error = NULL,
+                    build_preparation_next_attempt_at = NULL
+                WHERE id = $1
+                "#,
             )
             .bind(derivation_id)
             .execute(&mut *tx)
@@ -1691,9 +1699,17 @@ pub async fn activate_evaluated_system_build(
                 existing_status = %status,
                 "system_build_job_activate_already_exists"
             );
-            // Build job already exists; keep preparation state consistent.
+            // Build job already exists; keep preparation state consistent
+            // and clear any stale backoff metadata from a prior generation.
             sqlx::query(
-                "UPDATE derivations SET build_preparation_state = 'queued' WHERE id = $1",
+                r#"
+                UPDATE derivations
+                SET build_preparation_state = 'queued',
+                    build_preparation_attempts = 0,
+                    build_preparation_last_error = NULL,
+                    build_preparation_next_attempt_at = NULL
+                WHERE id = $1
+                "#,
             )
             .bind(derivation_id)
             .execute(&mut *tx)
