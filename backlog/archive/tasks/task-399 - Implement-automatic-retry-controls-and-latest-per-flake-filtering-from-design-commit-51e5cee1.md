@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-07-24 03:26'
-updated_date: '2026-07-30 13:43'
+updated_date: '2026-07-30 17:34'
 labels:
   - design-parity
   - web-ui
@@ -264,6 +264,24 @@ Verification run locally:
 - `SQLX_OFFLINE=true nix develop ../.. --command cargo test -p cf-builder --lib attic_streaming_push_args_do_not_add_verbose_flags -- --test-threads=1` passed.
 - `SQLX_OFFLINE=true nix develop ../.. --command cargo check -p cf-builder --all-targets` passed (existing warnings only).
 - `git diff --check` passed.
+---
+
+author: gpt-5.5
+created: 2026-07-30 17:34
+---
+Follow-up web-ui integration test fix pushed in `81ae7ece` on MR !310.
+
+Change:
+- Updated `checks/web-ui/tests/integration-test.js` only.
+- Replaced stale filtered-empty assertions for `15k-builds-latest-combined-filters-empty-clear` and `26d-evaluations-latest-combined-filters-empty-clear` with assertions scoped to the matching `.q-empty` container.
+- Tests now verify the intentional empty-state structure: heading (`No matching builds` / `No matching evaluations`), secondary guidance (`Try adjusting your search or filters.`), and the scoped `Clear active filters` button.
+- Production Builds/Evaluations copy was not changed.
+
+Verification run locally:
+- `rg -n 'No builds match the active filters|No evaluations match the active filters' checks/web-ui/tests/integration-test.js` produced no matches.
+- No repository JS formatter/check config was found (`package.json`, `.prettierrc*`, `biome.json*` absent), so no separate JS format command was run.
+- First `nix build -L .#checks.x86_64-linux.web-ui` reached both fixed steps as OK but hit the tool timeout before the derivation finished, so it was not counted as proof.
+- Rerun `nix build -L .#checks.x86_64-linux.web-ui` with a longer timeout passed. Relevant lines included `[OK] 15k-builds-latest-combined-filters-empty-clear`, `[OK] 26d-evaluations-latest-combined-filters-empty-clear`, and `=== All Mega Integration Tests Passed ===`.
 ---
 <!-- COMMENTS:END -->
 
