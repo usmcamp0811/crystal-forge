@@ -2458,6 +2458,7 @@ in {
         findutils
         gnused
         gnugrep
+        gnutar
       ];
 
       environment =
