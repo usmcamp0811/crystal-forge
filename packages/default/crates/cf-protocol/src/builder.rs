@@ -209,12 +209,24 @@ pub struct BuildJob {
     pub status: String,
     pub retry_count: i32,
     pub max_retries: i32,
+    #[serde(default)]
+    pub parent_job_id: Option<Uuid>,
+    #[serde(default)]
+    pub root_job_id: Option<Uuid>,
+    #[serde(default = "default_attempt_number")]
+    pub attempt_number: i32,
+    #[serde(default = "Utc::now")]
+    pub available_at: DateTime<Utc>,
     pub priority_weight: f64,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub logs: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_attempt_number() -> i32 {
+    1
 }
 
 /// Response returned by GET/POST /api/v1/builders/:id/next-job.
@@ -291,6 +303,18 @@ pub enum BuildFailurePhase {
     DerivationMismatch,
     PathMaterialization,
     Build,
+}
+
+/// Retry classification supplied by newer builders. Missing values from older
+/// builders remain unknown and are not transient-retry eligible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildFailureClass {
+    Transient,
+    Deterministic,
+    Authorization,
+    Cancelled,
+    Unknown,
 }
 
 impl std::fmt::Display for BuildFailurePhase {
@@ -474,5 +498,18 @@ mod tests {
             BuildFailurePhase::DerivationMismatch.to_string(),
             "derivation_mismatch"
         );
+    }
+
+    #[test]
+    fn old_failure_payload_has_no_classification() {
+        #[derive(Deserialize)]
+        struct Failure {
+            #[serde(default)]
+            failure_class: Option<BuildFailureClass>,
+        }
+
+        let failure: Failure = serde_json::from_str(r#"{"error_message":"failed"}"#)
+            .expect("older payload should parse");
+        assert_eq!(failure.failure_class, None);
     }
 }

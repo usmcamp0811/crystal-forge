@@ -667,6 +667,10 @@ async fn main() -> anyhow::Result<()> {
             get(admin::get_classification_config).put(admin::update_classification_config),
         )
         .route(
+            "/api/v1/admin/automatic-retry-policy",
+            get(admin::get_automatic_retry_policy).put(admin::update_automatic_retry_policy),
+        )
+        .route(
             "/api/v1/admin/setup-progress",
             get(setup_wizard::get_setup_progress),
         )

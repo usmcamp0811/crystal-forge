@@ -562,6 +562,14 @@ pub struct BuildQueueItem {
     #[serde(default)]
     pub system_id: Option<uuid::Uuid>,
 
+    /// Stable flake identity used for latest-per-flake grouping.
+    #[serde(default)]
+    pub flake_id: Option<i32>,
+
+    /// True when this is the newest item in its active/history domain for its flake.
+    #[serde(default)]
+    pub is_latest_per_flake: bool,
+
     /// The hostname/system being built.
     pub hostname: String,
     /// The flake name this build belongs to.
@@ -578,6 +586,14 @@ pub struct BuildQueueItem {
     pub builder_name: Option<String>,
     /// When the build was queued.
     pub queued_at: DateTime<Utc>,
+    #[serde(default = "default_attempt_number")]
+    pub attempt_number: i32,
+    #[serde(default)]
+    pub parent_job_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub root_job_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub available_at: Option<DateTime<Utc>>,
     /// When the build started (None if still queued).
     pub started_at: Option<DateTime<Utc>>,
     /// Elapsed time in seconds since started (for display).
@@ -598,6 +614,10 @@ pub struct BuildQueueItem {
     /// Derivations that have been pushed to cache (cache-pushed status).
     #[serde(default)]
     pub cached_derivs: i64,
+}
+
+fn default_attempt_number() -> i32 {
+    1
 }
 
 /// Query parameters for the paginated build queue endpoint.
@@ -627,6 +647,12 @@ pub struct BuildQueueParams {
     /// Filter jobs queued at or before this ISO-8601 timestamp.
     #[serde(default)]
     pub queued_before: Option<DateTime<Utc>>,
+    /// Search system/config, flake, commit, builder, architecture, or status.
+    #[serde(default)]
+    pub search: Option<String>,
+    /// Return only the authoritative latest item for each stable flake.
+    #[serde(default)]
+    pub latest_only: bool,
 }
 
 /// Hard upper bound for per-request limit parameters.
@@ -654,6 +680,9 @@ fn default_limit() -> i64 {
 pub struct BuildQueuePageResponse {
     /// Total number of matching rows across all pages.
     pub total: i64,
+    /// Total rows in the active/history domain before search and filters.
+    #[serde(default)]
+    pub domain_total: i64,
     /// Current page (1-indexed).
     pub page: i64,
     /// Items per page.
@@ -668,6 +697,12 @@ pub struct EvalQueueSummary {
     pub active_count: i64,
     pub completed_count: i64,
     pub failed_count: i64,
+    /// Active evaluation rows before search and filters.
+    #[serde(default)]
+    pub domain_total: i64,
+    /// Active evaluation rows after all search/filter/latest predicates.
+    #[serde(default)]
+    pub filtered_total: i64,
     pub execution_mode: String,
     pub items: Vec<EvalQueueItem>,
     pub timestamp: DateTime<Utc>,
@@ -684,6 +719,9 @@ pub struct EvalQueueItem {
     pub commit_message: Option<String>,
     pub author: Option<String>,
     pub committed_at: DateTime<Utc>,
+    pub enqueued_at: DateTime<Utc>,
+    #[serde(default)]
+    pub is_latest_per_flake: bool,
     pub evaluation_status: String,
     pub queue_position: i64,
     pub systems: Vec<String>,
@@ -691,6 +729,14 @@ pub struct EvalQueueItem {
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
+    #[serde(default = "default_attempt_number")]
+    pub attempt_number: i32,
+    #[serde(default)]
+    pub parent_attempt_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub root_attempt_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub available_at: Option<DateTime<Utc>>,
 }
 
 /// Request payload for persisting eval queue order from the UI.
@@ -729,6 +775,9 @@ pub struct EvalHistoryItem {
     pub commit_message: Option<String>,
     pub author: Option<String>,
     pub committed_at: DateTime<Utc>,
+    pub enqueued_at: DateTime<Utc>,
+    #[serde(default)]
+    pub is_latest_per_flake: bool,
     pub evaluation_status: String,
     /// When the evaluation finished (complete, failed, or cancelled).
     pub evaluation_completed_at: Option<DateTime<Utc>>,
@@ -743,15 +792,58 @@ pub struct EvalHistoryItem {
     /// and completion timestamp. Used for alert acknowledgement to distinguish
     /// between separate evaluation attempts of the same commit (review finding).
     pub alert_occurrence_id: String,
+    #[serde(default = "default_attempt_number")]
+    pub attempt_number: i32,
+    #[serde(default)]
+    pub parent_attempt_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub root_attempt_id: Option<uuid::Uuid>,
 }
 
 /// Paginated response for GET /api/v1/commits/eval-history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalHistoryPage {
     pub total_count: i64,
+    /// Total terminal evaluations before search and filters.
+    #[serde(default)]
+    pub domain_total: i64,
     pub page: i64,
     pub limit: i64,
     pub items: Vec<EvalHistoryItem>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EvalQueueParams {
+    #[serde(default = "default_eval_queue_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub flake: Option<String>,
+    #[serde(default)]
+    pub search: Option<String>,
+    #[serde(default)]
+    pub latest_only: bool,
+}
+
+fn default_eval_queue_limit() -> i64 {
+    200
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EvalHistoryParams {
+    #[serde(default = "default_page")]
+    pub page: i64,
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub flake: Option<String>,
+    #[serde(default)]
+    pub search: Option<String>,
+    #[serde(default)]
+    pub latest_only: bool,
 }
 
 /// Per-system policy matrix for a single commit evaluation.
@@ -2020,6 +2112,24 @@ pub struct UpdateClassificationBannerRequest {
     pub enabled: bool,
     pub level: String,
     pub custom_text: String,
+}
+
+/// Persisted server-wide automatic retry policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutomaticRetryPolicyResponse {
+    pub max_build_retries: i16,
+    pub max_evaluation_retries: i16,
+    pub backoff_seconds: i32,
+    pub transient_only: bool,
+}
+
+/// Complete replacement payload for the automatic retry policy.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateAutomaticRetryPolicyRequest {
+    pub max_build_retries: i16,
+    pub max_evaluation_retries: i16,
+    pub backoff_seconds: i32,
+    pub transient_only: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

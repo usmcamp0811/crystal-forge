@@ -305,12 +305,22 @@ pub fn AppShell() -> Element {
     } else {
         "0px"
     };
+
+    // Compute the combined offset for fixed-position surfaces (drawers, trays,
+    // backdrops) so they sit between the clearance banners rather than behind them.
+    let top_class_height: u8 = if classification_enabled { 24 } else { 0 };
+    let bot_class_height = top_class_height;
+    let dev_height: u8 = if dev_mode_enabled { DEV_MODE_BANNER_HEIGHT_PX } else { 0 };
+    let top_banner_offset = format!("{}px", dev_height + top_class_height);
+    let bottom_banner_offset = format!("{}px", dev_height + bot_class_height);
+
     let classification_top = classification_config.clone();
     let classification_bottom = classification_config;
 
     rsx! {
         div {
             class: "min-h-screen {theme::surface::PAGE_BG} {theme::text::PRIMARY} flex flex-col overflow-x-hidden",
+            style: "--cf-app-fixed-top-offset:{top_banner_offset};--cf-app-fixed-bottom-offset:{bottom_banner_offset};",
 
             // Top banner stack: the classification banner offsets only when
             // the dev banner is actually visible. Each active fixed banner has

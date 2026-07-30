@@ -44,6 +44,7 @@ pub enum IconName {
     Power,
     /// Clock / history-time icon (design Icon.jsx "history").
     Clock,
+    Star,
 }
 
 #[component]
@@ -358,6 +359,13 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
             circle { cx: "12", cy: "12", r: "9" }
             path {
                 d: "M12 7v5l3 2",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::Star => rsx! {
+            path {
+                d: "m12 2.5 3 6.4 6.8.9-5 4.9 1.3 6.8L12 18l-6.1 3.5L7.2 14.7l-5-4.9 6.8-.9L12 2.5z",
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }

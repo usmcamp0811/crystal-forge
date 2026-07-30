@@ -87,6 +87,10 @@ fn builder_https_verified_by_trusted_proxy(
     forwarded_header_asserts_https(headers)
 }
 
+fn build_log_append_status_allowed(status: &str) -> bool {
+    matches!(status, "queued" | "building" | "cancelling")
+}
+
 fn forwarded_header_asserts_https(headers: &HeaderMap) -> bool {
     headers
         .get("x-forwarded-proto")
@@ -643,7 +647,14 @@ async fn generate_source_archive(
     // Write to a temp file then rename atomically so readers never see a
     // partially-written archive. Include the PID to avoid cross-process
     // collision if the server is restarted mid-generation.
-    let tmp_archive = archive_path.with_extension(format!("tar.gz.tmp.{}", std::process::id()));
+    // Build the temp path by appending a suffix to the full archive path string
+    // rather than using .with_extension(), which strips only the last component
+    // and produces a double extension like ".tar.tar.gz.tmp" for ".tar.gz" paths.
+    let tmp_archive = {
+        let mut s = archive_path.as_os_str().to_owned();
+        s.push(format!(".tmp.{}", std::process::id()));
+        std::path::PathBuf::from(s)
+    };
     let _ = tokio::fs::remove_file(&tmp_archive).await;
 
     // Tar the mirror directory. Since mirror_path is like .../<mirror_id>.git,
@@ -1808,7 +1819,30 @@ pub async fn list_recent_build_jobs(
         .max(1)
         .min(crate::api::models::LIMIT_MAX);
 
-    let items = crate::queries::dashboard::fetch_recent_build_history(&state.pool, limit)
+    let query = crate::api::models::BuildQueueParams {
+        page: 1,
+        limit,
+        status: params.get("status").cloned(),
+        commit_hash: params.get("commit_hash").cloned(),
+        flake_name: params
+            .get("flake_name")
+            .or_else(|| params.get("flake"))
+            .cloned(),
+        config_name: params.get("config_name").cloned(),
+        queued_after: params
+            .get("queued_after")
+            .and_then(|value| value.parse().ok()),
+        queued_before: params
+            .get("queued_before")
+            .and_then(|value| value.parse().ok()),
+        search: params.get("search").cloned(),
+        latest_only: params
+            .get("latest_only")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(false),
+    };
+
+    let items = crate::queries::dashboard::fetch_recent_build_history(&state.pool, &query)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -2342,6 +2376,8 @@ pub struct JobStatusRequest {
     pub status: Option<String>,
     #[serde(default)]
     pub failure_phase: Option<String>,
+    #[serde(default)]
+    pub failure_class: Option<crate::models::builders::BuildFailureClass>,
     pub error_message: Option<String>,
 }
 
@@ -2350,6 +2386,7 @@ fn parse_job_status_request(body: &[u8]) -> Result<JobStatusRequest, serde_json:
         return Ok(JobStatusRequest {
             status: None,
             failure_phase: None,
+            failure_class: None,
             error_message: None,
         });
     }
@@ -2361,6 +2398,7 @@ fn fallback_job_status_request_for_invalid_details() -> JobStatusRequest {
     JobStatusRequest {
         status: None,
         failure_phase: Some("build".to_string()),
+        failure_class: None,
         error_message: Some("builder reported failure with invalid failure details".to_string()),
     }
 }
@@ -2370,6 +2408,25 @@ fn format_failure_message(request: &JobStatusRequest) -> Option<String> {
     match request.failure_phase.as_deref() {
         Some(phase) if !phase.trim().is_empty() => Some(format!("[{phase}] {message}")),
         _ => Some(message),
+    }
+}
+
+fn retry_failure_class(
+    request: &JobStatusRequest,
+) -> crate::models::retry_policy::RetryFailureClass {
+    use crate::models::builders::BuildFailureClass;
+    use crate::models::retry_policy::RetryFailureClass;
+
+    if request.failure_phase.as_deref() == Some("derivation_mismatch") {
+        return RetryFailureClass::DerivationMismatch;
+    }
+
+    match request.failure_class {
+        Some(BuildFailureClass::Transient) => RetryFailureClass::Transient,
+        Some(BuildFailureClass::Deterministic) => RetryFailureClass::Deterministic,
+        Some(BuildFailureClass::Authorization) => RetryFailureClass::Authorization,
+        Some(BuildFailureClass::Cancelled) => RetryFailureClass::Cancelled,
+        Some(BuildFailureClass::Unknown) | None => RetryFailureClass::Unknown,
     }
 }
 
@@ -3424,9 +3481,7 @@ pub async fn complete_job(
 
 /// POST /api/v1/builders/:id/jobs/:job_id/fail - Mark job as failed
 ///
-/// Implements retry logic:
-/// - If retry_count < max_retries: increment retry_count, re-queue job, reduce priority
-/// - If retry_count >= max_retries: mark as permanently failed
+/// Terminally records this attempt and may schedule a policy-eligible child attempt.
 pub async fn fail_job(
     State(state): State<CFState>,
     Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
@@ -3473,6 +3528,7 @@ pub async fn fail_job(
         &builder_id,
         verified.builder_session_id.as_ref(),
         failure_message.as_deref(),
+        retry_failure_class(&request),
     )
     .await
     .map_err(|err| {
@@ -3485,8 +3541,10 @@ pub async fn fail_job(
         StatusCode::CONFLICT
     })?;
 
-    // Return 200 for re-queued jobs, 202 for permanently failed jobs
-    if updated_job.status == "queued" {
+    cleanup_build_log_channel(&state, job_id).await;
+
+    // Return 200 when a child was scheduled, 202 when no retry is eligible.
+    if updated_job.retry_job.is_some() {
         if state.server_config.source_delivery_mode == SourceInputDeliveryMode::ServerBundledArchive
         {
             cleanup_source_archive(
@@ -3498,7 +3556,7 @@ pub async fn fail_job(
         }
         Ok(StatusCode::OK) // Job re-queued for retry
     } else {
-        // Permanent failure: record the derivation-level failure server-side so
+        // No retry was scheduled: record the derivation-level failure server-side so
         // API builders never touch the database directly.
         match crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
             .await
@@ -3534,8 +3592,6 @@ pub async fn fail_job(
                 );
             }
         }
-
-        cleanup_build_log_channel(&state, job_id).await;
 
         // Best-effort source archive cleanup (for ServerBundledArchive jobs).
         if state.server_config.source_delivery_mode == SourceInputDeliveryMode::ServerBundledArchive
@@ -3632,12 +3688,14 @@ pub async fn append_job_logs(
         ));
     }
 
-    // Only queued/building jobs may receive log appends.
-    if job.status != "queued" && job.status != "building" {
+    // Only active or cancelling jobs may receive log appends.  Final messages
+    // emitted while the builder is shutting down are accepted in `cancelling`,
+    // but terminal statuses remain closed.
+    if !build_log_append_status_allowed(&job.status) {
         return Err((
             StatusCode::CONFLICT,
             format!(
-                "Cannot append logs for job in '{}' status; only 'queued' and 'building' are allowed",
+                "Cannot append logs for terminal job in '{}' status; only 'queued', 'building', and 'cancelling' are allowed",
                 job.status
             ),
         ));
@@ -4155,6 +4213,7 @@ mod tests {
     use super::parse_job_status_request;
     use super::parse_next_job_request;
     use super::persisted_build_log_frames;
+    use super::retry_failure_class;
     use super::source_flake_target_for_derivation;
     use super::verify_builder_resolve_request;
     use crate::builder::api_client::BuilderApiClient;
@@ -4422,6 +4481,7 @@ mod tests {
 
         assert_eq!(parsed.status, None);
         assert_eq!(parsed.failure_phase, None);
+        assert_eq!(parsed.failure_class, None);
         assert_eq!(parsed.error_message.as_deref(), Some("nix build failed"));
     }
 
@@ -4437,6 +4497,32 @@ mod tests {
         assert_eq!(
             format_failure_message(&parsed).as_deref(),
             Some("[derivation_mismatch] drv mismatch")
+        );
+    }
+
+    #[test]
+    fn job_status_request_accepts_additive_failure_class() {
+        let parsed = parse_job_status_request(
+            br#"{"failure_phase":"source_fetch","failure_class":"transient","error_message":"timeout"}"#,
+        )
+        .expect("classified failure should parse");
+
+        assert_eq!(
+            retry_failure_class(&parsed),
+            crate::models::retry_policy::RetryFailureClass::Transient
+        );
+    }
+
+    #[test]
+    fn derivation_mismatch_is_never_retryable_even_if_misclassified() {
+        let parsed = parse_job_status_request(
+            br#"{"failure_phase":"derivation_mismatch","failure_class":"transient"}"#,
+        )
+        .expect("classified failure should parse");
+
+        assert_eq!(
+            retry_failure_class(&parsed),
+            crate::models::retry_policy::RetryFailureClass::DerivationMismatch
         );
     }
 
@@ -4632,6 +4718,23 @@ mod tests {
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body, "Failed to create builder");
+    }
+
+    #[test]
+    fn build_log_append_status_allows_cancelling_but_rejects_terminal() {
+        for status in ["queued", "building", "cancelling"] {
+            assert!(
+                super::build_log_append_status_allowed(status),
+                "{status} should accept builder log appends"
+            );
+        }
+
+        for status in ["cancelled", "failed", "success"] {
+            assert!(
+                !super::build_log_append_status_allowed(status),
+                "{status} should reject builder log appends"
+            );
+        }
     }
 
     // ── builder_https_verified_by_trusted_proxy tests ──────────────────────

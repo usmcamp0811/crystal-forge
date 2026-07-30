@@ -1352,6 +1352,34 @@
       "baseline": "advisory"
     },
     {
+      "name": "15j-builds-latest-per-flake-populated",
+      "description": "Builds active and completed tabs honor server-authoritative latest markers and retain the pressed filter",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "15k-builds-latest-combined-filters-empty-clear",
+      "description": "Build latest-only composes with active status criteria and search and exposes a clearable filter-aware empty state",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
       "name": "16-cves",
       "description": "CVE dashboard - fleet overview",
       "route": "/cves",
@@ -1618,6 +1646,34 @@
       "baseline": "advisory"
     },
     {
+      "name": "26c-evaluations-latest-per-flake-populated",
+      "description": "Evaluation active and history tabs honor server-authoritative latest markers and retain the pressed filter",
+      "route": "/evaluations",
+      "designRef": "docs/design/CrystalForge/components/EvalsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "26d-evaluations-latest-combined-filters-empty-clear",
+      "description": "Evaluation latest-only composes with search, status, and flake filters and exposes a clearable filter-aware empty state",
+      "route": "/evaluations",
+      "designRef": "docs/design/CrystalForge/components/EvalsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
       "name": "12i-system-detail-generation-metric",
       "description": "System detail shows API-provided generation in overview metrics",
       "route": "/systems/:id",
@@ -1784,6 +1840,48 @@
       "semanticAssertions": true,
       "interactions": false,
       "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "30a-admin-automatic-retries-defaults-reset",
+      "description": "Admin Server shows retry defaults and Reset restores the server baseline without persisting drafts",
+      "route": "/admin",
+      "designRef": "docs/design/CrystalForge/components/AdminView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "30b-admin-automatic-retries-save-reload",
+      "description": "Admin saves every retry policy field to the real server and observes the persisted values after reload",
+      "route": "/admin",
+      "designRef": "docs/design/CrystalForge/components/AdminView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "30c-admin-automatic-retries-failed-save-retains-draft",
+      "description": "Admin retry persistence failure is visible and retains every unsaved draft field",
+      "route": "/admin",
+      "designRef": "docs/design/CrystalForge/components/AdminView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
       "baseline": "advisory"
     },
     {

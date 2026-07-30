@@ -938,6 +938,25 @@ body {
   background: var(--cf-hover-bg);
 }
 
+.btn-ghost.active-filter,
+.btn-ghost[aria-pressed="true"] {
+  color: var(--cf-amber);
+  border-color: color-mix(in oklab, var(--cf-amber) 55%, var(--cf-card-border));
+  background: var(--cf-amber-bg);
+}
+
+.latest-star {
+  color: var(--cf-amber);
+  flex-shrink: 0;
+}
+
+.commit-latest {
+  color: var(--cf-amber) !important;
+  font-weight: 600;
+}
+
+.commit-latest svg { display: inline; vertical-align: -1px; }
+
 .btn-ghost:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -1287,6 +1306,11 @@ body {
   display: none;
 }
 
+/* Card-embedded tab strips get a subtle header band */
+.card > .sd-tabs {
+  background: color-mix(in oklab, var(--cf-page-bg) 40%, var(--cf-card-bg));
+}
+
 /* Builds/Evals queue tab bar: vertically centers tabs + multi-select hint + search */
 .q-tabbar {
   display: flex;
@@ -1426,7 +1450,6 @@ body {
 }
 
 .q-search {
-  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -3064,10 +3087,13 @@ html[data-theme="light"] .sd-nix {
   border-top: 1px solid var(--cf-divider);
 }
 
-/* Side panel (detail peek) */
+/* Side panel (detail peek) — respects clearance banner offsets */
 .side-panel-backdrop {
   position: fixed;
-  inset: 0;
+  top: var(--cf-app-fixed-top-offset, 0px);
+  right: 0;
+  bottom: var(--cf-app-fixed-bottom-offset, 0px);
+  left: 0;
   background: rgba(3, 7, 18, 0.55);
   backdrop-filter: blur(2px);
   z-index: 55;
@@ -3080,9 +3106,9 @@ html[data-theme="light"] .sd-nix {
 
 .side-panel {
   position: fixed;
-  top: 0;
+  top: var(--cf-app-fixed-top-offset, 0px);
   right: 0;
-  bottom: 0;
+  bottom: var(--cf-app-fixed-bottom-offset, 0px);
   width: min(560px, 92vw);
   background: var(--cf-card-bg);
   border-left: 1px solid var(--cf-card-border);
@@ -3231,10 +3257,13 @@ html[data-theme="light"] .sd-nix {
   }
 }
 
-/* Design tray classes */
+/* Design tray classes — respects clearance banner offsets */
 .fl-tray-backdrop {
   position: fixed;
-  inset: 0;
+  top: var(--cf-app-fixed-top-offset, 0px);
+  right: 0;
+  bottom: var(--cf-app-fixed-bottom-offset, 0px);
+  left: 0;
   background: rgba(0, 0, 0, 0.45);
   z-index: 80;
   animation: fadeIn 160ms ease-out;
@@ -3242,9 +3271,9 @@ html[data-theme="light"] .sd-nix {
 
 .fl-tray {
   position: fixed;
-  top: 0;
+  top: var(--cf-app-fixed-top-offset, 0px);
   right: 0;
-  bottom: 0;
+  bottom: var(--cf-app-fixed-bottom-offset, 0px);
   width: min(840px, 100vw);
   background: var(--cf-card-bg);
   border-left: 1px solid var(--cf-card-border);
@@ -3266,7 +3295,7 @@ html[data-theme="light"] .sd-nix {
 
 .ed-kbd-hint {
   position: fixed;
-  bottom: 16px;
+  bottom: calc(var(--cf-app-fixed-bottom-offset, 0px) + 16px);
   right: 16px;
   background: var(--cf-card-bg);
   border: 1px solid var(--cf-divider);
@@ -3307,10 +3336,10 @@ tr.kbd-focused > td {
   cursor: pointer;
 }
 
-/* Toast notification */
+/* Toast notification — respects clearance banner bottom offset */
 .ed-toast {
   position: fixed;
-  bottom: 24px;
+  bottom: calc(var(--cf-app-fixed-bottom-offset, 0px) + 24px);
   left: 50%;
   transform: translateX(-50%);
   background: var(--cf-card-bg);
@@ -3991,7 +4020,7 @@ tr.kbd-focused > td {
 .score-bar { width: 92px; height: 8px; border-radius: 999px; background: var(--cf-surface-muted); overflow: hidden; display: inline-block; margin-right: .5rem; }
 .score-bar-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, #22c55e, #60a5fa); }
 .score-inline { color: var(--cf-text-muted); font-size: .78rem; }
-.compliance-evidence-drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(760px, 92vw); z-index: 80; overflow: auto; background: var(--cf-surface); box-shadow: -20px 0 80px rgba(0,0,0,.35); }
+.compliance-evidence-drawer { position: fixed; top: var(--cf-app-fixed-top-offset, 0px); right: 0; bottom: var(--cf-app-fixed-bottom-offset, 0px); width: min(760px, 92vw); z-index: 80; overflow: auto; background: var(--cf-surface); box-shadow: -20px 0 80px rgba(0,0,0,.35); }
 .compliance-evidence-body { display: grid; gap: .75rem; padding: 1rem; }
 .compliance-control-head { display: flex; justify-content: space-between; gap: 1rem; align-items: start; }
 .compliance-control-title { font-weight: 700; }
@@ -4338,16 +4367,19 @@ tr.kbd-focused > td {
 }
 .fl-tray-backdrop {
   position: fixed;
-  inset: 0;
+  top: var(--cf-app-fixed-top-offset, 0px);
+  right: 0;
+  bottom: var(--cf-app-fixed-bottom-offset, 0px);
+  left: 0;
   background: rgba(0, 0, 0, 0.45);
   z-index: 80;
 }
 
 .fl-tray {
   position: fixed;
-  top: 0;
+  top: var(--cf-app-fixed-top-offset, 0px);
   right: 0;
-  bottom: 0;
+  bottom: var(--cf-app-fixed-bottom-offset, 0px);
   width: min(840px, 100vw);
   background: var(--cf-card-bg);
   border-left: 1px solid var(--cf-card-border);
@@ -4858,6 +4890,30 @@ tr.kbd-focused > td {
 .dash-w-mini span { color: var(--cf-text-muted); }
 .dash-w-mini strong { font-weight: 600; font-variant-numeric: tabular-nums; }
 
+/* Empty state — inside a table-card body (replaces table rows) */
+.q-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 48px 20px;
+  min-height: 160px;
+  box-sizing: border-box;
+  color: var(--cf-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.q-empty h3 {
+  color: var(--cf-text-secondary);
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.q-empty > svg { color: var(--cf-text-disabled); }
+.q-empty > .btn { margin-top: 4px; }
+
 /* Empty state + widget library (ported from design reference) */
 .empty {
   padding: 48px 24px;
@@ -5003,9 +5059,17 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
 /* chip-dot inside status chips in the queue table */
 .chip-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; flex-shrink: 0; }
 
-/* ─── Multi-select hint (in sd-tabs bar) ──────────────────────────────────── */
+/* ─── Right-side action group in queue tab bars ──────────────────────────── */
+.q-tabbar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
 .ms-hint {
-  margin-left: auto; display: inline-flex; align-items: center; gap: 3px;
+  display: inline-flex; align-items: center; gap: 3px;
   font-size: 11px; color: var(--cf-text-muted); white-space: nowrap;
   user-select: none;
 }

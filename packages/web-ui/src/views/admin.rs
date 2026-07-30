@@ -4,15 +4,17 @@ use std::collections::HashMap;
 
 use crate::api::client::{
     create_admin_user, delete_admin_oidc_mapping, delete_admin_user, fetch_admin_audit_events,
-    fetch_admin_oidc_mappings, fetch_admin_server_info, fetch_admin_users, fetch_environments,
+    fetch_admin_oidc_mappings, fetch_admin_server_info, fetch_admin_users,
+    fetch_automatic_retry_policy, fetch_environments, set_automatic_retry_policy,
     set_classification_config, set_setup_wizard_dismissed, update_admin_user,
     upsert_admin_oidc_mapping,
 };
 use crate::api::models::{
     AdminAuditEventsParams, AdminCreateUserRequest, AdminUpdateUserRequest,
-    AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, AuthMode,
+    AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, AuthMode, AutomaticRetryPolicy,
     ClassificationBannerConfig, EnvironmentSummary, IdentitySource, OidcGroupMapping, Role,
-    ServerRuntimeInfoResponse, UpdateClassificationBannerRequest,
+    ServerRuntimeInfoResponse, UpdateAutomaticRetryPolicyRequest,
+    UpdateClassificationBannerRequest,
 };
 use crate::components::{Icon, IconName};
 use crate::state::app_state::AppState;
@@ -1774,6 +1776,8 @@ fn ServerTab(
                 environments_error,
             }
 
+            AutomaticRetriesCard {}
+
             // Classification banners card
             ClassificationBannerCard {
                 enabled: classification_enabled,
@@ -1858,6 +1862,299 @@ fn ServerTab(
                         }
                         "Invalidate all sessions · unavailable"
                     }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// AUTOMATIC RETRIES CARD
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RetryPolicyFormState {
+    baseline: Option<AutomaticRetryPolicy>,
+    draft: AutomaticRetryPolicy,
+    loading: bool,
+    saving: bool,
+    load_error: Option<String>,
+    save_error: Option<String>,
+    success: Option<String>,
+}
+
+impl Default for RetryPolicyFormState {
+    fn default() -> Self {
+        Self {
+            baseline: None,
+            draft: AutomaticRetryPolicy::default(),
+            loading: true,
+            saving: false,
+            load_error: None,
+            save_error: None,
+            success: None,
+        }
+    }
+}
+
+impl RetryPolicyFormState {
+    fn load_started(&mut self) {
+        self.loading = true;
+        self.load_error = None;
+    }
+
+    fn load_succeeded(&mut self, policy: AutomaticRetryPolicy) {
+        self.baseline = Some(policy.clone());
+        self.draft = policy;
+        self.loading = false;
+        self.load_error = None;
+        self.save_error = None;
+        self.success = None;
+    }
+
+    fn load_failed(&mut self, error: String) {
+        self.loading = false;
+        self.load_error = Some(error);
+    }
+
+    fn update_draft(&mut self, update: impl FnOnce(&mut AutomaticRetryPolicy)) {
+        update(&mut self.draft);
+        self.save_error = None;
+        self.success = None;
+    }
+
+    fn reset(&mut self) {
+        if let Some(baseline) = self.baseline.clone() {
+            self.draft = baseline;
+            self.save_error = None;
+            self.success = None;
+        }
+    }
+
+    fn begin_save(&mut self) -> Option<UpdateAutomaticRetryPolicyRequest> {
+        if let Err(error) = validate_retry_policy(&self.draft) {
+            self.save_error = Some(error);
+            self.success = None;
+            return None;
+        }
+
+        self.saving = true;
+        self.save_error = None;
+        self.success = None;
+        Some(UpdateAutomaticRetryPolicyRequest {
+            max_build_retries: self.draft.max_build_retries,
+            max_evaluation_retries: self.draft.max_evaluation_retries,
+            backoff_seconds: self.draft.backoff_seconds,
+            transient_only: self.draft.transient_only,
+        })
+    }
+
+    fn save_succeeded(&mut self, policy: AutomaticRetryPolicy) {
+        self.baseline = Some(policy.clone());
+        self.draft = policy;
+        self.saving = false;
+        self.save_error = None;
+        self.success = Some("Automatic retry configuration saved.".to_string());
+    }
+
+    fn save_failed(&mut self, error: String) {
+        self.saving = false;
+        self.save_error = Some(error);
+        self.success = None;
+    }
+}
+
+fn validate_retry_policy(policy: &AutomaticRetryPolicy) -> Result<(), String> {
+    if !(0..=5).contains(&policy.max_build_retries) {
+        return Err("Max build retries must be between 0 and 5.".to_string());
+    }
+    if !(0..=5).contains(&policy.max_evaluation_retries) {
+        return Err("Max eval retries must be between 0 and 5.".to_string());
+    }
+    if !matches!(policy.backoff_seconds, 0 | 10 | 30 | 60 | 120 | 300) {
+        return Err("Backoff must be None, 10s, 30s, 1m, 2m, or 5m.".to_string());
+    }
+    Ok(())
+}
+
+#[component]
+fn AutomaticRetriesCard() -> Element {
+    let mut form = use_signal(RetryPolicyFormState::default);
+    let mut reload = use_signal(|| 0_u32);
+
+    use_effect(move || {
+        let _ = *reload.read();
+        form.with_mut(RetryPolicyFormState::load_started);
+        spawn(async move {
+            match fetch_automatic_retry_policy().await {
+                Ok(policy) => form.with_mut(|state| state.load_succeeded(policy)),
+                Err(error) => form.with_mut(|state| {
+                    state.load_failed(format!("Failed to load automatic retry policy: {error}"))
+                }),
+            }
+        });
+    });
+
+    let state = form.read().clone();
+    let controls_disabled = state.loading || state.saving || state.baseline.is_none();
+
+    rsx! {
+        div {
+            class: "card",
+            style: "padding:16px;grid-column:1 / -1;",
+            "data-testid": "automatic-retries-card",
+            div { style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;gap:12px;flex-wrap:wrap;",
+                h3 { style: "margin:0;font-size:13px;font-weight:600;", "Automatic retries" }
+                span { style: "font-size:11px;color:var(--cf-text-muted);", "How many times a failed build/eval is retried before it's left failed" }
+            }
+
+            if state.loading {
+                div {
+                    style: "font-size:12px;color:var(--cf-text-muted);margin-top:14px;",
+                    role: "status",
+                    "data-testid": "automatic-retries-loading",
+                    "Loading automatic retry policy…"
+                }
+            } else if let Some(error) = state.load_error.as_ref() {
+                div {
+                    class: "sd-callout sd-callout-danger",
+                    style: "font-size:12px;margin-top:14px;display:flex;align-items:center;gap:10px;",
+                    role: "alert",
+                    "data-testid": "automatic-retries-load-error",
+                    span { style: "flex:1;", "{error}" }
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        "aria-label": "Retry loading automatic retry policy",
+                        onclick: move |_| reload += 1,
+                        "Retry"
+                    }
+                }
+            }
+
+            if let Some(error) = state.save_error.as_ref() {
+                div {
+                    class: "sd-callout sd-callout-danger",
+                    style: "font-size:12px;margin-top:14px;",
+                    role: "alert",
+                    "data-testid": "automatic-retries-save-error",
+                    "{error}"
+                }
+            }
+            if let Some(message) = state.success.as_ref() {
+                div {
+                    class: "sd-callout sd-callout-success",
+                    style: "font-size:12px;margin-top:14px;",
+                    role: "status",
+                    "data-testid": "automatic-retries-save-success",
+                    "{message}"
+                }
+            }
+
+            div { style: "display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px;",
+                label { style: "display:flex;flex-direction:column;gap:5px;",
+                    span { style: "font-size:12px;font-weight:500;", "Max build retries" }
+                    select {
+                        class: "input focus-ring",
+                        style: "width:120px;",
+                        disabled: controls_disabled,
+                        value: "{state.draft.max_build_retries}",
+                        "data-testid": "automatic-retries-build-count",
+                        onchange: move |event| {
+                            if let Ok(value) = event.value().parse::<i16>() {
+                                form.with_mut(|state| state.update_draft(|draft| draft.max_build_retries = value));
+                            }
+                        },
+                        for count in 0_i16..=5 {
+                            option { value: "{count}", if count == 0 { "Never" } else { "{count}" } }
+                        }
+                    }
+                }
+                label { style: "display:flex;flex-direction:column;gap:5px;",
+                    span { style: "font-size:12px;font-weight:500;", "Max eval retries" }
+                    select {
+                        class: "input focus-ring",
+                        style: "width:120px;",
+                        disabled: controls_disabled,
+                        value: "{state.draft.max_evaluation_retries}",
+                        "data-testid": "automatic-retries-eval-count",
+                        onchange: move |event| {
+                            if let Ok(value) = event.value().parse::<i16>() {
+                                form.with_mut(|state| state.update_draft(|draft| draft.max_evaluation_retries = value));
+                            }
+                        },
+                        for count in 0_i16..=5 {
+                            option { value: "{count}", if count == 0 { "Never" } else { "{count}" } }
+                        }
+                    }
+                }
+                label { style: "display:flex;flex-direction:column;gap:5px;",
+                    span { style: "font-size:12px;font-weight:500;", "Backoff between attempts" }
+                    select {
+                        class: "input focus-ring",
+                        style: "width:120px;",
+                        disabled: controls_disabled,
+                        value: "{state.draft.backoff_seconds}",
+                        "data-testid": "automatic-retries-backoff",
+                        onchange: move |event| {
+                            if let Ok(value) = event.value().parse::<i32>() {
+                                form.with_mut(|state| state.update_draft(|draft| draft.backoff_seconds = value));
+                            }
+                        },
+                        option { value: "0", "None" }
+                        option { value: "10", "10s" }
+                        option { value: "30", "30s" }
+                        option { value: "60", "1m" }
+                        option { value: "120", "2m" }
+                        option { value: "300", "5m" }
+                    }
+                }
+                label { style: "display:flex;gap:9px;align-items:flex-start;cursor:pointer;margin-top:22px;",
+                    input {
+                        r#type: "checkbox",
+                        disabled: controls_disabled,
+                        checked: state.draft.transient_only,
+                        style: "margin-top:2px;accent-color:var(--cf-brand-purple);",
+                        "data-testid": "automatic-retries-transient-only",
+                        onchange: move |event| {
+                            let checked = event.checked();
+                            form.with_mut(|state| state.update_draft(|draft| draft.transient_only = checked));
+                        }
+                    }
+                    span {
+                        span { style: "display:block;font-size:12px;font-weight:500;", "Only retry transient failures" }
+                        span { style: "display:block;font-size:11px;color:var(--cf-text-muted);", "Skip auto-retry for eval/build errors that won't change on their own (e.g. bad derivation, assertion failure)" }
+                    }
+                }
+            }
+            div { style: "display:flex;justify-content:flex-end;gap:8px;margin-top:14px;",
+                button {
+                    class: "btn btn-ghost focus-ring",
+                    disabled: controls_disabled,
+                    "data-testid": "automatic-retries-reset",
+                    onclick: move |_| form.with_mut(RetryPolicyFormState::reset),
+                    "Reset"
+                }
+                button {
+                    class: "btn btn-primary focus-ring",
+                    disabled: controls_disabled,
+                    "data-testid": "automatic-retries-save",
+                    onclick: move |_| {
+                        let request = form.with_mut(RetryPolicyFormState::begin_save);
+                        if let Some(request) = request {
+                            spawn(async move {
+                                match set_automatic_retry_policy(&request).await {
+                                    Ok(policy) => form.with_mut(|state| state.save_succeeded(policy)),
+                                    Err(error) => form.with_mut(|state| {
+                                        state.save_failed(format!("Failed to save automatic retry policy: {error}"))
+                                    }),
+                                }
+                            });
+                        }
+                    },
+                    svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:5px;vertical-align:text-bottom;",
+                        polyline { points: "20 6 9 17 4 12" }
+                    }
+                    if state.saving { "Saving…" } else { "Save retry config" }
                 }
             }
         }
@@ -2410,5 +2707,126 @@ async fn refresh_users(
             users_error.set(None);
         }
         Err(e) => users_error.set(Some(format!("Failed to load admin users: {e}"))),
+    }
+}
+
+#[cfg(test)]
+mod retry_policy_form_tests {
+    use super::*;
+
+    fn policy(
+        max_build_retries: i16,
+        max_evaluation_retries: i16,
+        backoff_seconds: i32,
+        transient_only: bool,
+    ) -> AutomaticRetryPolicy {
+        AutomaticRetryPolicy {
+            max_build_retries,
+            max_evaluation_retries,
+            backoff_seconds,
+            transient_only,
+        }
+    }
+
+    #[test]
+    fn load_transitions_from_defaults_to_server_values_or_error() {
+        let mut state = RetryPolicyFormState::default();
+        assert!(state.loading);
+        assert_eq!(state.draft, AutomaticRetryPolicy::default());
+        assert!(state.baseline.is_none());
+
+        state.load_failed("HTTP 403: Forbidden".to_string());
+        assert!(!state.loading);
+        assert_eq!(state.load_error.as_deref(), Some("HTTP 403: Forbidden"));
+        assert_eq!(state.draft, AutomaticRetryPolicy::default());
+
+        state.load_started();
+        let server_policy = policy(4, 3, 120, false);
+        state.load_succeeded(server_policy.clone());
+        assert!(!state.loading);
+        assert_eq!(state.baseline, Some(server_policy.clone()));
+        assert_eq!(state.draft, server_policy);
+        assert!(state.load_error.is_none());
+    }
+
+    #[test]
+    fn reset_restores_last_server_value_without_starting_save() {
+        let baseline = policy(3, 2, 60, true);
+        let mut state = RetryPolicyFormState::default();
+        state.load_succeeded(baseline.clone());
+        state.update_draft(|draft| {
+            draft.max_build_retries = 5;
+            draft.backoff_seconds = 300;
+        });
+
+        state.reset();
+
+        assert_eq!(state.draft, baseline);
+        assert!(!state.saving);
+        assert!(state.success.is_none());
+    }
+
+    #[test]
+    fn successful_save_updates_baseline_and_visible_success() {
+        let mut state = RetryPolicyFormState::default();
+        state.load_succeeded(AutomaticRetryPolicy::default());
+        state.update_draft(|draft| draft.max_build_retries = 4);
+
+        let request = state.begin_save().expect("valid draft should save");
+        assert_eq!(request.max_build_retries, 4);
+        assert!(state.saving);
+
+        let saved = policy(4, 1, 30, true);
+        state.save_succeeded(saved.clone());
+        assert_eq!(state.baseline, Some(saved.clone()));
+        assert_eq!(state.draft, saved);
+        assert!(!state.saving);
+        assert_eq!(
+            state.success.as_deref(),
+            Some("Automatic retry configuration saved.")
+        );
+    }
+
+    #[test]
+    fn failed_save_preserves_draft_and_surfaces_error() {
+        let mut state = RetryPolicyFormState::default();
+        state.load_succeeded(AutomaticRetryPolicy::default());
+        state.update_draft(|draft| {
+            draft.max_evaluation_retries = 5;
+            draft.transient_only = false;
+        });
+        let draft = state.draft.clone();
+
+        assert!(state.begin_save().is_some());
+        state.save_failed("HTTP 403: Forbidden".to_string());
+
+        assert_eq!(state.draft, draft);
+        assert_eq!(state.baseline, Some(AutomaticRetryPolicy::default()));
+        assert_eq!(state.save_error.as_deref(), Some("HTTP 403: Forbidden"));
+        assert!(!state.saving);
+        assert!(state.success.is_none());
+    }
+
+    #[test]
+    fn local_validation_rejects_unsupported_counts_and_backoff() {
+        for invalid in [-1, 6] {
+            let mut state = RetryPolicyFormState::default();
+            state.draft.max_build_retries = invalid;
+            assert!(state.begin_save().is_none());
+            assert!(!state.saving);
+            assert!(state.save_error.is_some());
+
+            state.draft = AutomaticRetryPolicy::default();
+            state.draft.max_evaluation_retries = invalid;
+            assert!(state.begin_save().is_none());
+        }
+
+        let mut state = RetryPolicyFormState::default();
+        state.draft.backoff_seconds = 15;
+        assert!(state.begin_save().is_none());
+        assert_eq!(
+            state.save_error.as_deref(),
+            Some("Backoff must be None, 10s, 30s, 1m, 2m, or 5m.")
+        );
     }
 }
