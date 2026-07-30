@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-07-24 03:26'
-updated_date: '2026-07-30 03:35'
+updated_date: '2026-07-30 04:02'
 labels:
   - design-parity
   - web-ui
@@ -226,6 +226,28 @@ Follow-up fix pushed in `abae919c` for manual build requeue visibility. The serv
 
 Verification run:
 - `SQLX_OFFLINE=true nix develop . --command cargo check --manifest-path packages/web-ui/Cargo.toml` passed (existing warnings only).
+---
+
+author: gpt-5.5
+created: 2026-07-30 04:02
+---
+Follow-up cancellation/cache-publication fix pushed in `ff1ce847` on MR !310.
+
+Changes:
+- Treat both `cancelling` and terminal `cancelled` as builder cancellation stop states.
+- Recheck cancellation after Nix exits, before signing, before cache publication, during cache publication, and before reporting success.
+- Stop remote log forwarding when append-log fallback receives a terminal-job conflict.
+- Allow final builder log appends while a job is `cancelling`, while keeping terminal statuses (`cancelled`, `failed`, `success`) closed.
+- Remove unsupported Attic `-vv` push flags and set cache command children to `kill_on_drop(true)` so cancellation during cache publication stops the child.
+- Restored unrelated formatter-only diffs before commit.
+
+Verification run locally:
+- `SQLX_OFFLINE=true nix develop ../.. --command cargo test -p cf-builder --lib append_logs_409_terminal_is_not_success -- --test-threads=1` passed.
+- `SQLX_OFFLINE=true nix develop ../.. --command cargo test -p cf-builder --lib cancelling_and_cancelled_statuses_request_cancellation -- --test-threads=1` passed.
+- `SQLX_OFFLINE=true nix develop ../.. --command cargo test -p cf-builder --lib attic_streaming_push_args_do_not_add_verbose_flags -- --test-threads=1` passed.
+- `SQLX_OFFLINE=true nix develop ../.. --command cargo test -p cf-server --lib build_log_append_status_allows_cancelling_but_rejects_terminal -- --test-threads=1` passed.
+- `SQLX_OFFLINE=true nix develop ../.. --command cargo check -p cf-builder -p cf-server --all-targets` passed (existing warnings only).
+- `git diff --check` passed.
 ---
 <!-- COMMENTS:END -->
 
