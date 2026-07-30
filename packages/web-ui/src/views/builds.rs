@@ -1155,6 +1155,8 @@ pub fn BuildsView() -> Element {
                                 let mut action_error = action_error;
                                 let mut last_action_note = last_action_note;
                                 let mut active_refresh_trigger = active_refresh_trigger;
+                                let mut history_refresh_trigger = history_refresh_trigger;
+                                let mut active_view = active_view;
                                 let filtered = filtered_list.clone();
                                 spawn(async move {
                                     let count = build_ids.len();
@@ -1168,7 +1170,9 @@ pub fn BuildsView() -> Element {
                                     action_error.set(None);
                                     let suffix = if count == 1 { "" } else { "s" };
                                     last_action_note.set(Some(format!("Re-queued {count} build{suffix}")));
+                                    active_view.set(BuildsTab::ActiveQueue);
                                     active_refresh_trigger.set(active_refresh_trigger() + 1);
+                                    history_refresh_trigger.set(history_refresh_trigger() + 1);
                                 });
                             }
                         },
@@ -1423,6 +1427,8 @@ pub fn BuildsView() -> Element {
                                     let mut action_error = action_error;
                                     let mut last_action_note = last_action_note;
                                     let mut active_refresh_trigger = active_refresh_trigger;
+                                    let mut history_refresh_trigger = history_refresh_trigger;
+                                    let mut active_view = active_view;
                                     spawn(async move {
                                         // Check both active queue and completed history
                                         let selected = queue_snapshot.iter().find(|b| b.job_id == Some(job_id))
@@ -1458,7 +1464,9 @@ pub fn BuildsView() -> Element {
                                                         Ok(_) => {
                                                             action_error.set(None);
                                                             last_action_note.set(Some("Build re-queued".to_string()));
+                                                            active_view.set(BuildsTab::ActiveQueue);
                                                             active_refresh_trigger.set(active_refresh_trigger() + 1);
+                                                            history_refresh_trigger.set(history_refresh_trigger() + 1);
                                                         }
                                                         Err(e) => {
                                                             action_error.set(Some(format!("Failed to requeue: {}", e)));
@@ -1473,7 +1481,9 @@ pub fn BuildsView() -> Element {
                                                         Ok(_) => {
                                                             action_error.set(None);
                                                             last_action_note.set(Some(format!("Triggered build sync for system {}", system_id)));
+                                                            active_view.set(BuildsTab::ActiveQueue);
                                                             active_refresh_trigger.set(active_refresh_trigger() + 1);
+                                                            history_refresh_trigger.set(history_refresh_trigger() + 1);
                                                         }
                                                         Err(e) => {
                                                             action_error.set(Some(format!("Failed to trigger build: {}", e)));
