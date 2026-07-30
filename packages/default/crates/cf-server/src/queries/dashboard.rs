@@ -345,7 +345,7 @@ pub async fn fetch_recent_build_history(
                    COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS display_name,
                    COALESCE(s.system_configuration_name, '') AS system_configuration_name,
                    COALESCE(b.name, '') AS builder_name,
-                   ROW_NUMBER() OVER (PARTITION BY c.flake_id ORDER BY bj.created_at DESC, bj.id DESC) AS latest_rank
+                   RANK() OVER (PARTITION BY c.flake_id ORDER BY c.commit_timestamp DESC, c.id DESC) AS latest_rank
             FROM build_jobs bj
             JOIN derivations d ON d.id = bj.derivation_id
             LEFT JOIN commits c ON c.id = d.commit_id
@@ -416,9 +416,9 @@ pub async fn fetch_recent_build_history(
             bj.available_at,
             COALESCE(bj.completed_at, bj.updated_at, bj.created_at) AS completed_sort_at,
             COALESCE(s.system_configuration_name, '') AS system_configuration_name,
-            ROW_NUMBER() OVER (
+            RANK() OVER (
                 PARTITION BY c.flake_id
-                ORDER BY bj.created_at DESC, bj.id DESC
+                ORDER BY c.commit_timestamp DESC, c.id DESC
             ) AS latest_rank
         FROM build_jobs bj
         JOIN derivations d ON d.id = bj.derivation_id
@@ -599,10 +599,10 @@ pub async fn list_build_queue_paginated(
                 COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS display_name,
                 COALESCE(s.system_configuration_name, '') AS system_configuration_name,
                 COALESCE(b.name, '') AS builder_name,
-                ROW_NUMBER() OVER (
+                RANK() OVER (
                     PARTITION BY c.flake_id,
                         bj.status IN ('queued', 'building', 'cancelling')
-                    ORDER BY bj.created_at DESC, bj.id DESC
+                    ORDER BY c.commit_timestamp DESC, c.id DESC
                 ) AS latest_rank
             FROM build_jobs bj
             JOIN derivations d ON d.id = bj.derivation_id
@@ -687,10 +687,10 @@ pub async fn list_build_queue_paginated(
             bj.parent_job_id,
             bj.root_job_id,
             bj.available_at,
-            ROW_NUMBER() OVER (
+            RANK() OVER (
                 PARTITION BY c.flake_id,
                     bj.status IN ('queued', 'building', 'cancelling')
-                ORDER BY bj.created_at DESC, bj.id DESC
+                ORDER BY c.commit_timestamp DESC, c.id DESC
             ) AS latest_rank,
             COALESCE(s.system_configuration_name, '') AS system_configuration_name,
             -- Derivation progress counts for the same system config at this commit.
