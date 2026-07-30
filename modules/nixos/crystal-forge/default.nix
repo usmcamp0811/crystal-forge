@@ -2242,6 +2242,8 @@ in {
         [
           nix
           git
+          gnutar
+          gzip
           vulnix
           systemd
           nix-fast-build

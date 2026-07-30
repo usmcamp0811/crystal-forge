@@ -38,6 +38,22 @@ This is the most reliable and fastest startup path because:
 
 Cache publication note: remote builders may perform the post-build cache push themselves. If the selected cache destination requires credentials, the server sends credential-bearing cache push config in the signed next-job response only when `server.trust_forwarded_builder_https` is enabled and the request is verified as HTTPS by the trusted reverse proxy.
 
+For NixOS deployments behind an HTTPS-terminating reverse proxy, enable the
+forwarded-HTTPS trust option on the server:
+
+```nix
+services.crystal-forge.server.trust_forwarded_builder_https = true;
+```
+
+Only enable this when the proxy is under your control and strips/re-sets
+forwarding headers before proxying to Crystal Forge. The backend service should
+not be directly reachable by builders or untrusted clients over plaintext HTTP.
+The proxy must forward one of the HTTPS indicators recognized by the server,
+such as `X-Forwarded-Proto: https`, `Forwarded: proto=https`, or
+`X-Forwarded-SSL: on`. If this option is left at its secure default of `false`,
+credential-bearing builder cache-push jobs are rejected with HTTP `426 Upgrade
+Required` before any credentials are sent.
+
 ### `server_derivation` — when to use it
 
 `server_derivation` is simpler and appropriate when you trust the server's evaluation completely and do not need the builder-side re-evaluation check. It is also the only option if the builder cannot run `nix eval` for some reason.
