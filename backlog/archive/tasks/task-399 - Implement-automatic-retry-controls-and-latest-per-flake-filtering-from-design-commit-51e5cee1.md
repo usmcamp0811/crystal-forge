@@ -7,7 +7,7 @@ status: Review
 assignee:
   - Matt Camp
 created_date: '2026-07-24 03:26'
-updated_date: '2026-07-29 12:58'
+updated_date: '2026-07-30 03:35'
 labels:
   - design-parity
   - web-ui
@@ -217,6 +217,15 @@ Migration numbering corrected after the rebase in commit `01ad2bd2`.
 Verification after renumbering:
 - `SQLX_OFFLINE=true nix develop ../.. --command cargo check -p cf-server --all-targets` passed.
 - `SQLX_OFFLINE=true nix develop ../.. --command cargo test -p cf-server --lib queries::commits -- --test-threads=1` passed: 4 passed, 23 ignored.
+---
+
+author: gpt-5.5
+created: 2026-07-30 03:35
+---
+Follow-up fix pushed in `abae919c` for manual build requeue visibility. The server endpoint already creates a new queued `build_jobs` attempt for terminal jobs (`failed`, `success`, `cancelled`), but the Builds UI only refreshed the active resource and stayed on the Completed tab after a requeue from history, making it look like nothing was added to the queue. The UI now switches to Active Queue and refreshes both active and history resources after successful single or bulk requeue / sync-trigger actions.
+
+Verification run:
+- `SQLX_OFFLINE=true nix develop . --command cargo check --manifest-path packages/web-ui/Cargo.toml` passed (existing warnings only).
 ---
 <!-- COMMENTS:END -->
 
