@@ -2459,6 +2459,11 @@ in {
         gnused
         gnugrep
         gnutar
+        gzip
+        # attic is used for cache push jobs that the server coordinates
+        attic-client
+        # systemd-run is used to scope nix-store builds and cache pushes
+        systemd
       ];
 
       environment =

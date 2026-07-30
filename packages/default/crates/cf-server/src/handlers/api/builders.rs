@@ -643,7 +643,14 @@ async fn generate_source_archive(
     // Write to a temp file then rename atomically so readers never see a
     // partially-written archive. Include the PID to avoid cross-process
     // collision if the server is restarted mid-generation.
-    let tmp_archive = archive_path.with_extension(format!("tar.gz.tmp.{}", std::process::id()));
+    // Build the temp path by appending a suffix to the full archive path string
+    // rather than using .with_extension(), which strips only the last component
+    // and produces a double extension like ".tar.tar.gz.tmp" for ".tar.gz" paths.
+    let tmp_archive = {
+        let mut s = archive_path.as_os_str().to_owned();
+        s.push(format!(".tmp.{}", std::process::id()));
+        std::path::PathBuf::from(s)
+    };
     let _ = tokio::fs::remove_file(&tmp_archive).await;
 
     // Tar the mirror directory. Since mirror_path is like .../<mirror_id>.git,
