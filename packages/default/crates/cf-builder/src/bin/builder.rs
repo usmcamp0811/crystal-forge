@@ -1083,6 +1083,22 @@ fn drv_path_eval_attr(source_ref: &str, flake_target: &str) -> String {
     format!("{source_ref}#{attr}.drvPath")
 }
 
+fn verified_source_eval_args(eval_attr: &str, allow_import_from_derivation: bool) -> Vec<String> {
+    vec![
+        "eval".to_string(),
+        "--raw".to_string(),
+        "--no-write-lock-file".to_string(),
+        "--option".to_string(),
+        "allow-import-from-derivation".to_string(),
+        if allow_import_from_derivation {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        },
+        eval_attr.to_string(),
+    ]
+}
+
 fn verify_drv_identity(expected: &str, actual: &str) -> Result<(), PreBuildFailure> {
     if expected == actual {
         Ok(())
@@ -1208,26 +1224,18 @@ async fn evaluate_verified_source_drv(
     // Transition phase tracker to evaluation phase so timeouts are reported correctly.
     pre_build_phase.store(PRE_BUILD_EVALUATION, Ordering::SeqCst);
 
-    let output = tokio::process::Command::new("nix")
-        .kill_on_drop(true)
-        .arg("eval")
-        .arg("--raw")
-        .arg("--no-write-lock-file")
-        .arg("--option")
-        .arg("allow-import-from-derivation")
-        .arg(if allow_import_from_derivation {
-            "true"
-        } else {
-            "false"
-        })
-        .arg(&eval_attr)
-        .output()
-        .await
-        .map_err(|e| PreBuildFailure {
-            phase: BuildFailurePhase::Evaluation,
-            class: BuildFailureClass::Unknown,
-            message: format!("failed to spawn nix eval for {eval_attr}: {e}"),
-        })?;
+    let mut command = tokio::process::Command::new("nix");
+    command.kill_on_drop(true);
+    command.args(verified_source_eval_args(
+        &eval_attr,
+        allow_import_from_derivation,
+    ));
+
+    let output = command.output().await.map_err(|e| PreBuildFailure {
+        phase: BuildFailurePhase::Evaluation,
+        class: BuildFailureClass::Unknown,
+        message: format!("failed to spawn nix eval for {eval_attr}: {e}"),
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -2260,8 +2268,8 @@ mod tests {
     use super::{
         PRE_BUILD_SOURCE_FETCH, cleanup_candidate_worktree, drv_path_eval_attr,
         ensure_mirror_has_commit, mock_store_path, should_mock_build_fail, source_flake_ref,
-        source_workspace_paths, source_workspace_paths_for_job, verify_drv_identity,
-        wait_for_pre_build_verification,
+        source_workspace_paths, source_workspace_paths_for_job, verified_source_eval_args,
+        verify_drv_identity, wait_for_pre_build_verification,
     };
     use cf_protocol::builder::{
         BuildFailurePhase, SourceInputDeliveryMode, VerifiedSourceIdentity,
@@ -2358,6 +2366,37 @@ mod tests {
                 "nixosConfigurations.host.config.system.build.toplevel.drvPath"
             ),
             "/tmp/source#nixosConfigurations.host.config.system.build.toplevel.drvPath"
+        );
+    }
+
+    #[test]
+    fn verified_source_eval_args_pass_ifd_setting_to_nix_eval() {
+        let eval_attr = "/tmp/source#nixosConfigurations.host.config.system.build.toplevel.drvPath";
+
+        assert_eq!(
+            verified_source_eval_args(eval_attr, false),
+            vec![
+                "eval",
+                "--raw",
+                "--no-write-lock-file",
+                "--option",
+                "allow-import-from-derivation",
+                "false",
+                eval_attr,
+            ]
+        );
+
+        assert_eq!(
+            verified_source_eval_args(eval_attr, true),
+            vec![
+                "eval",
+                "--raw",
+                "--no-write-lock-file",
+                "--option",
+                "allow-import-from-derivation",
+                "true",
+                eval_attr,
+            ]
         );
     }
 
