@@ -87,6 +87,10 @@ fn builder_https_verified_by_trusted_proxy(
     forwarded_header_asserts_https(headers)
 }
 
+fn build_log_append_status_allowed(status: &str) -> bool {
+    matches!(status, "queued" | "building" | "cancelling")
+}
+
 fn forwarded_header_asserts_https(headers: &HeaderMap) -> bool {
     headers
         .get("x-forwarded-proto")
@@ -3684,12 +3688,14 @@ pub async fn append_job_logs(
         ));
     }
 
-    // Only queued/building jobs may receive log appends.
-    if job.status != "queued" && job.status != "building" {
+    // Only active or cancelling jobs may receive log appends.  Final messages
+    // emitted while the builder is shutting down are accepted in `cancelling`,
+    // but terminal statuses remain closed.
+    if !build_log_append_status_allowed(&job.status) {
         return Err((
             StatusCode::CONFLICT,
             format!(
-                "Cannot append logs for job in '{}' status; only 'queued' and 'building' are allowed",
+                "Cannot append logs for terminal job in '{}' status; only 'queued', 'building', and 'cancelling' are allowed",
                 job.status
             ),
         ));
@@ -4712,6 +4718,23 @@ mod tests {
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body, "Failed to create builder");
+    }
+
+    #[test]
+    fn build_log_append_status_allows_cancelling_but_rejects_terminal() {
+        for status in ["queued", "building", "cancelling"] {
+            assert!(
+                super::build_log_append_status_allowed(status),
+                "{status} should accept builder log appends"
+            );
+        }
+
+        for status in ["cancelled", "failed", "success"] {
+            assert!(
+                !super::build_log_append_status_allowed(status),
+                "{status} should reject builder log appends"
+            );
+        }
     }
 
     // ── builder_https_verified_by_trusted_proxy tests ──────────────────────

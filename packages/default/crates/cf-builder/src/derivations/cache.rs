@@ -8,6 +8,10 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
+fn attic_streaming_push_args(effective_args: &[String]) -> Vec<String> {
+    effective_args.to_vec()
+}
+
 impl Derivation {
     pub async fn push_to_cache_with_retry(
         &self,
@@ -194,8 +198,7 @@ impl Derivation {
 
             // ---- First attempt (streaming) ----
             let mut cmd = tokio::process::Command::new("attic");
-            cmd.args(&effective_args);
-            cmd.arg("-vv"); // Add verbose output for streaming
+            cmd.args(attic_streaming_push_args(&effective_args));
             cmd.env("HOME", "/var/lib/crystal-forge");
             cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
             apply_cache_env_to_command(&mut cmd);
@@ -230,8 +233,7 @@ impl Derivation {
 
                     // Retry push with streaming
                     let mut cmd2 = tokio::process::Command::new("attic");
-                    cmd2.args(&effective_args);
-                    cmd2.arg("-vv"); // Add verbose output for streaming
+                    cmd2.args(attic_streaming_push_args(&effective_args));
                     cmd2.env("HOME", "/var/lib/crystal-forge");
                     cmd2.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
                     apply_cache_env_to_command(&mut cmd2);
@@ -311,6 +313,25 @@ impl Derivation {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::attic_streaming_push_args;
+
+    #[test]
+    fn attic_streaming_push_args_do_not_add_verbose_flags() {
+        let args = vec![
+            "push".to_string(),
+            "local:campground".to_string(),
+            "/nix/store/example".to_string(),
+        ];
+
+        let push_args = attic_streaming_push_args(&args);
+
+        assert_eq!(push_args, args);
+        assert!(!push_args.iter().any(|arg| arg == "-v" || arg == "-vv"));
+    }
+}
+
 /// Run a command and stream its output to debug logs
 async fn run_cache_command_streaming(
     mut cmd: tokio::process::Command,
@@ -318,7 +339,9 @@ async fn run_cache_command_streaming(
 ) -> Result<bool> {
     info!("  → Spawning cache command: {}", command_name);
 
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().context("Failed to spawn cache command")?;
 
     let stdout = child.stdout.take().expect("Failed to capture stdout");

@@ -1267,7 +1267,7 @@ pub async fn append_job_logs(pool: &PgPool, job_id: &Uuid, new_logs: &str) -> Re
 /// Append logs to a job with safety limits.
 ///
 /// Enforces:
-/// - job must be in queued/building status
+/// - job must be in queued/building/cancelling status
 /// - total log bytes must not exceed max_total_log_bytes
 pub async fn append_job_logs_with_limits(
     pool: &PgPool,
@@ -1312,7 +1312,7 @@ async fn append_job_logs_with_limits_guarded(
         SET logs = COALESCE(logs, '') || $2,
             updated_at = now()
         WHERE id = $1
-          AND status IN ('queued', 'building')
+          AND status IN ('queued', 'building', 'cancelling')
           AND ($4::uuid IS NULL OR builder_id = $4)
           AND (builder_session_id IS NULL OR builder_session_id = $5)
           AND OCTET_LENGTH(COALESCE(logs, '')) + OCTET_LENGTH($2) <= $3
@@ -1348,7 +1348,7 @@ async fn append_job_logs_with_limits_guarded(
     match diagnostics {
         None => bail!("job_not_found"),
         Some((status, current_len_opt)) => {
-            if status != "queued" && status != "building" {
+            if status != "queued" && status != "building" && status != "cancelling" {
                 bail!("invalid_job_status:{status}");
             }
 

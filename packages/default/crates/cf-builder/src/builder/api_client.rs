@@ -21,6 +21,40 @@ use tokio_tungstenite::{
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendLogsOutcome {
+    Appended,
+    Rejected,
+    TerminalJob,
+}
+
+pub fn job_status_requests_cancellation(status: Option<&str>) -> bool {
+    matches!(status, Some("cancelling" | "cancelled"))
+}
+
+fn append_logs_conflict_is_terminal(error_text: &str) -> bool {
+    let lower = error_text.to_ascii_lowercase();
+    lower.contains("terminal")
+        || lower.contains("cancelled")
+        || lower.contains("success")
+        || lower.contains("failed")
+}
+
+fn append_logs_outcome_for_status(
+    status: reqwest::StatusCode,
+    error_text: &str,
+) -> AppendLogsOutcome {
+    if status.is_success() {
+        AppendLogsOutcome::Appended
+    } else if status == reqwest::StatusCode::CONFLICT
+        && append_logs_conflict_is_terminal(error_text)
+    {
+        AppendLogsOutcome::TerminalJob
+    } else {
+        AppendLogsOutcome::Rejected
+    }
+}
+
 const DEFAULT_API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
@@ -1276,7 +1310,11 @@ impl BuilderApiClient {
     }
 
     /// Append logs to a job
-    pub async fn append_logs(&self, job_id: uuid::Uuid, log_lines: &str) -> Result<()> {
+    pub async fn append_logs(
+        &self,
+        job_id: uuid::Uuid,
+        log_lines: &str,
+    ) -> Result<AppendLogsOutcome> {
         #[derive(Serialize)]
         struct LogRequest {
             logs: String,
@@ -1303,18 +1341,18 @@ impl BuilderApiClient {
             .await
             .context("Failed to append logs")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
+        let status = response.status();
+        if !status.is_success() {
             let error_text = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".to_string());
             warn!("Append logs failed with status {}: {}", status, error_text);
-            // Don't fail the entire operation if log append fails
+            return Ok(append_logs_outcome_for_status(status, &error_text));
         }
 
         debug!("Logs appended to job {}", job_id);
-        Ok(())
+        Ok(AppendLogsOutcome::Appended)
     }
 
     /// Create WebSocket URL for log streaming
@@ -1447,7 +1485,7 @@ impl crate::build::BuildReporter for ApiBuildReporter {
             return Ok(false);
         };
         let status = self.client.get_job_status(job_id).await?;
-        Ok(matches!(status.as_deref(), Some("cancelling")))
+        Ok(job_status_requests_cancellation(status.as_deref()))
     }
 }
 
@@ -1506,6 +1544,34 @@ mod tests {
         assert_eq!(id, builder_id.to_string());
         assert_eq!(sig.len(), 88); // 64 bytes Ed25519 signature as base64
         assert!(!ts.is_empty());
+    }
+
+    #[test]
+    fn append_logs_409_terminal_is_not_success() {
+        assert_eq!(
+            append_logs_outcome_for_status(
+                reqwest::StatusCode::CONFLICT,
+                "Cannot append logs for terminal job in 'cancelled' status",
+            ),
+            AppendLogsOutcome::TerminalJob
+        );
+        assert_eq!(
+            append_logs_outcome_for_status(reqwest::StatusCode::CONFLICT, "temporary conflict"),
+            AppendLogsOutcome::Rejected
+        );
+        assert_eq!(
+            append_logs_outcome_for_status(reqwest::StatusCode::OK, ""),
+            AppendLogsOutcome::Appended
+        );
+    }
+
+    #[test]
+    fn cancelling_and_cancelled_statuses_request_cancellation() {
+        assert!(job_status_requests_cancellation(Some("cancelling")));
+        assert!(job_status_requests_cancellation(Some("cancelled")));
+        assert!(!job_status_requests_cancellation(Some("building")));
+        assert!(!job_status_requests_cancellation(Some("success")));
+        assert!(!job_status_requests_cancellation(None));
     }
 
     #[tokio::test]

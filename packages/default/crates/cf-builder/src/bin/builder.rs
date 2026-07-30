@@ -1,5 +1,6 @@
 use anyhow::Context;
 use cf_builder::build::{BuildCancelledError, Derivation, LogSink};
+use cf_builder::builder::api_client::{AppendLogsOutcome, job_status_requests_cancellation};
 use cf_builder::builder::{ApiBuildReporter, BuilderApiClient, SystemMetrics};
 use cf_builder::cache::builder_cache_to_config;
 // Bring in the build execution and cache methods on Derivation
@@ -421,6 +422,40 @@ where
                 }
             }
         }
+    }
+}
+
+async fn remote_job_cancellation_requested(client: &BuilderApiClient, job_id: uuid::Uuid) -> bool {
+    match client.get_job_status(job_id).await {
+        Ok(status) => job_status_requests_cancellation(status.as_deref()),
+        Err(err) => {
+            warn!(
+                "⚠️ Failed to poll cancellation status for job #{}: {}",
+                job_id, err
+            );
+            false
+        }
+    }
+}
+
+async fn abort_cancelled_remote_job(
+    client: &BuilderApiClient,
+    job_id: uuid::Uuid,
+    ws_shared: &mut Option<
+        std::sync::Arc<
+            tokio::sync::Mutex<
+                tokio_tungstenite::WebSocketStream<
+                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                >,
+            >,
+        >,
+    >,
+    message: &str,
+) {
+    info!("🛑 Job #{} cancelled by operator — finalizing", job_id);
+    send_log_with_fallback(client, job_id, ws_shared, message).await;
+    if let Err(e) = client.finalize_cancelled_job(job_id).await {
+        error!("❌ Failed to finalize cancelled job #{}: {}", job_id, e);
     }
 }
 
@@ -1337,22 +1372,15 @@ async fn execute_build_job(
                 Some(&client),
                 remote_runtime.allow_import_from_derivation,
             );
-            wait_for_pre_build_verification(verification_future, build_timeout, &pre_build_phase, || {
-                let client = client.clone();
-                async move {
-                    match client.get_job_status(job_id).await {
-                        Ok(Some(status)) if status == "cancelling" => true,
-                        Ok(_) => false,
-                        Err(err) => {
-                            warn!(
-                                "⚠️ Failed to poll cancellation during verified source pre-build phase for job #{}: {}",
-                                job_id, err
-                            );
-                            false
-                        }
-                    }
-                }
-            })
+            wait_for_pre_build_verification(
+                verification_future,
+                build_timeout,
+                &pre_build_phase,
+                || {
+                    let client = client.clone();
+                    async move { remote_job_cancellation_requested(&client, job_id).await }
+                },
+            )
             .await
         };
 
@@ -1513,7 +1541,15 @@ async fn execute_build_job(
     let log_forward_task = tokio::spawn(async move {
         let mut ws_local = fwd_ws;
         while let Some(batch) = log_rx.recv().await {
-            send_log_with_fallback(&fwd_client, fwd_job_id, &mut ws_local, &batch).await;
+            if send_log_with_fallback(&fwd_client, fwd_job_id, &mut ws_local, &batch).await
+                == AppendLogsOutcome::TerminalJob
+            {
+                warn!(
+                    "stopping log forwarding for job {} because server reports terminal status",
+                    fwd_job_id
+                );
+                break;
+            }
         }
     });
 
@@ -1593,6 +1629,17 @@ async fn execute_build_job(
                 store_path
             );
 
+            if remote_job_cancellation_requested(&client, job_id).await {
+                abort_cancelled_remote_job(
+                    &client,
+                    job_id,
+                    &mut ws_shared,
+                    "[crystal-forge] Build cancelled by operator after nix process exited; skipping signing and cache push\n",
+                )
+                .await;
+                return;
+            }
+
             // Send success log
             let success_msg = format!(
                 "✅ Build completed successfully in {:.1}s\n",
@@ -1614,6 +1661,17 @@ async fn execute_build_job(
                     )
                     .await;
             } else {
+                if remote_job_cancellation_requested(&client, job_id).await {
+                    abort_cancelled_remote_job(
+                        &client,
+                        job_id,
+                        &mut ws_shared,
+                        "[crystal-forge] Build cancelled by operator before signing; skipping signing and cache push\n",
+                    )
+                    .await;
+                    return;
+                }
+
                 // Sign the derivation locally before reporting completion.
                 let _ = client
                     .append_logs(job_id, "🔐 Signing derivation...\n")
@@ -1632,6 +1690,17 @@ async fn execute_build_job(
             }
 
             if !execution_mode.is_mock() {
+                if remote_job_cancellation_requested(&client, job_id).await {
+                    abort_cancelled_remote_job(
+                        &client,
+                        job_id,
+                        &mut ws_shared,
+                        "[crystal-forge] Build cancelled by operator before cache publication; skipping cache push\n",
+                    )
+                    .await;
+                    return;
+                }
+
                 let _cache_reference = match required_cache_push_reference(
                     &cache_config,
                     &derivation.derivation_name,
@@ -1671,10 +1740,33 @@ async fn execute_build_job(
                     .append_logs(job_id, "📤 Pushing build output to cache...\n")
                     .await;
 
-                match derivation
-                    .push_to_cache_with_retry(&store_path, &cache_config, &build_config)
-                    .await
-                {
+                let cache_push =
+                    derivation.push_to_cache_with_retry(&store_path, &cache_config, &build_config);
+                tokio::pin!(cache_push);
+
+                let cache_push_result = tokio::select! {
+                    result = &mut cache_push => result,
+                    _ = async {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            if remote_job_cancellation_requested(&client, job_id).await {
+                                break;
+                            }
+                        }
+                    } => {
+                        drop(cache_push);
+                        abort_cancelled_remote_job(
+                            &client,
+                            job_id,
+                            &mut ws_shared,
+                            "[crystal-forge] Build cancelled by operator during cache publication; stopped cache push\n",
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                match cache_push_result {
                     Ok(()) => {
                         let _ = client
                             .append_logs(job_id, "✅ Build output pushed to cache\n")
@@ -1725,6 +1817,17 @@ async fn execute_build_job(
                     }
                 }
             };
+
+            if remote_job_cancellation_requested(&client, job_id).await {
+                abort_cancelled_remote_job(
+                    &client,
+                    job_id,
+                    &mut ws_shared,
+                    "[crystal-forge] Build cancelled by operator before completion report; not reporting success\n",
+                )
+                .await;
+                return;
+            }
 
             if let Err(e) = client
                 .complete_job(job_id, &store_path, cache_reference.as_deref())
@@ -2211,7 +2314,7 @@ async fn send_log_with_fallback(
         >,
     >,
     message: &str,
-) {
+) -> AppendLogsOutcome {
     if let Some(ws) = ws_shared.as_ref() {
         let mut ws_lock = ws.lock().await;
         let sent_ok = cf_builder::builder::api_client::BuilderApiClient::send_log_line(
@@ -2223,7 +2326,7 @@ async fn send_log_with_fallback(
         drop(ws_lock);
 
         if sent_ok {
-            return;
+            return AppendLogsOutcome::Appended;
         }
 
         warn!(
@@ -2233,7 +2336,10 @@ async fn send_log_with_fallback(
         *ws_shared = None;
     }
 
-    let _ = client.append_logs(job_id, message).await;
+    client
+        .append_logs(job_id, message)
+        .await
+        .unwrap_or(AppendLogsOutcome::Rejected)
 }
 
 fn is_local_db_host(host: &str) -> bool {
