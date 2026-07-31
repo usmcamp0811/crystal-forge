@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-07-31 14:08'
+updated_date: '2026-07-31 14:23'
 labels:
   - web-ui
   - design-parity
@@ -126,4 +126,22 @@ Files: packages/web-ui/src/state/preferences.rs (new), packages/web-ui/src/views
 MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/312
 
 CI will run to generate screenshots and validate the web-ui checks. Screenshots will be appended to the MR after first CI run completes.
+
+Addressed all P1 and P2 review findings in commit d4277532:
+
+P1-1: Sidebar mode now uses SidebarContext.is_collapsed and cf-sidebar-collapsed key
+
+P1-2: Default view uses existing crystal_forge.systems.view key
+
+P1-3: Theme uses shared global Signal from root, no longer calls apply/persist directly
+
+P1-4: Sign out button implements logout() and navigation; other actions disabled with titles
+
+P2-5: Density uses set_root_attr pattern matching topbar implementation
+
+P2-6: Organization, groups, MFA, environments only shown when available; IdP help only for OIDC
+
+P2-7: Sidebar user section (desktop and mobile) now Link to ProfileView
+
+P2-8: Notification preferences acknowledged as stored-only (no backend integration yet)
 <!-- SECTION:NOTES:END -->
