@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
-use gloo_storage::{LocalStorage, Storage};
 use uuid::Uuid;
 
 use crate::alerts::{
@@ -21,6 +20,7 @@ use crate::components::filters::ViewMode;
 use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::icon::{Icon, IconName};
+use crate::components::layout::sidebar::PreferencesContext;
 use crate::components::modals::{
     GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
 };
@@ -69,17 +69,13 @@ use systems_list_helpers::{
     systems_missing_heartbeat_count, unique_environments, update_key_for_system,
 };
 
-const VIEW_PREF_KEY: &str = "crystal_forge.systems.view";
-const DENSITY_KEY: &str = "cf.ui.density";
-
-fn load_density() -> bool {
-    web_sys::window()
+fn store_pref(key: &str, value: &str) {
+    if let Some(storage) = web_sys::window()
         .and_then(|w| w.local_storage().ok())
         .flatten()
-        .and_then(|storage| storage.get_item(DENSITY_KEY).ok())
-        .flatten()
-        .map(|v| v == "compact")
-        .unwrap_or(false)
+    {
+        let _ = storage.set_item(key, value);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,31 +143,25 @@ pub fn SystemsListView() -> Element {
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
 
-    let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
-    let mut view_mode = use_signal(|| ViewMode::from_storage(stored_view));
+    let prefs_ctx = use_context::<PreferencesContext>();
+    let mut default_view = prefs_ctx.default_systems_view;
+    let mut density = prefs_ctx.density;
+
     let query_view = prefers_view_from_query();
-    let mut is_compact = use_signal(load_density);
     let container_id = use_memo(|| format!("systems-filters-{}", uuid::Uuid::new_v4()));
 
+    // Apply a view-mode override from the URL query string, then persist it.
     use_effect(move || {
         if let Some(mode) = query_view {
-            view_mode.set(mode);
-            let _ = LocalStorage::set(VIEW_PREF_KEY, mode.as_storage());
+            let value = mode.as_storage().to_string();
+            default_view.set(value.clone());
+            store_pref("crystal_forge.systems.view", &value);
         }
     });
 
-    // Poll for density changes from topbar tweaks
-    use_effect(move || {
-        spawn(async move {
-            loop {
-                gloo_timers::future::TimeoutFuture::new(500).await;
-                let compact = load_density();
-                if compact != is_compact() {
-                    is_compact.set(compact);
-                }
-            }
-        });
-    });
+    // View/density from the shared preferences context.
+    let view_mode = use_memo(move || ViewMode::from_storage(default_view.read().clone().into()));
+    let is_compact = use_memo(move || density.read().as_str() == "compact");
 
     // Filter state — single-select values matching the design's filter bar
     // ("all" mirrors the design's "All environments/statuses/flakes" options).
@@ -783,10 +773,10 @@ pub fn SystemsListView() -> Element {
                         role: "tablist",
                         "aria-label": "View mode",
                         button {
-                            class: if *view_mode.read() == ViewMode::Cards { "active" } else { "" },
+                            class: if view_mode() == ViewMode::Cards { "active" } else { "" },
                             onclick: move |_| {
-                                view_mode.set(ViewMode::Cards);
-                                let _ = LocalStorage::set(VIEW_PREF_KEY, ViewMode::Cards.as_storage());
+                                default_view.set("cards".to_string());
+                                store_pref("crystal_forge.systems.view", "cards");
                             },
                             svg {
                                 class: "w-3 h-3",
@@ -802,10 +792,10 @@ pub fn SystemsListView() -> Element {
                             " Cards"
                         }
                         button {
-                            class: if *view_mode.read() == ViewMode::Table { "active" } else { "" },
+                            class: if view_mode() == ViewMode::Table { "active" } else { "" },
                             onclick: move |_| {
-                                view_mode.set(ViewMode::Table);
-                                let _ = LocalStorage::set(VIEW_PREF_KEY, ViewMode::Table.as_storage());
+                                default_view.set("table".to_string());
+                                store_pref("crystal_forge.systems.view", "table");
                             },
                             svg {
                                 class: "w-3 h-3",
@@ -860,14 +850,14 @@ pub fn SystemsListView() -> Element {
                         div { "Use Add system to register your first managed machine." }
                     }
                 }
-            } else if *view_mode.read() == ViewMode::Cards {
+            } else if view_mode() == ViewMode::Cards {
                 div {
                     class: "cards-grid",
                     "data-testid": "systems-cards",
                     for system in filtered_systems.clone() {
                         SystemCardV2 {
                             system: system.clone(),
-                            compact: *is_compact.read(),
+                            compact: is_compact(),
                             selected: selected_preview_id == Some(system.id),
                             environment_colors: environment_color_pairs.clone(),
                             flake_context: flake_context.clone(),
@@ -918,7 +908,7 @@ pub fn SystemsListView() -> Element {
             } else {
                 SystemsTable {
                     systems: filtered_systems.clone(),
-                    compact: *is_compact.read(),
+                    compact: is_compact(),
                     environment_colors: environment_color_pairs.clone(),
                     flake_context: flake_context.clone(),
                     attention_classes: attention_classes.clone(),
