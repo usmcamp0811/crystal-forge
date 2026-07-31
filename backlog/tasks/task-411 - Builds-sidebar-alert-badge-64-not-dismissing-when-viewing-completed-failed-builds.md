@@ -3,10 +3,11 @@ id: TASK-411
 title: >-
   Builds sidebar alert badge (64) not dismissing when viewing completed/failed
   builds
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - agent
 created_date: '2026-07-31 04:08'
-updated_date: '2026-07-31 04:09'
+updated_date: '2026-07-31 04:11'
 labels:
   - builds
   - sidebar
@@ -100,3 +101,12 @@ nix build .#packages.x86_64-linux.web-ui
 ## Risk Assessment
 Low-medium risk. This is a UI-only change affecting client-side state management. No database, API, or backend changes required. The existing alert infrastructure from TASK-385 should already be in place; this is likely a missing or incorrect acknowledgment trigger.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-07-31 04:11
+---
+Preflight complete. Worktree: /home/mcamp/code/crystal-forge/TASK-411-builds-badge-not-dismissing, branch: TASK-411-builds-badge-not-dismissing, base: dev (1b329f1a). Researching alert system code before writing implementation plan.
+---
+<!-- COMMENTS:END -->
