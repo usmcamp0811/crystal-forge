@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -65,6 +65,48 @@ pub async fn update_user_preferences(
     .await?;
 
     Ok(preferences)
+}
+
+pub async fn initialize_user_preferences(
+    pool: &PgPool,
+    user_id: Uuid,
+    update: &UpdateUserPreferences,
+) -> Result<UserPreferences> {
+    let theme = update.theme.map(|value| value.as_str());
+    let density = update.density.map(|value| value.as_str());
+    let sidebar_collapsed = update.sidebar_collapsed;
+    let default_systems_view = update.default_systems_view.map(|value| value.as_str());
+
+    sqlx::query(
+        r#"
+        INSERT INTO user_preferences (
+            user_id,
+            theme,
+            density,
+            sidebar_collapsed,
+            default_systems_view
+        )
+        VALUES (
+            $1,
+            COALESCE($2, 'dark'),
+            COALESCE($3, 'comfortable'),
+            COALESCE($4, FALSE),
+            COALESCE($5, 'cards')
+        )
+        ON CONFLICT (user_id) DO NOTHING
+        "#,
+    )
+    .bind(user_id)
+    .bind(theme)
+    .bind(density)
+    .bind(sidebar_collapsed)
+    .bind(default_systems_view)
+    .execute(pool)
+    .await?;
+
+    get_user_preferences(pool, user_id)
+        .await?
+        .context("preference initialization returned no authoritative row")
 }
 
 #[cfg(test)]
@@ -172,6 +214,84 @@ mod tests {
             .expect("row exists");
 
         assert_eq!(loaded.theme, "light");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a migrated live database; run with DATABASE_URL=... cargo test user_preferences -- --ignored"]
+    async fn competing_legacy_initialization_does_not_overwrite_existing_row() {
+        let pool = live_pool().await;
+        let user_id = insert_test_user(&pool, "init-race").await;
+
+        let first = initialize_user_preferences(
+            &pool,
+            user_id,
+            &UpdateUserPreferences {
+                theme: Some(UiThemePreference::Light),
+                density: Some(UiDensityPreference::Compact),
+                sidebar_collapsed: Some(true),
+                default_systems_view: Some(SystemsViewPreference::Table),
+            },
+        )
+        .await
+        .expect("first legacy import");
+
+        let second = initialize_user_preferences(
+            &pool,
+            user_id,
+            &UpdateUserPreferences {
+                theme: Some(UiThemePreference::Dark),
+                density: Some(UiDensityPreference::Comfortable),
+                sidebar_collapsed: Some(false),
+                default_systems_view: Some(SystemsViewPreference::Cards),
+            },
+        )
+        .await
+        .expect("second legacy import");
+
+        assert_eq!(first.theme, "light");
+        assert_eq!(second.theme, "light");
+        assert_eq!(second.density, "compact");
+        assert!(second.sidebar_collapsed);
+        assert_eq!(second.default_systems_view, "table");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a migrated live database; run with DATABASE_URL=... cargo test user_preferences -- --ignored"]
+    async fn concurrent_legacy_initialization_returns_single_authoritative_row() {
+        let pool = live_pool().await;
+        let user_id = insert_test_user(&pool, "init-concurrent").await;
+        let light_import = UpdateUserPreferences {
+            theme: Some(UiThemePreference::Light),
+            density: Some(UiDensityPreference::Compact),
+            sidebar_collapsed: Some(true),
+            default_systems_view: Some(SystemsViewPreference::Table),
+        };
+        let dark_import = UpdateUserPreferences {
+            theme: Some(UiThemePreference::Dark),
+            density: Some(UiDensityPreference::Comfortable),
+            sidebar_collapsed: Some(false),
+            default_systems_view: Some(SystemsViewPreference::Cards),
+        };
+
+        let (first, second) = tokio::join!(
+            initialize_user_preferences(&pool, user_id, &light_import),
+            initialize_user_preferences(&pool, user_id, &dark_import),
+        );
+        let first = first.expect("first concurrent legacy import");
+        let second = second.expect("second concurrent legacy import");
+        let loaded = get_user_preferences(&pool, user_id)
+            .await
+            .expect("load authoritative row")
+            .expect("initialized row exists");
+
+        assert_eq!(first.theme, second.theme);
+        assert_eq!(first.density, second.density);
+        assert_eq!(first.sidebar_collapsed, second.sidebar_collapsed);
+        assert_eq!(first.default_systems_view, second.default_systems_view);
+        assert_eq!(loaded.theme, first.theme);
+        assert_eq!(loaded.density, first.density);
+        assert_eq!(loaded.sidebar_collapsed, first.sidebar_collapsed);
+        assert_eq!(loaded.default_systems_view, first.default_systems_view);
     }
 
     #[tokio::test]

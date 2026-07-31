@@ -243,6 +243,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/user/preferences",
             get(user_preferences::get_preferences).patch(user_preferences::patch_preferences),
         )
+        .route(
+            "/api/v1/user/preferences/initialize",
+            post(user_preferences::initialize_preferences),
+        )
         .route("/api/v1/cves", get(cves::list_cves))
         .route("/api/v1/cves/grouped", get(cves::list_cves_grouped))
         .route("/api/v1/cves/stats", get(cves::get_fleet_stats))

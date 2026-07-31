@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use std::cell::RefCell;
 
 use crate::api::client::update_user_preferences;
 use crate::api::models::{
@@ -137,16 +138,87 @@ pub fn mirror_to_storage(preferences: &UserPreferencesDto) {
     write_storage(SYSTEMS_VIEW_KEY, &preferences.default_systems_view);
 }
 
+#[derive(Default)]
+struct PreferenceSaveState {
+    in_flight: bool,
+    pending: Option<UpdateUserPreferences>,
+}
+
+thread_local! {
+    static PREFERENCE_SAVE_STATE: RefCell<PreferenceSaveState> = RefCell::new(PreferenceSaveState::default());
+}
+
+fn merge_update(target: &mut UpdateUserPreferences, update: UpdateUserPreferences) {
+    if update.theme.is_some() {
+        target.theme = update.theme;
+    }
+    if update.density.is_some() {
+        target.density = update.density;
+    }
+    if update.sidebar_collapsed.is_some() {
+        target.sidebar_collapsed = update.sidebar_collapsed;
+    }
+    if update.default_systems_view.is_some() {
+        target.default_systems_view = update.default_systems_view;
+    }
+}
+
+fn take_next_pending_update() -> Option<UpdateUserPreferences> {
+    PREFERENCE_SAVE_STATE.with(|state| state.borrow_mut().pending.take())
+}
+
+fn mark_save_worker_finished_if_idle() -> bool {
+    PREFERENCE_SAVE_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.pending.is_some() {
+            false
+        } else {
+            state.in_flight = false;
+            true
+        }
+    })
+}
+
 pub fn save_update(update: UpdateUserPreferences, mut save_error: Signal<Option<String>>) {
     save_error.set(None);
+
+    let should_start_worker = PREFERENCE_SAVE_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Some(pending) = state.pending.as_mut() {
+            merge_update(pending, update);
+        } else {
+            state.pending = Some(update);
+        }
+
+        if state.in_flight {
+            false
+        } else {
+            state.in_flight = true;
+            true
+        }
+    });
+
+    if !should_start_worker {
+        return;
+    }
+
     spawn(async move {
-        match update_user_preferences(&update).await {
-            Ok(response) => {
-                if let Some(preferences) = response.preferences {
-                    mirror_to_storage(&preferences);
+        loop {
+            let Some(update) = take_next_pending_update() else {
+                if mark_save_worker_finished_if_idle() {
+                    break;
                 }
+                continue;
+            };
+
+            match update_user_preferences(&update).await {
+                Ok(response) => {
+                    if let Some(preferences) = response.preferences {
+                        mirror_to_storage(&preferences);
+                    }
+                }
+                Err(err) => save_error.set(Some(format!("Could not save preferences: {err}"))),
             }
-            Err(err) => save_error.set(Some(format!("Could not save preferences: {err}"))),
         }
     });
 }
@@ -229,5 +301,33 @@ mod tests {
         assert_eq!(snapshot.density, UiDensityPreference::Compact);
         assert!(snapshot.sidebar_collapsed);
         assert_eq!(snapshot.default_systems_view, SystemsViewPreference::Table);
+    }
+
+    #[test]
+    fn merge_update_keeps_latest_value_per_preference_field() {
+        let mut pending = UpdateUserPreferences {
+            theme: Some(UiThemePreference::Light),
+            density: Some(UiDensityPreference::Comfortable),
+            sidebar_collapsed: Some(false),
+            default_systems_view: Some(SystemsViewPreference::Cards),
+        };
+
+        merge_update(
+            &mut pending,
+            UpdateUserPreferences {
+                theme: Some(UiThemePreference::Dark),
+                density: None,
+                sidebar_collapsed: Some(true),
+                default_systems_view: None,
+            },
+        );
+
+        assert_eq!(pending.theme, Some(UiThemePreference::Dark));
+        assert_eq!(pending.density, Some(UiDensityPreference::Comfortable));
+        assert_eq!(pending.sidebar_collapsed, Some(true));
+        assert_eq!(
+            pending.default_systems_view,
+            Some(SystemsViewPreference::Cards)
+        );
     }
 }

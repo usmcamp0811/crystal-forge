@@ -3,7 +3,9 @@ use sqlx::PgPool;
 
 use crate::api::models::{UpdateUserPreferences, UserPreferencesResponse};
 use crate::auth::extractors::AuthenticatedUser;
-use crate::queries::user_preferences::{get_user_preferences, update_user_preferences};
+use crate::queries::user_preferences::{
+    get_user_preferences, initialize_user_preferences, update_user_preferences,
+};
 
 pub async fn get_preferences(
     user: AuthenticatedUser,
@@ -47,6 +49,31 @@ pub async fn patch_preferences(
                 Json(serde_json::json!({
                     "error": "preferences_update_failed",
                     "message": "Could not save user preferences",
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn initialize_preferences(
+    user: AuthenticatedUser,
+    State(pool): State<PgPool>,
+    Json(update): Json<UpdateUserPreferences>,
+) -> impl IntoResponse {
+    match initialize_user_preferences(&pool, user.user_id, &update).await {
+        Ok(preferences) => (
+            StatusCode::OK,
+            Json(UserPreferencesResponse::from(preferences)),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::error!(%err, user_id = %user.user_id, "failed to initialize user preferences");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "preferences_initialize_failed",
+                    "message": "Could not initialize user preferences",
                 })),
             )
                 .into_response()

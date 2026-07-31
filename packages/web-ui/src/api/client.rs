@@ -1317,6 +1317,13 @@ pub async fn update_user_preferences(
     send_json_with_csrf("PATCH", &url, Some(request)).await
 }
 
+pub async fn initialize_user_preferences(
+    request: &UpdateUserPreferences,
+) -> Result<UserPreferencesResponse, ApiClientError> {
+    let url = format!("{}/user/preferences/initialize", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
 /// Development mode login.
 pub async fn dev_login(email: &str) -> Result<DevLoginResponse, ApiClientError> {
     let url = format!("{}/dev/login", auth_base_url());

@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use crate::api::client::{
     fetch_classification_config, fetch_config_health, fetch_user_preferences,
-    update_user_preferences,
+    initialize_user_preferences,
 };
 use crate::api::models::{
     AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role, UserPreferencesDto,
@@ -244,13 +244,15 @@ pub fn AppShell() -> Element {
                             &default_systems_view(),
                         );
                         let import = preferences::import_request(&legacy);
-                        update_user_preferences(&import).await.and_then(|response| {
-                            response.preferences.ok_or_else(|| {
-                                crate::api::client::ApiClientError::Deserialize(
-                                    "preference import returned no preferences".to_string(),
-                                )
+                        initialize_user_preferences(&import)
+                            .await
+                            .and_then(|response| {
+                                response.preferences.ok_or_else(|| {
+                                    crate::api::client::ApiClientError::Deserialize(
+                                        "preference import returned no preferences".to_string(),
+                                    )
+                                })
                             })
-                        })
                     };
 
                     match preferences {

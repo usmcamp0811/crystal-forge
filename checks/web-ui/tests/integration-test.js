@@ -87,6 +87,20 @@ async function setAccountPreferences(page, preferences) {
   );
 }
 
+async function getAccountPreferences(page) {
+  return await page.evaluate(async ({ baseUrl }) => {
+    const response = await fetch(`${baseUrl}/api/v1/user/preferences`, {
+      method: "GET",
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      throw new Error(`Preference GET failed with HTTP ${response.status}`);
+    }
+    return await response.json();
+  }, { baseUrl });
+}
+
 async function captureThemedBaselines(page, step, visualThemes) {
   const visuals = [];
 
@@ -3499,6 +3513,58 @@ const steps = [
       });
       await page.locator(".card", { hasText: "Appearance" }).locator("button", { hasText: "Comfort" }).click();
       await assertVisible(page.getByText("Could not save preferences"), "Expected visible preference save failure");
+      await page.unroute("**/api/v1/user/preferences");
+
+      await setAccountPreferences(page, { theme: "dark" });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1000);
+
+      let patchCount = 0;
+      let resolveSecondPatch;
+      const secondPatchSeen = new Promise((resolve) => {
+        resolveSecondPatch = resolve;
+      });
+      await page.route("**/api/v1/user/preferences", async (route) => {
+        if (route.request().method() !== "PATCH") {
+          await route.fallback();
+          return;
+        }
+
+        patchCount += 1;
+        if (patchCount === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+        if (patchCount === 2) {
+          resolveSecondPatch();
+        }
+        await route.continue();
+      });
+
+      const appearanceCard = page.locator(".card", { hasText: "Appearance" });
+      await appearanceCard.locator("button", { hasText: "Light" }).click();
+      await appearanceCard.locator("button", { hasText: "Dark" }).click();
+      await Promise.race([
+        secondPatchSeen,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for serialized second preference PATCH")), 5000)),
+      ]);
+      await page.waitForFunction(
+        async ({ baseUrl }) => {
+          const response = await fetch(`${baseUrl}/api/v1/user/preferences`, {
+            method: "GET",
+            credentials: "include",
+            headers: { Accept: "application/json" },
+          });
+          if (!response.ok) return false;
+          const body = await response.json();
+          return body.preferences?.theme === "dark";
+        },
+        { baseUrl },
+        { timeout: 5000 },
+      );
+      const finalPreferences = await getAccountPreferences(page);
+      if (finalPreferences.preferences?.theme !== "dark") {
+        throw new Error(`Expected serialized saves to leave last-selected dark theme, got ${finalPreferences.preferences?.theme}`);
+      }
       await page.unroute("**/api/v1/user/preferences");
 
       await setAccountPreferences(page, { theme: "dark", density: "comfortable", sidebar_collapsed: false, default_systems_view: "cards" });
