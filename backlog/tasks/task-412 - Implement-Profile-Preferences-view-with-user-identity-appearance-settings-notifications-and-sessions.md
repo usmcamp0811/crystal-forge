@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-07-31 15:32'
+updated_date: '2026-07-31 15:33'
 labels:
   - web-ui
   - design-parity
@@ -117,49 +117,19 @@ The view follows `docs/design/CrystalForge/components/ProfileView.jsx` for appli
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Implementation complete. Created preferences state module with Density, SidebarMode, DefaultView, and NotificationPreferences types, all with localStorage persistence. Created ProfileView component with identity card, appearance settings, notifications, access summary, and sessions. Added reusable SegmentedControl, PrefRow, and Toggle components. Wired up /profile route. All layout, typography, spacing, and styling matches ProfileView.jsx design exactly. Theme changes apply immediately via existing theme module. Notification and appearance prefs persist to localStorage with correct defaults. Integrated with AppState auth context for user data.
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/312
 
-Files: packages/web-ui/src/state/preferences.rs (new), packages/web-ui/src/views/profile.rs (new), packages/web-ui/src/state/mod.rs, packages/web-ui/src/views/mod.rs, packages/web-ui/src/routes.rs, plus automatic fmt in alerts/app_shell/sidebar/cves.
+Current implementation:
+- `/profile` is reachable from desktop and mobile sidebar user sections.
+- Theme, density, sidebar mode, and default Systems view share application state with existing controls and use canonical storage keys.
+- Identity, role, and authentication source are derived only from AuthContext; unavailable values are omitted or labelled unavailable.
+- Sign out handles failure with an inline error and clears AppState authentication only after a successful logout.
+- Notifications and active-session management are visibly unavailable pending backend support.
 
-MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/312
+Review fixes are in commits 0219c523, 9bcb1b00, 5bd52b31, and 873e49f6. The branch was rebuilt from origin/dev, so the MR contains only TASK-412 work.
 
-CI will run to generate screenshots and validate the web-ui checks. Screenshots will be appended to the MR after first CI run completes.
-
-Addressed all P1 and P2 review findings in commit d4277532:
-
-P1-1: Sidebar mode now uses SidebarContext.is_collapsed and cf-sidebar-collapsed key
-
-P1-2: Default view uses existing crystal_forge.systems.view key
-
-P1-3: Theme uses shared global Signal from root, no longer calls apply/persist directly
-
-P1-4: Sign out button implements logout() and navigation; other actions disabled with titles
-
-P2-5: Density uses set_root_attr pattern matching topbar implementation
-
-P2-6: Organization, groups, MFA, environments only shown when available; IdP help only for OIDC
-
-P2-7: Sidebar user section (desktop and mobile) now Link to ProfileView
-
-P2-8: Notification preferences acknowledged as stored-only (no backend integration yet)
-
-Re-review findings addressed in commit 9bcb1b00 (force-pushed clean branch):
-
-P1-1 FIXED: Sign out now properly handles logout() result, clears AppState.auth, uses replace() navigation. Errors logged to console.
-
-P2-2 FIXED: Notifications card completely disabled with 'coming soon' message until backend integration exists.
-
-P2-3 FIXED: Created shared PreferencesContext with density and default_systems_view signals. AppShell initializes and provides context. TopBar and ProfileView consume same signals. Changes sync immediately across app.
-
-P2-4 FIXED: Branch rebased onto origin/dev, removing all TASK-411 commits. MR now contains only clean TASK-412 history.
-
-P2-5 FIXED: All mock security data hidden (Member since, Last login, Active sessions all removed or disabled). No fabricated information presented as real.
-
-Shared preference architecture: AppShell owns signals, use_effect applies density to data-density, both TopBar Tweaks and Profile view read/write same state.
-
-Re-review P2 findings addressed in commits 5bd52b31 and 873e49f6: removed the unused preferences module, notification/session mock state and UI helpers, and TopBar's obsolete load_pref helper. The profile only renders identity, role, and auth-source values supplied by AuthContext; unavailable values are explicitly marked unavailable and environment scope is omitted until supplied by an API.
-
-MR !312 description updated to match the implementation and verification status.
-
-Verification: cargo fmt passed; cargo check --target wasm32-unknown-unknown passed with pre-existing repository warnings. nix build .#checks.x86_64-linux.web-ui --no-link was started twice but did not complete before the local 10-minute command timeout while building the Nix VM test.
+Verification:
+- `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml` passed.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed, with pre-existing repository warnings.
+- `nix build .#checks.x86_64-linux.web-ui --no-link` was started twice but did not complete locally: the Nix VM build exceeded the 10-minute command timeout. Do not treat it as passed.
 <!-- SECTION:NOTES:END -->
