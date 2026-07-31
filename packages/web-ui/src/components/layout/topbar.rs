@@ -46,15 +46,6 @@ fn visible_notifications(is_admin_user: bool) -> Vec<NotificationItem> {
         .collect()
 }
 
-fn load_pref(key: &str, default: &str) -> String {
-    web_sys::window()
-        .and_then(|w| w.local_storage().ok())
-        .flatten()
-        .and_then(|storage| storage.get_item(key).ok())
-        .flatten()
-        .unwrap_or_else(|| default.to_string())
-}
-
 fn store_pref(key: &str, value: &str) {
     if let Some(storage) = web_sys::window()
         .and_then(|w| w.local_storage().ok())

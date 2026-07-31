@@ -8,36 +8,12 @@ use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
 use crate::components::{Icon, IconName};
 use crate::routes::Route;
 use crate::state::app_state::AppState;
-use crate::state::{preferences, theme};
+use crate::state::theme;
 
 // Storage keys matching existing application preferences
 const DENSITY_KEY: &str = "cf.ui.density";
 const SYSTEMS_VIEW_KEY: &str = "crystal_forge.systems.view";
 const SIDEBAR_COLLAPSED_KEY: &str = "cf-sidebar-collapsed";
-
-/// Mock session data structure.
-#[derive(Clone, Debug)]
-struct Session {
-    device: &'static str,
-    ip: &'static str,
-    at: &'static str,
-    current: bool,
-}
-
-const MOCK_SESSIONS: &[Session] = &[
-    Session {
-        device: "MacBook Pro · Chrome",
-        ip: "10.2.4.18",
-        at: "current session",
-        current: true,
-    },
-    Session {
-        device: "iPhone · Safari",
-        ip: "10.5.2.7",
-        at: "2h ago",
-        current: false,
-    },
-];
 
 /// Helper to store preference in localStorage.
 #[cfg(target_arch = "wasm32")]
@@ -70,27 +46,28 @@ pub fn ProfileView() -> Element {
     let mut density = prefs_ctx.density;
     let mut default_view = prefs_ctx.default_systems_view;
 
-    // Notification preferences
-    let mut notif = use_signal(|| preferences::NotificationPreferences::load());
-
-    // User identity data from auth context
+    // Only display identity values supplied by the authenticated context.
     let user_name = auth_context
         .as_ref()
         .and_then(|ctx| ctx.user.as_ref())
         .map(|u| {
             u.display_name
                 .clone()
-                .unwrap_or_else(|| u.email.split('@').next().unwrap_or("User").to_string())
-        })
-        .unwrap_or_else(|| "User".to_string());
+                .unwrap_or_else(|| u.email.split('@').next().unwrap_or_default().to_string())
+        });
 
     let user_email = auth_context
         .as_ref()
         .and_then(|ctx| ctx.user.as_ref())
-        .map(|u| u.email.clone())
-        .unwrap_or_else(|| "user@example.com".to_string());
+        .map(|u| u.email.clone());
+
+    let user_name_display = user_name.as_deref().unwrap_or("Unavailable").to_string();
+    let user_email_display = user_email.as_deref().unwrap_or("unavailable").to_string();
 
     let user_initials = user_name
+        .as_deref()
+        .or(user_email.as_deref())
+        .unwrap_or("?")
         .split_whitespace()
         .take(2)
         .filter_map(|word| word.chars().next())
@@ -98,51 +75,31 @@ pub fn ProfileView() -> Element {
         .to_uppercase();
 
     let user_initials = if user_initials.is_empty() {
-        "U".to_string()
+        "?".to_string()
     } else {
         user_initials
     };
 
-    let user_role = auth_context
-        .as_ref()
-        .and_then(|ctx| ctx.roles.first())
-        .cloned()
-        .unwrap_or(Role::Viewer);
+    let user_role =
+        auth_context
+            .as_ref()
+            .and_then(|ctx| ctx.roles.first())
+            .map(|role| match role {
+                Role::Admin => "admin",
+                Role::Operator => "operator",
+                Role::Viewer => "viewer",
+            });
 
-    let user_role_str = match user_role {
-        Role::Admin => "admin",
-        Role::Operator => "operator",
-        Role::Viewer => "viewer",
-    };
-
-    let auth_source = auth_context
-        .as_ref()
-        .map(|ctx| match ctx.auth_mode {
-            AuthMode::Local => "local",
-            AuthMode::Oidc => "oidc",
-            AuthMode::Dev => "dev",
-        })
-        .unwrap_or("local");
+    let auth_source = auth_context.as_ref().map(|ctx| match ctx.auth_mode {
+        AuthMode::Local => "local",
+        AuthMode::Oidc => "oidc",
+        AuthMode::Dev => "dev",
+    });
 
     let is_oidc = auth_context
         .as_ref()
         .map(|ctx| matches!(ctx.auth_mode, AuthMode::Oidc))
         .unwrap_or(false);
-
-    // Mock data - TODO: Replace with actual API data when available
-    let mock_org: Option<&str> = None; // Would come from OIDC claims
-    let mock_groups: Vec<&str> = vec![]; // Would come from OIDC claims
-    let mock_groups_str = if mock_groups.is_empty() {
-        String::new()
-    } else {
-        mock_groups.join(", ")
-    };
-    let mock_mfa = false; // Would come from auth context
-    let mock_environments: Vec<&str> = vec![]; // Would come from user permissions
-    let mock_joined = "Jan 2026"; // Would come from user record
-    let mock_last_login = "2m ago"; // Would come from auth context
-
-    // No separate handlers needed - will use inline closures
 
     rsx! {
         div {
@@ -173,47 +130,27 @@ pub fn ProfileView() -> Element {
                     style: "min-width: 0; flex: 1;",
                     div {
                         style: "font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 10px;",
-                        "{user_name}"
-                        span {
-                            class: "chip chip-critical",
-                            style: "font-size: 10px;",
-                            "{user_role_str}"
+                        "{user_name_display}"
+                        if let Some(role) = user_role {
+                            span {
+                                class: "chip chip-critical",
+                                style: "font-size: 10px;",
+                                "{role}"
+                            }
                         }
                     }
                     div {
                         class: "mono",
                         style: "font-size: 12px; color: var(--cf-text-muted); margin-top: 2px;",
-                        "{user_email}"
+                        "{user_email_display}"
                     }
                     div {
                         style: "display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap;",
-                        span {
-                            class: "chip chip-unknown",
-                            style: "font-size: 10px;",
-                            "{auth_source}"
-                        }
-                        // Only show organization for OIDC when available
-                        if let Some(org) = mock_org {
+                        if let Some(source) = auth_source {
                             span {
-                                class: "chip chip-info",
+                                class: "chip chip-unknown",
                                 style: "font-size: 10px;",
-                                "{org}"
-                            }
-                        }
-                        // Only show groups when available
-                        for group in &mock_groups {
-                            span {
-                                class: "chip chip-unknown mono",
-                                style: "font-size: 10px;",
-                                "{group}"
-                            }
-                        }
-                        // Only show MFA when actually enabled
-                        if mock_mfa {
-                            span {
-                                class: "chip chip-healthy",
-                                style: "font-size: 10px;",
-                                "MFA on"
+                                "{source}"
                             }
                         }
                     }
@@ -356,38 +293,37 @@ pub fn ProfileView() -> Element {
                         class: "kv-grid",
                         dt { "Role" }
                         dd {
-                            span {
-                                class: "chip chip-critical",
-                                style: "font-size: 10px;",
-                                "{user_role_str}"
-                            }
-                        }
-
-                        dt { "Environments" }
-                        dd {
-                            if mock_environments.is_empty() {
+                            if let Some(role) = user_role {
+                                span {
+                                    class: "chip chip-critical",
+                                    style: "font-size: 10px;",
+                                    "{role}"
+                                }
+                            } else {
                                 span {
                                     class: "chip chip-unknown",
                                     style: "font-size: 10px;",
-                                    "none assigned"
-                                }
-                            } else {
-                                for env in &mock_environments {
-                                    span {
-                                        class: "chip chip-info",
-                                        style: "font-size: 10px; margin-right: 4px;",
-                                        "{env}"
-                                    }
+                                    "unavailable"
                                 }
                             }
                         }
 
+                        // Environments row hidden until API provides scope data
+                        // dt { "Environments" }
+                        // dd {
+                        //     span {
+                        //         class: "chip chip-unknown",
+                        //         style: "font-size: 10px;",
+                        //         "unavailable"
+                        //     }
+                        // }
+
                         dt { "Auth source" }
                         dd {
-                            if !mock_groups_str.is_empty() {
-                                "{auth_source} · {mock_groups_str}"
+                            if let Some(source) = auth_source {
+                                "{source}"
                             } else {
-                                "{auth_source}"
+                                "unavailable"
                             }
                         }
 
@@ -466,30 +402,6 @@ impl PreferenceValue for theme::UiTheme {
     }
 }
 
-impl PreferenceValue for preferences::Density {
-    fn label(self) -> &'static str {
-        preferences::Density::label(self)
-    }
-}
-
-impl PreferenceValue for preferences::SidebarMode {
-    fn label(self) -> &'static str {
-        preferences::SidebarMode::label(self)
-    }
-}
-
-impl PreferenceValue for preferences::DefaultView {
-    fn label(self) -> &'static str {
-        preferences::DefaultView::label(self)
-    }
-}
-
-impl PreferenceValue for preferences::NotificationChannel {
-    fn label(self) -> &'static str {
-        preferences::NotificationChannel::label(self)
-    }
-}
-
 #[component]
 fn SegmentedControl<T: PreferenceValue + 'static>(
     value: T,
@@ -527,21 +439,6 @@ fn SegmentedControlString(
                     onclick: move |_| on_change.call(opt_value.to_string()),
                     "{opt_label}"
                 }
-            }
-        }
-    }
-}
-
-#[component]
-fn Toggle(on: bool, on_change: EventHandler<bool>) -> Element {
-    rsx! {
-        label {
-            style: "display: inline-flex; cursor: pointer;",
-            input {
-                r#type: "checkbox",
-                checked: on,
-                oninput: move |evt| on_change.call(evt.checked()),
-                style: "accent-color: var(--cf-brand-purple); width: 16px; height: 16px;",
             }
         }
     }

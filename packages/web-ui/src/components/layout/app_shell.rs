@@ -144,6 +144,8 @@ pub fn AppShell() -> Element {
     // Apply density immediately on load and whenever it changes
     use_effect(move || {
         let density_val = density();
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = density_val;
         #[cfg(target_arch = "wasm32")]
         {
             if let Some(window) = web_sys::window() {
