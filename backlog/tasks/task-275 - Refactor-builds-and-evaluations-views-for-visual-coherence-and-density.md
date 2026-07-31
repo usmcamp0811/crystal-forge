@@ -1,10 +1,10 @@
 ---
 id: TASK-275
 title: Refactor builds and evaluations views for visual coherence and density
-status: To Do
+status: Cancelled
 assignee: []
 created_date: '2026-04-18 01:56'
-updated_date: '2026-05-31 16:07'
+updated_date: '2026-07-31 03:23'
 labels:
   - ui
   - ux
@@ -20,7 +20,7 @@ dependencies:
 references:
   - /home/mcamp/code/crystal-forge/CrystalForgelatest
 priority: medium
-ordinal: 0
+ordinal: 500
 ---
 
 ## Description
