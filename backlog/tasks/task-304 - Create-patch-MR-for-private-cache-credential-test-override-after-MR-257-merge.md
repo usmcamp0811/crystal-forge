@@ -4,12 +4,6 @@ title: Create patch MR for private cache credential-test override after MR 257 m
 status: Review
 assignee: []
 created_date: '2026-05-23 03:44'
-updated_date: '2026-05-23 03:44'
-status: Backlog
-assignee: []
-created_date: '2026-05-23 03:44'
-updated_date: '2026-05-23 03:44'
-updated_date: '2026-05-23 03:45'
 updated_date: '2026-05-23 03:51'
 labels:
   - patch

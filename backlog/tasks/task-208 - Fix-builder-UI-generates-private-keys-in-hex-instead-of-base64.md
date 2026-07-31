@@ -1,3 +1,6 @@
+---
+id: TASK-208
+---
 # TASK-208: Fix builder UI generates private keys in hex instead of base64
 
 **Status:** Done  

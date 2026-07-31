@@ -1,5 +1,5 @@
 ---
-id: TASK-214
+id: TASK-408
 title: Add systemConfiguration name field to decouple hostname from NixOS config path
 status: To Do
 assignee: []
