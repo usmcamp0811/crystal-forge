@@ -16,6 +16,14 @@ pub struct SidebarContext {
     pub is_collapsed: Signal<bool>,
 }
 
+/// Shared UI preference signals (density, default systems view).
+/// Created in AppShell and consumed by TopBar, ProfileView, etc.
+#[derive(Clone, Copy)]
+pub struct PreferencesContext {
+    pub density: Signal<String>,
+    pub default_systems_view: Signal<String>,
+}
+
 /// Sidebar edge toggle button — rendered as a sibling of SidebarNav in the shell,
 /// absolutely positioned to straddle the sidebar/content boundary.
 #[component]

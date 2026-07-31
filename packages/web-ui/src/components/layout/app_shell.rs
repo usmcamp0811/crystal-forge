@@ -5,7 +5,9 @@ use dioxus::prelude::*;
 use crate::api::client::{fetch_classification_config, fetch_config_health};
 use crate::api::models::{AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role};
 use crate::components::layout::TopBar;
-use crate::components::layout::sidebar::{MobileDrawer, SidebarContext, SidebarNav};
+use crate::components::layout::sidebar::{
+    MobileDrawer, PreferencesContext, SidebarContext, SidebarNav,
+};
 use crate::components::layout::{
     BannerPlacement, DEV_MODE_BANNER_HEIGHT_PX, DevModeBanner, use_dev_mode_enabled,
 };
@@ -106,13 +108,53 @@ pub fn AppShell() -> Element {
             .unwrap_or(false)
     });
 
+    // Initialize shared UI preferences
+    let density = use_signal(|| {
+        web_sys::window()
+            .and_then(|w| w.local_storage().ok())
+            .flatten()
+            .and_then(|s| s.get_item("cf.ui.density").ok())
+            .flatten()
+            .unwrap_or_else(|| "comfortable".to_string())
+    });
+    let default_systems_view = use_signal(|| {
+        web_sys::window()
+            .and_then(|w| w.local_storage().ok())
+            .flatten()
+            .and_then(|s| s.get_item("crystal_forge.systems.view").ok())
+            .flatten()
+            .unwrap_or_else(|| "cards".to_string())
+    });
+
     // Provide sidebar context
     use_context_provider(|| SidebarContext {
         is_mobile_drawer_open,
         is_collapsed,
     });
+
+    // Provide preferences context
+    use_context_provider(|| PreferencesContext {
+        density,
+        default_systems_view,
+    });
+
     let breadcrumb_override = use_signal(|| None::<(String, String)>);
     use_context_provider(|| breadcrumb_override);
+
+    // Apply density immediately on load and whenever it changes
+    use_effect(move || {
+        let density_val = density();
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window() {
+                if let Some(document) = window.document() {
+                    if let Some(root) = document.document_element() {
+                        let _ = root.set_attribute("data-density", &density_val);
+                    }
+                }
+            }
+        }
+    });
 
     let sidebar_width = if is_collapsed() { "64px" } else { "240px" };
 

@@ -1,6 +1,6 @@
 //! Top bar layout component.
 
-use crate::components::layout::sidebar::SidebarContext;
+use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
@@ -141,10 +141,13 @@ pub fn TopBar(title: String) -> Element {
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
     let mut is_collapsed = sidebar_ctx.is_collapsed;
+
+    let prefs_ctx = use_context::<PreferencesContext>();
+    let mut density = prefs_ctx.density;
+    let mut default_view = prefs_ctx.default_systems_view;
+
     let mut tweaks_open = use_signal(|| false);
     let mut notifications_open = use_signal(|| false);
-    let mut density = use_signal(|| load_pref(DENSITY_KEY, "comfortable"));
-    let mut default_view = use_signal(|| load_pref(SYSTEMS_VIEW_KEY, "cards"));
     let mut notification_items = use_signal(|| visible_notifications(is_admin_user));
     let unread_count = notification_items
         .read()
@@ -179,10 +182,6 @@ pub fn TopBar(title: String) -> Element {
                 } \
             })()",
         );
-    });
-
-    use_effect(move || {
-        set_root_attr("data-density", &density());
     });
 
     use_effect(move || {

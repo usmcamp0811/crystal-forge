@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use crate::api::client::logout;
 use crate::api::models::{AuthMode, Role};
-use crate::components::layout::sidebar::SidebarContext;
+use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
 use crate::components::{Icon, IconName};
 use crate::routes::Route;
 use crate::state::app_state::AppState;
@@ -39,21 +39,6 @@ const MOCK_SESSIONS: &[Session] = &[
     },
 ];
 
-/// Helper to set root document attribute (e.g., data-density).
-#[cfg(target_arch = "wasm32")]
-fn set_root_attr(name: &str, value: &str) {
-    if let Some(window) = web_sys::window() {
-        if let Some(document) = window.document() {
-            if let Some(root) = document.document_element() {
-                let _ = root.set_attribute(name, value);
-            }
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn set_root_attr(_name: &str, _value: &str) {}
-
 /// Helper to store preference in localStorage.
 #[cfg(target_arch = "wasm32")]
 fn store_pref(key: &str, value: &str) {
@@ -69,7 +54,7 @@ fn store_pref(_key: &str, _value: &str) {}
 
 #[component]
 pub fn ProfileView() -> Element {
-    let app_state = use_context::<Signal<AppState>>();
+    let mut app_state = use_context::<Signal<AppState>>();
     let auth_context = app_state.read().auth.clone();
     let nav = navigator();
 
@@ -80,34 +65,10 @@ pub fn ProfileView() -> Element {
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_collapsed = sidebar_ctx.is_collapsed;
 
-    // Appearance preferences - read from existing storage keys
-    let mut density = use_signal(|| {
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let Some(window) = web_sys::window() {
-                if let Ok(Some(storage)) = window.local_storage() {
-                    if let Ok(Some(value)) = storage.get_item(DENSITY_KEY) {
-                        return value;
-                    }
-                }
-            }
-        }
-        "comfortable".to_string()
-    });
-
-    let mut default_view = use_signal(|| {
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let Some(window) = web_sys::window() {
-                if let Ok(Some(storage)) = window.local_storage() {
-                    if let Ok(Some(value)) = storage.get_item(SYSTEMS_VIEW_KEY) {
-                        return value;
-                    }
-                }
-            }
-        }
-        "cards".to_string()
-    });
+    // Use shared preferences context
+    let prefs_ctx = use_context::<PreferencesContext>();
+    let mut density = prefs_ctx.density;
+    let mut default_view = prefs_ctx.default_systems_view;
 
     // Notification preferences
     let mut notif = use_signal(|| preferences::NotificationPreferences::load());
@@ -272,9 +233,25 @@ pub fn ProfileView() -> Element {
                         class: "btn btn-ghost focus-ring xs",
                         onclick: move |_| {
                             spawn(async move {
-                                let _ = logout().await;
-                                // Clear auth state and navigate to login
-                                nav.push(Route::LoginView {});
+                                match logout().await {
+                                    Ok(()) => {
+                                        // Clear auth state before navigating
+                                        let mut state = app_state.write();
+                                        state.auth = None;
+                                        state.auth_fetch_state = crate::state::app_state::AuthFetchState::Loaded;
+                                        drop(state);
+                                        nav.replace(Route::LoginView {});
+                                    }
+                                    Err(_e) => {
+                                        // TODO: Display error to user instead of silently failing
+                                        #[cfg(target_arch = "wasm32")]
+                                        {
+                                            if let Some(console) = web_sys::window().and_then(|w| Some(w.console())) {
+                                                console.error_1(&"Logout failed".into());
+                                            }
+                                        }
+                                    }
+                                }
                             });
                         },
                         Icon { name: IconName::X, size: 11 }
@@ -318,7 +295,7 @@ pub fn ProfileView() -> Element {
                             on_change: move |value: String| {
                                 density.set(value.clone());
                                 store_pref(DENSITY_KEY, &value);
-                                set_root_attr("data-density", &value);
+                                // Note: set_root_attr handled by AppShell use_effect
                             },
                         }
                     }
@@ -351,110 +328,18 @@ pub fn ProfileView() -> Element {
                     }
                 }
 
-                // Notifications card
+                // Notifications card - disabled until backend integration
                 div {
                     class: "card",
-                    style: "padding: 8px 18px 14px;",
+                    style: "padding: 8px 18px 14px; opacity: 0.6; pointer-events: none;",
                     h3 {
                         style: "font-size: 13px; font-weight: 600; margin: 14px 0 4px;",
                         "Notifications"
                     }
-
-                    PrefRow {
-                        title: "Deploy failures",
-                        Toggle {
-                            on: notif().deploy_failed,
-                            on_change: move |value| {
-                                let mut n = notif();
-                                n.deploy_failed = value;
-                                n.persist();
-                                notif.set(n);
-                            },
-                        }
-                    }
-
-                    PrefRow {
-                        title: "Build failures",
-                        Toggle {
-                            on: notif().build_failed,
-                            on_change: move |value| {
-                                let mut n = notif();
-                                n.build_failed = value;
-                                n.persist();
-                                notif.set(n);
-                            },
-                        }
-                    }
-
-                    PrefRow {
-                        title: "New critical CVEs",
-                        Toggle {
-                            on: notif().critical_cve,
-                            on_change: move |value| {
-                                let mut n = notif();
-                                n.critical_cve = value;
-                                n.persist();
-                                notif.set(n);
-                            },
-                        }
-                    }
-
-                    PrefRow {
-                        title: "Policy violations",
-                        Toggle {
-                            on: notif().policy_fail,
-                            on_change: move |value| {
-                                let mut n = notif();
-                                n.policy_fail = value;
-                                n.persist();
-                                notif.set(n);
-                            },
-                        }
-                    }
-
-                    PrefRow {
-                        title: "Heartbeat lost",
-                        Toggle {
-                            on: notif().heartbeat_lost,
-                            on_change: move |value| {
-                                let mut n = notif();
-                                n.heartbeat_lost = value;
-                                n.persist();
-                                notif.set(n);
-                            },
-                        }
-                    }
-
-                    PrefRow {
-                        title: "Weekly digest email",
-                        Toggle {
-                            on: notif().weekly_digest,
-                            on_change: move |value| {
-                                let mut n = notif();
-                                n.weekly_digest = value;
-                                n.persist();
-                                notif.set(n);
-                            },
-                        }
-                    }
-
-                    PrefRow {
-                        title: "Delivery",
-                        desc: "Where alerts are sent.",
-                        SegmentedControl {
-                            value: notif().channel,
-                            options: vec![
-                                preferences::NotificationChannel::InApp,
-                                preferences::NotificationChannel::Email,
-                                preferences::NotificationChannel::Both,
-                            ],
-                            on_change: move |new_channel| {
-                                let mut n = notif();
-                                n.channel = new_channel;
-                                n.persist();
-                                notif.set(n);
-                            },
-                        }
+                    div {
+                        class: "help",
+                        style: "margin: 12px 0;",
+                        "Notification preferences will be available once backend integration is complete."
                     }
                 }
 
@@ -506,11 +391,12 @@ pub fn ProfileView() -> Element {
                             }
                         }
 
-                        dt { "Member since" }
-                        dd { "{mock_joined}" }
+                        // Member since and Last login hidden until real data available
+                        // dt { "Member since" }
+                        // dd { span { class: "chip chip-unknown", style: "font-size: 10px;", "unavailable" } }
 
-                        dt { "Last login" }
-                        dd { "{mock_last_login}" }
+                        // dt { "Last login" }
+                        // dd { span { class: "chip chip-unknown", style: "font-size: 10px;", "unavailable" } }
                     }
 
                     if is_oidc {
@@ -522,58 +408,17 @@ pub fn ProfileView() -> Element {
                     }
                 }
 
-                // Active sessions card
+                // Active sessions card - disabled until session management implemented
                 div {
                     class: "card",
-                    style: "padding: 18px;",
+                    style: "padding: 18px; opacity: 0.6;",
                     h3 {
                         style: "font-size: 13px; font-weight: 600; margin: 0 0 12px;",
                         "Active sessions"
                     }
-
                     div {
-                        style: "display: flex; flex-direction: column; gap: 8px;",
-                        for session in MOCK_SESSIONS {
-                            div {
-                                style: "display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--cf-subtle-bg); border-radius: 8px; font-size: 12px;",
-                                Icon { name: IconName::Server, size: 13 }
-                                div {
-                                    style: "flex: 1; min-width: 0;",
-                                    div {
-                                        style: "font-weight: 600;",
-                                        "{session.device}"
-                                    }
-                                    div {
-                                        class: "mono",
-                                        style: "font-size: 10px; color: var(--cf-text-muted);",
-                                        "{session.ip} · {session.at}"
-                                    }
-                                }
-                                if session.current {
-                                    span {
-                                        class: "chip chip-healthy",
-                                        style: "font-size: 9px;",
-                                        "this device"
-                                    }
-                                } else {
-                                    button {
-                                        class: "btn btn-ghost focus-ring xs",
-                                        disabled: true,
-                                        title: "Session management not yet implemented",
-                                        "Revoke"
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    button {
-                        class: "btn btn-ghost focus-ring",
-                        style: "margin-top: 12px; color: #fbbf24; border-color: rgba(251,191,36,0.3);",
-                        disabled: true,
-                        title: "Session management not yet implemented",
-                        Icon { name: IconName::Warn, size: 12 }
-                        " Sign out everywhere"
+                        class: "help",
+                        "Session management will be available in a future release."
                     }
                 }
             }
