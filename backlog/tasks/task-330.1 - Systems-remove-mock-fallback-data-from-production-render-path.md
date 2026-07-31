@@ -22,7 +22,6 @@ modified_files:
   - packages/web-ui/src/views/systems_list.rs
   - packages/web-ui/src/systems/adapter.rs
   - checks/web-ui/tests/integration-test.js
-parent_task_id: TASK-330
 priority: high
 ordinal: 1621
 ---

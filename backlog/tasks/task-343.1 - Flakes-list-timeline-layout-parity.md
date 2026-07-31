@@ -23,7 +23,6 @@ modified_files:
   - packages/web-ui/src/components/flake/flake_timeline.rs
   - packages/web-ui/assets/app.css
   - checks/web-ui/tests/integration-test.js
-parent_task_id: TASK-343
 priority: high
 ordinal: 1741
 ---

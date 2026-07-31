@@ -16,7 +16,6 @@ references:
 modified_files:
   - packages/default/src/handlers/api/builders.rs
   - packages/default/src/builder/api_client.rs
-parent_task_id: TASK-375
 priority: medium
 ordinal: 0
 ---

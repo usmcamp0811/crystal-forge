@@ -23,7 +23,6 @@ modified_files:
   - packages/web-ui/src/views/builders.rs
   - packages/web-ui/src/components/builders/mod.rs
   - checks/web-ui/tests/integration-test.js
-parent_task_id: TASK-346
 priority: high
 ordinal: 1791
 ---

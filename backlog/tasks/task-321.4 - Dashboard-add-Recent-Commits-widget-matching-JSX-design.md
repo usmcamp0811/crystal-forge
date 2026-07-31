@@ -14,7 +14,6 @@ dependencies: []
 references:
   - >-
     /home/mcamp/code/crystal-forge/CrystalForgelatest/components/DashboardView.jsx
-parent_task_id: TASK-321
 priority: medium
 ordinal: 292000
 ---

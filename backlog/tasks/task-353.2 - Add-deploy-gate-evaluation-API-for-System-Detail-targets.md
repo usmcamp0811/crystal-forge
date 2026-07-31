@@ -15,7 +15,6 @@ milestone: 'm-19: Design Parity Existing Surfaces'
 dependencies: []
 references:
   - TASK-353
-parent_task_id: TASK-353
 priority: medium
 ordinal: 0
 ---

@@ -15,7 +15,6 @@ dependencies:
   - TASK-336
 references:
   - TASK-336.2
-parent_task_id: TASK-336
 priority: low
 ordinal: 315000
 ---

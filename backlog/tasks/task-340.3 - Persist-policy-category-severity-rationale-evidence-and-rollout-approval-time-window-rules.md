@@ -17,7 +17,6 @@ references:
   - >-
     /home/mcamp/code/crystal-forge/CrystalForgelatest/components/PoliciesView.jsx
   - packages/web-ui/src/components/policy/policy_editor_modal.rs
-parent_task_id: TASK-340
 priority: medium
 ordinal: 308000
 ---

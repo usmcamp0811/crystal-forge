@@ -22,7 +22,6 @@ modified_files:
   - packages/web-ui/src/views/flakes.rs
   - packages/web-ui/src/components/flake/mod.rs
   - checks/web-ui/tests/integration-test.js
-parent_task_id: TASK-343
 priority: high
 ordinal: 1742
 ---

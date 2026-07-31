@@ -13,7 +13,6 @@ milestone: 'm-19: Design Parity Existing Surfaces'
 dependencies: []
 references:
   - packages/default/src/queries/environments.rs
-parent_task_id: TASK-358
 priority: medium
 ordinal: 306000
 ---

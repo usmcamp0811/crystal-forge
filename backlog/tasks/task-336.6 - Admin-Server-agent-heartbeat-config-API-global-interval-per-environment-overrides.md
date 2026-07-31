@@ -14,7 +14,6 @@ labels:
   - backend
 milestone: 'm-20: Design Parity Missing Surfaces'
 dependencies: []
-parent_task_id: TASK-336
 priority: medium
 ordinal: 312000
 ---

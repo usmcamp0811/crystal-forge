@@ -15,7 +15,6 @@ references:
   - packages/default/src/builder/metrics.rs
   - packages/default/src/handlers/api/builders.rs
   - packages/default/src/models/builders.rs
-parent_task_id: TASK-375
 priority: medium
 ordinal: 0
 ---

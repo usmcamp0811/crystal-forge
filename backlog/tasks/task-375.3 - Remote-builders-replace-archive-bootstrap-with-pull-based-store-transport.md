@@ -22,7 +22,6 @@ modified_files:
   - packages/default/src/bin/builder.rs
   - packages/default/src/queries/builders.rs
   - modules/nixos/crystal-forge/default.nix
-parent_task_id: TASK-375
 priority: high
 ordinal: 5510
 ---

@@ -16,7 +16,6 @@ references:
   - packages/default/src/queries/hardening_scans.rs
   - packages/default/src/bin/server.rs
   - packages/web-ui/src/views/system_detail.rs
-parent_task_id: TASK-353
 priority: medium
 ordinal: 0
 ---
