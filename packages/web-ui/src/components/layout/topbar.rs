@@ -1,15 +1,14 @@
 //! Top bar layout component.
 
+use crate::api::models::UpdateUserPreferences;
 use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
+use crate::state::preferences::{self, save_update};
 use crate::state::theme::UiTheme;
 use crate::theme;
 use dioxus::prelude::*;
-
-const DENSITY_KEY: &str = "cf.ui.density";
-const SYSTEMS_VIEW_KEY: &str = "crystal_forge.systems.view";
 
 #[derive(Clone)]
 struct NotificationItem {
@@ -44,15 +43,6 @@ fn visible_notifications(is_admin_user: bool) -> Vec<NotificationItem> {
         .into_iter()
         .filter(|item| is_admin_user || !admin_only_route(&item.route))
         .collect()
-}
-
-fn store_pref(key: &str, value: &str) {
-    if let Some(storage) = web_sys::window()
-        .and_then(|w| w.local_storage().ok())
-        .flatten()
-    {
-        let _ = storage.set_item(key, value);
-    }
 }
 
 fn set_root_attr(name: &str, value: &str) {
@@ -136,6 +126,7 @@ pub fn TopBar(title: String) -> Element {
     let prefs_ctx = use_context::<PreferencesContext>();
     let mut density = prefs_ctx.density;
     let mut default_view = prefs_ctx.default_systems_view;
+    let save_error = prefs_ctx.save_error;
 
     let mut tweaks_open = use_signal(|| false);
     let mut notifications_open = use_signal(|| false);
@@ -420,6 +411,13 @@ pub fn TopBar(title: String) -> Element {
                 onclick: move |_| {
                     let next = ui_theme().toggle();
                     ui_theme.set(next);
+                    save_update(
+                        UpdateUserPreferences {
+                            theme: Some(preferences::theme_to_preference(next)),
+                            ..UpdateUserPreferences::default()
+                        },
+                        save_error,
+                    );
                 },
                 if ui_theme() == UiTheme::Dark {
                     svg {
@@ -499,6 +497,13 @@ pub fn TopBar(title: String) -> Element {
                             on_change: move |value: String| {
                                 let next = if value == "light" { UiTheme::Light } else { UiTheme::Dark };
                                 ui_theme.set(next);
+                                save_update(
+                                    UpdateUserPreferences {
+                                        theme: Some(preferences::theme_to_preference(next)),
+                                        ..UpdateUserPreferences::default()
+                                    },
+                                    save_error,
+                                );
                             }
                         }
                         TweakRow {
@@ -507,8 +512,15 @@ pub fn TopBar(title: String) -> Element {
                             value: density(),
                             on_change: move |value: String| {
                                 density.set(value.clone());
-                                store_pref(DENSITY_KEY, &value);
+                                preferences::write_storage(preferences::DENSITY_KEY, &value);
                                 set_root_attr("data-density", &value);
+                                save_update(
+                                    UpdateUserPreferences {
+                                        density: Some(preferences::density_from_storage(Some(&value))),
+                                        ..UpdateUserPreferences::default()
+                                    },
+                                    save_error,
+                                );
                             }
                         }
                         TweakRow {
@@ -517,7 +529,14 @@ pub fn TopBar(title: String) -> Element {
                             value: default_view(),
                             on_change: move |value: String| {
                                 default_view.set(value.clone());
-                                store_pref(SYSTEMS_VIEW_KEY, &value);
+                                preferences::write_storage(preferences::SYSTEMS_VIEW_KEY, &value);
+                                save_update(
+                                    UpdateUserPreferences {
+                                        default_systems_view: Some(preferences::systems_view_from_storage(Some(&value))),
+                                        ..UpdateUserPreferences::default()
+                                    },
+                                    save_error,
+                                );
                             }
                         }
                         TweakRow {
@@ -527,7 +546,24 @@ pub fn TopBar(title: String) -> Element {
                             on_change: move |value: String| {
                                 let collapsed = value == "rail";
                                 is_collapsed.set(collapsed);
-                                store_pref("cf-sidebar-collapsed", if collapsed { "true" } else { "false" });
+                                preferences::write_storage(
+                                    preferences::SIDEBAR_COLLAPSED_KEY,
+                                    if collapsed { "true" } else { "false" },
+                                );
+                                save_update(
+                                    UpdateUserPreferences {
+                                        sidebar_collapsed: Some(collapsed),
+                                        ..UpdateUserPreferences::default()
+                                    },
+                                    save_error,
+                                );
+                            }
+                        }
+                        if let Some(error) = save_error() {
+                            div {
+                                class: "help",
+                                style: "color: var(--cf-critical); margin-top: 8px;",
+                                "{error}"
                             }
                         }
                     }

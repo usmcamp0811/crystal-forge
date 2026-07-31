@@ -2,8 +2,13 @@
 
 use dioxus::prelude::*;
 
-use crate::api::client::{fetch_classification_config, fetch_config_health};
-use crate::api::models::{AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role};
+use crate::api::client::{
+    fetch_classification_config, fetch_config_health, fetch_user_preferences,
+    update_user_preferences,
+};
+use crate::api::models::{
+    AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role, UserPreferencesDto,
+};
 use crate::components::layout::TopBar;
 use crate::components::layout::sidebar::{
     MobileDrawer, PreferencesContext, SidebarContext, SidebarNav,
@@ -16,6 +21,7 @@ use crate::components::onboarding::OnboardingCoachPanel;
 use crate::routes::Route;
 use crate::state::app_state::{AppState, AuthFetchState, ConfigHealthFetchState};
 use crate::state::auth;
+use crate::state::preferences;
 use crate::theme;
 
 /// Check if UI check mock auth mode is enabled via query param.
@@ -75,6 +81,43 @@ fn should_show_admin_denied(route: &Route, auth_context: &Option<AuthContext>) -
     ) && !auth::is_admin(auth_context)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreferenceBootstrapState {
+    Idle,
+    Loading,
+    Loaded,
+    Error,
+}
+
+fn set_root_attr(name: &str, value: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (name, value);
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+            if let Some(root) = document.document_element() {
+                let _ = root.set_attribute(name, value);
+            }
+        }
+    }
+}
+
+fn apply_loaded_preferences(
+    preferences: &UserPreferencesDto,
+    mut theme_signal: Signal<crate::state::theme::UiTheme>,
+    mut density: Signal<String>,
+    mut is_collapsed: Signal<bool>,
+    mut default_systems_view: Signal<String>,
+) {
+    theme_signal.set(preferences::theme_from_server(&preferences.theme));
+    density.set(preferences.density.clone());
+    is_collapsed.set(preferences.sidebar_collapsed);
+    default_systems_view.set(preferences.default_systems_view.clone());
+    preferences::mirror_to_storage(preferences);
+    set_root_attr("data-density", &preferences.density);
+}
+
 /// Top-level application layout wrapping all views.
 ///
 /// Provides the sidebar navigation and main content area.
@@ -84,17 +127,13 @@ pub fn AppShell() -> Element {
     let current_route = use_route::<Route>();
     let mut app_state = use_context::<Signal<AppState>>();
     let nav = navigator();
+    let theme_signal = use_context::<Signal<crate::state::theme::UiTheme>>();
 
     // Initialize sidebar state
     let is_mobile_drawer_open = use_signal(|| false);
     let is_collapsed = use_signal(|| {
-        // Try to read from localStorage
-        let stored = web_sys::window()
-            .and_then(|w| w.local_storage().ok())
-            .flatten()
-            .and_then(|storage| storage.get_item("cf-sidebar-collapsed").ok())
-            .flatten()
-            .map(|v| v == "true");
+        let stored =
+            preferences::read_storage(preferences::SIDEBAR_COLLAPSED_KEY).map(|v| v == "true");
 
         if let Some(value) = stored {
             return value;
@@ -110,21 +149,15 @@ pub fn AppShell() -> Element {
 
     // Initialize shared UI preferences
     let density = use_signal(|| {
-        web_sys::window()
-            .and_then(|w| w.local_storage().ok())
-            .flatten()
-            .and_then(|s| s.get_item("cf.ui.density").ok())
-            .flatten()
+        preferences::read_storage(preferences::DENSITY_KEY)
             .unwrap_or_else(|| "comfortable".to_string())
     });
     let default_systems_view = use_signal(|| {
-        web_sys::window()
-            .and_then(|w| w.local_storage().ok())
-            .flatten()
-            .and_then(|s| s.get_item("crystal_forge.systems.view").ok())
-            .flatten()
+        preferences::read_storage(preferences::SYSTEMS_VIEW_KEY)
             .unwrap_or_else(|| "cards".to_string())
     });
+    let mut save_error = use_signal(|| None::<String>);
+    let mut preference_bootstrap = use_signal(|| PreferenceBootstrapState::Idle);
 
     // Provide sidebar context
     use_context_provider(|| SidebarContext {
@@ -136,6 +169,7 @@ pub fn AppShell() -> Element {
     use_context_provider(|| PreferencesContext {
         density,
         default_systems_view,
+        save_error,
     });
 
     let breadcrumb_override = use_signal(|| None::<(String, String)>);
@@ -173,6 +207,82 @@ pub fn AppShell() -> Element {
         auth_context = Some(mock);
     }
 
+    let auth_loaded = matches!(auth_fetch_state, AuthFetchState::Loaded);
+    let is_authenticated = auth::is_authenticated(&auth_context);
+    let mock_auth_enabled = ui_check_mock_auth_enabled();
+
+    use_effect(move || {
+        if mock_auth_enabled {
+            if preference_bootstrap() != PreferenceBootstrapState::Loaded {
+                preference_bootstrap.set(PreferenceBootstrapState::Loaded);
+            }
+            return;
+        }
+
+        if !auth_loaded || !is_authenticated {
+            if preference_bootstrap() != PreferenceBootstrapState::Idle {
+                preference_bootstrap.set(PreferenceBootstrapState::Idle);
+            }
+            return;
+        }
+
+        if preference_bootstrap() != PreferenceBootstrapState::Idle {
+            return;
+        }
+
+        preference_bootstrap.set(PreferenceBootstrapState::Loading);
+        spawn(async move {
+            match fetch_user_preferences().await {
+                Ok(response) => {
+                    let preferences = if let Some(preferences) = response.preferences {
+                        Ok(preferences)
+                    } else {
+                        let legacy = preferences::legacy_snapshot_with_current_defaults(
+                            theme_signal(),
+                            &density(),
+                            is_collapsed(),
+                            &default_systems_view(),
+                        );
+                        let import = preferences::import_request(&legacy);
+                        update_user_preferences(&import).await.and_then(|response| {
+                            response.preferences.ok_or_else(|| {
+                                crate::api::client::ApiClientError::Deserialize(
+                                    "preference import returned no preferences".to_string(),
+                                )
+                            })
+                        })
+                    };
+
+                    match preferences {
+                        Ok(preferences) => {
+                            apply_loaded_preferences(
+                                &preferences,
+                                theme_signal,
+                                density,
+                                is_collapsed,
+                                default_systems_view,
+                            );
+                            save_error.set(None);
+                            preference_bootstrap.set(PreferenceBootstrapState::Loaded);
+                        }
+                        Err(err) => {
+                            save_error.set(Some(format!(
+                                "Could not initialize account preferences: {err}"
+                            )));
+                            preference_bootstrap.set(PreferenceBootstrapState::Error);
+                        }
+                    }
+                }
+                Err(err) => {
+                    save_error.set(Some(format!(
+                        "Could not initialize account preferences: {err}"
+                    )));
+                    preference_bootstrap.set(PreferenceBootstrapState::Error);
+                }
+            }
+        });
+    });
+
     // Handle auth fetch states
     match auth_fetch_state {
         AuthFetchState::Loading => {
@@ -208,7 +318,7 @@ pub fn AppShell() -> Element {
         }
         AuthFetchState::Loaded => {
             // Auth loaded - check if authenticated
-            if !auth::is_authenticated(&auth_context) {
+            if !is_authenticated {
                 nav.push("/login");
                 return rsx! {
                     div {
@@ -219,6 +329,41 @@ pub fn AppShell() -> Element {
                         }
                     }
                 };
+            }
+
+            match preference_bootstrap() {
+                PreferenceBootstrapState::Loaded => {}
+                PreferenceBootstrapState::Error => {
+                    return rsx! {
+                        div {
+                            class: "min-h-screen flex items-center justify-center {theme::surface::PAGE_BG}",
+                            div {
+                                class: "card max-w-lg p-6 space-y-3",
+                                h2 { class: "text-lg font-semibold", "Could not load account preferences" }
+                                if let Some(error) = save_error() {
+                                    p { class: "text-sm text-red-300", "{error}" }
+                                }
+                                button {
+                                    class: "btn btn-primary focus-ring",
+                                    onclick: move |_| preference_bootstrap.set(PreferenceBootstrapState::Idle),
+                                    "Retry"
+                                }
+                            }
+                        }
+                    };
+                }
+                PreferenceBootstrapState::Idle | PreferenceBootstrapState::Loading => {
+                    return rsx! {
+                        div {
+                            class: "min-h-screen flex items-center justify-center {theme::surface::PAGE_BG}",
+                            div {
+                                class: "text-center",
+                                div { class: "animate-spin rounded-full h-12 w-12 border-b-2 border-violet-500 mx-auto mb-4" }
+                                p { class: "{theme::text::SECONDARY}", "Loading account preferences..." }
+                            }
+                        }
+                    };
+                }
             }
         }
     }
@@ -390,6 +535,18 @@ pub fn AppShell() -> Element {
                 div {
                     class: "main",
                     TopBar { title: current_route.title() }
+                    if let Some(error) = save_error() {
+                        div {
+                            class: "px-6 py-3 border-b border-red-500/30 bg-red-950/30",
+                            AlertBanner {
+                                severity: AlertSeverity::Warning,
+                                message: error,
+                                action_label: None,
+                                action_url: None,
+                                on_dismiss: Some(EventHandler::new(move |_| save_error.set(None))),
+                            }
+                        }
+                    }
                     if show_health_bar {
                         if let Some(ref msg) = health_banner_msg {
                             div {

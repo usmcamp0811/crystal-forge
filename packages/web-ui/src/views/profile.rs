@@ -3,30 +3,13 @@
 use dioxus::prelude::*;
 
 use crate::api::client::logout;
-use crate::api::models::{AuthMode, Role};
+use crate::api::models::{AuthMode, Role, UpdateUserPreferences};
 use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
 use crate::components::{Icon, IconName};
 use crate::routes::Route;
 use crate::state::app_state::AppState;
+use crate::state::preferences::{self, save_update};
 use crate::state::theme;
-
-// Storage keys matching existing application preferences
-const DENSITY_KEY: &str = "cf.ui.density";
-const SYSTEMS_VIEW_KEY: &str = "crystal_forge.systems.view";
-const SIDEBAR_COLLAPSED_KEY: &str = "cf-sidebar-collapsed";
-
-/// Helper to store preference in localStorage.
-#[cfg(target_arch = "wasm32")]
-fn store_pref(key: &str, value: &str) {
-    if let Some(window) = web_sys::window() {
-        if let Ok(Some(storage)) = window.local_storage() {
-            let _ = storage.set_item(key, value);
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn store_pref(_key: &str, _value: &str) {}
 
 #[component]
 pub fn ProfileView() -> Element {
@@ -45,6 +28,7 @@ pub fn ProfileView() -> Element {
     let prefs_ctx = use_context::<PreferencesContext>();
     let mut density = prefs_ctx.density;
     let mut default_view = prefs_ctx.default_systems_view;
+    let save_error = prefs_ctx.save_error;
     let mut logout_error = use_signal(|| None::<String>);
 
     // Only display identity values supplied by the authenticated context.
@@ -218,8 +202,14 @@ pub fn ProfileView() -> Element {
                             value: theme_pref(),
                             options: vec![theme::UiTheme::Dark, theme::UiTheme::Light],
                             on_change: move |new_theme| {
-                                // Only set the signal - root effect handles apply & persist
                                 theme_pref.set(new_theme);
+                                save_update(
+                                    UpdateUserPreferences {
+                                        theme: Some(preferences::theme_to_preference(new_theme)),
+                                        ..UpdateUserPreferences::default()
+                                    },
+                                    save_error,
+                                );
                             },
                         }
                     }
@@ -232,8 +222,14 @@ pub fn ProfileView() -> Element {
                             options: vec![("comfortable", "Comfort"), ("compact", "Compact")],
                             on_change: move |value: String| {
                                 density.set(value.clone());
-                                store_pref(DENSITY_KEY, &value);
-                                // Note: set_root_attr handled by AppShell use_effect
+                                preferences::write_storage(preferences::DENSITY_KEY, &value);
+                                save_update(
+                                    UpdateUserPreferences {
+                                        density: Some(preferences::density_from_storage(Some(&value))),
+                                        ..UpdateUserPreferences::default()
+                                    },
+                                    save_error,
+                                );
                             },
                         }
                     }
@@ -247,7 +243,17 @@ pub fn ProfileView() -> Element {
                             on_change: move |value: String| {
                                 let collapsed = value == "rail";
                                 is_collapsed.set(collapsed);
-                                store_pref(SIDEBAR_COLLAPSED_KEY, if collapsed { "true" } else { "false" });
+                                preferences::write_storage(
+                                    preferences::SIDEBAR_COLLAPSED_KEY,
+                                    if collapsed { "true" } else { "false" },
+                                );
+                                save_update(
+                                    UpdateUserPreferences {
+                                        sidebar_collapsed: Some(collapsed),
+                                        ..UpdateUserPreferences::default()
+                                    },
+                                    save_error,
+                                );
                             },
                         }
                     }
@@ -260,8 +266,22 @@ pub fn ProfileView() -> Element {
                             options: vec![("cards", "Cards"), ("table", "Table")],
                             on_change: move |value: String| {
                                 default_view.set(value.clone());
-                                store_pref(SYSTEMS_VIEW_KEY, &value);
+                                preferences::write_storage(preferences::SYSTEMS_VIEW_KEY, &value);
+                                save_update(
+                                    UpdateUserPreferences {
+                                        default_systems_view: Some(preferences::systems_view_from_storage(Some(&value))),
+                                        ..UpdateUserPreferences::default()
+                                    },
+                                    save_error,
+                                );
                             },
+                        }
+                    }
+                    if let Some(error) = save_error() {
+                        div {
+                            class: "help",
+                            style: "color: var(--cf-critical); margin: 8px 18px 14px;",
+                            "{error}"
                         }
                     }
                 }

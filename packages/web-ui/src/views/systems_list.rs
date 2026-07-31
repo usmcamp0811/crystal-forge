@@ -13,7 +13,7 @@ use crate::alerts::{
 use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
     DeploymentStatus, HealthStatus, SystemDetail, SystemHistoryEntry, SystemSummary,
-    SystemsListParams,
+    SystemsListParams, UpdateUserPreferences,
 };
 use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::filters::ViewMode;
@@ -38,6 +38,7 @@ use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
+use crate::state::preferences::{self, save_update};
 use crate::systems::adapter::{
     create_system_via_api, deactivate_system_via_api, fallback_flake_names,
     load_flake_context_with_fallback, load_flake_names_with_fallback,
@@ -68,15 +69,6 @@ use systems_list_helpers::{
     normalize_policy, prefers_view_from_query, remove_system_by_id, systems_missing_flake_count,
     systems_missing_heartbeat_count, unique_environments, update_key_for_system,
 };
-
-fn store_pref(key: &str, value: &str) {
-    if let Some(storage) = web_sys::window()
-        .and_then(|w| w.local_storage().ok())
-        .flatten()
-    {
-        let _ = storage.set_item(key, value);
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 struct ActivityRow {
@@ -146,6 +138,7 @@ pub fn SystemsListView() -> Element {
     let prefs_ctx = use_context::<PreferencesContext>();
     let mut default_view = prefs_ctx.default_systems_view;
     let mut density = prefs_ctx.density;
+    let save_error = prefs_ctx.save_error;
 
     let query_view = prefers_view_from_query();
     let container_id = use_memo(|| format!("systems-filters-{}", uuid::Uuid::new_v4()));
@@ -155,7 +148,16 @@ pub fn SystemsListView() -> Element {
         if let Some(mode) = query_view {
             let value = mode.as_storage().to_string();
             default_view.set(value.clone());
-            store_pref("crystal_forge.systems.view", &value);
+            preferences::write_storage(preferences::SYSTEMS_VIEW_KEY, &value);
+            save_update(
+                UpdateUserPreferences {
+                    default_systems_view: Some(preferences::systems_view_from_storage(Some(
+                        &value,
+                    ))),
+                    ..UpdateUserPreferences::default()
+                },
+                save_error,
+            );
         }
     });
 
@@ -775,8 +777,16 @@ pub fn SystemsListView() -> Element {
                         button {
                             class: if view_mode() == ViewMode::Cards { "active" } else { "" },
                             onclick: move |_| {
-                                default_view.set("cards".to_string());
-                                store_pref("crystal_forge.systems.view", "cards");
+                                let value = "cards".to_string();
+                                default_view.set(value.clone());
+                                preferences::write_storage(preferences::SYSTEMS_VIEW_KEY, &value);
+                                save_update(
+                                    UpdateUserPreferences {
+                                        default_systems_view: Some(preferences::systems_view_from_storage(Some(&value))),
+                                        ..UpdateUserPreferences::default()
+                                    },
+                                    save_error,
+                                );
                             },
                             svg {
                                 class: "w-3 h-3",
@@ -794,8 +804,16 @@ pub fn SystemsListView() -> Element {
                         button {
                             class: if view_mode() == ViewMode::Table { "active" } else { "" },
                             onclick: move |_| {
-                                default_view.set("table".to_string());
-                                store_pref("crystal_forge.systems.view", "table");
+                                let value = "table".to_string();
+                                default_view.set(value.clone());
+                                preferences::write_storage(preferences::SYSTEMS_VIEW_KEY, &value);
+                                save_update(
+                                    UpdateUserPreferences {
+                                        default_systems_view: Some(preferences::systems_view_from_storage(Some(&value))),
+                                        ..UpdateUserPreferences::default()
+                                    },
+                                    save_error,
+                                );
                             },
                             svg {
                                 class: "w-3 h-3",
