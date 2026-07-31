@@ -441,7 +441,13 @@ pub fn BuildsView() -> Element {
 
     use_effect(move || {
         if let Some(Ok(page_resp)) = &*recent_builds.read() {
-            build_history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
+            // Subscribe to NAV_BADGES so this effect re-runs when the sidebar
+            // poll fills in `observed_at`.  On first load, `recent_builds` often
+            // resolves before the first badge poll completes, leaving the cursor
+            // as `None` and silently skipping the ack.  Reading via `.read()`
+            // (not `read_unchecked()`) registers the reactive dependency so
+            // Dioxus re-runs this effect when the cursor later becomes available.
+            build_history_ack_cursor.set(NAV_BADGES.read().observed_at.clone());
             let mapped = page_resp
                 .items
                 .iter()
