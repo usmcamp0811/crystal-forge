@@ -45,6 +45,7 @@ pub fn ProfileView() -> Element {
     let prefs_ctx = use_context::<PreferencesContext>();
     let mut density = prefs_ctx.density;
     let mut default_view = prefs_ctx.default_systems_view;
+    let mut logout_error = use_signal(|| None::<String>);
 
     // Only display identity values supplied by the authenticated context.
     let user_name = auth_context
@@ -179,20 +180,20 @@ pub fn ProfileView() -> Element {
                                         drop(state);
                                         nav.replace(Route::LoginView {});
                                     }
-                                    Err(_e) => {
-                                        // TODO: Display error to user instead of silently failing
-                                        #[cfg(target_arch = "wasm32")]
-                                        {
-                                            if let Some(console) = web_sys::window().and_then(|w| Some(w.console())) {
-                                                console.error_1(&"Logout failed".into());
-                                            }
-                                        }
-                                    }
+                                    Err(_) => logout_error
+                                        .set(Some("Unable to sign out. Please try again.".to_string())),
                                 }
                             });
                         },
                         Icon { name: IconName::X, size: 11 }
                         " Sign out"
+                    }
+                    if let Some(error) = logout_error() {
+                        div {
+                            class: "help",
+                            style: "color: var(--cf-critical); max-width: 180px; text-align: right;",
+                            "{error}"
+                        }
                     }
                 }
             }
