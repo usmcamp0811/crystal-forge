@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-07-31 16:05'
+updated_date: '2026-07-31 16:07'
 labels:
   - web-ui
   - design-parity
@@ -118,6 +118,8 @@ The view follows `docs/design/CrystalForge/components/ProfileView.jsx` for appli
 
 <!-- SECTION:NOTES:BEGIN -->
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/312
+Pipeline: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2722327841
+SHA: 08b17b9b971e6c8a7e22ee7e87257316ffa64835
 
 Current implementation:
 - `/profile` is reachable from desktop and mobile sidebar user sections.
@@ -129,8 +131,11 @@ Current implementation:
 
 Review fixes are in commits 0219c523, 9bcb1b00, 5bd52b31, 873e49f6, and 08b17b9b. The branch was rebuilt from origin/dev, so the MR contains only TASK-412 work.
 
-Verification:
+Local verification:
 - `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml` passed.
 - `nix develop -c bash -c 'cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed, with pre-existing repository warnings.
 - `nix build .#checks.x86_64-linux.web-ui --no-link` was started multiple times but did not complete locally: the Nix VM build exceeded the command timeout. Do not treat it as passed.
+
+CI verification:
+- Pipeline running as of last check; `flake-check: [web-ui]` pending.
 <!-- SECTION:NOTES:END -->
