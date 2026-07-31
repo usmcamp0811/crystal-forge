@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-07-31 16:07'
+updated_date: '2026-07-31 16:31'
 labels:
   - web-ui
   - design-parity
@@ -134,8 +134,9 @@ Review fixes are in commits 0219c523, 9bcb1b00, 5bd52b31, 873e49f6, and 08b17b9b
 Local verification:
 - `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml` passed.
 - `nix develop -c bash -c 'cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed, with pre-existing repository warnings.
-- `nix build .#checks.x86_64-linux.web-ui --no-link` was started multiple times but did not complete locally: the Nix VM build exceeded the command timeout. Do not treat it as passed.
+- `nix build .#checks.x86_64-linux.web-ui --no-link` was started multiple times but did not complete locally: the Nix VM build exceeded the command timeout.
 
 CI verification:
-- Pipeline running as of last check; `flake-check: [web-ui]` pending.
+- Pipeline 2722327841 succeeded at SHA 08b17b9b971e6c8a7e22ee7e87257316ffa64835.
+- All jobs passed, including `flake-check: [web-ui]`.
 <!-- SECTION:NOTES:END -->
