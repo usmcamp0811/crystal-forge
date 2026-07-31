@@ -310,7 +310,11 @@ pub fn AppShell() -> Element {
     // backdrops) so they sit between the clearance banners rather than behind them.
     let top_class_height: u8 = if classification_enabled { 24 } else { 0 };
     let bot_class_height = top_class_height;
-    let dev_height: u8 = if dev_mode_enabled { DEV_MODE_BANNER_HEIGHT_PX } else { 0 };
+    let dev_height: u8 = if dev_mode_enabled {
+        DEV_MODE_BANNER_HEIGHT_PX
+    } else {
+        0
+    };
     let top_banner_offset = format!("{}px", dev_height + top_class_height);
     let bottom_banner_offset = format!("{}px", dev_height + bot_class_height);
 

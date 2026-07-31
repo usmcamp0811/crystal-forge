@@ -111,7 +111,8 @@ pub fn SidebarNav() -> Element {
                 }
                 if !badge_recently_zeroed("systems", GRACE) {
                     badges.systems_attention = fresh.systems_attention;
-                    badges.systems_occurrence_ids = std::mem::take(&mut fresh.systems_occurrence_ids);
+                    badges.systems_occurrence_ids =
+                        std::mem::take(&mut fresh.systems_occurrence_ids);
                 }
                 if !badge_recently_zeroed("environments", GRACE) {
                     badges.environments_attention = fresh.environments_attention;

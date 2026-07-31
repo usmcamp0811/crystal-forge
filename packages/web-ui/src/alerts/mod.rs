@@ -219,7 +219,10 @@ pub fn occurrence_ids_for_rendered_subjects(
 pub fn acknowledge(view_key: &str) {
     let (observed_at, occurrence_ids) = {
         let badges = NAV_BADGES.read_unchecked();
-        (badges.observed_at.clone(), occurrence_ids_for_category(&badges, view_key))
+        (
+            badges.observed_at.clone(),
+            occurrence_ids_for_category(&badges, view_key),
+        )
     };
     let Some(observed_at) = observed_at else {
         // New clients must not acknowledge without a server cursor. Otherwise
@@ -278,7 +281,8 @@ pub async fn acknowledge_with_cursor_and_ids_async(
     }
     zero_nav_badge_field(view_key);
 
-    let result = acknowledge_navigation_category(view_key, observed_at.as_str(), &occurrence_ids).await;
+    let result =
+        acknowledge_navigation_category(view_key, observed_at.as_str(), &occurrence_ids).await;
 
     let success = result.is_ok();
     {
@@ -306,7 +310,11 @@ pub async fn acknowledge_with_cursor_and_ids_async(
 
 /// Acknowledge using a view-owned cursor and a list of server occurrence IDs.
 /// The IDs are the exact canonical occurrences the rendered view can dismiss.
-pub fn acknowledge_with_cursor_and_ids(view_key: &str, observed_at: String, occurrence_ids: Vec<String>) {
+pub fn acknowledge_with_cursor_and_ids(
+    view_key: &str,
+    observed_at: String,
+    occurrence_ids: Vec<String>,
+) {
     let view_key = view_key.to_string();
     spawn(async move {
         let _ = acknowledge_with_cursor_and_ids_async(&view_key, observed_at, occurrence_ids).await;
@@ -469,9 +477,7 @@ pub fn dismiss_attention_item(view_key: &str, subject_id: &str, occurrence_id: O
                 // and in-memory entry so the row reappears on next render.
                 let mut state = ALERT_STATE.write();
                 state.dismissed_items.remove(&local_key_for_revert);
-                if let Ok(mut stored) =
-                    LocalStorage::get::<Vec<String>>(&storage_key_for_revert)
-                {
+                if let Ok(mut stored) = LocalStorage::get::<Vec<String>>(&storage_key_for_revert) {
                     stored.retain(|k| k != &local_key_for_revert);
                     let _ = LocalStorage::set(&storage_key_for_revert, stored);
                 }
