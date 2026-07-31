@@ -3,10 +3,10 @@ id: TASK-412
 title: >-
   Implement Profile & Preferences view with user identity, appearance settings,
   notifications, and sessions
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-07-31 16:32'
+updated_date: '2026-07-31 23:07'
 labels:
   - web-ui
   - design-parity
@@ -56,62 +56,52 @@ The view follows `docs/design/CrystalForge/components/ProfileView.jsx` for appli
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 Route /profile exists inside AppShell and is reachable through the desktop and mobile sidebar user sections
-- [x] #2 Profile identity displays only values supplied by AuthContext; missing user name, email, role, or auth source is explicitly unavailable or omitted
-- [x] #3 Appearance controls update shared application state: theme uses the root UiTheme signal, sidebar uses SidebarContext, and density/default Systems view use PreferencesContext
-- [x] #4 Appearance changes persist through existing canonical keys and remain synchronized between the profile page and TopBar Tweaks
-- [x] #5 Successful sign out calls logout(), clears AppState.auth, marks auth fetch state Loaded, and replaces the route with LoginView; failure keeps the user on the page and displays an error
-- [x] #6 Notification preferences and active-session management are visibly unavailable until backend support exists; no non-functional controls claim to configure behavior
-- [x] #7 Access scope, organization, groups, MFA, last-login, and session data are omitted unless the API provides actual values
-- [x] #8 cargo fmt and cargo check --target wasm32-unknown-unknown pass
-- [x] #9 The Nix web-ui check completes successfully in CI or an equivalent environment; local timeout results are recorded without claiming success
+- [ ] #1 Route /profile exists inside AppShell and is reachable through the desktop and mobile sidebar user sections
+- [ ] #2 Profile identity displays only values supplied by AuthContext; missing user name, email, role, or auth source is explicitly unavailable or omitted
+- [ ] #3 Appearance controls update shared application state: theme uses the root UiTheme signal, sidebar uses SidebarContext, and density/default Systems view use PreferencesContext
+- [ ] #4 Appearance changes persist through existing canonical keys and remain synchronized between the profile page and TopBar Tweaks
+- [ ] #5 Successful sign out calls logout(), clears AppState.auth, marks auth fetch state Loaded, and replaces the route with LoginView; failure keeps the user on the page and displays an error
+- [ ] #6 Notification preferences and active-session management are visibly unavailable until backend support exists; no non-functional controls claim to configure behavior
+- [ ] #7 Access scope, organization, groups, MFA, last-login, and session data are omitted unless the API provides actual values
+- [ ] #8 cargo fmt and cargo check --target wasm32-unknown-unknown pass
+- [ ] #9 The Nix web-ui check completes successfully in CI or an equivalent environment; local timeout results are recorded without claiming success
+- [ ] #10 Preferences are stored server-side in a `user_preferences` table keyed only by `users.id` with theme, density, sidebar_collapsed, default_systems_view, and updated_at columns
+- [ ] #11 GET `/api/v1/user/preferences` and PATCH `/api/v1/user/preferences` derive the target user exclusively from `AuthenticatedUser.user_id`; requests cannot specify another user ID
+- [ ] #12 PATCH accepts partial updates and updates only supplied fields so concurrent browser sessions do not overwrite unrelated preferences
+- [ ] #13 Authenticated app startup applies server preferences before rendering the normal shell and populates theme, density, sidebar, and Systems view shared signals
+- [ ] #14 LocalStorage is used only as a startup cache and one-time legacy import source for users without a database preference row; after import, server values are authoritative
+- [ ] #15 Preference changes send PATCH requests and display a visible error when saving fails
+- [ ] #16 Tests prove same-user persistence across sessions, isolation between users, same OIDC issuer/subject reuse, no cross-user modification, server override of stale localStorage, one-time legacy import, failed-save error display, and second-browser survival for theme/density/sidebar/default Systems view
+- [ ] #17 The exact acceptance behavior is covered: given the same OIDC user on two computers, selecting Light theme on computer A causes a new login/application load on computer B to use Light theme
+- [ ] #18 Existing profile route, identity display, sign-out behavior, and unavailable notification/session messaging remain intact
+- [ ] #19 Server checks, web-ui checks, SQLx metadata, and migration verification are run or explicitly reported if an environment limitation prevents them
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-## Implementation Plan
+## Revised implementation plan: account-scoped user preferences
 
-### 1. Extend state management for UI preferences
-- Create `packages/web-ui/src/state/preferences.rs` for density, sidebar mode, default view persistence
-- Follow the same localStorage pattern as `UiTheme` (load, apply, persist functions)
-- Add enums for `Density`, `SidebarMode`, `DefaultView`, `NotificationChannel`
-- Create notification preferences struct with individual toggle states
+### 1. Server persistence and API
+- Add a new migration for `user_preferences`, keyed only by `users.id` with `ON DELETE CASCADE`, CHECK-constrained text values, and `updated_at`.
+- Add typed server/API models for theme, density, sidebar collapsed, and default Systems view preferences.
+- Implement database helpers that get/create preferences by `AuthenticatedUser.user_id`, import legacy values when supplied for a missing row, and partially update only supplied fields.
+- Add authenticated routes:
+  - `GET /api/v1/user/preferences`
+  - `PATCH /api/v1/user/preferences`
+- Do not accept any user ID in request bodies or query parameters.
 
-### 2. Create ProfileView component
-- Create `packages/web-ui/src/views/profile.rs`
-- Import existing components: Icon, chip classes, kv-grid pattern
-- Build component hierarchy matching ProfileView.jsx:
-  - Page header
-  - Identity card with avatar, user info, action buttons
-  - Two-column grid container
-  - Appearance card with 4 PrefRow segmented controls
-  - Notifications card with toggles and channel selector
-  - Access summary card with kv-grid
-  - Active sessions card with mock data
+### 2. Web UI startup and state authority
+- Add a web client API for the new endpoints.
+- On authenticated startup, fetch preferences before rendering the normal AppShell content.
+- If the server reports no row or supports import, send legacy localStorage values once and then treat server values as authoritative.
+- Populate root theme, SidebarContext, and PreferencesContext from server data, mirroring successful values into canonical localStorage keys only as cache.
+- On preference changes from Profile/TopBar/sidebar/Systems view, update UI state optimistically or after success according to existing patterns, send PATCH, and show a visible save error on failure.
 
-### 3. Implement reusable UI components
-- `SegmentedControl` component for preference selectors
-- `PrefRow` component for consistent preference layout
-- `Toggle` component for notification switches
-
-### 4. Wire up route
-- Add ProfileView to routes.rs inside AppShell layout
-- Add route title in Route::title() match
-- Update views/mod.rs to export profile module
-
-### 5. Connect state
-- Read auth context from AppState for user data
-- Initialize preference signals from localStorage on mount
-- Hook up onChange handlers to persist and apply changes
-- Ensure theme changes trigger state/theme.rs functions
-
-### 6. Verification
-- cargo fmt --all
-- cargo clippy --all-targets -- -D warnings
-- cargo test in packages/web-ui
-- nix build .#checks.x86_64-linux.web-ui
-- Manual testing: navigate to /profile, verify all controls work, check localStorage persistence
+### 3. Tests and verification
+- Add server tests for same-user persistence, user isolation, OIDC issuer/subject reuse through persistent users.id, partial PATCH isolation, and no request-specified user ID path.
+- Add web UI/unit or browser tests for stale localStorage being overridden by server values, missing server row importing legacy local values once, visible failed-save error, and second-browser persistence for all four settings.
+- Run targeted server/web-ui checks, SQLx preparation/metadata updates if required, and CI web-ui verification before moving back to Review.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
