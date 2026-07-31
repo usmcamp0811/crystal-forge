@@ -3,10 +3,10 @@ id: TASK-412
 title: >-
   Implement Profile & Preferences view with user identity, appearance settings,
   notifications, and sessions
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-07-31 14:00'
+updated_date: '2026-07-31 14:08'
 labels:
   - web-ui
   - design-parity
@@ -122,4 +122,8 @@ The view must match the design reference (`docs/design/CrystalForge/components/P
 Implementation complete. Created preferences state module with Density, SidebarMode, DefaultView, and NotificationPreferences types, all with localStorage persistence. Created ProfileView component with identity card, appearance settings, notifications, access summary, and sessions. Added reusable SegmentedControl, PrefRow, and Toggle components. Wired up /profile route. All layout, typography, spacing, and styling matches ProfileView.jsx design exactly. Theme changes apply immediately via existing theme module. Notification and appearance prefs persist to localStorage with correct defaults. Integrated with AppState auth context for user data.
 
 Files: packages/web-ui/src/state/preferences.rs (new), packages/web-ui/src/views/profile.rs (new), packages/web-ui/src/state/mod.rs, packages/web-ui/src/views/mod.rs, packages/web-ui/src/routes.rs, plus automatic fmt in alerts/app_shell/sidebar/cves.
+
+MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/312
+
+CI will run to generate screenshots and validate the web-ui checks. Screenshots will be appended to the MR after first CI run completes.
 <!-- SECTION:NOTES:END -->
