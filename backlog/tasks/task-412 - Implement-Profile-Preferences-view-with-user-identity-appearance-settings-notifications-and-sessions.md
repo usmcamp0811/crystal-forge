@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-07-31 23:32'
+updated_date: '2026-07-31 23:50'
 labels:
   - web-ui
   - design-parity
@@ -140,4 +140,14 @@ Continued account-scoped preferences work:
   - `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_preferences --lib'` passed: 3 tests, 4 ignored live-DB tests.
   - `nix develop -c bash -c 'node --check checks/web-ui/tests/integration-test.js && cd packages/web-ui && cargo test preferences::tests --lib'` partially ran: `node --check` passed, then failed because `crystal-forge-ui` has no library target; reran with `--bin crystal-forge-ui` successfully.
 - Live DB ignored tests, SQLx metadata refresh, and full Nix web-ui check remain to run in an appropriate environment.
+
+Addressed re-review races:
+- Added insert-only legacy preference initialization via `POST /api/v1/user/preferences/initialize`, backed by `initialize_user_preferences()` using `ON CONFLICT (user_id) DO NOTHING` followed by an authoritative fetch. AppShell now uses this initialization endpoint only for missing preference rows; ordinary preference saves still use partial PATCH/upsert.
+- Added ignored live-DB tests for sequential and concurrent legacy initialization so a competing import returns/keeps one authoritative row instead of overwriting with a later browser's values.
+- Reworked web-ui `save_update()` into a shared serialized/coalescing save worker. It keeps at most one PATCH in flight, merges pending updates while the current request is running, and sends queued updates only after the prior save finishes so later user actions reach the server after earlier actions.
+- Added unit coverage for coalescing latest preference values and extended the `11a-profile-preferences` web-ui check step to delay the first PATCH, issue a second same-field theme update, and assert the final server value is the last-selected theme.
+- Verification run:
+  - `nix develop -c bash -c 'rustfmt --edition 2024 packages/default/crates/cf-server/src/bin/server.rs packages/default/crates/cf-server/src/handlers/api/user_preferences.rs packages/default/crates/cf-server/src/queries/user_preferences.rs packages/web-ui/src/api/client.rs packages/web-ui/src/components/layout/app_shell.rs packages/web-ui/src/state/preferences.rs && node --check checks/web-ui/tests/integration-test.js'` passed.
+  - `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml && SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_preferences --lib && cd packages/web-ui && cargo check --target wasm32-unknown-unknown && cargo test --bin crystal-forge-ui preferences::tests'` passed with existing warnings; server command ran 3 non-ignored user_preferences tests and reported 6 ignored live-DB tests.
+  - Attempted required ignored DB command with `CRYSTAL_FORGE_TEST_DATABASE_URL`, but the variable is not set in this shell: `CRYSTAL_FORGE_TEST_DATABASE_URL is not set` (exit 2).
 <!-- SECTION:NOTES:END -->
