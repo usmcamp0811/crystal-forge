@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-07-31 16:31'
+updated_date: '2026-07-31 16:32'
 labels:
   - web-ui
   - design-parity
@@ -56,15 +56,15 @@ The view follows `docs/design/CrystalForge/components/ProfileView.jsx` for appli
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Route /profile exists inside AppShell and is reachable through the desktop and mobile sidebar user sections
-- [ ] #2 Profile identity displays only values supplied by AuthContext; missing user name, email, role, or auth source is explicitly unavailable or omitted
-- [ ] #3 Appearance controls update shared application state: theme uses the root UiTheme signal, sidebar uses SidebarContext, and density/default Systems view use PreferencesContext
-- [ ] #4 Appearance changes persist through existing canonical keys and remain synchronized between the profile page and TopBar Tweaks
-- [ ] #5 Successful sign out calls logout(), clears AppState.auth, marks auth fetch state Loaded, and replaces the route with LoginView; failure keeps the user on the page and displays an error
-- [ ] #6 Notification preferences and active-session management are visibly unavailable until backend support exists; no non-functional controls claim to configure behavior
-- [ ] #7 Access scope, organization, groups, MFA, last-login, and session data are omitted unless the API provides actual values
-- [ ] #8 cargo fmt and cargo check --target wasm32-unknown-unknown pass
-- [ ] #9 The Nix web-ui check completes successfully in CI or an equivalent environment; local timeout results are recorded without claiming success
+- [x] #1 Route /profile exists inside AppShell and is reachable through the desktop and mobile sidebar user sections
+- [x] #2 Profile identity displays only values supplied by AuthContext; missing user name, email, role, or auth source is explicitly unavailable or omitted
+- [x] #3 Appearance controls update shared application state: theme uses the root UiTheme signal, sidebar uses SidebarContext, and density/default Systems view use PreferencesContext
+- [x] #4 Appearance changes persist through existing canonical keys and remain synchronized between the profile page and TopBar Tweaks
+- [x] #5 Successful sign out calls logout(), clears AppState.auth, marks auth fetch state Loaded, and replaces the route with LoginView; failure keeps the user on the page and displays an error
+- [x] #6 Notification preferences and active-session management are visibly unavailable until backend support exists; no non-functional controls claim to configure behavior
+- [x] #7 Access scope, organization, groups, MFA, last-login, and session data are omitted unless the API provides actual values
+- [x] #8 cargo fmt and cargo check --target wasm32-unknown-unknown pass
+- [x] #9 The Nix web-ui check completes successfully in CI or an equivalent environment; local timeout results are recorded without claiming success
 <!-- AC:END -->
 
 ## Implementation Plan
