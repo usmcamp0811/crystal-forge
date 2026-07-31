@@ -536,8 +536,10 @@ pub fn SidebarNav() -> Element {
             }
 
             // User profile section at bottom
-            div {
+            Link {
+                to: Route::ProfileView {},
                 class: "sidebar-user",
+                style: "cursor: pointer;",
                 div {
                     class: "user-avatar",
                     {user_initials}
@@ -901,8 +903,11 @@ pub fn MobileDrawer() -> Element {
             }
 
             // User profile section at bottom
-            div {
+            Link {
+                to: Route::ProfileView {},
                 class: "sidebar-user",
+                style: "cursor: pointer;",
+                onclick: move |_| is_mobile_drawer_open.set(false),
                 div {
                     class: "user-avatar",
                     {user_initials}

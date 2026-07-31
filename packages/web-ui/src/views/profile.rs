@@ -2,10 +2,18 @@
 
 use dioxus::prelude::*;
 
+use crate::api::client::logout;
 use crate::api::models::{AuthMode, Role};
+use crate::components::layout::sidebar::SidebarContext;
 use crate::components::{Icon, IconName};
+use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::{preferences, theme};
+
+// Storage keys matching existing application preferences
+const DENSITY_KEY: &str = "cf.ui.density";
+const SYSTEMS_VIEW_KEY: &str = "crystal_forge.systems.view";
+const SIDEBAR_COLLAPSED_KEY: &str = "cf-sidebar-collapsed";
 
 /// Mock session data structure.
 #[derive(Clone, Debug)]
@@ -31,18 +39,75 @@ const MOCK_SESSIONS: &[Session] = &[
     },
 ];
 
+/// Helper to set root document attribute (e.g., data-density).
+#[cfg(target_arch = "wasm32")]
+fn set_root_attr(name: &str, value: &str) {
+    if let Some(window) = web_sys::window() {
+        if let Some(document) = window.document() {
+            if let Some(root) = document.document_element() {
+                let _ = root.set_attribute(name, value);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_root_attr(_name: &str, _value: &str) {}
+
+/// Helper to store preference in localStorage.
+#[cfg(target_arch = "wasm32")]
+fn store_pref(key: &str, value: &str) {
+    if let Some(window) = web_sys::window() {
+        if let Ok(Some(storage)) = window.local_storage() {
+            let _ = storage.set_item(key, value);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn store_pref(_key: &str, _value: &str) {}
+
 #[component]
 pub fn ProfileView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
     let auth_context = app_state.read().auth.clone();
+    let nav = navigator();
 
-    // Theme state (already managed globally)
-    let mut theme_pref = use_signal(|| theme::UiTheme::load());
+    // Use shared global theme signal from root
+    let mut theme_pref = use_context::<Signal<theme::UiTheme>>();
 
-    // Appearance preferences
-    let mut density = use_signal(|| preferences::Density::load());
-    let mut sidebar_mode = use_signal(|| preferences::SidebarMode::load());
-    let mut default_view = use_signal(|| preferences::DefaultView::load());
+    // Use shared sidebar context
+    let sidebar_ctx = use_context::<SidebarContext>();
+    let mut is_collapsed = sidebar_ctx.is_collapsed;
+
+    // Appearance preferences - read from existing storage keys
+    let mut density = use_signal(|| {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window() {
+                if let Ok(Some(storage)) = window.local_storage() {
+                    if let Ok(Some(value)) = storage.get_item(DENSITY_KEY) {
+                        return value;
+                    }
+                }
+            }
+        }
+        "comfortable".to_string()
+    });
+
+    let mut default_view = use_signal(|| {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window() {
+                if let Ok(Some(storage)) = window.local_storage() {
+                    if let Ok(Some(value)) = storage.get_item(SYSTEMS_VIEW_KEY) {
+                        return value;
+                    }
+                }
+            }
+        }
+        "cards".to_string()
+    });
 
     // Notification preferences
     let mut notif = use_signal(|| preferences::NotificationPreferences::load());
@@ -98,13 +163,23 @@ pub fn ProfileView() -> Element {
         })
         .unwrap_or("local");
 
-    // Mock data for OIDC groups, org, MFA
-    let mock_org = "acme-prod";
-    let mock_groups: Vec<&str> = vec!["cf-admins"];
-    let mock_groups_str = mock_groups.join(", ");
-    let mock_mfa = true;
-    let mock_joined = "Jan 2026";
-    let mock_last_login = "2m ago";
+    let is_oidc = auth_context
+        .as_ref()
+        .map(|ctx| matches!(ctx.auth_mode, AuthMode::Oidc))
+        .unwrap_or(false);
+
+    // Mock data - TODO: Replace with actual API data when available
+    let mock_org: Option<&str> = None; // Would come from OIDC claims
+    let mock_groups: Vec<&str> = vec![]; // Would come from OIDC claims
+    let mock_groups_str = if mock_groups.is_empty() {
+        String::new()
+    } else {
+        mock_groups.join(", ")
+    };
+    let mock_mfa = false; // Would come from auth context
+    let mock_environments: Vec<&str> = vec![]; // Would come from user permissions
+    let mock_joined = "Jan 2026"; // Would come from user record
+    let mock_last_login = "2m ago"; // Would come from auth context
 
     // No separate handlers needed - will use inline closures
 
@@ -156,18 +231,23 @@ pub fn ProfileView() -> Element {
                             style: "font-size: 10px;",
                             "{auth_source}"
                         }
-                        span {
-                            class: "chip chip-info",
-                            style: "font-size: 10px;",
-                            "{mock_org}"
+                        // Only show organization for OIDC when available
+                        if let Some(org) = mock_org {
+                            span {
+                                class: "chip chip-info",
+                                style: "font-size: 10px;",
+                                "{org}"
+                            }
                         }
-                        for group in mock_groups {
+                        // Only show groups when available
+                        for group in &mock_groups {
                             span {
                                 class: "chip chip-unknown mono",
                                 style: "font-size: 10px;",
                                 "{group}"
                             }
                         }
+                        // Only show MFA when actually enabled
                         if mock_mfa {
                             span {
                                 class: "chip chip-healthy",
@@ -183,11 +263,20 @@ pub fn ProfileView() -> Element {
                     style: "display: flex; flex-direction: column; gap: 6px; align-items: flex-end;",
                     button {
                         class: "btn btn-ghost focus-ring xs",
+                        disabled: true,
+                        title: "Password change not yet implemented",
                         Icon { name: IconName::Key, size: 11 }
                         " Change password"
                     }
                     button {
                         class: "btn btn-ghost focus-ring xs",
+                        onclick: move |_| {
+                            spawn(async move {
+                                let _ = logout().await;
+                                // Clear auth state and navigate to login
+                                nav.push(Route::LoginView {});
+                            });
+                        },
                         Icon { name: IconName::X, size: 11 }
                         " Sign out"
                     }
@@ -214,9 +303,8 @@ pub fn ProfileView() -> Element {
                             value: theme_pref(),
                             options: vec![theme::UiTheme::Dark, theme::UiTheme::Light],
                             on_change: move |new_theme| {
+                                // Only set the signal - root effect handles apply & persist
                                 theme_pref.set(new_theme);
-                                theme::apply(new_theme);
-                                theme::persist(new_theme);
                             },
                         }
                     }
@@ -224,12 +312,13 @@ pub fn ProfileView() -> Element {
                     PrefRow {
                         title: "Density",
                         desc: "Compact fits more rows per screen.",
-                        SegmentedControl {
+                        SegmentedControlString {
                             value: density(),
-                            options: vec![preferences::Density::Comfortable, preferences::Density::Compact],
-                            on_change: move |new_density| {
-                                density.set(new_density);
-                                new_density.persist();
+                            options: vec![("comfortable", "Comfort"), ("compact", "Compact")],
+                            on_change: move |value: String| {
+                                density.set(value.clone());
+                                store_pref(DENSITY_KEY, &value);
+                                set_root_attr("data-density", &value);
                             },
                         }
                     }
@@ -237,12 +326,13 @@ pub fn ProfileView() -> Element {
                     PrefRow {
                         title: "Sidebar",
                         desc: "Rail collapses the sidebar to icons.",
-                        SegmentedControl {
-                            value: sidebar_mode(),
-                            options: vec![preferences::SidebarMode::Full, preferences::SidebarMode::Rail],
-                            on_change: move |new_mode| {
-                                sidebar_mode.set(new_mode);
-                                new_mode.persist();
+                        SegmentedControlString {
+                            value: if is_collapsed() { "rail".to_string() } else { "full".to_string() },
+                            options: vec![("full", "Full"), ("rail", "Rail")],
+                            on_change: move |value: String| {
+                                let collapsed = value == "rail";
+                                is_collapsed.set(collapsed);
+                                store_pref(SIDEBAR_COLLAPSED_KEY, if collapsed { "true" } else { "false" });
                             },
                         }
                     }
@@ -250,12 +340,12 @@ pub fn ProfileView() -> Element {
                     PrefRow {
                         title: "Default systems view",
                         desc: "Cards or table when opening Systems.",
-                        SegmentedControl {
+                        SegmentedControlString {
                             value: default_view(),
-                            options: vec![preferences::DefaultView::Cards, preferences::DefaultView::Table],
-                            on_change: move |new_view| {
-                                default_view.set(new_view);
-                                new_view.persist();
+                            options: vec![("cards", "Cards"), ("table", "Table")],
+                            on_change: move |value: String| {
+                                default_view.set(value.clone());
+                                store_pref(SYSTEMS_VIEW_KEY, &value);
                             },
                         }
                     }
@@ -390,15 +480,31 @@ pub fn ProfileView() -> Element {
 
                         dt { "Environments" }
                         dd {
-                            span {
-                                class: "chip chip-info",
-                                style: "font-size: 10px;",
-                                "all"
+                            if mock_environments.is_empty() {
+                                span {
+                                    class: "chip chip-unknown",
+                                    style: "font-size: 10px;",
+                                    "none assigned"
+                                }
+                            } else {
+                                for env in &mock_environments {
+                                    span {
+                                        class: "chip chip-info",
+                                        style: "font-size: 10px; margin-right: 4px;",
+                                        "{env}"
+                                    }
+                                }
                             }
                         }
 
                         dt { "Auth source" }
-                        dd { "{auth_source} · {mock_groups_str}" }
+                        dd {
+                            if !mock_groups_str.is_empty() {
+                                "{auth_source} · {mock_groups_str}"
+                            } else {
+                                "{auth_source}"
+                            }
+                        }
 
                         dt { "Member since" }
                         dd { "{mock_joined}" }
@@ -407,10 +513,12 @@ pub fn ProfileView() -> Element {
                         dd { "{mock_last_login}" }
                     }
 
-                    div {
-                        class: "help",
-                        style: "margin-top: 10px;",
-                        "Role and environment scope come from your IdP groups. Contact an admin to change them."
+                    if is_oidc {
+                        div {
+                            class: "help",
+                            style: "margin-top: 10px;",
+                            "Role and environment scope come from your IdP groups. Contact an admin to change them."
+                        }
                     }
                 }
 
@@ -450,6 +558,8 @@ pub fn ProfileView() -> Element {
                                 } else {
                                     button {
                                         class: "btn btn-ghost focus-ring xs",
+                                        disabled: true,
+                                        title: "Session management not yet implemented",
                                         "Revoke"
                                     }
                                 }
@@ -460,6 +570,8 @@ pub fn ProfileView() -> Element {
                     button {
                         class: "btn btn-ghost focus-ring",
                         style: "margin-top: 12px; color: #fbbf24; border-color: rgba(251,191,36,0.3);",
+                        disabled: true,
+                        title: "Session management not yet implemented",
                         Icon { name: IconName::Warn, size: 12 }
                         " Sign out everywhere"
                     }
@@ -548,6 +660,27 @@ fn SegmentedControl<T: PreferenceValue + 'static>(
                     class: if value == opt { "active" } else { "" },
                     onclick: move |_| on_change.call(opt),
                     "{opt.label()}"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SegmentedControlString(
+    value: String,
+    options: Vec<(&'static str, &'static str)>,
+    on_change: EventHandler<String>,
+) -> Element {
+    rsx! {
+        div {
+            class: "seg",
+            style: "width: fit-content;",
+            for (opt_value, opt_label) in options {
+                button {
+                    class: if value == opt_value { "active" } else { "" },
+                    onclick: move |_| on_change.call(opt_value.to_string()),
+                    "{opt_label}"
                 }
             }
         }
