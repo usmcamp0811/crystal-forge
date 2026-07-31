@@ -68,3 +68,50 @@ The view must match the design reference (`docs/design/CrystalForge/components/P
 - [ ] #15 cargo fmt, clippy -D warnings, and cargo test pass in packages/web-ui
 - [ ] #16 nix build .#checks.x86_64-linux.web-ui passes with any required baseline updates for the new route
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation Plan
+
+### 1. Extend state management for UI preferences
+- Create `packages/web-ui/src/state/preferences.rs` for density, sidebar mode, default view persistence
+- Follow the same localStorage pattern as `UiTheme` (load, apply, persist functions)
+- Add enums for `Density`, `SidebarMode`, `DefaultView`, `NotificationChannel`
+- Create notification preferences struct with individual toggle states
+
+### 2. Create ProfileView component
+- Create `packages/web-ui/src/views/profile.rs`
+- Import existing components: Icon, chip classes, kv-grid pattern
+- Build component hierarchy matching ProfileView.jsx:
+  - Page header
+  - Identity card with avatar, user info, action buttons
+  - Two-column grid container
+  - Appearance card with 4 PrefRow segmented controls
+  - Notifications card with toggles and channel selector
+  - Access summary card with kv-grid
+  - Active sessions card with mock data
+
+### 3. Implement reusable UI components
+- `SegmentedControl` component for preference selectors
+- `PrefRow` component for consistent preference layout
+- `Toggle` component for notification switches
+
+### 4. Wire up route
+- Add ProfileView to routes.rs inside AppShell layout
+- Add route title in Route::title() match
+- Update views/mod.rs to export profile module
+
+### 5. Connect state
+- Read auth context from AppState for user data
+- Initialize preference signals from localStorage on mount
+- Hook up onChange handlers to persist and apply changes
+- Ensure theme changes trigger state/theme.rs functions
+
+### 6. Verification
+- cargo fmt --all
+- cargo clippy --all-targets -- -D warnings
+- cargo test in packages/web-ui
+- nix build .#checks.x86_64-linux.web-ui
+- Manual testing: navigate to /profile, verify all controls work, check localStorage persistence
+<!-- SECTION:PLAN:END -->
