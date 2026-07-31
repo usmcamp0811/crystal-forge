@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-07-31 15:33'
+updated_date: '2026-07-31 16:05'
 labels:
   - web-ui
   - design-parity
@@ -125,11 +125,12 @@ Current implementation:
 - Identity, role, and authentication source are derived only from AuthContext; unavailable values are omitted or labelled unavailable.
 - Sign out handles failure with an inline error and clears AppState authentication only after a successful logout.
 - Notifications and active-session management are visibly unavailable pending backend support.
+- SystemsListView now uses PreferencesContext for default Systems view and density; changes sync immediately with Profile and TopBar without polling.
 
-Review fixes are in commits 0219c523, 9bcb1b00, 5bd52b31, and 873e49f6. The branch was rebuilt from origin/dev, so the MR contains only TASK-412 work.
+Review fixes are in commits 0219c523, 9bcb1b00, 5bd52b31, 873e49f6, and 08b17b9b. The branch was rebuilt from origin/dev, so the MR contains only TASK-412 work.
 
 Verification:
 - `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml` passed.
 - `nix develop -c bash -c 'cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed, with pre-existing repository warnings.
-- `nix build .#checks.x86_64-linux.web-ui --no-link` was started twice but did not complete locally: the Nix VM build exceeded the 10-minute command timeout. Do not treat it as passed.
+- `nix build .#checks.x86_64-linux.web-ui --no-link` was started multiple times but did not complete locally: the Nix VM build exceeded the command timeout. Do not treat it as passed.
 <!-- SECTION:NOTES:END -->
