@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-07-31 04:08'
-updated_date: '2026-07-31 04:11'
+updated_date: '2026-07-31 04:12'
 labels:
   - builds
   - sidebar
@@ -63,6 +63,33 @@ This appears to be a regression or defect in the alert badge acknowledgment syst
 - [ ] #6 Manual testing on dev server confirms badge dismisses from 64 to 0 (or appropriate count) when viewing failed builds
 - [ ] #7 Verify acknowledgment works for multiple navigation flows: direct navigation, tab switching within builds view, and return navigation
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Root Cause
+
+`build_history_ack_cursor` is set once when `recent_builds` data arrives (lines 442-514 of `builds.rs`), capturing `NAV_BADGES.observed_at` at that moment. On first page load, the sidebar poll (which populates `NAV_BADGES.observed_at`) often hasn't completed before `recent_builds` resolves. Result: cursor is captured as `None`, the ack `use_effect` hits the early-return at line 581-583, and `builds_ack_sent` never becomes `true`.
+
+The sidebar poll runs every 30s and fills `NAV_BADGES.observed_at` later, but the cursor-setting `use_effect` only re-runs when `recent_builds` changes (every 5s poll), so there's a window of 0-5 seconds where the cursor stays `None`. During that window the ack is silently skipped and `builds_ack_sent` remains `false`, meaning subsequent recheck attempts (e.g. when the user clicks the Completed tab again) are blocked by `builds_ack_sent()` being false — but that only helps if `active_view()` changes again.
+
+More precisely, `builds_ack_sent` is reset to `false` in the Completed tab's `onclick` handler (line 958), so the ack does retry on the next tab click. **However** if the user navigated directly to the Completed tab on page load (via `NavigationFocus`), there is no tab click to reset `builds_ack_sent`, and the cursor may still be `None` from the first attempt.
+
+## Fix
+
+Make the cursor-setting `use_effect` also subscribe to `NAV_BADGES.observed_at` changes, so that when the sidebar poll fills in the cursor after the initial data load, `build_history_ack_cursor` is updated and the ack `use_effect` immediately retries.
+
+Concretely: read `NAV_BADGES.read_unchecked().observed_at` inside the recent_builds mapping effect so Dioxus subscribes to it. When it changes, the effect re-runs, sets a non-None cursor, which triggers the ack effect.
+
+**Files to change:** `packages/web-ui/src/views/builds.rs` only.
+
+## Steps
+
+1. In the `use_effect` that processes `recent_builds` (lines 442-514), change `NAV_BADGES.read_unchecked().observed_at.clone()` to `NAV_BADGES.read().observed_at.clone()` (or call `NAV_BADGES()` to subscribe) so Dioxus tracks it as a reactive dependency, causing the effect to re-run when the cursor arrives.
+2. Verify the ack fires correctly on first load by checking that `builds_ack_sent` eventually becomes `true`.
+3. Build with `nix develop --command cargo build -p web-ui` and confirm no compile errors.
+4. Verify with `nix develop --command cargo test -p web-ui`.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
