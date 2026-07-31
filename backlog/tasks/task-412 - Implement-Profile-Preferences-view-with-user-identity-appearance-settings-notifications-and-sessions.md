@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-07-31 14:23'
+updated_date: '2026-07-31 14:48'
 labels:
   - web-ui
   - design-parity
@@ -144,4 +144,18 @@ P2-6: Organization, groups, MFA, environments only shown when available; IdP hel
 P2-7: Sidebar user section (desktop and mobile) now Link to ProfileView
 
 P2-8: Notification preferences acknowledged as stored-only (no backend integration yet)
+
+Re-review findings addressed in commit 9bcb1b00 (force-pushed clean branch):
+
+P1-1 FIXED: Sign out now properly handles logout() result, clears AppState.auth, uses replace() navigation. Errors logged to console.
+
+P2-2 FIXED: Notifications card completely disabled with 'coming soon' message until backend integration exists.
+
+P2-3 FIXED: Created shared PreferencesContext with density and default_systems_view signals. AppShell initializes and provides context. TopBar and ProfileView consume same signals. Changes sync immediately across app.
+
+P2-4 FIXED: Branch rebased onto origin/dev, removing all TASK-411 commits. MR now contains only clean TASK-412 history.
+
+P2-5 FIXED: All mock security data hidden (Member since, Last login, Active sessions all removed or disabled). No fabricated information presented as real.
+
+Shared preference architecture: AppShell owns signals, use_effect applies density to data-density, both TopBar Tweaks and Profile view read/write same state.
 <!-- SECTION:NOTES:END -->
