@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-07-31 14:48'
+updated_date: '2026-07-31 15:32'
 labels:
   - web-ui
   - design-parity
@@ -22,6 +22,15 @@ documentation:
   - packages/web-ui/src/state/theme.rs
   - packages/web-ui/src/state/auth.rs
   - packages/web-ui/src/routes.rs
+modified_files:
+  - packages/web-ui/src/components/layout/app_shell.rs
+  - packages/web-ui/src/components/layout/mod.rs
+  - packages/web-ui/src/components/layout/sidebar.rs
+  - packages/web-ui/src/components/layout/topbar.rs
+  - packages/web-ui/src/routes.rs
+  - packages/web-ui/src/state/mod.rs
+  - packages/web-ui/src/views/mod.rs
+  - packages/web-ui/src/views/profile.rs
 priority: high
 type: feature
 ordinal: 401000
@@ -158,4 +167,10 @@ P2-4 FIXED: Branch rebased onto origin/dev, removing all TASK-411 commits. MR no
 P2-5 FIXED: All mock security data hidden (Member since, Last login, Active sessions all removed or disabled). No fabricated information presented as real.
 
 Shared preference architecture: AppShell owns signals, use_effect applies density to data-density, both TopBar Tweaks and Profile view read/write same state.
+
+Re-review P2 findings addressed in commits 5bd52b31 and 873e49f6: removed the unused preferences module, notification/session mock state and UI helpers, and TopBar's obsolete load_pref helper. The profile only renders identity, role, and auth-source values supplied by AuthContext; unavailable values are explicitly marked unavailable and environment scope is omitted until supplied by an API.
+
+MR !312 description updated to match the implementation and verification status.
+
+Verification: cargo fmt passed; cargo check --target wasm32-unknown-unknown passed with pre-existing repository warnings. nix build .#checks.x86_64-linux.web-ui --no-link was started twice but did not complete before the local 10-minute command timeout while building the Nix VM test.
 <!-- SECTION:NOTES:END -->
