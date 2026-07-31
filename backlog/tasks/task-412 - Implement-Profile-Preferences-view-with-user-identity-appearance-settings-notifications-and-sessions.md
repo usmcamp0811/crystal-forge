@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-07-31 23:07'
+updated_date: '2026-07-31 23:32'
 labels:
   - web-ui
   - design-parity
@@ -129,4 +129,15 @@ Local verification:
 CI verification:
 - Pipeline 2722327841 succeeded at SHA 08b17b9b971e6c8a7e22ee7e87257316ffa64835.
 - All jobs passed, including `flake-check: [web-ui]`.
+
+Continued account-scoped preferences work:
+- Added current-state-aware legacy import so a missing server row imports the active theme/density/sidebar/default Systems view instead of forcing hard-coded sidebar defaults; this preserves responsive/sidebar startup behavior while still making the server row authoritative after import.
+- Updated web-ui integration harness to set account preferences through `PATCH /api/v1/user/preferences` instead of mutating localStorage for sidebar/theme setup, because server preferences now override localStorage after bootstrap.
+- Added `11a-profile-preferences` web-ui coverage-manifest step to assert server override of stale localStorage for theme/density/sidebar/default Systems view, profile identity/unavailable notifications/sessions messaging, and visible failed preference-save errors.
+- Verification run:
+  - `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml && cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed with existing warnings.
+  - `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui preferences::tests'` passed: 3 tests.
+  - `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_preferences --lib'` passed: 3 tests, 4 ignored live-DB tests.
+  - `nix develop -c bash -c 'node --check checks/web-ui/tests/integration-test.js && cd packages/web-ui && cargo test preferences::tests --lib'` partially ran: `node --check` passed, then failed because `crystal-forge-ui` has no library target; reran with `--bin crystal-forge-ui` successfully.
+- Live DB ignored tests, SQLx metadata refresh, and full Nix web-ui check remain to run in an appropriate environment.
 <!-- SECTION:NOTES:END -->
