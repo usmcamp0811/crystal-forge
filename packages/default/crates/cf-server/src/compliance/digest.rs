@@ -45,6 +45,11 @@ use super::canonical::semantic_digest;
 /// The digest must change when any field that affects activation, enforcement,
 /// or exported meaning changes. Fields like timestamps, trust state, local DB
 /// IDs, and assignment state are excluded.
+///
+/// `opaque_xml` preserves imported semantics that Crystal Forge cannot model;
+/// two opaque policies with different XML but identical modeled fields must
+/// produce different digests. We hash the normalized opaque content rather than
+/// including raw bytes in the digest DTO.
 #[derive(Debug, Clone)]
 pub struct PolicyVersionCanonical {
     pub name: String,
@@ -55,6 +60,9 @@ pub struct PolicyVersionCanonical {
     pub config: Value,
     pub compliance_metadata: Value,
     pub dependencies: Value,
+    /// SHA-256 hex of the normalised opaque XML, or `null` when absent.
+    /// Included so that different preserved XML always produces a different digest.
+    pub opaque_xml_digest: Option<String>,
 }
 
 impl PolicyVersionCanonical {
@@ -68,12 +76,19 @@ impl PolicyVersionCanonical {
             "execution_phase": self.execution_phase,
             "implementation_state": self.implementation_state,
             "name": self.name,
+            "opaque_xml_digest": self.opaque_xml_digest,
             "policy_type": self.policy_type,
         })
     }
 
     pub fn compute_digest(&self) -> String {
         semantic_digest(&self.to_digest_value())
+    }
+
+    /// Compute the sha-256 hex digest of the trimmed opaque XML, or return `None`.
+    pub fn digest_opaque_xml(xml: Option<&str>) -> Option<String> {
+        use sha2::{Digest as ShaDigest, Sha256};
+        xml.map(|s| hex::encode(Sha256::digest(s.trim().as_bytes())))
     }
 }
 
@@ -314,8 +329,14 @@ pub async fn write_bundle_version_digest(
     Ok(())
 }
 
-/// Build and write the effective-set digest for a single assignment,
-/// computing it from the assignment's own exclusions/additions/overrides.
+/// Build and write the assignment overlay digest for a single assignment.
+///
+/// Covers: selected baseline - exclusions + additions.
+/// Does NOT include direct environment/system policies (resolved at evaluation).
+/// Stored as `assignment_overlay_digest` to accurately reflect the scope (P1 #4).
+///
+/// The effective-policy resolver that includes direct policies will compute and
+/// persist the full effective-set at evaluation time.
 pub async fn write_assignment_effective_set_digest(
     tx: &mut Transaction<'_, Postgres>,
     assignment_id: Uuid,
@@ -363,34 +384,46 @@ pub async fn write_assignment_effective_set_digest(
     .fetch_all(&mut **tx)
     .await?;
 
-    // Resolved effective policy set:
-    //   selected baseline membership
-    //   - exclusions
-    //   + assignment additions
+    // Ordered assignment overlay policy set:
+    //   selected baseline - exclusions (in policy_order)
+    //   + additions (sorted by policy_version_id for stability)
     //
-    // Note: direct environment and system policies have higher specificity and
-    // are resolved at evaluation time, not at assignment-creation time. They are
-    // not included here because the assignment record does not own them.
-    // Conflict detection for same-lineage versions at equal specificity is also
-    // deferred to evaluation.
+    // Uses a CTE with explicit source_rank so the UNION ALL can be
+    // ORDER-ed correctly (bare ORDER BY inside UNION ALL operands is
+    // invalid PostgreSQL). (P1 #1)
     let effective_policy_version_ids: Vec<Uuid> = sqlx::query_scalar(
         r#"
-        SELECT bvp.policy_version_id
-        FROM compliance_bundle_assignments a
-        JOIN compliance_bundle_version_policies bvp ON bvp.bundle_version_id = a.bundle_version_id
-        WHERE a.id = $1
-          AND bvp.selected = TRUE
-          AND bvp.policy_version_id NOT IN (
-              SELECT policy_version_id
-              FROM compliance_assignment_exclusions
-              WHERE assignment_id = $1
-          )
-        ORDER BY bvp.policy_order ASC
-        UNION ALL
-        SELECT aa.policy_version_id
-        FROM compliance_assignment_additions aa
-        WHERE aa.assignment_id = $1
-        ORDER BY 1
+        WITH overlay AS (
+            SELECT
+                bvp.policy_version_id,
+                0            AS source_rank,
+                bvp.policy_order AS source_order
+            FROM compliance_bundle_assignments a
+            JOIN compliance_bundle_version_policies bvp
+              ON bvp.bundle_version_id = a.bundle_version_id
+            WHERE a.id = $1
+              AND bvp.selected = TRUE
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM compliance_assignment_exclusions ex
+                  WHERE ex.assignment_id = $1
+                    AND ex.policy_version_id = bvp.policy_version_id
+              )
+
+            UNION ALL
+
+            SELECT
+                aa.policy_version_id,
+                1   AS source_rank,
+                ROW_NUMBER() OVER (
+                    ORDER BY aa.policy_version_id
+                )::integer AS source_order
+            FROM compliance_assignment_additions aa
+            WHERE aa.assignment_id = $1
+        )
+        SELECT policy_version_id
+        FROM overlay
+        ORDER BY source_rank, source_order, policy_version_id
         "#,
     )
     .bind(assignment_id)
@@ -409,11 +442,14 @@ pub async fn write_assignment_effective_set_digest(
     };
 
     let digest = canonical.compute_digest();
-    sqlx::query("UPDATE compliance_bundle_assignments SET effective_set_digest = $1 WHERE id = $2")
-        .bind(&digest)
-        .bind(assignment_id)
-        .execute(&mut **tx)
-        .await?;
+    // Write to assignment_overlay_digest (renamed from effective_set_digest in 0201).
+    sqlx::query(
+        "UPDATE compliance_bundle_assignments SET assignment_overlay_digest = $1 WHERE id = $2",
+    )
+    .bind(&digest)
+    .bind(assignment_id)
+    .execute(&mut **tx)
+    .await?;
 
     Ok(())
 }
@@ -441,12 +477,13 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
         config: Value,
         compliance_metadata: Value,
         dependencies: Value,
+        opaque_xml: Option<String>,
     }
     let pending_policies: Vec<PolicyVersionRow> = sqlx::query_as(
         r#"
         SELECT id, policy_id, name, description, policy_type,
                implementation_state, execution_phase, config,
-               compliance_metadata, dependencies
+               compliance_metadata, dependencies, opaque_xml
         FROM deployment_policy_versions
         WHERE semantic_digest = 'pending'
           AND publication_state = 'draft'
@@ -465,6 +502,7 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
             config: row.config.clone(),
             compliance_metadata: row.compliance_metadata.clone(),
             dependencies: row.dependencies.clone(),
+            opaque_xml_digest: PolicyVersionCanonical::digest_opaque_xml(row.opaque_xml.as_deref()),
         };
         let digest = canonical.compute_digest();
         sqlx::query(
@@ -544,7 +582,7 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
 
     // ── Assignment effective-set digests ──────────────────────────────────────
     let pending_assignments: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM compliance_bundle_assignments WHERE effective_set_digest = 'pending'",
+        "SELECT id FROM compliance_bundle_assignments WHERE assignment_overlay_digest = 'pending'",
     )
     .fetch_all(pool)
     .await?;
@@ -569,7 +607,7 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
     .await?;
 
     let remaining_assignment: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM compliance_bundle_assignments WHERE effective_set_digest = 'pending'",
+        "SELECT COUNT(*) FROM compliance_bundle_assignments WHERE assignment_overlay_digest = 'pending'",
     )
     .fetch_one(pool)
     .await?;
@@ -596,39 +634,18 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn policy(
-        name: &str,
-        description: Option<&str>,
-        policy_type: &str,
-        impl_state: &str,
-        exec_phase: &str,
-        config: Value,
-        meta: Value,
-        deps: Value,
-    ) -> PolicyVersionCanonical {
-        PolicyVersionCanonical {
-            name: name.into(),
-            description: description.map(String::from),
-            policy_type: policy_type.into(),
-            implementation_state: impl_state.into(),
-            execution_phase: exec_phase.into(),
-            config,
-            compliance_metadata: meta,
-            dependencies: deps,
-        }
-    }
-
     fn base_policy() -> PolicyVersionCanonical {
-        policy(
-            "firewall",
-            Some("Firewall enabled"),
-            "custom_check",
-            "native",
-            "nix-evaluation",
-            json!({"expr": "cfg.config.networking.firewall.enable"}),
-            json!({}),
-            json!([]),
-        )
+        PolicyVersionCanonical {
+            name: "firewall".into(),
+            description: Some("Firewall enabled".into()),
+            policy_type: "custom_check".into(),
+            implementation_state: "native".into(),
+            execution_phase: "nix-evaluation".into(),
+            config: json!({"expr": "cfg.config.networking.firewall.enable"}),
+            compliance_metadata: json!({}),
+            dependencies: json!([]),
+            opaque_xml_digest: None,
+        }
     }
 
     fn bundle(policy_ids: Vec<Uuid>) -> BundleVersionCanonical {
@@ -680,6 +697,25 @@ mod tests {
         let mut b = base_policy();
         b.dependencies = json!([{"nix_option": "services.example.enable"}]);
         assert_ne!(a, b.compute_digest());
+    }
+
+    #[test]
+    fn policy_digest_changes_when_opaque_xml_changes() {
+        let mut with_xml = base_policy();
+        with_xml.opaque_xml_digest =
+            PolicyVersionCanonical::digest_opaque_xml(Some("<check>A</check>"));
+
+        let mut with_different_xml = base_policy();
+        with_different_xml.opaque_xml_digest =
+            PolicyVersionCanonical::digest_opaque_xml(Some("<check>B</check>"));
+
+        let no_xml = base_policy(); // opaque_xml_digest = None
+
+        assert_ne!(no_xml.compute_digest(), with_xml.compute_digest());
+        assert_ne!(
+            with_xml.compute_digest(),
+            with_different_xml.compute_digest()
+        );
     }
 
     #[test]

@@ -297,6 +297,7 @@ pub async fn create_deployment_policy(
     .context("Failed to create deployment policy")?;
 
     // Compute and persist the canonical digest before committing.
+    // New policies created via the legacy API have no opaque XML.
     let canonical = PolicyVersionCanonical {
         name: policy.name.clone(),
         description: policy.description.clone(),
@@ -306,6 +307,7 @@ pub async fn create_deployment_policy(
         config: policy.config.clone(),
         compliance_metadata: serde_json::json!({}),
         dependencies: serde_json::json!([]),
+        opaque_xml_digest: None,
     };
     write_policy_version_digest(&mut tx, policy.id, &canonical)
         .await
@@ -339,11 +341,12 @@ pub async fn update_deployment_policy(
         execution_phase: String,
         compliance_metadata: serde_json::Value,
         dependencies: serde_json::Value,
+        opaque_xml: Option<String>,
     }
     let draft_fields: Option<DraftVersionFields> = sqlx::query_as(
         r#"
         SELECT dpv.implementation_state, dpv.execution_phase,
-               dpv.compliance_metadata, dpv.dependencies
+               dpv.compliance_metadata, dpv.dependencies, dpv.opaque_xml
         FROM deployment_policies dp
         JOIN deployment_policy_versions dpv ON dpv.id = dp.current_draft_version_id
         WHERE dp.id = $1
@@ -380,15 +383,16 @@ pub async fn update_deployment_policy(
     .context("Failed to update deployment policy")?;
 
     if let Some(ref p) = policy {
-        // Merge: preserve existing rich fields, update only what the legacy
+        // Merge: preserve existing rich fields; update only what the legacy
         // request supports. Callers using the full version-aware API can update
         // implementation_state, execution_phase, etc. separately.
-        let (impl_state, exec_phase, meta, deps) = if let Some(df) = draft_fields {
+        let (impl_state, exec_phase, meta, deps, opaque_xml) = if let Some(df) = draft_fields {
             (
                 df.implementation_state,
                 df.execution_phase,
                 df.compliance_metadata,
                 df.dependencies,
+                df.opaque_xml,
             )
         } else {
             // No prior draft version — new policy path, use defaults.
@@ -397,6 +401,7 @@ pub async fn update_deployment_policy(
                 "nix-evaluation".to_string(),
                 serde_json::json!({}),
                 serde_json::json!([]),
+                None,
             )
         };
 
@@ -409,6 +414,7 @@ pub async fn update_deployment_policy(
             config: p.config.clone(),
             compliance_metadata: meta,
             dependencies: deps,
+            opaque_xml_digest: PolicyVersionCanonical::digest_opaque_xml(opaque_xml.as_deref()),
         };
         write_policy_version_digest(&mut tx, p.id, &canonical)
             .await

@@ -192,7 +192,7 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
         WITH latest_commit_per_flake AS (
             SELECT DISTINCT ON (flake_id) id AS commit_id, flake_id
             FROM commits
-            ORDER BY flake_id, id DESC
+            ORDER BY flake_id, commit_timestamp DESC NULLS LAST, id DESC
         ),
         latest_per_derivation AS (
             SELECT DISTINCT ON (d.id)
@@ -411,7 +411,7 @@ pub async fn get_scan_queue_for_system(
         WITH latest_commit_per_flake AS (
             SELECT DISTINCT ON (flake_id) id AS commit_id, flake_id
             FROM commits
-            ORDER BY flake_id, id DESC
+            ORDER BY flake_id, commit_timestamp DESC NULLS LAST, id DESC
         ),
         latest_per_derivation AS (
             SELECT DISTINCT ON (d.id)

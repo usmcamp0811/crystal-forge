@@ -272,8 +272,8 @@ pub async fn create_bundle(
     };
     write_bundle_version_digest(&mut tx, bundle_id, &canonical).await?;
 
-    // Write assignment effective-set digests for all new environment assignments
-    // (created by trigger; still have effective_set_digest = 'pending').
+    // Write assignment overlay digests for all new environment assignments
+    // (created by trigger; still have assignment_overlay_digest = 'pending').
     let assignment_ids: Vec<Uuid> = sqlx::query_scalar(
         r#"
         SELECT id FROM compliance_bundle_assignments
