@@ -1263,3 +1263,71 @@ BEGIN
     RETURN OLD;
 END;
 $$;
+
+-- ── 24. Invalidate digest on bundle_version_id change (P1 #1) ────────────────
+-- The digest resolves baseline membership through the assignment's current
+-- bundle version. Changing bundle_version_id must also mark the digest pending.
+
+CREATE OR REPLACE FUNCTION invalidate_assignment_on_digest_field_change()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.enforcement_mode IS DISTINCT FROM OLD.enforcement_mode
+       OR NEW.bundle_version_id IS DISTINCT FROM OLD.bundle_version_id
+    THEN
+        NEW.assignment_overlay_digest = 'pending';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- ── 25. Immutable source-object mappings (P1 #2) ─────────────────────────────
+-- Mappings must not be deleted or modified after commit (AC #19).  Target
+-- foreign keys changed from ON DELETE SET NULL to ON DELETE RESTRICT so
+-- deleting a policy or bundle version while a committed mapping still
+-- references it is also an error.
+
+CREATE OR REPLACE FUNCTION guard_source_object_mapping_immutability()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION
+            'Source-object mapping % is immutable and cannot be deleted.',
+            OLD.id;
+    END IF;
+
+    IF (to_jsonb(NEW) - 'id') IS DISTINCT FROM (to_jsonb(OLD) - 'id') THEN
+        RAISE EXCEPTION
+            'Source-object mapping % is immutable and cannot be updated.',
+            OLD.id;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trigger_guard_source_object_mapping_immutability
+    BEFORE UPDATE OR DELETE ON compliance_source_object_mappings
+    FOR EACH ROW
+    EXECUTE FUNCTION guard_source_object_mapping_immutability();
+
+-- Change version-target FKs from SET NULL to RESTRICT so deleting a draft
+-- policy or bundle that is still referenced by a committed mapping fails.
+ALTER TABLE compliance_source_object_mappings
+    DROP CONSTRAINT IF EXISTS
+        compliance_source_object_mappings_policy_version_id_fkey;
+
+ALTER TABLE compliance_source_object_mappings
+    ADD CONSTRAINT compliance_source_object_mappings_policy_version_id_fkey
+        FOREIGN KEY (policy_version_id)
+        REFERENCES deployment_policy_versions(id)
+        ON DELETE RESTRICT;
+
+ALTER TABLE compliance_source_object_mappings
+    DROP CONSTRAINT IF EXISTS
+        compliance_source_object_mappings_bundle_version_id_fkey;
+
+ALTER TABLE compliance_source_object_mappings
+    ADD CONSTRAINT compliance_source_object_mappings_bundle_version_id_fkey
+        FOREIGN KEY (bundle_version_id)
+        REFERENCES compliance_bundle_versions(id)
+        ON DELETE RESTRICT;
