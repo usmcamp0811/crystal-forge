@@ -42,6 +42,8 @@ pub mod policy;
 pub mod system;
 pub mod tables;
 
+pub mod io_menu;
+
 // Top-level component modules
 pub mod chips;
 pub mod icon;
@@ -63,6 +65,7 @@ pub use filters::{
     ViewToggle,
 };
 pub use heartbeat_spinner::HeartbeatSpinner;
+pub use io_menu::{IOMenu, IOMenuItem};
 pub use icon::{Icon, IconName};
 pub use layout::{AppShell, Card, SidebarNav, TopBar};
 pub use loading::{DashboardLoadingSpinner, ErrorMessage, LoadingSpinner};

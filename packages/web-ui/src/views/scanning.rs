@@ -2,9 +2,9 @@ use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 use crate::api::client::{
-    fetch_environments, fetch_scanning_activity, fetch_scanning_queue, fetch_scanning_schedule,
-    fetch_scanning_stats, fetch_scanning_system_scans, fetch_scanning_systems,
-    update_scanning_schedule,
+    fetch_environments, fetch_scanning_activity, fetch_scanning_deployed, fetch_scanning_queue,
+    fetch_scanning_schedule, fetch_scanning_stats, fetch_scanning_system_scans,
+    fetch_scanning_systems, update_scanning_schedule,
 };
 use crate::api::models::ScanningQueueItemResponse;
 use crate::api::models::{ScanSchedulePolicyResponse, UpdateScanSchedulePolicyRequest};
@@ -87,7 +87,7 @@ fn meta_for(status: &str) -> StatusMeta {
 #[component]
 pub fn ScanningView() -> Element {
     let nav = navigator();
-    let mut tab = use_signal(|| "queue".to_string());
+    let mut tab = use_signal(|| "deployed".to_string());
     let mut all_configs_search = use_signal(String::new);
     let mut all_configs_env_filter = use_signal(|| "all".to_string());
     let mut show_activity = use_signal(|| true);
@@ -106,6 +106,7 @@ pub fn ScanningView() -> Element {
 
     let stats = use_resource(|| async { fetch_scanning_stats().await });
     let queue = use_resource(|| async { fetch_scanning_queue(Some(50)).await });
+    let deployed = use_resource(|| async { fetch_scanning_deployed(Some(500)).await });
     let systems = use_resource(|| async { fetch_scanning_systems(Some(100)).await });
     let environments = use_resource(|| async { fetch_environments().await });
     let activity = use_resource(|| async { fetch_scanning_activity(Some(20)).await });
@@ -180,6 +181,7 @@ pub fn ScanningView() -> Element {
                 style: if show_activity() { "display:grid; grid-template-columns: 1fr 320px; gap:14px; align-items:start;" } else { "display:grid; grid-template-columns: 1fr; gap:14px; align-items:start;" },
                 div { class: "card", style: "overflow:hidden;",
                     div { class: "sd-tabs", style: "padding:0 16px; border-bottom:1px solid var(--cf-card-border); display:flex; align-items:center;",
+                        button { class: if tab() == "deployed" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" }, onclick: move |_| tab.set("deployed".to_string()), "Deployed" }
                         button { class: if tab() == "queue" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" }, onclick: move |_| tab.set("queue".to_string()), "Active & Recent" }
                         button { class: if tab() == "all" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" }, onclick: move |_| tab.set("all".to_string()), "All configs" }
                         if !show_activity() {
@@ -194,7 +196,58 @@ pub fn ScanningView() -> Element {
                         }
                     }
 
-                    if tab() == "queue" {
+                    if tab() == "deployed" {
+                        table { class: "sys-table",
+                            thead { tr {
+                                th { "System" }
+                                th { "Commit" }
+                                th { "Status" }
+                                th { "Findings" }
+                                th { "Last scan" }
+                            } }
+                            tbody {
+                                if let Some(Ok(rows)) = deployed.read().as_ref() {
+                                    if rows.is_empty() {
+                                        tr { td { colspan: 5, style: "padding:14px; color:var(--cf-text-muted);", "No deployed configurations found." } }
+                                    }
+                                    for row in rows.iter() {
+                                        {
+                                            let eff = effective_status(row);
+                                            let meta = meta_for(&eff);
+                                            let is_latest = row.is_latest_per_flake;
+                                            rsx! {
+                                                tr {
+                                                    td {
+                                                        div { style: "font-weight:600; font-size:13px;", "{row.hostname}" }
+                                                    }
+                                                    td {
+                                                        div {
+                                                            class: "mono",
+                                                            style: "font-size:11px; color:var(--cf-text-muted); display:flex; align-items:center; gap:4px;",
+                                                            if is_latest {
+                                                                span { title: "Latest commit for this flake", style: "color:#f59e0b; font-size:12px;", "★" }
+                                                            }
+                                                            "{flake_commit(row)}"
+                                                        }
+                                                    }
+                                                    td {
+                                                        span { class: "chip {meta.cls}",
+                                                            span { class: "chip-dot", style: "background:{meta.color};" }
+                                                            "{meta.label}"
+                                                        }
+                                                    }
+                                                    td { { findings_cell(row.critical_count, row.high_count, row.medium_count, row.completed_at.is_some()) } }
+                                                    td { style: "font-size:12px; color:var(--cf-text-muted);", "{last_scan(row)}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    tr { td { colspan: 5, style: "padding:14px; color:var(--cf-text-muted);", "Loading deployed configurations…" } }
+                                }
+                            }
+                        }
+                    } else if tab() == "queue" {
                         table { class: "sys-table",
                             thead { tr {
                                 th { "Config" }
@@ -214,11 +267,19 @@ pub fn ScanningView() -> Element {
                                             let fresh = freshness_label(row);
                                             let trigger = row.trigger.clone();
                                             let has_findings = row.critical_count > 0 || row.high_count > 0;
+                                            let is_latest = row.is_latest_per_flake;
                                             rsx! {
                                                 tr {
                                                     td {
                                                         div { style: "font-weight:600; font-size:13px;", "{row.hostname}" }
-                                                        div { class: "mono", style: "font-size:11px; color:var(--cf-text-muted);", "{flake_commit(row)}" }
+                                                        div {
+                                                            class: "mono",
+                                                            style: "font-size:11px; color:var(--cf-text-muted); display:flex; align-items:center; gap:4px;",
+                                                            if is_latest {
+                                                                span { title: "Latest commit for this flake", style: "color:#f59e0b; font-size:12px;", "★" }
+                                                            }
+                                                            "{flake_commit(row)}"
+                                                        }
                                                     }
                                                     td { { fresh_chip(&fresh) } }
                                                     td {
@@ -252,7 +313,7 @@ pub fn ScanningView() -> Element {
                                 }
                             }
                         }
-                    } else {
+                    } else if tab() == "all" {
                         if let Some(Ok(rows)) = systems.read().as_ref() {
                             {
                                 let total_configs: i64 = rows.iter().map(|r| r.total_configs).sum();
@@ -455,11 +516,15 @@ pub fn ScanningView() -> Element {
                                                                             let meta = meta_for(&eff);
                                                                             let fresh = freshness_label(row);
                                                                             let is_current = row.is_current;
+                                                                            let is_latest = row.is_latest_per_flake;
                                                                             let needs_build = row.status == "needs-build" || row.status == "needs_build";
                                                                                             rsx! {
                                                                                                 tr { style: "border-top:1px solid var(--cf-divider);",
                                                                                                     td { style: "padding:7px 8px;",
-                                                                                                        span { class: "mono", style: "font-weight:600;", "{commit_label(&row.commit_hash)}" }
+                                                                                                        div { style: "display:flex; align-items:center; gap:4px;",
+                                                                                                            if is_latest { span { title: "Latest commit for this flake", style: "color:#f59e0b; font-size:12px;", "★" } }
+                                                                                                            span { class: "mono", style: "font-weight:600;", "{commit_label(&row.commit_hash)}" }
+                                                                                                        }
                                                                                                         if is_current { span { class: "chip chip-info", style: "font-size:9px; margin-left:6px;", "current" } }
                                                                                                         div { style: "font-size:10px; color:var(--cf-text-muted);", "{row.flake_name.clone().unwrap_or_default()}" }
                                                                                                     }

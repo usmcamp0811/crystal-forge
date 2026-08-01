@@ -14,6 +14,7 @@ use crate::components::compliance::{
     BundleCatalog, BundleHeader, EvidenceDrawer, ScoreStrip, SystemsMatrix,
 };
 use crate::components::icon::{Icon, IconName};
+use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::loading::DashboardLoadingSpinner;
 use crate::export::{
     ExportPayload, build_cf_json, build_csv, build_oscal, build_sarif, download_print_html,
@@ -178,29 +179,70 @@ pub fn ComplianceView() -> Element {
                         "Walk through compliance bundles, review per-control evidence, export for auditors."
                     }
                 }
-                div { style: "display:flex;gap:8px;",
-                    button {
-                        class: "btn btn-ghost focus-ring",
-                        onclick: move |_| show_export.set(true),
-                        Icon { name: IconName::Download, size: 14 }
-                        " Export evidence"
-                    }
-                    // Admin-only bundle management actions
+                div { style: "display:flex;gap:8px;align-items:center;",
+                    // Admin-only bundle management
                     if is_admin {
-                        button {
-                            class: "btn btn-ghost focus-ring",
-                            onclick: move |_| show_import_stig.set(true),
-                            span { style: "display:inline-flex;transform:rotate(180deg);",
-                                Icon { name: IconName::Download, size: 14 }
-                            }
-                            " Import STIG"
-                        }
                         button {
                             class: "btn btn-primary focus-ring",
                             onclick: move |_| show_new_bundle.set(true),
                             Icon { name: IconName::Plus, size: 14 }
                             " New bundle"
                         }
+                    }
+                    // Shared Import / Export menu (AC #25)
+                    IOMenu {
+                        trigger_label: "Import / Export".to_string(),
+                        trigger_class: "focus-ring".to_string(),
+                        items: {
+                            let mut items = vec![];
+                            if is_admin {
+                                items.push(IOMenuItem::action_with_icon(
+                                    "Import STIG or XCCDF (.xml/.zip)",
+                                    IconName::Download,
+                                ));
+                                items.push(IOMenuItem::action_with_icon(
+                                    "Import Crystal Forge bundle (.xml)",
+                                    IconName::Download,
+                                ));
+                                items.push(IOMenuItem::Separator);
+                            }
+                            items.push(if selected_bundle_id.read().is_some() {
+                                IOMenuItem::action_with_icon(
+                                    "Export this bundle (XCCDF .xml)",
+                                    IconName::Download,
+                                )
+                            } else {
+                                IOMenuItem::disabled(
+                                    "Export this bundle (XCCDF .xml)",
+                                    "Select a bundle first",
+                                )
+                            });
+                            items.push(IOMenuItem::action_with_icon(
+                                "Export evidence report…",
+                                IconName::Download,
+                            ));
+                            items
+                        },
+                        on_action: move |idx: usize| {
+                            // Index mapping depends on is_admin:
+                            // admin:    0=Import STIG, 1=Import CF bundle, (sep), 2=Export XCCDF, 3=Export evidence
+                            // non-admin: 0=Export XCCDF (disabled if no bundle), 1=Export evidence
+                            if is_admin {
+                                match idx {
+                                    0 => show_import_stig.set(true),
+                                    1 => { /* Import CF bundle: not yet implemented */ }
+                                    2 => { /* Export XCCDF: not yet implemented */ }
+                                    3 => show_export.set(true),
+                                    _ => {}
+                                }
+                            } else {
+                                match idx {
+                                    0 => { /* Export XCCDF */ }
+                                    1 => show_export.set(true),
+                                    _ => {}
+                                }
+                            }
+                        },
                     }
                 }
             }

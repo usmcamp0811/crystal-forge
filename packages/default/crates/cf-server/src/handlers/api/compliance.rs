@@ -9,6 +9,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -174,6 +175,141 @@ pub async fn delete_compliance_bundle(
         Err(_) => internal_error("Failed to delete compliance bundle"),
     }
 }
+
+// ── XCCDF interchange ──────────────────────────────────────────────────────
+
+/// Request/response stubs – full parser implementation comes in a later commit.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct XccdfPreviewResponse {
+    pub sha256: String,
+    pub document_type: String,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct XccdfImportResult {
+    pub bundle_version_id: Option<Uuid>,
+    pub created_policy_count: u32,
+    pub reused_policy_count: u32,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PolicyInterchangeExportRequest {
+    pub policy_version_ids: Vec<Uuid>,
+    pub format: String, // "json" or "toml"
+}
+
+/// `POST /api/v1/compliance/xccdf/preview`
+///
+/// Accepts a multipart XML or ZIP upload, validates structure and limits, and
+/// returns metadata without persisting anything. The full parser is implemented
+/// in phase 4; this handler enforces upload limits and returns a structured stub.
+pub async fn xccdf_preview(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !has_admin_role(&roles) {
+        return forbidden();
+    }
+    // Phase 4 will add full multipart parsing and XCCDF validation here.
+    // For now, return a structured 501 so the UI can distinguish "not yet
+    // implemented" from a server error.
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(XccdfPreviewResponse {
+            sha256: String::new(),
+            document_type: "unknown".to_string(),
+            errors: vec!["XCCDF parser not yet implemented".to_string()],
+            warnings: vec![],
+        }),
+    )
+        .into_response()
+}
+
+/// `POST /api/v1/compliance/xccdf/import`
+///
+/// Accepts the same file plus an import plan and commits atomically.
+/// Full implementation arrives in phase 4.
+pub async fn xccdf_import(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !has_admin_role(&roles) {
+        return forbidden();
+    }
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(XccdfImportResult {
+            bundle_version_id: None,
+            created_policy_count: 0,
+            reused_policy_count: 0,
+            errors: vec!["XCCDF import not yet implemented".to_string()],
+        }),
+    )
+        .into_response()
+}
+
+/// `GET /api/v1/compliance/bundle-versions/:version_id/xccdf`
+///
+/// Exports the bundle version as an XCCDF 1.2 XML document. Full
+/// implementation arrives in phase 4.
+pub async fn export_bundle_xccdf(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(version_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((_user_id, _roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let _ = version_id;
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(ApiError {
+            error: "Not Implemented".to_string(),
+            message: "XCCDF export not yet implemented".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+/// `POST /api/v1/policies/interchange/export`
+///
+/// Exports selected policy versions as canonical JSON or TOML.
+pub async fn policy_interchange_export(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Json(request): Json<PolicyInterchangeExportRequest>,
+) -> impl IntoResponse {
+    let Some((_user_id, _roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if request.policy_version_ids.is_empty() {
+        return bad_request("At least one policy_version_id is required");
+    }
+    if !matches!(request.format.as_str(), "json" | "toml") {
+        return bad_request("format must be 'json' or 'toml'");
+    }
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(ApiError {
+            error: "Not Implemented".to_string(),
+            message: "Policy interchange export not yet implemented".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+// ── helpers ────────────────────────────────────────────────────────────────
 
 fn forbidden() -> axum::response::Response {
     (

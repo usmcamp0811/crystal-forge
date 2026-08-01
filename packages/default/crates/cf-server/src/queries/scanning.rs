@@ -42,6 +42,8 @@ pub struct ScanQueueRow {
     pub freshness: String,
     /// True when this is the latest scan row for its derivation.
     pub is_current: bool,
+    /// True when this derivation's commit is the latest known commit for its flake.
+    pub is_latest_per_flake: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,12 +187,19 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
 pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRow>> {
     let rows = sqlx::query(
         r#"
-        WITH latest_per_derivation AS (
+        WITH latest_commit_per_flake AS (
+            SELECT DISTINCT ON (flake_id) id AS commit_id, flake_id
+            FROM commits
+            ORDER BY flake_id, id DESC
+        ),
+        latest_per_derivation AS (
             SELECT DISTINCT ON (d.id)
                 cs.id AS scan_id,
                 d.derivation_name AS hostname,
                 f.name AS flake_name,
                 c.git_commit_hash AS commit_hash,
+                c.flake_id,
+                c.id AS commit_db_id,
                 cs.status,
                 cs.completed_at,
                 cs.scheduled_at,
@@ -222,8 +231,10 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
                 WHEN completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
                 ELSE 'archived'
             END AS freshness,
-            TRUE AS is_current
-        FROM latest_per_derivation
+            TRUE AS is_current,
+            (lc.commit_id IS NOT NULL AND lpd.commit_db_id = lc.commit_id) AS is_latest_per_flake
+        FROM latest_per_derivation lpd
+        LEFT JOIN latest_commit_per_flake lc ON lc.flake_id = lpd.flake_id
         ORDER BY
             CASE WHEN status = 'in_progress' THEN 0 WHEN status = 'pending' THEN 1 ELSE 2 END,
             lifecycle_at DESC NULLS LAST
@@ -249,6 +260,92 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
             medium_count: row.get("medium_count"),
             freshness: row.get("freshness"),
             is_current: row.get("is_current"),
+            is_latest_per_flake: row.get("is_latest_per_flake"),
+        })
+        .collect())
+}
+
+/// Returns all derivations currently deployed on at least one active system,
+/// with complete flake history used to derive `is_latest_per_flake`.
+pub async fn get_scan_deployed(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRow>> {
+    let rows = sqlx::query(
+        r#"
+        WITH latest_commit_per_flake AS (
+            SELECT DISTINCT ON (flake_id) id AS commit_id, flake_id
+            FROM commits
+            ORDER BY flake_id, id DESC
+        ),
+        deployed_derivations AS (
+            SELECT DISTINCT ON (d.id)
+                cs.id AS scan_id,
+                s.hostname,
+                f.name AS flake_name,
+                c.git_commit_hash AS commit_hash,
+                c.flake_id,
+                c.id AS commit_db_id,
+                cs.status,
+                cs.completed_at,
+                cs.scheduled_at,
+                cs.critical_count,
+                cs.high_count,
+                cs.medium_count,
+                COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at
+            FROM systems s
+            JOIN derivations d ON d.derivation_name = s.hostname
+                AND d.store_path IS NOT NULL
+                AND d.store_path = s.current_store_path
+            LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
+            LEFT JOIN commits c ON c.id = d.commit_id
+            LEFT JOIN flakes f ON f.id = c.flake_id
+            WHERE s.is_active = TRUE
+              AND d.derivation_type = 'nixos'
+            ORDER BY d.id, COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
+        )
+        SELECT
+            scan_id,
+            hostname,
+            flake_name,
+            commit_hash,
+            status,
+            completed_at,
+            scheduled_at,
+            critical_count,
+            high_count,
+            medium_count,
+            CASE
+                WHEN completed_at IS NULL THEN 'archived'
+                WHEN completed_at >= NOW() - INTERVAL '24 hours' THEN 'deployed'
+                WHEN completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
+                ELSE 'archived'
+            END AS freshness,
+            TRUE AS is_current,
+            (lc.commit_id IS NOT NULL AND dd.commit_db_id = lc.commit_id) AS is_latest_per_flake
+        FROM deployed_derivations dd
+        LEFT JOIN latest_commit_per_flake lc ON lc.flake_id = dd.flake_id
+        ORDER BY hostname ASC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| ScanQueueRow {
+            scan_id: row.get("scan_id"),
+            hostname: row.get("hostname"),
+            flake_name: row.get("flake_name"),
+            commit_hash: row.get("commit_hash"),
+            status: row.get("status"),
+            completed_at: row.get("completed_at"),
+            scheduled_at: row.get("scheduled_at"),
+            critical_count: row.get("critical_count"),
+            high_count: row.get("high_count"),
+            medium_count: row.get("medium_count"),
+            freshness: row.get("freshness"),
+            is_current: row.get("is_current"),
+            is_latest_per_flake: row.get("is_latest_per_flake"),
         })
         .collect())
 }
@@ -260,12 +357,19 @@ pub async fn get_scan_queue_for_system(
 ) -> Result<Vec<ScanQueueRow>> {
     let rows = sqlx::query(
         r#"
-        WITH latest_per_derivation AS (
+        WITH latest_commit_per_flake AS (
+            SELECT DISTINCT ON (flake_id) id AS commit_id, flake_id
+            FROM commits
+            ORDER BY flake_id, id DESC
+        ),
+        latest_per_derivation AS (
             SELECT DISTINCT ON (d.id)
                 cs.id AS scan_id,
                 d.derivation_name AS hostname,
                 f.name AS flake_name,
                 c.git_commit_hash AS commit_hash,
+                c.flake_id,
+                c.id AS commit_db_id,
                 cs.status,
                 cs.completed_at,
                 cs.scheduled_at,
@@ -302,8 +406,10 @@ pub async fn get_scan_queue_for_system(
             END AS freshness,
             (ROW_NUMBER() OVER (
                 ORDER BY lifecycle_at DESC NULLS LAST
-            ) = 1) AS is_current
-        FROM latest_per_derivation
+            ) = 1) AS is_current,
+            (lc.commit_id IS NOT NULL AND lpd.commit_db_id = lc.commit_id) AS is_latest_per_flake
+        FROM latest_per_derivation lpd
+        LEFT JOIN latest_commit_per_flake lc ON lc.flake_id = lpd.flake_id
         ORDER BY
             CASE WHEN status = 'in_progress' THEN 0 WHEN status = 'pending' THEN 1 ELSE 2 END,
             lifecycle_at DESC NULLS LAST
@@ -330,6 +436,7 @@ pub async fn get_scan_queue_for_system(
             medium_count: row.get("medium_count"),
             freshness: row.get("freshness"),
             is_current: row.get("is_current"),
+            is_latest_per_flake: row.get("is_latest_per_flake"),
         })
         .collect())
 }

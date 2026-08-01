@@ -327,6 +327,9 @@ pub struct ScanningQueueItemResponse {
     pub freshness: String,
     /// True when this is the latest scan row for its derivation.
     pub is_current: bool,
+    /// True when this derivation's commit is the latest known commit for its flake.
+    #[serde(default)]
+    pub is_latest_per_flake: bool,
     /// What triggered the scan. Not yet tracked in the schema; always `None`
     /// until a trigger source column is added (tracked as follow-up).
     pub trigger: Option<String>,
@@ -1391,6 +1394,12 @@ pub enum ComplianceControlStatus {
     Warn,
     Fail,
     Waiver,
+    /// Control is selected but no applicable evidence was found.
+    NotChecked,
+    /// Control does not apply to this target.
+    NotApplicable,
+    /// Evaluator encountered an error attempting to assess the control.
+    Error,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

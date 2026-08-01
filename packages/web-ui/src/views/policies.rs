@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use crate::api::client::delete_deployment_policy;
+use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::layout::Card;
 use crate::components::policy::{
     POLICY_CATEGORIES, PolicyCard, PolicyCategory, PolicyDefinition, PolicyEditorModal,
@@ -187,20 +188,44 @@ pub fn PoliciesView() -> Element {
                         "Criteria a system must satisfy to deploy · {built_in_count} built-in · {custom_count} custom"
                     }
                 }
-                button {
-                    class: "btn btn-primary focus-ring",
-                    onclick: move |_| {
-                        editing_policy_id.set(None);
-                        edit_name.set(String::new());
-                        edit_description.set(String::new());
-                        edit_body.set(POLICY_JSON_TEMPLATE.to_string());
-                        edit_format.set(PolicyFormat::Json);
-                        show_editor.set(true);
-                    },
-                    svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                        path { d: "M12 5v14M5 12h14" }
+                div { style: "display:flex; gap:8px; align-items:center;",
+                    // Shared Import / Export menu (AC #32, #35)
+                    IOMenu {
+                        trigger_label: "Import / Export".to_string(),
+                        trigger_class: "focus-ring".to_string(),
+                        items: vec![
+                            IOMenuItem::action("Import policies…"),
+                            IOMenuItem::Separator,
+                            IOMenuItem::action("Export all custom policies"),
+                            IOMenuItem::disabled(
+                                "Export selected policies…",
+                                "Select policies using the checkboxes first",
+                            ),
+                        ],
+                        on_action: move |idx: usize| {
+                            match idx {
+                                0 => { /* Import: not yet implemented */ }
+                                1 => { /* Export all custom: not yet implemented */ }
+                                2 => { /* Export selected: disabled */ }
+                                _ => {}
+                            }
+                        },
                     }
-                    " New custom policy"
+                    button {
+                        class: "btn btn-primary focus-ring",
+                        onclick: move |_| {
+                            editing_policy_id.set(None);
+                            edit_name.set(String::new());
+                            edit_description.set(String::new());
+                            edit_body.set(POLICY_JSON_TEMPLATE.to_string());
+                            edit_format.set(PolicyFormat::Json);
+                            show_editor.set(true);
+                        },
+                        svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                            path { d: "M12 5v14M5 12h14" }
+                        }
+                        " New custom policy"
+                    }
                 }
             }
 

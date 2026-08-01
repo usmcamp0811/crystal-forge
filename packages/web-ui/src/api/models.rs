@@ -575,6 +575,9 @@ pub struct ScanningQueueItemResponse {
     /// True when this is the latest scan row for its derivation.
     #[serde(default)]
     pub is_current: bool,
+    /// True when this derivation's commit is the latest known commit for its flake.
+    #[serde(default)]
+    pub is_latest_per_flake: bool,
     /// Scan trigger source (not yet tracked server-side).
     #[serde(default)]
     pub trigger: Option<String>,

@@ -285,6 +285,10 @@ async fn main() -> anyhow::Result<()> {
             get(scanning::get_scanning_schedule).put(scanning::put_scanning_schedule),
         )
         .route(
+            "/api/v1/scanning/deployed",
+            get(scanning::get_scanning_deployed),
+        )
+        .route(
             "/api/v1/hardening/summary",
             get(hardening::hardening_fleet_summary),
         )
@@ -421,6 +425,24 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:system_id/compliance",
             get(compliance::get_system_compliance_bundles),
+        )
+        // CF-XCCDF import/export and bundle version endpoints
+        .route(
+            "/api/v1/compliance/xccdf/preview",
+            post(compliance::xccdf_preview),
+        )
+        .route(
+            "/api/v1/compliance/xccdf/import",
+            post(compliance::xccdf_import),
+        )
+        .route(
+            "/api/v1/compliance/bundle-versions/:version_id/xccdf",
+            get(compliance::export_bundle_xccdf),
+        )
+        // Policy interchange endpoints
+        .route(
+            "/api/v1/policies/interchange/export",
+            post(compliance::policy_interchange_export),
         )
         // Deployment policies CRUD endpoints
         .route(

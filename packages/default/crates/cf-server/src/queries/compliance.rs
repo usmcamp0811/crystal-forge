@@ -686,6 +686,17 @@ pub(crate) fn system_rollup(system: SystemRow, policies: &[PolicyRow]) -> Compli
             PolicyEval::Evaluated(ComplianceControlStatus::Waiver) => {
                 evaluated_total += 1;
             }
+            // New states: not_checked, not_applicable, and error are known
+            // outcomes but must not inflate the evaluated denominator.
+            PolicyEval::Evaluated(ComplianceControlStatus::NotChecked)
+            | PolicyEval::Evaluated(ComplianceControlStatus::NotApplicable) => {
+                // Count in total but not evaluated; shown separately in UI.
+            }
+            PolicyEval::Evaluated(ComplianceControlStatus::Error) => {
+                // Evaluator error: surface as warn so the UI shows something
+                // actionable, but do not count in the evaluated denominator.
+                warn += 1;
+            }
             // Disabled or unsupported: count in warn for visibility, but not
             // in evaluated_total so they don't skew the percentage score.
             PolicyEval::Disabled | PolicyEval::Unsupported => {
@@ -829,8 +840,9 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
 
     let severity = match status {
         ComplianceControlStatus::Fail => "high",
-        ComplianceControlStatus::Warn => "medium",
+        ComplianceControlStatus::Warn | ComplianceControlStatus::Error => "medium",
         ComplianceControlStatus::Pass | ComplianceControlStatus::Waiver => "low",
+        ComplianceControlStatus::NotChecked | ComplianceControlStatus::NotApplicable => "info",
     }
     .to_string();
 
@@ -850,6 +862,18 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
         PolicyEval::Evaluated(ComplianceControlStatus::Waiver) => format!(
             "{} has a waiver recorded for {}.",
             system.hostname, policy.name
+        ),
+        PolicyEval::Evaluated(ComplianceControlStatus::NotChecked) => format!(
+            "No applicable evidence found for '{}' on {}; control is not checked.",
+            policy.name, system.hostname
+        ),
+        PolicyEval::Evaluated(ComplianceControlStatus::NotApplicable) => format!(
+            "Control '{}' does not apply to {}.",
+            policy.name, system.hostname
+        ),
+        PolicyEval::Evaluated(ComplianceControlStatus::Error) => format!(
+            "Evaluator error when assessing '{}' on {}.",
+            policy.name, system.hostname
         ),
         PolicyEval::Disabled => format!(
             "Policy '{}' is disabled and was not evaluated on {}.",

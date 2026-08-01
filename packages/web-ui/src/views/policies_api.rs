@@ -1,7 +1,9 @@
-//! API integration for policies view with fallback to mock data.
+//! API integration for the policies view.
 //!
-//! This module provides the adapter layer between the policies UI and the backend API,
-//! with graceful fallback to mock data when the API is unavailable.
+//! This module provides the adapter layer between the policies UI and the
+//! backend API. Network and server errors are surfaced as `Err` so the view
+//! can render an explicit error state. Mock policy data is never returned to
+//! the caller (AC #34).
 
 use std::collections::HashMap;
 
@@ -11,62 +13,51 @@ use crate::api::client::{ApiClientError, fetch_deployment_policies};
 use crate::api::models::DeploymentPolicyRecord;
 use crate::components::policy::PolicyDefinition;
 
-/// Fetch policies from the API with fallback to mock data.
+/// Result type for policy loading.
+pub enum PolicyLoadResult {
+    Ok(Vec<PolicyDefinition>),
+    /// Server or network error — the caller must display an error state.
+    /// Never returns mock data (AC #34).
+    Err(String),
+}
+
+/// Fetch policies from the API.
 ///
-/// Returns policies from the backend if available, otherwise returns
-/// mock data to ensure the UI remains functional during development
-/// or when the server is unavailable.
-pub async fn load_policies_with_fallback() -> Vec<PolicyDefinition> {
+/// Returns an explicit error on any failure; never falls back to mock data.
+pub async fn load_policies() -> PolicyLoadResult {
     match fetch_deployment_policies(Some(100), Some(0)).await {
         Ok(response) => {
-            web_sys::console::log_1(
-                &format!("Loaded {} policies from API", response.policies.len()).into(),
-            );
             let sys_counts = response.system_counts;
-            response
+            let definitions = response
                 .policies
                 .into_iter()
                 .map(|p| {
                     let count = sys_counts.get(&p.id).copied().unwrap_or(0);
                     policy_record_to_definition_with_count(p, count)
                 })
-                .collect()
+                .collect();
+            PolicyLoadResult::Ok(definitions)
         }
-        Err(ApiClientError::Status { code, body }) => {
-            // Only use mock fallback for server-side failures (5xx).
-            // For auth/client errors (401/403/404/etc.), do not mask with mock data.
-            if (500..600).contains(&code) {
-                web_sys::console::warn_1(
-                    &format!(
-                        "API returned {}: {} - falling back to mock data",
-                        code, body
-                    )
-                    .into(),
-                );
-                mock_policies()
-            } else {
-                web_sys::console::warn_1(
-                    &format!("API returned {}: {} - showing empty policies", code, body).into(),
-                );
-                Vec::new()
-            }
-        }
+        Err(ApiClientError::Status { code, body }) => PolicyLoadResult::Err(format!(
+            "Server returned {}: {}",
+            code, body
+        )),
         Err(ApiClientError::Network(msg)) => {
-            web_sys::console::warn_1(
-                &format!("Network error: {} - falling back to mock data", msg).into(),
-            );
-            mock_policies()
+            PolicyLoadResult::Err(format!("Network error: {}", msg))
         }
         Err(ApiClientError::Deserialize(msg)) => {
-            web_sys::console::error_1(
-                &format!(
-                    "Failed to deserialize API response: {} - showing empty policies",
-                    msg
-                )
-                .into(),
-            );
-            Vec::new()
+            PolicyLoadResult::Err(format!("Deserialize error: {}", msg))
         }
+    }
+}
+
+/// Backwards-compatible shim used by any existing call site that still expects
+/// the old signature. Returns an empty list on error so the view remains
+/// renderable; callers should migrate to `load_policies()`.
+pub async fn load_policies_with_fallback() -> Vec<PolicyDefinition> {
+    match load_policies().await {
+        PolicyLoadResult::Ok(p) => p,
+        PolicyLoadResult::Err(_) => Vec::new(),
     }
 }
 

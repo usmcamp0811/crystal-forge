@@ -12,8 +12,9 @@ use crate::api::models::{
 };
 use crate::handlers::api::rbac::require_admin;
 use crate::queries::scanning::{
-    ScanSchedulePolicyRow, get_scan_activity, get_scan_queue, get_scan_queue_for_system,
-    get_scan_schedule_policy, get_scan_stats, get_scan_systems, update_scan_schedule_policy,
+    ScanSchedulePolicyRow, get_scan_activity, get_scan_deployed, get_scan_queue,
+    get_scan_queue_for_system, get_scan_schedule_policy, get_scan_stats, get_scan_systems,
+    update_scan_schedule_policy,
 };
 
 #[derive(Debug, Deserialize)]
@@ -96,7 +97,34 @@ fn scan_queue_row_to_response(
         medium_count: r.medium_count,
         freshness: r.freshness,
         is_current: r.is_current,
+        is_latest_per_flake: r.is_latest_per_flake,
         trigger: None,
+    }
+}
+
+pub async fn get_scanning_deployed(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Query(params): Query<ScanningListParams>,
+) -> impl IntoResponse {
+    if require_admin(&pool, &headers).await.is_none() {
+        return forbidden_admin();
+    }
+
+    match get_scan_deployed(&pool, params.limit.clamp(1, 1000)).await {
+        Ok(rows) => (
+            StatusCode::OK,
+            Json(
+                rows.into_iter()
+                    .map(scan_queue_row_to_response)
+                    .collect::<Vec<_>>(),
+            ),
+        )
+            .into_response(),
+        Err(e) => {
+            error!("scanning deployed query failed: {e:#}");
+            internal_error("Failed to load deployed scanning configurations")
+        }
     }
 }
 
