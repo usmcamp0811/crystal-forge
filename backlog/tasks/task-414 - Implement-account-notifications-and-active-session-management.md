@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 04:21'
+updated_date: '2026-08-01 04:25'
 labels:
   - frontend
   - web-ui
@@ -1080,6 +1080,51 @@ Run database-backed ignored tests explicitly against the migrated isolated test 
 - [ ] Web UI integration tests pass.
 - [ ] The Nix web-ui check passes.
 - [ ] The task record documents the final schema, API routes, configuration, defaults, and verification commands.
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation Plan
+
+### Preflight and branch
+- Worktree: `/home/mcamp/code/crystal-forge/TASK-414-account-notifications-sessions`
+- Branch: `TASK-414-account-notifications-sessions`
+- Base: local `dev` at `019f6fff` (Backlog auto-commit `Update task TASK-414`; parent `182823d0 add new task for notifications`)
+- Next migration after current branch: `0197_*` unless `dev` is rebased and a later migration exists.
+
+### Server/session foundation
+1. Extend existing `user_sessions` rather than introducing a parallel session store. Preserve existing `id`, `session_token_hash`, `issued_at`, `expires_at`, `last_seen_at`, `invalidated_at`, `user_agent`, and `ip_address` semantics.
+2. Add query/API support for listing the authenticated user’s active sessions, identifying the current row by the authenticated session token hash, revoking another owned session idempotently, and revoking all owned sessions while clearing session/CSRF cookies.
+3. Add throttled `last_seen_at` updates in session resolution with a default five-minute interval, and add typed config/NixOS options for session last-seen throttle, retention, and trusted proxy client-IP handling.
+4. Parse user-agent metadata best-effort server-side for browser/OS/device labels; render explicit unknown values rather than invented device names.
+5. Add audit events for individual revocation and sign-out-everywhere without storing token material.
+
+### Server/notification foundation
+1. Add durable tables for `user_notification_preferences`, `user_notifications`, email delivery queue, and weekly digest runs, keyed by authenticated `users.id` and source occurrence/event ids with uniqueness for idempotency.
+2. Implement typed server DTOs and authenticated routes:
+   - `GET/PATCH /api/v1/user/notification-preferences`
+   - `GET /api/v1/user/notifications`
+   - `POST /api/v1/user/notifications/:notification_id/read`
+   - `POST /api/v1/user/notifications/read-all`
+   - `DELETE /api/v1/user/notifications/:notification_id`
+   - `GET/DELETE/POST /api/v1/user/sessions...`
+3. Map canonical attention occurrences to notification categories for build failures, CVEs, eval/policy-ish failures, and heartbeat/system offline events; use `system_events` for deployment failures because deployment failures are not currently attention occurrences.
+4. Recheck authorization and current preferences when materializing notifications and before email send. Notification records must not grant access after role/scope changes.
+5. Introduce an email delivery abstraction with an in-process fake provider for tests, durable queue claims/retries/stale-claim recovery, and weekly digest uniqueness/no-empty-digest behavior. Add config/NixOS options for email enablement, sender, transport, retry/worker intervals, digest schedule, and classification/external-delivery policy.
+
+### Web UI
+1. Add web DTOs/API client methods matching server routes, using existing CSRF helpers for mutating routes.
+2. Add authenticated AppShell-owned notification/preferences/session contexts with auth-generation guards that clear pending saves, feed, and sessions on logout or account switch.
+3. Replace Profile placeholders with real Notification controls and Active Sessions rows matching `docs/design/CrystalForge/components/ProfileView.jsx` and shared CSS patterns.
+4. Replace TopBar static notification arrays with server-backed feed/unread count, read/dismiss/mark-all behavior, pagination or incremental loading, keyboard navigation, Escape/click-outside close, and focus restoration.
+
+### Verification
+- Run targeted server checks/tests with `SQLX_OFFLINE=true` during implementation.
+- Run web WASM check and web unit tests.
+- Run `node --check checks/web-ui/tests/integration-test.js` after integration-test edits.
+- Run DB-backed ignored tests against an isolated migrated database when available.
+- Run `nix build .#checks.x86_64-linux.web-ui --no-link` before review or report exact environment limitation if it cannot complete.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
