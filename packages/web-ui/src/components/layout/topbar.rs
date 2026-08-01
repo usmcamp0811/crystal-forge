@@ -1,15 +1,14 @@
 //! Top bar layout component.
 
-use crate::components::layout::sidebar::SidebarContext;
+use crate::api::models::UpdateUserPreferences;
+use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
+use crate::state::preferences;
 use crate::state::theme::UiTheme;
 use crate::theme;
 use dioxus::prelude::*;
-
-const DENSITY_KEY: &str = "cf.ui.density";
-const SYSTEMS_VIEW_KEY: &str = "crystal_forge.systems.view";
 
 #[derive(Clone)]
 struct NotificationItem {
@@ -44,24 +43,6 @@ fn visible_notifications(is_admin_user: bool) -> Vec<NotificationItem> {
         .into_iter()
         .filter(|item| is_admin_user || !admin_only_route(&item.route))
         .collect()
-}
-
-fn load_pref(key: &str, default: &str) -> String {
-    web_sys::window()
-        .and_then(|w| w.local_storage().ok())
-        .flatten()
-        .and_then(|storage| storage.get_item(key).ok())
-        .flatten()
-        .unwrap_or_else(|| default.to_string())
-}
-
-fn store_pref(key: &str, value: &str) {
-    if let Some(storage) = web_sys::window()
-        .and_then(|w| w.local_storage().ok())
-        .flatten()
-    {
-        let _ = storage.set_item(key, value);
-    }
 }
 
 fn set_root_attr(name: &str, value: &str) {
@@ -141,10 +122,14 @@ pub fn TopBar(title: String) -> Element {
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
     let mut is_collapsed = sidebar_ctx.is_collapsed;
+
+    let prefs_ctx = use_context::<PreferencesContext>();
+    let mut density = prefs_ctx.density;
+    let mut default_view = prefs_ctx.default_systems_view;
+    let save_error = prefs_ctx.save_error;
+
     let mut tweaks_open = use_signal(|| false);
     let mut notifications_open = use_signal(|| false);
-    let mut density = use_signal(|| load_pref(DENSITY_KEY, "comfortable"));
-    let mut default_view = use_signal(|| load_pref(SYSTEMS_VIEW_KEY, "cards"));
     let mut notification_items = use_signal(|| visible_notifications(is_admin_user));
     let unread_count = notification_items
         .read()
@@ -179,10 +164,6 @@ pub fn TopBar(title: String) -> Element {
                 } \
             })()",
         );
-    });
-
-    use_effect(move || {
-        set_root_attr("data-density", &density());
     });
 
     use_effect(move || {
@@ -430,6 +411,10 @@ pub fn TopBar(title: String) -> Element {
                 onclick: move |_| {
                     let next = ui_theme().toggle();
                     ui_theme.set(next);
+                    prefs_ctx.save_update.call(UpdateUserPreferences {
+                        theme: Some(preferences::theme_to_preference(next)),
+                        ..UpdateUserPreferences::default()
+                    });
                 },
                 if ui_theme() == UiTheme::Dark {
                     svg {
@@ -509,6 +494,10 @@ pub fn TopBar(title: String) -> Element {
                             on_change: move |value: String| {
                                 let next = if value == "light" { UiTheme::Light } else { UiTheme::Dark };
                                 ui_theme.set(next);
+                                prefs_ctx.save_update.call(UpdateUserPreferences {
+                                    theme: Some(preferences::theme_to_preference(next)),
+                                    ..UpdateUserPreferences::default()
+                                });
                             }
                         }
                         TweakRow {
@@ -517,8 +506,12 @@ pub fn TopBar(title: String) -> Element {
                             value: density(),
                             on_change: move |value: String| {
                                 density.set(value.clone());
-                                store_pref(DENSITY_KEY, &value);
+                                preferences::write_storage(preferences::DENSITY_KEY, &value);
                                 set_root_attr("data-density", &value);
+                                prefs_ctx.save_update.call(UpdateUserPreferences {
+                                    density: Some(preferences::density_from_storage(Some(&value))),
+                                    ..UpdateUserPreferences::default()
+                                });
                             }
                         }
                         TweakRow {
@@ -527,7 +520,11 @@ pub fn TopBar(title: String) -> Element {
                             value: default_view(),
                             on_change: move |value: String| {
                                 default_view.set(value.clone());
-                                store_pref(SYSTEMS_VIEW_KEY, &value);
+                                preferences::write_storage(preferences::SYSTEMS_VIEW_KEY, &value);
+                                prefs_ctx.save_update.call(UpdateUserPreferences {
+                                    default_systems_view: Some(preferences::systems_view_from_storage(Some(&value))),
+                                    ..UpdateUserPreferences::default()
+                                });
                             }
                         }
                         TweakRow {
@@ -537,7 +534,21 @@ pub fn TopBar(title: String) -> Element {
                             on_change: move |value: String| {
                                 let collapsed = value == "rail";
                                 is_collapsed.set(collapsed);
-                                store_pref("cf-sidebar-collapsed", if collapsed { "true" } else { "false" });
+                                preferences::write_storage(
+                                    preferences::SIDEBAR_COLLAPSED_KEY,
+                                    if collapsed { "true" } else { "false" },
+                                );
+                                prefs_ctx.save_update.call(UpdateUserPreferences {
+                                    sidebar_collapsed: Some(collapsed),
+                                    ..UpdateUserPreferences::default()
+                                });
+                            }
+                        }
+                        if let Some(error) = save_error() {
+                            div {
+                                class: "help",
+                                style: "color: var(--cf-critical); margin-top: 8px;",
+                                "{error}"
                             }
                         }
                     }

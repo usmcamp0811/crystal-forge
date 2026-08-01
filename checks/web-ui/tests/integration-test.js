@@ -61,6 +61,46 @@ async function applyVisualTheme(page, theme) {
   }
 }
 
+async function setAccountPreferences(page, preferences) {
+  await page.evaluate(
+    async ({ baseUrl, preferences }) => {
+      const csrf = document.cookie
+        .split(";")
+        .map((cookie) => cookie.trim())
+        .find((cookie) => cookie.startsWith("__Host-cf-csrf="))
+        ?.slice("__Host-cf-csrf=".length);
+      const response = await fetch(`${baseUrl}/api/v1/user/preferences`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          ...(csrf ? { "X-CSRF-Token": csrf } : {}),
+        },
+        body: JSON.stringify(preferences),
+      });
+      if (!response.ok) {
+        throw new Error(`Preference PATCH failed with HTTP ${response.status}`);
+      }
+    },
+    { baseUrl, preferences },
+  );
+}
+
+async function getAccountPreferences(page) {
+  return await page.evaluate(async ({ baseUrl }) => {
+    const response = await fetch(`${baseUrl}/api/v1/user/preferences`, {
+      method: "GET",
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      throw new Error(`Preference GET failed with HTTP ${response.status}`);
+    }
+    return await response.json();
+  }, { baseUrl });
+}
+
 async function captureThemedBaselines(page, step, visualThemes) {
   const visuals = [];
 
@@ -3057,9 +3097,7 @@ const steps = [
       // Force expanded state
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
-      await page.evaluate(() => {
-        localStorage.setItem("cf-sidebar-collapsed", "false");
-      });
+      await setAccountPreferences(page, { sidebar_collapsed: false });
       await page.reload({ timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
@@ -3097,9 +3135,7 @@ const steps = [
     action: async (page) => {
       await routeNavigationBadges(page);
       await page.setViewportSize(VIEWPORTS.desktop);
-      await page.evaluate(() => {
-        localStorage.setItem("cf-sidebar-collapsed", "true");
-      });
+      await setAccountPreferences(page, { sidebar_collapsed: true });
       await page.reload({ timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
@@ -3128,9 +3164,7 @@ const steps = [
     action: async (page) => {
       // Self-contained: force collapsed, reload, then click toggle to expand
       await page.setViewportSize(VIEWPORTS.desktop);
-      await page.evaluate(() => {
-        localStorage.setItem("cf-sidebar-collapsed", "true");
-      });
+      await setAccountPreferences(page, { sidebar_collapsed: true });
       await page.reload({ timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
@@ -3157,9 +3191,7 @@ const steps = [
     description: "Tablet (900px): default icons-only state, edge toggle visible",
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.tablet);
-      await page.evaluate(() => {
-        localStorage.removeItem("cf-sidebar-collapsed");
-      });
+      await setAccountPreferences(page, { sidebar_collapsed: true });
       await page.reload({ timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
@@ -3184,9 +3216,7 @@ const steps = [
     action: async (page) => {
       // Self-contained: force collapsed, reload, then click toggle to expand
       await page.setViewportSize(VIEWPORTS.tablet);
-      await page.evaluate(() => {
-        localStorage.setItem("cf-sidebar-collapsed", "true");
-      });
+      await setAccountPreferences(page, { sidebar_collapsed: true });
       await page.reload({ timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
@@ -3238,9 +3268,7 @@ const steps = [
     description: "Narrow desktop (560px): default icons-only — no hamburger, edge toggle present",
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.narrowDesktop);
-      await page.evaluate(() => {
-        localStorage.removeItem("cf-sidebar-collapsed");
-      });
+      await setAccountPreferences(page, { sidebar_collapsed: true });
       await page.reload({ timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
@@ -3268,9 +3296,7 @@ const steps = [
     description: "Desktop: full-width sidebar showing all section group headers",
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.desktop);
-      await page.evaluate(() => {
-        localStorage.setItem("cf-sidebar-collapsed", "false");
-      });
+      await setAccountPreferences(page, { sidebar_collapsed: false });
       await page.reload({ timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
@@ -3319,10 +3345,7 @@ const steps = [
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.desktop);
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
-      await page.evaluate(() => {
-        localStorage.setItem("cf-sidebar-collapsed", "false");
-        localStorage.setItem("cf.ui.theme", "light");
-      });
+      await setAccountPreferences(page, { sidebar_collapsed: false, theme: "light" });
       await page.reload({ timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
@@ -3340,9 +3363,7 @@ const steps = [
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.desktop);
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
-      await page.evaluate(() => {
-        localStorage.setItem("cf.ui.theme", "dark");
-      });
+      await setAccountPreferences(page, { theme: "dark" });
       await page.reload({ timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
@@ -3376,9 +3397,7 @@ const steps = [
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.desktop);
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
-      await page.evaluate(() => {
-        localStorage.setItem("cf.ui.theme", "light");
-      });
+      await setAccountPreferences(page, { theme: "light" });
       await page.reload({ timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
@@ -3420,10 +3439,7 @@ const steps = [
     description: "Reset viewport and localStorage to desktop defaults for remaining screenshots",
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.desktop);
-      await page.evaluate(() => {
-        localStorage.removeItem("cf-sidebar-collapsed");
-        localStorage.setItem("cf.ui.theme", "dark");
-      });
+      await setAccountPreferences(page, { sidebar_collapsed: false, theme: "dark" });
       await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1200);
     },
@@ -3438,6 +3454,133 @@ const steps = [
         await userMenu.click();
         await page.waitForTimeout(500);
       }
+    },
+  },
+  {
+    name: "11a-profile-preferences",
+    description: "Profile page uses account-scoped preferences and reports save failures",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await setAccountPreferences(page, {
+        theme: "light",
+        density: "compact",
+        sidebar_collapsed: true,
+        default_systems_view: "table",
+      });
+
+      await page.evaluate(() => {
+        localStorage.setItem("cf.ui.theme", "dark");
+        localStorage.setItem("cf.ui.density", "comfortable");
+        localStorage.setItem("cf-sidebar-collapsed", "false");
+        localStorage.setItem("crystal_forge.systems.view", "cards");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const theme = await page.locator("html").getAttribute("data-theme");
+      if (theme !== "light") {
+        throw new Error(`Expected server preference to override stale local theme, got ${theme}`);
+      }
+      const density = await page.locator("html").getAttribute("data-density");
+      if (density !== "compact") {
+        throw new Error(`Expected server preference to override stale density, got ${density}`);
+      }
+      await assertVisible(page.locator("[data-testid='systems-table']"), "Expected server Systems view preference to select table view");
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      const collapsedBox = await sidebar.boundingBox();
+      if (!collapsedBox || collapsedBox.width > 100) {
+        throw new Error(`Expected server sidebar preference to collapse sidebar, got ${collapsedBox ? collapsedBox.width : "missing"}`);
+      }
+
+      await page.goto(`${baseUrl}/profile`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1000);
+      await assertVisible(page.getByRole("heading", { name: "Profile & Preferences" }), "Expected Profile page heading");
+      await assertVisible(page.getByText(TEST_USER.email), "Expected profile identity email from AuthContext");
+      await assertVisible(page.getByText("Notification preferences will be available once backend integration is complete."), "Expected unavailable notification messaging");
+      await assertVisible(page.getByText("Session management will be available in a future release."), "Expected unavailable session messaging");
+
+      await page.route("**/api/v1/user/preferences", async (route) => {
+        if (route.request().method() === "PATCH") {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "forced_failure" }),
+          });
+        } else {
+          await route.fallback();
+        }
+      });
+      await page.locator(".card", { hasText: "Appearance" }).locator("button", { hasText: "Comfort" }).click();
+      await assertVisible(page.getByText("Could not save preferences"), "Expected visible preference save failure");
+      await page.unroute("**/api/v1/user/preferences");
+
+      await setAccountPreferences(page, { theme: "dark" });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1000);
+
+      let patchCount = 0;
+      let resolveFirstPatchCompleted;
+      let resolveSecondPatch;
+      const firstPatchCompleted = new Promise((resolve) => {
+        resolveFirstPatchCompleted = resolve;
+      });
+      const secondPatchSeen = new Promise((resolve) => {
+        resolveSecondPatch = resolve;
+      });
+      await page.route("**/api/v1/user/preferences", async (route) => {
+        if (route.request().method() !== "PATCH") {
+          await route.fallback();
+          return;
+        }
+
+        patchCount += 1;
+        if (patchCount === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          const response = await route.fetch();
+          await route.fulfill({ response });
+          resolveFirstPatchCompleted();
+          return;
+        }
+        if (patchCount === 2) {
+          resolveSecondPatch();
+        }
+        const response = await route.fetch();
+        await route.fulfill({ response });
+      });
+
+      const appearanceCard = page.locator(".card", { hasText: "Appearance" });
+      await appearanceCard.locator("button", { hasText: "Light" }).click();
+      await appearanceCard.locator("button", { hasText: "Dark" }).click();
+      await Promise.race([
+        secondPatchSeen,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for serialized second preference PATCH")), 5000)),
+      ]);
+      await Promise.race([
+        firstPatchCompleted,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for delayed first preference PATCH completion")), 5000)),
+      ]);
+      await page.waitForFunction(
+        async ({ baseUrl }) => {
+          const response = await fetch(`${baseUrl}/api/v1/user/preferences`, {
+            method: "GET",
+            credentials: "include",
+            headers: { Accept: "application/json" },
+          });
+          if (!response.ok) return false;
+          const body = await response.json();
+          return body.preferences?.theme === "dark";
+        },
+        { baseUrl },
+        { timeout: 5000 },
+      );
+      const finalPreferences = await getAccountPreferences(page);
+      if (finalPreferences.preferences?.theme !== "dark") {
+        throw new Error(`Expected serialized saves to leave last-selected dark theme, got ${finalPreferences.preferences?.theme}`);
+      }
+      await page.unroute("**/api/v1/user/preferences");
+
+      await setAccountPreferences(page, { theme: "dark", density: "comfortable", sidebar_collapsed: false, default_systems_view: "cards" });
     },
   },
   {

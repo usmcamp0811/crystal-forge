@@ -4,9 +4,11 @@ use dioxus::prelude::*;
 
 use crate::alerts::{NAV_BADGES, badge_recently_zeroed, badge_visible};
 use crate::api::client::get_navigation_badges;
+use crate::api::models::UpdateUserPreferences;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
+use crate::state::preferences;
 use crate::theme;
 
 /// Context for sidebar state shared between components
@@ -16,24 +18,35 @@ pub struct SidebarContext {
     pub is_collapsed: Signal<bool>,
 }
 
+/// Shared UI preference signals (density, default systems view).
+/// Created in AppShell and consumed by TopBar, ProfileView, etc.
+#[derive(Clone)]
+pub struct PreferencesContext {
+    pub density: Signal<String>,
+    pub default_systems_view: Signal<String>,
+    pub save_error: Signal<Option<String>>,
+    pub save_update: Callback<UpdateUserPreferences>,
+}
+
 /// Sidebar edge toggle button — rendered as a sibling of SidebarNav in the shell,
 /// absolutely positioned to straddle the sidebar/content boundary.
 #[component]
 pub fn SidebarEdgeToggle() -> Element {
     let mut sidebar_ctx = use_context::<SidebarContext>();
+    let prefs_ctx = use_context::<PreferencesContext>();
     let is_collapsed = (sidebar_ctx.is_collapsed)();
 
     let toggle_sidebar = move |_| {
         let new_state = !(sidebar_ctx.is_collapsed)();
         sidebar_ctx.is_collapsed.set(new_state);
-        if let Some(window) = web_sys::window() {
-            if let Ok(Some(storage)) = window.local_storage() {
-                let _ = storage.set_item(
-                    "cf-sidebar-collapsed",
-                    if new_state { "true" } else { "false" },
-                );
-            }
-        }
+        preferences::write_storage(
+            preferences::SIDEBAR_COLLAPSED_KEY,
+            if new_state { "true" } else { "false" },
+        );
+        prefs_ctx.save_update.call(UpdateUserPreferences {
+            sidebar_collapsed: Some(new_state),
+            ..UpdateUserPreferences::default()
+        });
     };
 
     let nav_width = if is_collapsed { "4rem" } else { "16rem" };
@@ -70,6 +83,7 @@ pub fn SidebarNav() -> Element {
 
     // Get sidebar context
     let sidebar_ctx = use_context::<SidebarContext>();
+    let prefs_ctx = use_context::<PreferencesContext>();
     let is_collapsed = (sidebar_ctx.is_collapsed)();
     let mut collapsed_signal = sidebar_ctx.is_collapsed;
 
@@ -111,7 +125,8 @@ pub fn SidebarNav() -> Element {
                 }
                 if !badge_recently_zeroed("systems", GRACE) {
                     badges.systems_attention = fresh.systems_attention;
-                    badges.systems_occurrence_ids = std::mem::take(&mut fresh.systems_occurrence_ids);
+                    badges.systems_occurrence_ids =
+                        std::mem::take(&mut fresh.systems_occurrence_ids);
                 }
                 if !badge_recently_zeroed("environments", GRACE) {
                     badges.environments_attention = fresh.environments_attention;
@@ -189,12 +204,12 @@ pub fn SidebarNav() -> Element {
             style: "border-right: 1px solid var(--cf-card-border); width: {nav_width};",
             div {
                 class: "sidebar-brand",
-                style: if is_collapsed { "justify-content: center;" } else { "" },
+
                 div {
                     class: "brand-mark",
                     img {
                         src: asset!("assets/cf.png"),
-                        alt: "Crystal Forge logo",
+                        alt: "Crystal Forge",
                         class: "brand-mark-img",
                     }
                 }
@@ -217,14 +232,14 @@ pub fn SidebarNav() -> Element {
                     onclick: move |_| {
                         let new_state = !collapsed_signal();
                         collapsed_signal.set(new_state);
-                        if let Some(window) = web_sys::window() {
-                            if let Ok(Some(storage)) = window.local_storage() {
-                                let _ = storage.set_item(
-                                    "cf-sidebar-collapsed",
-                                    if new_state { "true" } else { "false" },
-                                );
-                            }
-                        }
+                        preferences::write_storage(
+                            preferences::SIDEBAR_COLLAPSED_KEY,
+                            if new_state { "true" } else { "false" },
+                        );
+                        prefs_ctx.save_update.call(UpdateUserPreferences {
+                            sidebar_collapsed: Some(new_state),
+                            ..UpdateUserPreferences::default()
+                        });
                     },
                     title: if is_collapsed { "Expand sidebar" } else { "Collapse sidebar" },
                     "aria-label": if is_collapsed { "Expand sidebar" } else { "Collapse sidebar" },
@@ -535,8 +550,10 @@ pub fn SidebarNav() -> Element {
             }
 
             // User profile section at bottom
-            div {
+            Link {
+                to: Route::ProfileView {},
                 class: "sidebar-user",
+                style: "cursor: pointer;",
                 div {
                     class: "user-avatar",
                     {user_initials}
@@ -900,8 +917,11 @@ pub fn MobileDrawer() -> Element {
             }
 
             // User profile section at bottom
-            div {
+            Link {
+                to: Route::ProfileView {},
                 class: "sidebar-user",
+                style: "cursor: pointer;",
+                onclick: move |_| is_mobile_drawer_open.set(false),
                 div {
                     class: "user-avatar",
                     {user_initials}

@@ -19,6 +19,7 @@ pub mod login;
 pub mod not_found;
 pub mod policies;
 pub mod policies_api;
+pub mod profile;
 pub mod register;
 pub mod scanning;
 pub mod setup;

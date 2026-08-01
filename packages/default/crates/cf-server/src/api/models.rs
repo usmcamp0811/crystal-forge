@@ -2013,6 +2013,106 @@ pub struct AuthContext {
     pub auth_mode: AuthMode,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiThemePreference {
+    Dark,
+    Light,
+}
+
+impl UiThemePreference {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiDensityPreference {
+    Comfortable,
+    Compact,
+}
+
+impl UiDensityPreference {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Comfortable => "comfortable",
+            Self::Compact => "compact",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SystemsViewPreference {
+    Cards,
+    Table,
+}
+
+impl SystemsViewPreference {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cards => "cards",
+            Self::Table => "table",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPreferencesDto {
+    pub user_id: uuid::Uuid,
+    pub theme: String,
+    pub density: String,
+    pub sidebar_collapsed: bool,
+    pub default_systems_view: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<crate::models::user_preferences::UserPreferences> for UserPreferencesDto {
+    fn from(value: crate::models::user_preferences::UserPreferences) -> Self {
+        Self {
+            user_id: value.user_id,
+            theme: value.theme,
+            density: value.density,
+            sidebar_collapsed: value.sidebar_collapsed,
+            default_systems_view: value.default_systems_view,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPreferencesResponse {
+    pub preferences: Option<UserPreferencesDto>,
+}
+
+impl UserPreferencesResponse {
+    pub fn new(preferences: Option<crate::models::user_preferences::UserPreferences>) -> Self {
+        Self {
+            preferences: preferences.map(UserPreferencesDto::from),
+        }
+    }
+}
+
+impl From<crate::models::user_preferences::UserPreferences> for UserPreferencesResponse {
+    fn from(value: crate::models::user_preferences::UserPreferences) -> Self {
+        Self {
+            preferences: Some(UserPreferencesDto::from(value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateUserPreferences {
+    pub theme: Option<UiThemePreference>,
+    pub density: Option<UiDensityPreference>,
+    pub sidebar_collapsed: Option<bool>,
+    pub default_systems_view: Option<SystemsViewPreference>,
+}
+
 /// Admin users list item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminUserSummary {
