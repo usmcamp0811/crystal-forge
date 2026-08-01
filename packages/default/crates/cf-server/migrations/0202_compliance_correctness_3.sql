@@ -1,23 +1,14 @@
 -- Migration 0202: Compliance foundation correctness (squash of former 0202+0203).
 --
--- 1. Pointer-integrity constraints on deployment_policies and compliance_bundles:
---    separate INSERT and UPDATE triggers (INSERT WHEN cannot reference OLD).
---
--- 2. Deferred constraint trigger on version state changes: verifies lineage
---    pointers are consistent at transaction end when publication_state changes.
---    - accepted/deprecated → must not remain current_draft_version_id
---    - accepted transition  → must be the lineage's current_published_version_id
---    - mutable states       → must not remain current_published_version_id
---
--- 3. Immutability guard on compliance_bundle_version_policies: rejects any
---    INSERT, UPDATE, or DELETE when the parent bundle version is immutable.
---
--- 4. Column rename sync: compliance_bundle_assignments now uses
---    assignment_overlay_digest (renamed in 0201); rebuild the updated_at trigger.
---
--- 5. Bundle membership trigger: error on missing version instead of silent skip.
---
--- 6. Bundle draft trigger: error instead of 0.1.0 fallback when no draft exists.
+-- 1. Pointer-integrity constraints on deployment_policies and compliance_bundles.
+-- 2. Deferred state-change validation with accepted-pointer enforcement.
+-- 3. Immutability guard on compliance_bundle_version_policies (checks both OLD/NEW).
+-- 4. Accepted→deprecated transition: permitted explicitly; all other semantic
+--    mutations to accepted rows remain rejected.
+-- 5. Policy draft sync trigger: uses mutable states, errors on missing draft,
+--    never creates an implicit derived draft.
+-- 6. Bundle membership and draft sync triggers: error-on-missing semantics.
+-- 7. Rebuilt assignment updated_at trigger.
 
 -- ── 1. Policy pointer-integrity triggers ─────────────────────────────────────
 
@@ -454,6 +445,142 @@ BEGIN
     ON CONFLICT (bundle_version_id, environment_id)
         WHERE environment_id IS NOT NULL
     DO NOTHING;
+
+    RETURN NEW;
+END;
+$$;
+
+-- ── 7. Fix membership immutability guard: check both OLD and NEW ─────────────
+-- P1 #2: During UPDATE, must reject when EITHER old (published row being taken
+-- away) OR new parent is immutable.
+CREATE OR REPLACE FUNCTION guard_bundle_version_membership_immutability()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_state text;
+BEGIN
+    IF TG_OP IN ('UPDATE', 'DELETE') THEN
+        SELECT publication_state INTO v_state
+        FROM compliance_bundle_versions WHERE id = OLD.bundle_version_id;
+        IF v_state IN ('accepted', 'deprecated') THEN
+            RAISE EXCEPTION
+                'Cannot remove membership from immutable bundle version %.',
+                OLD.bundle_version_id;
+        END IF;
+    END IF;
+
+    IF TG_OP IN ('INSERT', 'UPDATE') THEN
+        SELECT publication_state INTO v_state
+        FROM compliance_bundle_versions WHERE id = NEW.bundle_version_id;
+        IF v_state IN ('accepted', 'deprecated') THEN
+            RAISE EXCEPTION
+                'Cannot add membership to immutable bundle version %.',
+                NEW.bundle_version_id;
+        END IF;
+    END IF;
+
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+-- ── 8. Permit accepted → deprecated transition ──────────────────────────────
+-- Replace the blanket-reject triggers from 0199 with versions that allow the
+-- single lifecycle transition while rejecting all semantic field changes.
+CREATE OR REPLACE FUNCTION enforce_bundle_version_immutability()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.publication_state = 'accepted' THEN
+        IF TG_OP = 'DELETE' THEN
+            RAISE EXCEPTION 'Cannot delete accepted bundle version %.', OLD.id;
+        END IF;
+        IF NEW.publication_state = 'deprecated' THEN
+            IF NEW.name IS DISTINCT FROM OLD.name
+            OR NEW.framework IS DISTINCT FROM OLD.framework
+            OR NEW.framework_version IS DISTINCT FROM OLD.framework_version
+            OR NEW.description IS DISTINCT FROM OLD.description
+            OR NEW.layer IS DISTINCT FROM OLD.layer
+            OR NEW.owner IS DISTINCT FROM OLD.owner
+            OR NEW.semantic_digest IS DISTINCT FROM OLD.semantic_digest
+            THEN
+                RAISE EXCEPTION
+                    'Deprecating accepted bundle version % but semantic fields changed.', OLD.id;
+            END IF;
+            RETURN NEW;
+        END IF;
+        RAISE EXCEPTION 'Cannot modify accepted bundle version %.', OLD.id;
+    END IF;
+    IF OLD.publication_state = 'deprecated' THEN
+        RAISE EXCEPTION 'Cannot modify deprecated bundle version %.', OLD.id;
+    END IF;
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION enforce_policy_version_immutability()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.publication_state = 'accepted' THEN
+        IF TG_OP = 'DELETE' THEN
+            RAISE EXCEPTION 'Cannot delete accepted policy version %.', OLD.id;
+        END IF;
+        IF NEW.publication_state = 'deprecated' THEN
+            IF NEW.name IS DISTINCT FROM OLD.name
+            OR NEW.description IS DISTINCT FROM OLD.description
+            OR NEW.policy_type IS DISTINCT FROM OLD.policy_type
+            OR NEW.config::text IS DISTINCT FROM OLD.config::text
+            OR NEW.semantic_digest IS DISTINCT FROM OLD.semantic_digest
+            THEN
+                RAISE EXCEPTION
+                    'Deprecating accepted policy version % but semantic fields changed.', OLD.id;
+            END IF;
+            RETURN NEW;
+        END IF;
+        RAISE EXCEPTION 'Cannot modify accepted policy version %.', OLD.id;
+    END IF;
+    IF OLD.publication_state = 'deprecated' THEN
+        RAISE EXCEPTION 'Cannot modify deprecated policy version %.', OLD.id;
+    END IF;
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- ── 9. Fix policy draft sync trigger ─────────────────────────────────────────
+-- The active version from 0200 still uses 'draft' as the only mutable state.
+-- This replacement: 1) updates for all mutable states; 2) errors when no draft
+-- exists; 3) never creates an implicit derived draft.
+CREATE OR REPLACE FUNCTION sync_policy_draft_version()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_id uuid;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO deployment_policy_versions (
+            policy_id, version, name, description, policy_type, config, semantic_digest
+        ) VALUES (
+            NEW.id, '0.1.0', NEW.name, NEW.description, NEW.policy_type, NEW.config,
+            'pending'
+        )
+        RETURNING id INTO v_id;
+        UPDATE deployment_policies SET current_draft_version_id = v_id WHERE id = NEW.id;
+
+    ELSIF TG_OP = 'UPDATE' THEN
+        IF NEW.current_draft_version_id IS NOT NULL THEN
+            UPDATE deployment_policy_versions
+            SET name = NEW.name,
+                description = NEW.description,
+                policy_type = NEW.policy_type,
+                config = NEW.config,
+                semantic_digest = 'pending'
+            WHERE id = NEW.current_draft_version_id
+              AND publication_state IN ('incomplete', 'draft', 'interim');
+        ELSE
+            RAISE EXCEPTION
+                'Cannot update policy %: no mutable draft version exists. '
+                'Create a derived draft before editing.',
+                NEW.id;
+        END IF;
+    END IF;
 
     RETURN NEW;
 END;

@@ -719,7 +719,7 @@ pub async fn create_deployment_policy(
 /// Returns 404 if the policy does not exist.
 /// Returns 409 if the new name conflicts with an existing policy.
 pub async fn update_deployment_policy(
-    RequireOperator(_user): RequireOperator,
+    RequireOperator(user): RequireOperator,
     State(state): State<CFState>,
     Path(policy_id): Path<Uuid>,
     Json(request): Json<UpdateDeploymentPolicyRequest>,
@@ -861,19 +861,24 @@ pub async fn update_deployment_policy(
     }
 
     // Update policy
-    let policy = deployment_policies::update_deployment_policy(&state.pool, &policy_id, &request)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to update deployment policy {}: {}", policy_id, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to update deployment policy".to_string(),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            "Deployment policy not found".to_string(),
-        ))?;
+    let policy = deployment_policies::update_deployment_policy(
+        &state.pool,
+        &policy_id,
+        &request,
+        Some(user.user_id),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to update deployment policy {}: {}", policy_id, e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to update deployment policy".to_string(),
+        )
+    })?
+    .ok_or((
+        StatusCode::NOT_FOUND,
+        "Deployment policy not found".to_string(),
+    ))?;
 
     Ok(Json(policy))
 }
@@ -1282,7 +1287,7 @@ mod tests {
         };
 
         let updated =
-            deployment_policies::update_deployment_policy(&pool, &policy_id, &update_request)
+            deployment_policies::update_deployment_policy(&pool, &policy_id, &update_request, None)
                 .await
                 .unwrap()
                 .expect("Policy should exist after update");

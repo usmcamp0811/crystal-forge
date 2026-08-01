@@ -334,7 +334,7 @@ pub async fn get_scan_deployed(
     // Decode the composite cursor.
     let (cursor_hostname, cursor_derivation_id): (String, i32) = match after_cursor {
         None => (String::new(), 0),
-        Some(c) => decode_deployed_cursor(c).map_err(|e| anyhow::anyhow!("{e}"))?,
+        Some(c) => decode_deployed_cursor(c).map_err(anyhow::Error::new)?,
     };
     let rows = sqlx::query(
         r#"

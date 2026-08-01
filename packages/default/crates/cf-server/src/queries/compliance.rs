@@ -225,6 +225,7 @@ pub async fn ensure_bundle_draft(
 pub async fn ensure_policy_draft(
     tx: &mut Transaction<'_, Postgres>,
     policy_id: Uuid,
+    actor_id: Option<Uuid>,
 ) -> Result<Uuid> {
     #[derive(sqlx::FromRow)]
     struct PolicyPointers {
@@ -294,8 +295,8 @@ pub async fn ensure_policy_draft(
             policy_id, version, name, description, policy_type,
             implementation_state, execution_phase, config,
             compliance_metadata, dependencies, opaque_xml,
-            semantic_digest, derived_from_version_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12)
+            semantic_digest, derived_from_version_id, created_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12, $13)
         RETURNING id
         "#,
     )
@@ -311,6 +312,7 @@ pub async fn ensure_policy_draft(
     .bind(&pub_ver.dependencies)
     .bind(&pub_ver.opaque_xml)
     .bind(published_id)
+    .bind(actor_id)
     .fetch_one(&mut **tx)
     .await?;
 
