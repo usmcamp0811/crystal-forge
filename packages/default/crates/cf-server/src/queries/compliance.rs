@@ -5,7 +5,8 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use crate::compliance::digest::{
-    BundleVersionCanonical, load_bundle_policy_version_ids, write_bundle_version_digest,
+    BundleVersionCanonical, load_bundle_policy_version_ids, write_assignment_effective_set_digest,
+    write_bundle_version_digest,
 };
 
 // ─── Typed validation error ───────────────────────────────────────────────────
@@ -236,23 +237,22 @@ pub async fn create_bundle(
         .await?;
     }
 
-    // Compute and persist the canonical bundle digest inside the transaction
-    // (before commit) so a digest failure rolls back the entire mutation.
-    // Fetch the draft version id first, then read its membership.
-    let draft_version_id: Uuid =
-        sqlx::query_scalar("SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1")
-            .bind(bundle_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    // Compute and persist canonical bundle and assignment digests inside the
+    // transaction so any failure rolls back the entire mutation.
+    let (draft_version_id, stored_layer, stored_owner): (Uuid, String, String) = sqlx::query_as(
+        r#"
+            SELECT b.current_draft_version_id, b.layer, b.owner
+            FROM compliance_bundles b
+            WHERE b.id = $1
+            "#,
+    )
+    .bind(bundle_id)
+    .fetch_one(&mut *tx)
+    .await?;
 
     let policy_version_ids = load_bundle_policy_version_ids(&mut tx, draft_version_id).await?;
 
-    let layer = request
-        .layer
-        .as_deref()
-        .unwrap_or("fleet")
-        .trim()
-        .to_string();
+    let req_layer = request.layer.as_deref().unwrap_or("").trim();
     let canonical = BundleVersionCanonical {
         name: request.name.trim().to_string(),
         framework: request.framework.trim().to_string(),
@@ -262,15 +262,33 @@ pub async fn create_bundle(
             .as_ref()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
-        layer: if layer.is_empty() {
-            "fleet".to_string()
+        layer: if req_layer.is_empty() {
+            stored_layer
         } else {
-            layer
+            req_layer.to_string()
         },
-        owner: "Platform Security".to_string(),
+        owner: stored_owner,
         policy_version_ids,
     };
     write_bundle_version_digest(&mut tx, bundle_id, &canonical).await?;
+
+    // Write assignment effective-set digests for all new environment assignments
+    // (created by trigger; still have effective_set_digest = 'pending').
+    let assignment_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT id FROM compliance_bundle_assignments
+        WHERE bundle_version_id = $1
+        ORDER BY id
+        FOR UPDATE
+        "#,
+    )
+    .bind(draft_version_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    for assignment_id in assignment_ids {
+        write_assignment_effective_set_digest(&mut tx, assignment_id).await?;
+    }
 
     tx.commit().await?;
 
@@ -339,26 +357,49 @@ pub async fn update_bundle(
 
     let mut tx = pool.begin().await?;
 
-    // Check for published/deprecated version before allowing edits.
-    let has_immutable: bool = sqlx::query_scalar(
+    // Verify the bundle exists and that the *current draft* is mutable.
+    // A bundle may have published history yet still have a separate mutable draft;
+    // only editing an already-immutable draft is rejected (P1 #6).
+    #[derive(sqlx::FromRow)]
+    struct BundleEditRow {
+        current_draft_version_id: Option<Uuid>,
+        draft_publication_state: Option<String>,
+        layer: String,
+        owner: String,
+    }
+    let edit_row: Option<BundleEditRow> = sqlx::query_as(
         r#"
-        SELECT EXISTS (
-            SELECT 1 FROM compliance_bundle_versions
-            WHERE bundle_id = $1
-              AND publication_state IN ('accepted', 'deprecated')
-        )
+        SELECT
+            b.current_draft_version_id,
+            bv.publication_state AS draft_publication_state,
+            b.layer,
+            b.owner
+        FROM compliance_bundles b
+        LEFT JOIN compliance_bundle_versions bv ON bv.id = b.current_draft_version_id
+        WHERE b.id = $1
+        FOR UPDATE OF b
         "#,
     )
     .bind(bundle_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    if has_immutable {
-        bail!("Cannot edit bundle {bundle_id}: it has an immutable published version");
+    let Some(row) = edit_row else {
+        return Ok(None);
+    };
+
+    if let Some(ref state) = row.draft_publication_state {
+        if state == "accepted" || state == "deprecated" {
+            bail!(
+                "Cannot edit bundle {bundle_id}: the current draft version is immutable ({}). \
+                 Create a new draft derived from the published version first.",
+                state
+            );
+        }
     }
 
-    // Update the lineage row. The sync trigger (trigger_sync_bundle_draft_version)
-    // fires AFTER UPDATE and updates the draft version row automatically.
+    // Update the lineage row. The sync trigger fires AFTER UPDATE and updates
+    // the draft version row automatically.
     let updated = sqlx::query_scalar::<_, i64>(
         r#"
         UPDATE compliance_bundles
@@ -386,7 +427,7 @@ pub async fn update_bundle(
         return Ok(None);
     }
 
-    // Replace membership. The compliance_bundle_policies triggers maintain
+    // Replace policy membership. The compliance_bundle_policies triggers maintain
     // the version membership table automatically.
     sqlx::query("DELETE FROM compliance_bundle_policies WHERE bundle_id = $1")
         .bind(bundle_id)
@@ -406,12 +447,35 @@ pub async fn update_bundle(
         .await?;
     }
 
-    sqlx::query("DELETE FROM compliance_bundle_environments WHERE bundle_id = $1")
+    // Diff-based environment update: remove only removed environments, add only
+    // new ones. This preserves existing assignment overlays (exclusions,
+    // additions, value overrides) for environments that remain in the request.
+    // (P1 #2)
+    let new_env_set: std::collections::HashSet<Uuid> =
+        request.required_envs.iter().copied().collect();
+
+    let existing_envs: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT environment_id FROM compliance_bundle_environments WHERE bundle_id = $1",
+    )
+    .bind(bundle_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let existing_env_set: std::collections::HashSet<Uuid> = existing_envs.iter().copied().collect();
+
+    // Remove environments no longer in the request.
+    for removed in existing_env_set.difference(&new_env_set) {
+        sqlx::query(
+            "DELETE FROM compliance_bundle_environments WHERE bundle_id = $1 AND environment_id = $2",
+        )
         .bind(bundle_id)
+        .bind(removed)
         .execute(&mut *tx)
         .await?;
+    }
 
-    for env_id in request.required_envs {
+    // Add newly requested environments (trigger will create assignments).
+    for added in new_env_set.difference(&existing_env_set) {
         sqlx::query(
             r#"
             INSERT INTO compliance_bundle_environments (bundle_id, environment_id)
@@ -419,17 +483,17 @@ pub async fn update_bundle(
             "#,
         )
         .bind(bundle_id)
-        .bind(env_id)
+        .bind(added)
         .execute(&mut *tx)
         .await?;
     }
 
     // Compute and persist the canonical bundle digest inside the transaction.
-    let draft_version_id: Uuid =
-        sqlx::query_scalar("SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1")
-            .bind(bundle_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    // Load layer and owner from the persisted version (they are not in the
+    // UpdateComplianceBundleRequest and must not be overwritten with constants).
+    let draft_version_id = row.current_draft_version_id.ok_or_else(|| {
+        anyhow::anyhow!("Bundle {bundle_id} has no current draft version after update")
+    })?;
 
     let policy_version_ids = load_bundle_policy_version_ids(&mut tx, draft_version_id).await?;
 
@@ -446,11 +510,30 @@ pub async fn update_bundle(
             .as_ref()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
-        layer: "fleet".to_string(),
-        owner: "Platform Security".to_string(),
+        // Load layer and owner from the persisted version, not hardcoded (P1 #6).
+        layer: row.layer,
+        owner: row.owner,
         policy_version_ids,
     };
     write_bundle_version_digest(&mut tx, bundle_id, &canonical).await?;
+
+    // Write assignment effective-set digests for ALL assignments on this draft
+    // version (both pre-existing and newly created by the trigger). (P1 #1)
+    let assignment_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT id FROM compliance_bundle_assignments
+        WHERE bundle_version_id = $1
+        ORDER BY id
+        FOR UPDATE
+        "#,
+    )
+    .bind(draft_version_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    for assignment_id in assignment_ids {
+        write_assignment_effective_set_digest(&mut tx, assignment_id).await?;
+    }
 
     tx.commit().await?;
 

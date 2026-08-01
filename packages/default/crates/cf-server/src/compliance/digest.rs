@@ -169,21 +169,38 @@ impl AssignmentEffectiveSetCanonical {
 
 /// Write the canonical policy version digest inside the active transaction.
 ///
-/// This must be called **before** the transaction commits. A failure here
-/// rolls back the entire mutation.
+/// Targets exactly the current draft version via `current_draft_version_id`
+/// with `FOR UPDATE` to prevent TOCTOU races. Fails if no draft version exists
+/// so a digest failure rolls back the entire mutation (P1 #5).
 pub async fn write_policy_version_digest(
     tx: &mut Transaction<'_, Postgres>,
     policy_id: Uuid,
     canonical: &PolicyVersionCanonical,
 ) -> Result<()> {
+    // Resolve and lock the current draft version pointer.
+    let version_id: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT current_draft_version_id
+        FROM deployment_policies
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(policy_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .flatten();
+
+    let version_id = version_id
+        .ok_or_else(|| anyhow::anyhow!("Policy {policy_id} has no current draft version"))?;
+
     let digest = canonical.compute_digest();
-    sqlx::query(
+    let rows_affected = sqlx::query(
         r#"
         UPDATE deployment_policy_versions
         SET semantic_digest          = $1,
             digest_algorithm         = 'sha-256',
             canonicalization_version = 'cf-model-json-1',
-            -- Refresh all canonical fields so the version row is authoritative.
             name                     = $3,
             description              = $4,
             policy_type              = $5,
@@ -192,12 +209,12 @@ pub async fn write_policy_version_digest(
             config                   = $8::jsonb,
             compliance_metadata      = $9::jsonb,
             dependencies             = $10::jsonb
-        WHERE policy_id  = $2
+        WHERE id = $2
           AND publication_state = 'draft'
         "#,
     )
     .bind(&digest)
-    .bind(policy_id)
+    .bind(version_id)
     .bind(&canonical.name)
     .bind(&canonical.description)
     .bind(&canonical.policy_type)
@@ -207,7 +224,12 @@ pub async fn write_policy_version_digest(
     .bind(&canonical.compliance_metadata)
     .bind(&canonical.dependencies)
     .execute(&mut **tx)
-    .await?;
+    .await?
+    .rows_affected();
+
+    if rows_affected != 1 {
+        anyhow::bail!("Policy version {version_id} is not in draft state and cannot be updated");
+    }
     Ok(())
 }
 
@@ -232,8 +254,8 @@ pub async fn load_bundle_policy_version_ids(
 
 /// Write the canonical bundle version digest inside the active transaction.
 ///
-/// Locks the bundle version row for the duration of the transaction to prevent
-/// concurrent updates producing a stale digest (P1 #3 concurrency).
+/// Resolves the current draft version via `current_draft_version_id FOR UPDATE`
+/// (P1 #5 and concurrency safety). Fails if no draft version exists.
 pub async fn write_bundle_version_digest(
     tx: &mut Transaction<'_, Postgres>,
     bundle_id: Uuid,
@@ -241,23 +263,24 @@ pub async fn write_bundle_version_digest(
 ) -> Result<()> {
     let digest = canonical.compute_digest();
 
-    // Lock the draft version row before writing to prevent TOCTOU races.
+    // Resolve and lock the current draft version pointer.
     let version_id: Option<Uuid> = sqlx::query_scalar(
         r#"
-        SELECT id FROM compliance_bundle_versions
-        WHERE bundle_id = $1 AND publication_state = 'draft'
+        SELECT current_draft_version_id
+        FROM compliance_bundles
+        WHERE id = $1
         FOR UPDATE
         "#,
     )
     .bind(bundle_id)
     .fetch_optional(&mut **tx)
-    .await?;
+    .await?
+    .flatten();
 
-    let Some(version_id) = version_id else {
-        return Ok(());
-    };
+    let version_id = version_id
+        .ok_or_else(|| anyhow::anyhow!("Bundle {bundle_id} has no current draft version"))?;
 
-    sqlx::query(
+    let rows_affected = sqlx::query(
         r#"
         UPDATE compliance_bundle_versions
         SET semantic_digest          = $1,
@@ -270,6 +293,7 @@ pub async fn write_bundle_version_digest(
             layer                    = $7,
             owner                    = $8
         WHERE id = $2
+          AND publication_state = 'draft'
         "#,
     )
     .bind(&digest)
@@ -281,8 +305,12 @@ pub async fn write_bundle_version_digest(
     .bind(&canonical.layer)
     .bind(&canonical.owner)
     .execute(&mut **tx)
-    .await?;
+    .await?
+    .rows_affected();
 
+    if rows_affected != 1 {
+        anyhow::bail!("Bundle version {version_id} is not in draft state and cannot be updated");
+    }
     Ok(())
 }
 
@@ -335,18 +363,34 @@ pub async fn write_assignment_effective_set_digest(
     .fetch_all(&mut **tx)
     .await?;
 
-    // Resolved effective policy set: baseline minus exclusions plus additions.
-    // Uses the bundle version membership as the baseline.
+    // Resolved effective policy set:
+    //   selected baseline membership
+    //   - exclusions
+    //   + assignment additions
+    //
+    // Note: direct environment and system policies have higher specificity and
+    // are resolved at evaluation time, not at assignment-creation time. They are
+    // not included here because the assignment record does not own them.
+    // Conflict detection for same-lineage versions at equal specificity is also
+    // deferred to evaluation.
     let effective_policy_version_ids: Vec<Uuid> = sqlx::query_scalar(
         r#"
         SELECT bvp.policy_version_id
         FROM compliance_bundle_assignments a
         JOIN compliance_bundle_version_policies bvp ON bvp.bundle_version_id = a.bundle_version_id
         WHERE a.id = $1
+          AND bvp.selected = TRUE
           AND bvp.policy_version_id NOT IN (
-              SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_id = $1
+              SELECT policy_version_id
+              FROM compliance_assignment_exclusions
+              WHERE assignment_id = $1
           )
         ORDER BY bvp.policy_order ASC
+        UNION ALL
+        SELECT aa.policy_version_id
+        FROM compliance_assignment_additions aa
+        WHERE aa.assignment_id = $1
+        ORDER BY 1
         "#,
     )
     .bind(assignment_id)

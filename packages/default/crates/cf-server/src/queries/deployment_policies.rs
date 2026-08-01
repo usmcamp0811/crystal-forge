@@ -319,14 +319,42 @@ pub async fn create_deployment_policy(
 
 /// Update an existing deployment policy.
 ///
-/// Runs entirely within a transaction. Digest computation and persistence
-/// happen before commit; a failure rolls back the entire update.
+/// Loads the current draft version's rich semantic fields (implementation_state,
+/// execution_phase, compliance_metadata, dependencies) before updating, so that
+/// a plain name/config/enabled edit does not overwrite imported metadata (P1 #4).
+///
+/// Runs entirely within a transaction; a digest failure rolls back the update.
 pub async fn update_deployment_policy(
     pool: &PgPool,
     policy_id: &Uuid,
     request: &UpdateDeploymentPolicyRequest,
 ) -> Result<Option<DeploymentPolicyRecord>> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+
+    // Load the current draft version's rich fields before the lineage update,
+    // so that updating the lineage cannot erase imported semantics (P1 #4).
+    #[derive(sqlx::FromRow)]
+    struct DraftVersionFields {
+        implementation_state: String,
+        execution_phase: String,
+        compliance_metadata: serde_json::Value,
+        dependencies: serde_json::Value,
+    }
+    let draft_fields: Option<DraftVersionFields> = sqlx::query_as(
+        r#"
+        SELECT dpv.implementation_state, dpv.execution_phase,
+               dpv.compliance_metadata, dpv.dependencies
+        FROM deployment_policies dp
+        JOIN deployment_policy_versions dpv ON dpv.id = dp.current_draft_version_id
+        WHERE dp.id = $1
+          AND dpv.publication_state = 'draft'
+        FOR UPDATE OF dp
+        "#,
+    )
+    .bind(policy_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to load policy draft version fields")?;
 
     let policy = sqlx::query_as::<_, DeploymentPolicyRecord>(
         r#"
@@ -352,15 +380,35 @@ pub async fn update_deployment_policy(
     .context("Failed to update deployment policy")?;
 
     if let Some(ref p) = policy {
+        // Merge: preserve existing rich fields, update only what the legacy
+        // request supports. Callers using the full version-aware API can update
+        // implementation_state, execution_phase, etc. separately.
+        let (impl_state, exec_phase, meta, deps) = if let Some(df) = draft_fields {
+            (
+                df.implementation_state,
+                df.execution_phase,
+                df.compliance_metadata,
+                df.dependencies,
+            )
+        } else {
+            // No prior draft version — new policy path, use defaults.
+            (
+                "native".to_string(),
+                "nix-evaluation".to_string(),
+                serde_json::json!({}),
+                serde_json::json!([]),
+            )
+        };
+
         let canonical = PolicyVersionCanonical {
             name: p.name.clone(),
             description: p.description.clone(),
             policy_type: p.policy_type.clone(),
-            implementation_state: "native".to_string(),
-            execution_phase: "nix-evaluation".to_string(),
+            implementation_state: impl_state,
+            execution_phase: exec_phase,
             config: p.config.clone(),
-            compliance_metadata: serde_json::json!({}),
-            dependencies: serde_json::json!([]),
+            compliance_metadata: meta,
+            dependencies: deps,
         };
         write_policy_version_digest(&mut tx, p.id, &canonical)
             .await
