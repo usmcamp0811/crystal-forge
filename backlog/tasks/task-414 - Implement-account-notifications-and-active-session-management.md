@@ -1298,6 +1298,8 @@ Verification for this slice:
 - `node --check checks/web-ui/tests/integration-test.js` passed.
 
 Remaining limitations: DB-backed ignored tests still require a migrated isolated `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata was not refreshed; `nix build .#checks.x86_64-linux.web-ui --no-link` was not rerun in this slice. P2 review items remain deferred unless explicitly scoped.
+
+Committed and pushed review-fix commit `244e73d9` (`Fix notification preference and pagination races`) to branch `TASK-414-account-notifications-sessions` for MR !314. Active task worktree and dev integration worktree are clean after push. Remaining limitations are unchanged: DB-backed ignored tests still need a migrated isolated `CRYSTAL_FORGE_TEST_DATABASE_URL`, SQLx metadata has not been refreshed, and the Nix web-ui check was not rerun in this slice.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
