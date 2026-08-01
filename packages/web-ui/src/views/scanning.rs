@@ -114,6 +114,7 @@ pub fn ScanningView() -> Element {
     let mut deployed_cursor = use_signal(|| Option::<String>::None);
     let mut deployed_total = use_signal(|| 0i64);
     let mut deployed_loading_more = use_signal(|| false);
+    let mut deployed_load_more_error: Signal<Option<String>> = use_signal(|| None);
 
     // Seed accumulated rows from the initial page fetch.
     use_effect(move || {
@@ -267,35 +268,53 @@ pub fn ScanningView() -> Element {
                             }
                         }
                         // Load more button for cursor pagination.
-                        if deployed_cursor.read().is_some() {
+                        if let Some(ref err) = *deployed_load_more_error.read() {
+                            div { class: "sd-callout sd-callout-danger", style: "margin:8px 16px;",
+                                "{err}"
+                                button {
+                                    class: "btn btn-ghost focus-ring",
+                                    style: "margin-left:8px; font-size:11px;",
+                                    onclick: move |_| deployed_load_more_error.set(None),
+                                    "Dismiss"
+                                }
+                            }
+                        }
+                        if deployed_cursor.read().is_some() || *deployed_loading_more.read() {
                             div { style: "padding:10px 16px; border-top:1px solid var(--cf-card-border); display:flex; align-items:center; gap:12px;",
                                 span { style: "font-size:12px; color:var(--cf-text-muted);",
                                     "Showing {deployed_rows.read().len()} of {deployed_total()} deployed configurations"
                                 }
-                                button {
-                                    class: "btn btn-ghost focus-ring",
-                                    style: "font-size:12px; padding:4px 10px;",
-                                    disabled: deployed_loading_more(),
-                                    onclick: move |_| {
-                                        if let Some(cursor) = deployed_cursor.read().clone() {
-                                            deployed_loading_more.set(true);
-                                            let cursor_clone = cursor.clone();
-                                            spawn(async move {
-                                                match fetch_scanning_deployed(Some(500), Some(&cursor_clone)).await {
-                                                    Ok(result) => {
-                                                        let mut rows = deployed_rows.read().clone();
-                                                        rows.extend(result.items);
-                                                        deployed_rows.set(rows);
-                                                        deployed_cursor.set(result.next_cursor);
-                                                        deployed_total.set(result.total);
+                                if deployed_cursor.read().is_some() {
+                                    button {
+                                        class: "btn btn-ghost focus-ring",
+                                        style: "font-size:12px; padding:4px 10px;",
+                                        disabled: deployed_loading_more(),
+                                        onclick: move |_| {
+                                            if let Some(cursor) = deployed_cursor.read().clone() {
+                                                deployed_loading_more.set(true);
+                                                deployed_load_more_error.set(None);
+                                                let cursor_clone = cursor.clone();
+                                                spawn(async move {
+                                                    match fetch_scanning_deployed(Some(500), Some(&cursor_clone)).await {
+                                                        Ok(result) => {
+                                                            let mut rows = deployed_rows.read().clone();
+                                                            rows.extend(result.items);
+                                                            deployed_rows.set(rows);
+                                                            deployed_cursor.set(result.next_cursor);
+                                                            deployed_total.set(result.total);
+                                                        }
+                                                        Err(e) => {
+                                                            deployed_load_more_error.set(Some(
+                                                                format!("Failed to load more: {e}")
+                                                            ));
+                                                        }
                                                     }
-                                                    Err(_) => {}
-                                                }
-                                                deployed_loading_more.set(false);
-                                            });
-                                        }
-                                    },
-                                    if deployed_loading_more() { "Loading…" } else { "Load more" }
+                                                    deployed_loading_more.set(false);
+                                                });
+                                            }
+                                        },
+                                        if deployed_loading_more() { "Loading…" } else { "Load more" }
+                                    }
                                 }
                             }
                         }

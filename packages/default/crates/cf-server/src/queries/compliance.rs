@@ -119,6 +119,90 @@ pub async fn ensure_bundle_draft(
     .execute(&mut **tx)
     .await?;
 
+    // Copy assignments (P1 #2): all existing assignments for the published version
+    // must be replicated on the new draft so unchanged environments retain their
+    // overlays (exclusions, additions, overrides, enforcement mode).
+    #[derive(sqlx::FromRow)]
+    struct PubAssignment {
+        id: Uuid,
+        scope_type: String,
+        environment_id: Option<Uuid>,
+        system_id: Option<Uuid>,
+        enforcement_mode: String,
+        provenance: serde_json::Value,
+    }
+    let pub_assignments: Vec<PubAssignment> = sqlx::query_as(
+        r#"
+        SELECT id, scope_type, environment_id, system_id,
+               enforcement_mode, provenance
+        FROM compliance_bundle_assignments
+        WHERE bundle_version_id = $1
+        "#,
+    )
+    .bind(published_id)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    for pa in &pub_assignments {
+        let new_assignment_id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO compliance_bundle_assignments
+                (bundle_version_id, scope_type, environment_id, system_id,
+                 enforcement_mode, provenance, assignment_overlay_digest)
+            VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+            RETURNING id
+            "#,
+        )
+        .bind(new_draft_id)
+        .bind(&pa.scope_type)
+        .bind(pa.environment_id)
+        .bind(pa.system_id)
+        .bind(&pa.enforcement_mode)
+        .bind(&pa.provenance)
+        .fetch_one(&mut **tx)
+        .await?;
+
+        // Copy exclusions.
+        sqlx::query(
+            r#"
+            INSERT INTO compliance_assignment_exclusions (assignment_id, policy_version_id)
+            SELECT $1, policy_version_id
+            FROM compliance_assignment_exclusions WHERE assignment_id = $2
+            "#,
+        )
+        .bind(new_assignment_id)
+        .bind(pa.id)
+        .execute(&mut **tx)
+        .await?;
+
+        // Copy additions.
+        sqlx::query(
+            r#"
+            INSERT INTO compliance_assignment_additions (assignment_id, policy_version_id)
+            SELECT $1, policy_version_id
+            FROM compliance_assignment_additions WHERE assignment_id = $2
+            "#,
+        )
+        .bind(new_assignment_id)
+        .bind(pa.id)
+        .execute(&mut **tx)
+        .await?;
+
+        // Copy value overrides.
+        sqlx::query(
+            r#"
+            INSERT INTO compliance_assignment_value_overrides
+                (assignment_id, policy_version_id, value_path, value)
+            SELECT $1, policy_version_id, value_path, value
+            FROM compliance_assignment_value_overrides WHERE assignment_id = $2
+            "#,
+        )
+        .bind(new_assignment_id)
+        .bind(pa.id)
+        .execute(&mut **tx)
+        .await?;
+    }
+
     // Update the lineage pointer (integrity trigger fires and validates).
     sqlx::query("UPDATE compliance_bundles SET current_draft_version_id = $1 WHERE id = $2")
         .bind(new_draft_id)
@@ -660,19 +744,79 @@ pub async fn update_bundle(
         .await?;
     }
 
-    // Add newly requested lineages.
-    for added in new_policy_set.difference(&existing_policy_set) {
+    // Add newly requested lineages (in request order — trigger picks up the
+    // correct version pointer). ON CONFLICT ensures idempotency.
+    for policy_id in &request.policy_ids {
+        if !existing_policy_set.contains(policy_id) {
+            sqlx::query(
+                r#"
+                INSERT INTO compliance_bundle_policies (bundle_id, policy_id)
+                VALUES ($1, $2) ON CONFLICT DO NOTHING
+                "#,
+            )
+            .bind(bundle_id)
+            .bind(policy_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    // Update policy_order in compliance_bundle_version_policies to match the
+    // request vector (P1 #4). Use a temporary large offset to avoid the unique
+    // (bundle_version_id, policy_order) constraint during reordering.
+    //
+    // Step 1: Offset all existing orders far above the final range.
+    sqlx::query(
+        r#"
+        UPDATE compliance_bundle_version_policies
+        SET policy_order = policy_order + 100000
+        WHERE bundle_version_id = $1
+        "#,
+    )
+    .bind(draft_version_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // Step 2: Assign each requested lineage its exact requested position.
+    for (pos, policy_lineage_id) in request.policy_ids.iter().enumerate() {
         sqlx::query(
             r#"
-            INSERT INTO compliance_bundle_policies (bundle_id, policy_id)
-            VALUES ($1, $2) ON CONFLICT DO NOTHING
+            UPDATE compliance_bundle_version_policies bvp
+            SET policy_order = $1
+            FROM deployment_policies dp
+            WHERE bvp.bundle_version_id = $2
+              AND bvp.policy_version_id = dp.current_draft_version_id
+              AND dp.id = $3
             "#,
         )
-        .bind(bundle_id)
-        .bind(added)
+        .bind(pos as i32)
+        .bind(draft_version_id)
+        .bind(policy_lineage_id)
         .execute(&mut *tx)
         .await?;
     }
+
+    // Step 3: Compact any remaining rows that were not in the request vector
+    // (should not exist after the diff, but guard defensively).
+    sqlx::query(
+        r#"
+        WITH remaining AS (
+            SELECT id,
+                   ROW_NUMBER() OVER (ORDER BY policy_order)::integer
+                       + $1 - 1 AS new_order
+            FROM compliance_bundle_version_policies
+            WHERE bundle_version_id = $2
+              AND policy_order >= 100000
+        )
+        UPDATE compliance_bundle_version_policies bvp
+        SET policy_order = r.new_order
+        FROM remaining r WHERE bvp.id = r.id
+        "#,
+    )
+    .bind(request.policy_ids.len() as i32)
+    .bind(draft_version_id)
+    .execute(&mut *tx)
+    .await?;
 
     // Diff-based environment update: preserve unchanged assignments.
     let new_env_set: std::collections::HashSet<Uuid> =

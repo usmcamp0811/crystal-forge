@@ -272,9 +272,9 @@ pub struct ScanDeployedResult {
     pub rows: Vec<ScanQueueRow>,
     /// Total deployed configurations known to the server (without limit/cursor).
     pub total: i64,
-    /// True when `rows.len() < total`.
+    /// True when the result was capped.
     pub has_more: bool,
-    /// Cursor for the next page: the hostname of the last returned row.
+    /// Opaque composite cursor: `{hostname}:{derivation_id}` of the last row.
     pub next_cursor: Option<String>,
 }
 
@@ -287,14 +287,28 @@ pub struct ScanDeployedResult {
 ///
 /// Nullable scan columns are COALESCE'd to safe defaults so systems that have
 /// never been scanned are included without NULL-decode panics.
-/// Cursor-based pagination for the deployed scan list. The cursor is the
-/// hostname of the last item returned by the previous page (the query uses
-/// `hostname ASC` ordering so `> cursor` is stable and deterministic).
+/// Cursor-based pagination for the deployed scan list.
+///
+/// The cursor is a composite `{hostname}:{derivation_id}` so that multiple
+/// rows with the same hostname are handled correctly (P2 #6).
 pub async fn get_scan_deployed(
     pool: &PgPool,
     limit: i64,
     after_cursor: Option<&str>,
 ) -> Result<ScanDeployedResult> {
+    // Parse the composite cursor into (hostname, derivation_id).
+    let (cursor_hostname, cursor_derivation_id): (String, i32) = match after_cursor {
+        None => (String::new(), 0),
+        Some(c) => {
+            let mut parts = c.splitn(2, ':');
+            let host = parts.next().unwrap_or("").to_string();
+            let id = parts
+                .next()
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(0);
+            (host, id)
+        }
+    };
     let rows = sqlx::query(
         r#"
         WITH latest_commit_per_flake AS (
@@ -307,7 +321,7 @@ pub async fn get_scan_deployed(
         deployed_derivations AS (
             SELECT DISTINCT ON (d.id)
                 cs.id                      AS scan_id,
-                -- Use the same normalized config-name expression as the evaluator.
+                d.id                       AS derivation_id,
                 COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) AS hostname,
                 f.name                     AS flake_name,
                 c.git_commit_hash          AS commit_hash,
@@ -321,7 +335,6 @@ pub async fn get_scan_deployed(
                 COALESCE(cs.medium_count, 0)::int      AS medium_count,
                 COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at
             FROM systems s
-            -- Match on the normalized config name.
             JOIN derivations d
               ON d.derivation_name =
                      COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
@@ -337,6 +350,7 @@ pub async fn get_scan_deployed(
         )
         SELECT
             scan_id,
+            derivation_id,
             hostname,
             flake_name,
             commit_hash,
@@ -357,39 +371,59 @@ pub async fn get_scan_deployed(
              AND dd.commit_db_id = lc.commit_id) AS is_latest_per_flake
         FROM deployed_derivations dd
         LEFT JOIN latest_commit_per_flake lc ON lc.flake_id = dd.flake_id
-        -- Keyset cursor: hostname is the stable sort key.
-        -- $2 is '' when no cursor; all hostname values sort after ''.
-        WHERE dd.hostname > $2
-        ORDER BY hostname ASC
+        -- Composite keyset cursor: (hostname, derivation_id).
+        WHERE (dd.hostname, dd.derivation_id) > ($2, $3)
+        ORDER BY dd.hostname ASC, dd.derivation_id ASC
         LIMIT $1
         "#,
     )
-    .bind(limit)
-    .bind(after_cursor.unwrap_or(""))
+    .bind(limit + 1) // Fetch one extra to detect has_more (P2 #7).
+    .bind(&cursor_hostname)
+    .bind(cursor_derivation_id)
     .fetch_all(pool)
     .await?;
 
-    let items: Vec<ScanQueueRow> = rows
+    // Build items from the raw rows, collecting (row, derivation_id) pairs so
+    // we can construct the composite cursor from the last item.
+    let mut raw_items: Vec<(ScanQueueRow, i32)> = rows
         .into_iter()
-        .map(|row| ScanQueueRow {
-            scan_id: row.get("scan_id"),
-            hostname: row.get("hostname"),
-            flake_name: row.get("flake_name"),
-            commit_hash: row.get("commit_hash"),
-            status: row.get("status"),
-            completed_at: row.get("completed_at"),
-            scheduled_at: row.get("scheduled_at"),
-            critical_count: row.get("critical_count"),
-            high_count: row.get("high_count"),
-            medium_count: row.get("medium_count"),
-            freshness: row.get("freshness"),
-            is_current: row.get("is_current"),
-            is_latest_per_flake: row.get("is_latest_per_flake"),
+        .map(|row| {
+            (
+                ScanQueueRow {
+                    scan_id: row.get("scan_id"),
+                    hostname: row.get("hostname"),
+                    flake_name: row.get("flake_name"),
+                    commit_hash: row.get("commit_hash"),
+                    status: row.get("status"),
+                    completed_at: row.get("completed_at"),
+                    scheduled_at: row.get("scheduled_at"),
+                    critical_count: row.get("critical_count"),
+                    high_count: row.get("high_count"),
+                    medium_count: row.get("medium_count"),
+                    freshness: row.get("freshness"),
+                    is_current: row.get("is_current"),
+                    is_latest_per_flake: row.get("is_latest_per_flake"),
+                },
+                row.get::<i32, _>("derivation_id"),
+            )
         })
         .collect();
 
-    // Count total deployed configurations (without limit) so the UI can detect
-    // a truncated result and show a pagination warning.
+    // limit+1 pattern: has_more iff we got the extra row; trim it off (P2 #7).
+    let has_more = raw_items.len() as i64 > limit;
+    if has_more {
+        raw_items.truncate(limit as usize);
+    }
+
+    let next_cursor = if has_more {
+        raw_items
+            .last()
+            .map(|(row, did)| format!("{}:{}", row.hostname, did))
+    } else {
+        None
+    };
+
+    // Total count query for informational display (not used for has_more).
     let total: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(DISTINCT d.id)
@@ -406,18 +440,11 @@ pub async fn get_scan_deployed(
     .fetch_one(pool)
     .await?;
 
-    let returned = items.len() as i64;
-    let has_more = returned < total;
-    let next_cursor = if has_more {
-        items.last().map(|r| r.hostname.clone())
-    } else {
-        None
-    };
     Ok(ScanDeployedResult {
         has_more,
         total,
         next_cursor,
-        rows: items,
+        rows: raw_items.into_iter().map(|(r, _)| r).collect(),
     })
 }
 

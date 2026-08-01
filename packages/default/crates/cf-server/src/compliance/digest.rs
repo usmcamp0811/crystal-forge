@@ -225,7 +225,7 @@ pub async fn write_policy_version_digest(
             compliance_metadata      = $9::jsonb,
             dependencies             = $10::jsonb
         WHERE id = $2
-          AND publication_state = 'draft'
+          AND publication_state IN ('incomplete', 'draft', 'interim')
         "#,
     )
     .bind(&digest)
@@ -308,7 +308,7 @@ pub async fn write_bundle_version_digest(
             layer                    = $7,
             owner                    = $8
         WHERE id = $2
-          AND publication_state = 'draft'
+          AND publication_state IN ('incomplete', 'draft', 'interim')
         "#,
     )
     .bind(&digest)
@@ -486,7 +486,7 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
                compliance_metadata, dependencies, opaque_xml
         FROM deployment_policy_versions
         WHERE semantic_digest = 'pending'
-          AND publication_state = 'draft'
+          AND publication_state IN ('incomplete', 'draft', 'interim')
         "#,
     )
     .fetch_all(pool)
@@ -537,7 +537,7 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
                description, layer, owner
         FROM compliance_bundle_versions
         WHERE semantic_digest = 'pending'
-          AND publication_state = 'draft'
+          AND publication_state IN ('incomplete', 'draft', 'interim')
         "#,
     )
     .fetch_all(pool)
