@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.6-terra
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-01 01:31'
+updated_date: '2026-08-01 01:33'
 labels:
   - design
   - frontend
@@ -1255,6 +1255,61 @@ Do not claim Level D generic SCAP execution unless standard executable checks an
 - [ ] #43 `nix flake check --keep-going` passes, or any local timeout is reported accurately and CI provides the authoritative result.
 - [ ] #44 The CF-XCCDF specification and operator documentation match the implemented behavior and make no unsupported SCAP-execution claim.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Current implementation plan
+
+### Scope and delivery structure
+This is a cross-cutting, security-sensitive feature with 44 acceptance criteria spanning migrations, versioned domain semantics, XML/ZIP parsing, APIs, UI, Nix packaging, and interoperability validation. Implement it as sequential, independently verifiable phases under this parent task; do not begin UI work before the server interchange and versioning contracts exist.
+
+1. **Freeze interchange contract and test foundation**
+   - Confirm the authoritative CF-XCCDF v0.1 profile against the existing policy model.
+   - Vendor XCCDF 1.2/extension schemas with provenance, add no-network validation fixtures, and establish parser/archive resource limits.
+   - Decide and document Rust XML/ZIP/XSD dependency choices compatible with the Nix build.
+
+2. **Versioned persistence and canonical semantics**
+   - Add additive migrations for policy/bundle versions, ordered membership, source artifacts/mappings, trust/audit data, and assignment overlays.
+   - Backfill current policy and bundle rows as drafts without changing current effective behavior.
+   - Implement typed canonical DTOs and `cf-model-json-1` SHA-256 semantic digests.
+
+3. **Version lifecycle and effective-policy resolver**
+   - Implement mutable drafts, immutable published versions, draft derivation, atomic publish, and delete restrictions.
+   - Add one version-aware resolver for baseline/exclusions/additions/direct policy precedence and conflict reporting; connect evaluator, deployment gates, compliance, previews, and derived exports.
+
+4. **Interchange services and APIs**
+   - Implement bounded server-side XCCDF/XML and ZIP handling, classification, preview/import transactions, source preservation, XCCDF export, and JSON/TOML policy interchange.
+   - Add admin-authorized mutation APIs, structured diagnostics, and audit events. Imported content remains draft, disabled, untrusted, and unassigned.
+
+5. **Evidence and assignment APIs**
+   - Extend result states and connect authoritative operational evidence where available.
+   - Implement version-aware assignment CRUD, enforce/report-only validation, and effective-set previews.
+
+6. **Dioxus UI and exact design delta**
+   - Add an accessible reusable Import / Export menu.
+   - Replace Compliance and Policies actions with real API-backed import/export flows; remove policy mock fallback for management failures.
+   - Add bundle publication/assignment UI and only the requested Scanning Deployed/latest-per-flake delta.
+
+7. **Verification and documentation**
+   - Add focused unit, database, API, parser-security, round-trip, schema/OpenSCAP, and web-ui tests.
+   - Update the CF-XCCDF profile and operator documentation; run the required formatting, web-ui Nix check, and full flake check.
+
+### Current implementation facts
+- Existing policies and bundles are mutable legacy records; no version, digest, trust, source-artifact, XCCDF, assignment-overlay, or interchange APIs exist.
+- All native policy types already have typed server configurations, including legacy and ordered multi-rule custom checks.
+- The current effective policy query is a de-duplicated environment/system union, so it must be replaced before versioned bundle semantics can be safely enforced.
+- The UI's current STIG modal is sample-only, Policies falls back to mock data on API failure, and Scanning is capped to a 50-item queue; none can satisfy this task without server APIs.
+- No XML/ZIP/schema-validation crates or XCCDF resources exist. Dependency and packaging choices are a material implementation decision that must be approved before writing code.
+
+### Verification plan
+- During each phase: targeted Rust tests and package formatting through `nix develop`.
+- Before UI review: `nix build .#checks.x86_64-linux.web-ui --no-link` and browser evidence/screenshots.
+- Before task review: focused server/database/parser/API/round-trip tests, vendored-schema/OpenSCAP validation, `cargo fmt --all --check`, and `nix flake check --keep-going`.
+
+### Required approval
+Before implementation, approve the phased delivery/subtask breakdown and the dependency-selection phase. These are material architecture and workflow decisions; a single unstructured implementation pass would not be safely reviewable.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
