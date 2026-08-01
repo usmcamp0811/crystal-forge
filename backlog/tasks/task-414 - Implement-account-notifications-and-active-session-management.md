@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 04:25'
+updated_date: '2026-08-01 04:41'
 labels:
   - frontend
   - web-ui
@@ -1130,6 +1130,19 @@ Run database-backed ignored tests explicitly against the migrated isolated test 
 
 <!-- SECTION:NOTES:BEGIN -->
 Repaired malformed TASK-414 front matter so Backlog.md can hydrate the task correctly; issue was indentation under labels/references/modified_files plus a leading blank line before front matter. User explicitly requested starting TASK-414, so task is being taken into progress for implementation preflight.
+
+Implementation started in worktree `/home/mcamp/code/crystal-forge/TASK-414-account-notifications-sessions` on branch `TASK-414-account-notifications-sessions`.
+
+Implemented first backend/UI foundation slice:
+- Added migration `0197_user_notifications_sessions.sql` with notification preference, in-app notification, email delivery queue, weekly digest run tables, plus `user_sessions.auth_source` and active-session index.
+- Added server notification preference/list/read/read-all/dismiss API routes and DTO/query/model scaffolding.
+- Added server user session list/revoke/revoke-all API routes, current-session derivation from the cookie token hash, CSRF enforcement for mutations, and throttled `last_seen_at` touch on authenticated requests.
+- Added web DTOs/API client methods for notification preferences, notifications, and sessions.
+- Replaced Profile notification/session placeholders with server-backed controls/session rows and sign-out-everywhere confirmation.
+
+Verification run so far:
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml'` passed with existing warnings.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo fmt && cargo check --target wasm32-unknown-unknown'` passed with existing warnings, but running workspace fmt touched unrelated server files; those unrelated formatting-only changes were reverted.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
