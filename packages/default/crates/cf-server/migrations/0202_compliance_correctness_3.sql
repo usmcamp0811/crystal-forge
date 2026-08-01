@@ -860,3 +860,210 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+-- ── 17. Fix membership recompaction: temporary offset (P1 #1) ─────────────────
+-- Direct row-number compaction can violate the UNIQUE (bundle_version_id,
+-- policy_order) constraint when updating multiple rows out of order. Use the
+-- same +100000 offset → recompute → compact pattern as the Rust path.
+CREATE OR REPLACE FUNCTION sync_bundle_version_membership()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_bundle_id       uuid;
+    v_version_id      uuid;
+    v_policy_version_id uuid;
+    v_max_order       integer;
+BEGIN
+    v_bundle_id := COALESCE(NEW.bundle_id, OLD.bundle_id);
+
+    SELECT current_draft_version_id INTO v_version_id
+    FROM compliance_bundles WHERE id = v_bundle_id;
+
+    IF v_version_id IS NULL THEN
+        IF TG_OP = 'INSERT' THEN
+            RAISE EXCEPTION
+                'Cannot add policy to bundle %: bundle has no current draft version.',
+                v_bundle_id;
+        END IF;
+        RETURN OLD;
+    END IF;
+
+    IF TG_OP = 'INSERT' THEN
+        SELECT COALESCE(dp.current_draft_version_id, dp.current_published_version_id)
+        INTO v_policy_version_id
+        FROM deployment_policies dp
+        WHERE dp.id = NEW.policy_id;
+
+        IF v_policy_version_id IS NULL THEN
+            RAISE EXCEPTION
+                'Cannot add policy % to bundle %: policy has no versioned draft or '
+                'published version.',
+                NEW.policy_id, v_bundle_id;
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1 FROM deployment_policy_versions
+            WHERE id = v_policy_version_id AND policy_id = NEW.policy_id
+        ) THEN
+            RAISE EXCEPTION
+                'Pointer integrity violation: policy version % does not belong to policy %.',
+                v_policy_version_id, NEW.policy_id;
+        END IF;
+
+        SELECT COALESCE(MAX(policy_order), -1) + 1 INTO v_max_order
+        FROM compliance_bundle_version_policies
+        WHERE bundle_version_id = v_version_id;
+
+        INSERT INTO compliance_bundle_version_policies
+            (bundle_version_id, policy_version_id, policy_order)
+        VALUES (v_version_id, v_policy_version_id, v_max_order)
+        ON CONFLICT DO NOTHING;
+
+    ELSIF TG_OP = 'DELETE' THEN
+        DELETE FROM compliance_bundle_version_policies
+        WHERE bundle_version_id = v_version_id
+          AND policy_version_id IN (
+              SELECT id FROM deployment_policy_versions
+              WHERE policy_id = OLD.policy_id
+          );
+
+        -- Step 1: temporarily offset all remaining rows to avoid unique-constraint
+        -- collisions during recompaction.
+        UPDATE compliance_bundle_version_policies
+        SET policy_order = policy_order + 100000
+        WHERE bundle_version_id = v_version_id;
+
+        -- Step 2: recompute compact order from 0.
+        WITH ordered AS (
+            SELECT
+                bundle_version_id,
+                policy_version_id,
+                (row_number() OVER (ORDER BY policy_order))::integer - 1 AS new_order
+            FROM compliance_bundle_version_policies
+            WHERE bundle_version_id = v_version_id
+        )
+        UPDATE compliance_bundle_version_policies bvp
+        SET policy_order = ordered.new_order
+        FROM ordered
+        WHERE bvp.bundle_version_id = ordered.bundle_version_id
+          AND bvp.policy_version_id = ordered.policy_version_id;
+    END IF;
+
+    UPDATE compliance_bundle_versions
+    SET semantic_digest = 'pending'
+    WHERE id = v_version_id
+      AND publication_state IN ('incomplete', 'draft', 'interim');
+
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+-- ── 18. Digest invalidation triggers on semantic child tables (P1 #2) ─────────
+-- Mark the owning bundle version's semantic_digest as pending whenever
+-- membership, exclusions, additions, or overrides change. The Rust service
+-- recomputes the final value before commit; these triggers ensure startup
+-- backfill can repair any direct-write or legacy-path inconsistency.
+
+CREATE OR REPLACE FUNCTION invalidate_bundle_digest_on_membership_change()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE compliance_bundle_versions
+    SET semantic_digest = 'pending'
+    WHERE id = COALESCE(NEW.bundle_version_id, OLD.bundle_version_id)
+      AND publication_state IN ('incomplete', 'draft', 'interim');
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trigger_invalidate_bundle_digest_membership
+    ON compliance_bundle_version_policies;
+
+CREATE TRIGGER trigger_invalidate_bundle_digest_membership
+    AFTER INSERT OR UPDATE OR DELETE ON compliance_bundle_version_policies
+    FOR EACH ROW
+    EXECUTE FUNCTION invalidate_bundle_digest_on_membership_change();
+
+-- Assignment overlay children invalidate the parent assignment on change.
+CREATE OR REPLACE FUNCTION invalidate_overlay_on_child_change()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE compliance_bundle_assignments
+    SET assignment_overlay_digest = 'pending'
+    WHERE id = COALESCE(NEW.assignment_id, OLD.assignment_id);
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+CREATE TRIGGER trigger_invalidate_overlay_exclusion
+    AFTER INSERT OR UPDATE OR DELETE ON compliance_assignment_exclusions
+    FOR EACH ROW
+    EXECUTE FUNCTION invalidate_overlay_on_child_change();
+
+CREATE TRIGGER trigger_invalidate_overlay_addition
+    AFTER INSERT OR UPDATE OR DELETE ON compliance_assignment_additions
+    FOR EACH ROW
+    EXECUTE FUNCTION invalidate_overlay_on_child_change();
+
+CREATE TRIGGER trigger_invalidate_overlay_override
+    AFTER INSERT OR UPDATE OR DELETE ON compliance_assignment_value_overrides
+    FOR EACH ROW
+    EXECUTE FUNCTION invalidate_overlay_on_child_change();
+
+-- ── 19. Source artifact integrity (P1 #3) ─────────────────────────────────────
+-- Reject updates to immutable source fields after insertion. Verify that the
+-- stored sha256 matches the content bytes on insert.
+
+CREATE OR REPLACE FUNCTION guard_source_artifact_integrity()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        -- Verify that the caller-supplied digest matches the stored bytes.
+        IF NEW.sha256 <> encode(digest(NEW.content, 'sha256'), 'hex') THEN
+            RAISE EXCEPTION
+                'Source artifact %: supplied sha256 does not match content hash.',
+                NEW.id;
+        END IF;
+    ELSIF TG_OP = 'UPDATE' THEN
+        -- Reject any change to immutable source fields.
+        IF NEW.content   IS DISTINCT FROM OLD.content
+        OR NEW.filename  IS DISTINCT FROM OLD.filename
+        OR NEW.media_type IS DISTINCT FROM OLD.media_type
+        OR NEW.sha256    IS DISTINCT FROM OLD.sha256
+        OR NEW.parser_version IS DISTINCT FROM OLD.parser_version
+        OR NEW.detected_xccdf_version IS DISTINCT FROM OLD.detected_xccdf_version
+        OR NEW.package_context IS DISTINCT FROM OLD.package_context
+        THEN
+            RAISE EXCEPTION
+                'Source artifact % is immutable. Only signature_details and imported_by may change.',
+                OLD.id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trigger_guard_source_artifact_integrity
+    BEFORE INSERT OR UPDATE ON compliance_source_artifacts
+    FOR EACH ROW
+    EXECUTE FUNCTION guard_source_artifact_integrity();
+
+-- When a source artifact is referenced by a version, prevent deletion.
+CREATE OR REPLACE FUNCTION prevent_source_artifact_delete_when_referenced()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM deployment_policy_versions WHERE source_artifact_id = OLD.id
+    ) OR EXISTS (
+        SELECT 1 FROM compliance_bundle_versions  WHERE source_artifact_id = OLD.id
+    ) THEN
+        RAISE EXCEPTION
+            'Cannot delete source artifact %: it is still referenced by a policy or bundle version.',
+            OLD.id;
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
+CREATE TRIGGER trigger_prevent_source_artifact_delete_when_referenced
+    BEFORE DELETE ON compliance_source_artifacts
+    FOR EACH ROW
+    EXECUTE FUNCTION prevent_source_artifact_delete_when_referenced();
