@@ -94,9 +94,114 @@ mod tests {
     #[test]
     fn publication_and_implementation_state_preserve_activation_rules() {
         assert!(PublicationState::Accepted.is_immutable());
+        assert!(PublicationState::Deprecated.is_immutable());
         assert!(!PublicationState::Draft.is_immutable());
+        assert!(!PublicationState::Incomplete.is_immutable());
+        assert!(!PublicationState::Interim.is_immutable());
         assert!(ImplementationState::Native.can_activate());
+        assert!(ImplementationState::Manual.can_activate());
+        assert!(ImplementationState::External.can_activate());
         assert!(!ImplementationState::Unbound.can_activate());
         assert!(!ImplementationState::Opaque.can_activate());
+    }
+
+    // ── Bundle digest field coverage ──────────────────────────────────────────
+
+    fn policy_canonical(name: &str, policy_type: &str, config: Value) -> Value {
+        json!({
+            "canonicalization_version": "cf-model-json-1",
+            "config": config,
+            "description": "",
+            "execution_phase": "nix-evaluation",
+            "implementation_state": "native",
+            "name": name,
+            "policy_type": policy_type,
+        })
+    }
+
+    fn bundle_canonical(
+        name: &str,
+        framework: &str,
+        framework_version: &str,
+        description: &str,
+        layer: &str,
+        owner: &str,
+        policy_ids: Vec<&str>,
+    ) -> Value {
+        json!({
+            "canonicalization_version": "cf-model-json-1",
+            "description": description,
+            "framework": framework,
+            "framework_version": framework_version,
+            "layer": layer,
+            "name": name,
+            "owner": owner,
+            "policy_version_ids": policy_ids,
+        })
+    }
+
+    #[test]
+    fn bundle_digest_changes_when_framework_version_changes() {
+        let a = bundle_canonical("B", "STIG", "V1R1", "", "os", "Me", vec![]);
+        let b = bundle_canonical("B", "STIG", "V1R2", "", "os", "Me", vec![]);
+        assert_ne!(semantic_digest(&a), semantic_digest(&b));
+    }
+
+    #[test]
+    fn bundle_digest_changes_when_description_changes() {
+        let a = bundle_canonical("B", "STIG", "V1R1", "Desc A", "os", "Me", vec![]);
+        let b = bundle_canonical("B", "STIG", "V1R1", "Desc B", "os", "Me", vec![]);
+        assert_ne!(semantic_digest(&a), semantic_digest(&b));
+    }
+
+    #[test]
+    fn bundle_digest_changes_when_membership_order_changes() {
+        let a = bundle_canonical("B", "STIG", "V1R1", "", "os", "Me", vec!["id1", "id2"]);
+        let b = bundle_canonical("B", "STIG", "V1R1", "", "os", "Me", vec!["id2", "id1"]);
+        assert_ne!(semantic_digest(&a), semantic_digest(&b));
+    }
+
+    #[test]
+    fn identical_bundles_produce_identical_digests() {
+        let a = bundle_canonical("B", "STIG", "V1R1", "Desc", "os", "Me", vec!["id1"]);
+        let b = bundle_canonical("B", "STIG", "V1R1", "Desc", "os", "Me", vec!["id1"]);
+        assert_eq!(semantic_digest(&a), semantic_digest(&b));
+    }
+
+    #[test]
+    fn policy_digest_changes_on_every_semantic_field() {
+        let base = policy_canonical("firewall", "custom_check", json!({"expr": "true"}));
+        let changed_name = policy_canonical("firewall2", "custom_check", json!({"expr": "true"}));
+        let changed_type =
+            policy_canonical("firewall", "require_packages", json!({"expr": "true"}));
+        let changed_config = policy_canonical("firewall", "custom_check", json!({"expr": "false"}));
+
+        assert_ne!(semantic_digest(&base), semantic_digest(&changed_name));
+        assert_ne!(semantic_digest(&base), semantic_digest(&changed_type));
+        assert_ne!(semantic_digest(&base), semantic_digest(&changed_config));
+    }
+
+    #[test]
+    fn digest_key_order_does_not_affect_value() {
+        // Object key order in the input must not change the digest.
+        let a = json!({
+            "canonicalization_version": "cf-model-json-1",
+            "config": {"expr": "true"},
+            "description": "",
+            "execution_phase": "nix-evaluation",
+            "implementation_state": "native",
+            "name": "test",
+            "policy_type": "custom_check",
+        });
+        let b = json!({
+            "policy_type": "custom_check",
+            "name": "test",
+            "description": "",
+            "implementation_state": "native",
+            "execution_phase": "nix-evaluation",
+            "config": {"expr": "true"},
+            "canonicalization_version": "cf-model-json-1",
+        });
+        assert_eq!(semantic_digest(&a), semantic_digest(&b));
     }
 }

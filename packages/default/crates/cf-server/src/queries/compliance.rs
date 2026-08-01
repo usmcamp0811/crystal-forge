@@ -174,10 +174,18 @@ pub async fn create_bundle(
     let framework = request.framework.trim();
     let version = request.version.as_deref().unwrap_or("").trim();
     let layer = request.layer.as_deref().unwrap_or("fleet").trim();
+    let description = request
+        .description
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     validate_bundle_request(name, framework, &request.policy_ids)?;
 
     let mut tx = pool.begin().await?;
+
+    // 1. Insert the lineage row. The sync trigger fires AFTER INSERT and creates
+    //    the initial draft version row + sets current_draft_version_id.
     let bundle_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO compliance_bundles (name, framework, version, description, layer)
@@ -188,17 +196,14 @@ pub async fn create_bundle(
     .bind(name)
     .bind(framework)
     .bind(version)
-    .bind(
-        request
-            .description
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty()),
-    )
+    .bind(description)
     .bind(if layer.is_empty() { "fleet" } else { layer })
     .fetch_one(&mut *tx)
     .await?;
 
+    // 2. Insert policy and environment membership. The membership trigger
+    //    (trigger_sync_bundle_version_membership) maintains bundle_version_policies
+    //    automatically.
     for policy_id in request.policy_ids {
         sqlx::query(
             r#"
@@ -294,6 +299,26 @@ pub async fn update_bundle(
 
     let mut tx = pool.begin().await?;
 
+    // Check for published/deprecated version before allowing edits.
+    let has_immutable: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM compliance_bundle_versions
+            WHERE bundle_id = $1
+              AND publication_state IN ('accepted', 'deprecated')
+        )
+        "#,
+    )
+    .bind(bundle_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if has_immutable {
+        bail!("Cannot edit bundle {bundle_id}: it has an immutable published version");
+    }
+
+    // Update the lineage row. The sync trigger (trigger_sync_bundle_draft_version)
+    // fires AFTER UPDATE and updates the draft version row automatically.
     let updated = sqlx::query_scalar::<_, i64>(
         r#"
         UPDATE compliance_bundles
@@ -321,6 +346,8 @@ pub async fn update_bundle(
         return Ok(None);
     }
 
+    // Replace membership. The compliance_bundle_policies triggers maintain
+    // the version membership table automatically.
     sqlx::query("DELETE FROM compliance_bundle_policies WHERE bundle_id = $1")
         .bind(bundle_id)
         .execute(&mut *tx)
@@ -362,6 +389,10 @@ pub async fn update_bundle(
 }
 
 pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<bool> {
+    // The database trigger on compliance_bundles prevents deletion when an
+    // accepted or deprecated version exists (0197/0199 migrations).
+    // The ON DELETE CASCADE on compliance_bundle_versions removes draft
+    // version rows and their associated membership + assignments automatically.
     let rows =
         sqlx::query_scalar::<_, i64>("DELETE FROM compliance_bundles WHERE id = $1 RETURNING 1")
             .bind(bundle_id)

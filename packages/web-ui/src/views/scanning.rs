@@ -106,7 +106,9 @@ pub fn ScanningView() -> Element {
 
     let stats = use_resource(|| async { fetch_scanning_stats().await });
     let queue = use_resource(|| async { fetch_scanning_queue(Some(50)).await });
-    let deployed = use_resource(|| async { fetch_scanning_deployed(Some(500)).await });
+    // Request up to 1000 deployed configurations (server's current maximum).
+    // Pagination will be added when fleet sizes exceed this bound.
+    let deployed = use_resource(|| async { fetch_scanning_deployed(Some(1000)).await });
     let systems = use_resource(|| async { fetch_scanning_systems(Some(100)).await });
     let environments = use_resource(|| async { fetch_environments().await });
     let activity = use_resource(|| async { fetch_scanning_activity(Some(20)).await });
