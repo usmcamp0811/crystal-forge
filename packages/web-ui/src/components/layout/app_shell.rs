@@ -89,6 +89,8 @@ enum PreferenceBootstrapState {
     Error,
 }
 
+const PREFERENCE_BOOTSTRAP_TIMEOUT_MS: u32 = 15_000;
+
 fn set_root_attr(name: &str, value: &str) {
     #[cfg(not(target_arch = "wasm32"))]
     let _ = (name, value);
@@ -158,6 +160,7 @@ pub fn AppShell() -> Element {
     });
     let mut save_error = use_signal(|| None::<String>);
     let mut preference_bootstrap = use_signal(|| PreferenceBootstrapState::Idle);
+    let mut preference_bootstrap_attempt = use_signal(|| 0_u64);
 
     // Provide sidebar context
     use_context_provider(|| SidebarContext {
@@ -230,10 +233,29 @@ pub fn AppShell() -> Element {
             return;
         }
 
+        let attempt = preference_bootstrap_attempt() + 1;
+        preference_bootstrap_attempt.set(attempt);
         preference_bootstrap.set(PreferenceBootstrapState::Loading);
+
+        spawn(async move {
+            gloo_timers::future::TimeoutFuture::new(PREFERENCE_BOOTSTRAP_TIMEOUT_MS).await;
+            if preference_bootstrap_attempt() == attempt
+                && preference_bootstrap() == PreferenceBootstrapState::Loading
+            {
+                save_error.set(Some(
+                    "Could not initialize account preferences: request timed out".to_string(),
+                ));
+                preference_bootstrap.set(PreferenceBootstrapState::Error);
+            }
+        });
+
         spawn(async move {
             match fetch_user_preferences().await {
                 Ok(response) => {
+                    if preference_bootstrap_attempt() != attempt {
+                        return;
+                    }
+
                     let preferences = if let Some(preferences) = response.preferences {
                         Ok(preferences)
                     } else {
@@ -276,6 +298,10 @@ pub fn AppShell() -> Element {
                     }
                 }
                 Err(err) => {
+                    if preference_bootstrap_attempt() != attempt {
+                        return;
+                    }
+
                     save_error.set(Some(format!(
                         "Could not initialize account preferences: {err}"
                     )));
@@ -347,7 +373,11 @@ pub fn AppShell() -> Element {
                                 }
                                 button {
                                     class: "btn btn-primary focus-ring",
-                                    onclick: move |_| preference_bootstrap.set(PreferenceBootstrapState::Idle),
+                                    onclick: move |_| {
+                                        preference_bootstrap_attempt.set(preference_bootstrap_attempt() + 1);
+                                        save_error.set(None);
+                                        preference_bootstrap.set(PreferenceBootstrapState::Idle);
+                                    },
                                     "Retry"
                                 }
                             }
