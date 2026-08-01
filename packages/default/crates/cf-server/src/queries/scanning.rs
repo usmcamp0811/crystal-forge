@@ -287,27 +287,54 @@ pub struct ScanDeployedResult {
 ///
 /// Nullable scan columns are COALESCE'd to safe defaults so systems that have
 /// never been scanned are included without NULL-decode panics.
+/// Marker for a malformed deployed-scan cursor.
+#[derive(Debug)]
+pub struct InvalidCursorError;
+impl std::fmt::Display for InvalidCursorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid deployed scan cursor")
+    }
+}
+impl std::error::Error for InvalidCursorError {}
+
+/// Decode an opaque base64url cursor into (hostname, derivation_id).
+pub fn decode_deployed_cursor(cursor: &str) -> Result<(String, i32), InvalidCursorError> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| InvalidCursorError)?;
+    let s = std::str::from_utf8(&bytes).map_err(|_| InvalidCursorError)?;
+    let mut parts = s.splitn(2, '\x00');
+    let host = parts.next().ok_or(InvalidCursorError)?.to_string();
+    let id: i32 = parts
+        .next()
+        .ok_or(InvalidCursorError)?
+        .parse()
+        .map_err(|_| InvalidCursorError)?;
+    Ok((host, id))
+}
+
+/// Encode (hostname, derivation_id) into an opaque base64url cursor.
+pub fn encode_deployed_cursor(hostname: &str, derivation_id: i32) -> String {
+    use base64::Engine;
+    // NUL-separated; hostname cannot contain NUL in practice.
+    let raw = format!("{}\x00{}", hostname, derivation_id);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes())
+}
+
 /// Cursor-based pagination for the deployed scan list.
 ///
-/// The cursor is a composite `{hostname}:{derivation_id}` so that multiple
-/// rows with the same hostname are handled correctly (P2 #6).
+/// The cursor is a base64url-encoded `{hostname}\x00{derivation_id}` payload so
+/// that the cursor is opaque, unambiguous, and handles config names with `:`.
 pub async fn get_scan_deployed(
     pool: &PgPool,
     limit: i64,
     after_cursor: Option<&str>,
 ) -> Result<ScanDeployedResult> {
-    // Parse the composite cursor into (hostname, derivation_id).
+    // Decode the composite cursor.
     let (cursor_hostname, cursor_derivation_id): (String, i32) = match after_cursor {
         None => (String::new(), 0),
-        Some(c) => {
-            let mut parts = c.splitn(2, ':');
-            let host = parts.next().unwrap_or("").to_string();
-            let id = parts
-                .next()
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(0);
-            (host, id)
-        }
+        Some(c) => decode_deployed_cursor(c).map_err(|e| anyhow::anyhow!("{e}"))?,
     };
     let rows = sqlx::query(
         r#"
@@ -418,7 +445,7 @@ pub async fn get_scan_deployed(
     let next_cursor = if has_more {
         raw_items
             .last()
-            .map(|(row, did)| format!("{}:{}", row.hostname, did))
+            .map(|(row, did)| encode_deployed_cursor(&row.hostname, *did))
     } else {
         None
     };

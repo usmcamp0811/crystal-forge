@@ -1,29 +1,30 @@
--- Migration 0202: Compliance foundation correctness – round 7.
+-- Migration 0202: Compliance foundation correctness (squash of former 0202+0203).
 --
--- 1. Pointer integrity constraints (P1 #3):
---    The current_draft_version_id and current_published_version_id columns are
---    unconstrained foreign keys. Add CHECK triggers that verify:
---      a) the referenced version's policy_id / bundle_id matches the lineage;
---      b) current_draft_version_id references a mutable (draft/incomplete/interim)
---         version;
---      c) current_published_version_id references an immutable (accepted/deprecated)
---         version.
---    Also make the membership trigger raise an error instead of silently skipping
---    when no valid exact policy version exists.
+-- 1. Pointer-integrity constraints on deployment_policies and compliance_bundles:
+--    separate INSERT and UPDATE triggers (INSERT WHEN cannot reference OLD).
 --
--- 2. Remove the implicit `0.1.0` fallback version name from triggers (P1 #2
---    partial): when both pointers are null the trigger now raises an error instead
---    of inserting a second `0.1.0` row that would violate the unique constraint on
---    (policy_id/bundle_id, version). Derived-draft creation is implemented in
---    Rust (see compliance.rs) as an explicit transactional operation.
+-- 2. Deferred constraint trigger on version state changes: verifies lineage
+--    pointers are consistent at transaction end when publication_state changes.
+--    - accepted/deprecated → must not remain current_draft_version_id
+--    - accepted transition  → must be the lineage's current_published_version_id
+--    - mutable states       → must not remain current_published_version_id
+--
+-- 3. Immutability guard on compliance_bundle_version_policies: rejects any
+--    INSERT, UPDATE, or DELETE when the parent bundle version is immutable.
+--
+-- 4. Column rename sync: compliance_bundle_assignments now uses
+--    assignment_overlay_digest (renamed in 0201); rebuild the updated_at trigger.
+--
+-- 5. Bundle membership trigger: error on missing version instead of silent skip.
+--
+-- 6. Bundle draft trigger: error instead of 0.1.0 fallback when no draft exists.
 
--- ── 1a. Policy pointer integrity ─────────────────────────────────────────────
+-- ── 1. Policy pointer-integrity triggers ─────────────────────────────────────
 
 CREATE OR REPLACE FUNCTION enforce_policy_version_pointer_integrity()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
     IF NEW.current_draft_version_id IS NOT NULL THEN
-        -- Must belong to this policy lineage.
         IF NOT EXISTS (
             SELECT 1 FROM deployment_policy_versions
             WHERE id = NEW.current_draft_version_id
@@ -33,7 +34,6 @@ BEGIN
                 'current_draft_version_id % does not belong to policy %',
                 NEW.current_draft_version_id, NEW.id;
         END IF;
-        -- Must be a mutable state.
         IF NOT EXISTS (
             SELECT 1 FROM deployment_policy_versions
             WHERE id = NEW.current_draft_version_id
@@ -44,7 +44,6 @@ BEGIN
                 NEW.current_draft_version_id;
         END IF;
     END IF;
-
     IF NEW.current_published_version_id IS NOT NULL THEN
         IF NOT EXISTS (
             SELECT 1 FROM deployment_policy_versions
@@ -65,23 +64,28 @@ BEGIN
                 NEW.current_published_version_id;
         END IF;
     END IF;
-
     RETURN NEW;
 END;
 $$;
 
-CREATE TRIGGER trigger_policy_version_pointer_integrity
-    BEFORE INSERT OR UPDATE OF current_draft_version_id, current_published_version_id
+-- Separate INSERT trigger (no WHEN, cannot reference OLD).
+CREATE TRIGGER trigger_policy_version_pointer_integrity_insert
+    BEFORE INSERT ON deployment_policies
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_policy_version_pointer_integrity();
+
+-- Separate UPDATE trigger (WHEN references OLD/NEW only, no TG_OP).
+CREATE TRIGGER trigger_policy_version_pointer_integrity_update
+    BEFORE UPDATE OF current_draft_version_id, current_published_version_id
     ON deployment_policies
     FOR EACH ROW
     WHEN (
-        NEW.current_draft_version_id IS DISTINCT FROM OLD.current_draft_version_id
-     OR NEW.current_published_version_id IS DISTINCT FROM OLD.current_published_version_id
-     OR TG_OP = 'INSERT'
+        OLD.current_draft_version_id IS DISTINCT FROM NEW.current_draft_version_id
+     OR OLD.current_published_version_id IS DISTINCT FROM NEW.current_published_version_id
     )
     EXECUTE FUNCTION enforce_policy_version_pointer_integrity();
 
--- ── 1b. Bundle pointer integrity ──────────────────────────────────────────────
+-- ── 2. Bundle pointer-integrity triggers ──────────────────────────────────────
 
 CREATE OR REPLACE FUNCTION enforce_bundle_version_pointer_integrity()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
@@ -106,7 +110,6 @@ BEGIN
                 NEW.current_draft_version_id;
         END IF;
     END IF;
-
     IF NEW.current_published_version_id IS NOT NULL THEN
         IF NOT EXISTS (
             SELECT 1 FROM compliance_bundle_versions
@@ -127,23 +130,187 @@ BEGIN
                 NEW.current_published_version_id;
         END IF;
     END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trigger_bundle_version_pointer_integrity_insert
+    BEFORE INSERT ON compliance_bundles
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_bundle_version_pointer_integrity();
+
+CREATE TRIGGER trigger_bundle_version_pointer_integrity_update
+    BEFORE UPDATE OF current_draft_version_id, current_published_version_id
+    ON compliance_bundles
+    FOR EACH ROW
+    WHEN (
+        OLD.current_draft_version_id IS DISTINCT FROM NEW.current_draft_version_id
+     OR OLD.current_published_version_id IS DISTINCT FROM NEW.current_published_version_id
+    )
+    EXECUTE FUNCTION enforce_bundle_version_pointer_integrity();
+
+-- ── 3. Deferred state-change validation ───────────────────────────────────────
+-- Fires at COMMIT so both the version state and the lineage pointer can be
+-- updated in any order within the same transaction.
+
+CREATE OR REPLACE FUNCTION validate_policy_lineage_pointer_after_state_change()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_draft_id     uuid;
+    v_published_id uuid;
+BEGIN
+    SELECT current_draft_version_id, current_published_version_id
+    INTO v_draft_id, v_published_id
+    FROM deployment_policies WHERE id = NEW.policy_id;
+
+    -- After moving to accepted: must be the lineage's current_published pointer.
+    IF NEW.publication_state = 'accepted' THEN
+        IF v_published_id IS DISTINCT FROM NEW.id THEN
+            RAISE EXCEPTION
+                'Policy version % became accepted but current_published_version_id on '
+                'policy % is %. Update the pointer in the same transaction.',
+                NEW.id, NEW.policy_id, v_published_id;
+        END IF;
+        IF v_draft_id = NEW.id THEN
+            RAISE EXCEPTION
+                'Policy version % became accepted but is still current_draft_version_id '
+                'on policy %. Clear the draft pointer.',
+                NEW.id, NEW.policy_id;
+        END IF;
+    END IF;
+
+    -- Any immutable state: must not remain draft pointer.
+    IF NEW.publication_state IN ('accepted', 'deprecated') THEN
+        IF v_draft_id = NEW.id THEN
+            RAISE EXCEPTION
+                'Policy version % moved to immutable state ''%'' but is still '
+                'current_draft_version_id on policy %.',
+                NEW.id, NEW.publication_state, NEW.policy_id;
+        END IF;
+    END IF;
+
+    -- Mutable states: must not remain published pointer.
+    IF NEW.publication_state IN ('incomplete', 'draft', 'interim') THEN
+        IF v_published_id = NEW.id THEN
+            RAISE EXCEPTION
+                'Policy version % is in mutable state ''%'' but is still '
+                'current_published_version_id on policy %.',
+                NEW.id, NEW.publication_state, NEW.policy_id;
+        END IF;
+    END IF;
 
     RETURN NEW;
 END;
 $$;
 
-CREATE TRIGGER trigger_bundle_version_pointer_integrity
-    BEFORE INSERT OR UPDATE OF current_draft_version_id, current_published_version_id
-    ON compliance_bundles
+CREATE CONSTRAINT TRIGGER trigger_validate_policy_lineage_on_state_change
+    AFTER UPDATE OF publication_state ON deployment_policy_versions
+    DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW
-    WHEN (
-        NEW.current_draft_version_id IS DISTINCT FROM OLD.current_draft_version_id
-     OR NEW.current_published_version_id IS DISTINCT FROM OLD.current_published_version_id
-     OR TG_OP = 'INSERT'
-    )
-    EXECUTE FUNCTION enforce_bundle_version_pointer_integrity();
+    WHEN (OLD.publication_state IS DISTINCT FROM NEW.publication_state)
+    EXECUTE FUNCTION validate_policy_lineage_pointer_after_state_change();
 
--- ── 1c. Membership trigger: error on missing version, not silent skip ─────────
+CREATE OR REPLACE FUNCTION validate_bundle_lineage_pointer_after_state_change()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_draft_id     uuid;
+    v_published_id uuid;
+BEGIN
+    SELECT current_draft_version_id, current_published_version_id
+    INTO v_draft_id, v_published_id
+    FROM compliance_bundles WHERE id = NEW.bundle_id;
+
+    IF NEW.publication_state = 'accepted' THEN
+        IF v_published_id IS DISTINCT FROM NEW.id THEN
+            RAISE EXCEPTION
+                'Bundle version % became accepted but current_published_version_id on '
+                'bundle % is %. Update the pointer in the same transaction.',
+                NEW.id, NEW.bundle_id, v_published_id;
+        END IF;
+        IF v_draft_id = NEW.id THEN
+            RAISE EXCEPTION
+                'Bundle version % became accepted but is still current_draft_version_id '
+                'on bundle %. Clear the draft pointer.',
+                NEW.id, NEW.bundle_id;
+        END IF;
+    END IF;
+
+    IF NEW.publication_state IN ('accepted', 'deprecated') THEN
+        IF v_draft_id = NEW.id THEN
+            RAISE EXCEPTION
+                'Bundle version % moved to immutable state ''%'' but is still '
+                'current_draft_version_id on bundle %.',
+                NEW.id, NEW.publication_state, NEW.bundle_id;
+        END IF;
+    END IF;
+
+    IF NEW.publication_state IN ('incomplete', 'draft', 'interim') THEN
+        IF v_published_id = NEW.id THEN
+            RAISE EXCEPTION
+                'Bundle version % is in mutable state ''%'' but is still '
+                'current_published_version_id on bundle %.',
+                NEW.id, NEW.publication_state, NEW.bundle_id;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER trigger_validate_bundle_lineage_on_state_change
+    AFTER UPDATE OF publication_state ON compliance_bundle_versions
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    WHEN (OLD.publication_state IS DISTINCT FROM NEW.publication_state)
+    EXECUTE FUNCTION validate_bundle_lineage_pointer_after_state_change();
+
+-- ── 4. Immutability guard on bundle version membership (P1 #3) ────────────────
+-- Prevents any change to compliance_bundle_version_policies when the parent
+-- bundle version is in an immutable state.
+
+CREATE OR REPLACE FUNCTION guard_bundle_version_membership_immutability()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_version_id uuid;
+    v_state      text;
+BEGIN
+    v_version_id := COALESCE(NEW.bundle_version_id, OLD.bundle_version_id);
+    SELECT publication_state INTO v_state
+    FROM compliance_bundle_versions WHERE id = v_version_id;
+
+    IF v_state IN ('accepted', 'deprecated') THEN
+        RAISE EXCEPTION
+            'Cannot modify membership of bundle version % because it is in '
+            'immutable state ''%''.',
+            v_version_id, v_state;
+    END IF;
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+CREATE TRIGGER trigger_guard_bundle_version_membership_immutability
+    BEFORE INSERT OR UPDATE OR DELETE ON compliance_bundle_version_policies
+    FOR EACH ROW
+    EXECUTE FUNCTION guard_bundle_version_membership_immutability();
+
+-- ── 5. Rebuild assignment updated_at trigger (column renamed in 0201) ─────────
+
+CREATE OR REPLACE FUNCTION update_bundle_assignment_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trigger_compliance_bundle_assignments_updated_at
+    ON compliance_bundle_assignments;
+
+CREATE TRIGGER trigger_compliance_bundle_assignments_updated_at
+    BEFORE UPDATE ON compliance_bundle_assignments
+    FOR EACH ROW EXECUTE FUNCTION update_bundle_assignment_updated_at();
+
+-- ── 6. Correct bundle membership and draft sync triggers ──────────────────────
 
 CREATE OR REPLACE FUNCTION sync_bundle_version_membership()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
@@ -159,8 +326,6 @@ BEGIN
     FROM compliance_bundles WHERE id = v_bundle_id;
 
     IF v_version_id IS NULL THEN
-        -- No current draft version: this should not happen after migrations but
-        -- guard defensively.
         IF TG_OP = 'INSERT' THEN
             RAISE EXCEPTION
                 'Cannot add policy to bundle %: bundle has no current draft version.',
@@ -170,7 +335,6 @@ BEGIN
     END IF;
 
     IF TG_OP = 'INSERT' THEN
-        -- Require an exact version pointer on the policy lineage (P1 #3).
         SELECT COALESCE(dp.current_draft_version_id, dp.current_published_version_id)
         INTO v_policy_version_id
         FROM deployment_policies dp
@@ -178,12 +342,11 @@ BEGIN
 
         IF v_policy_version_id IS NULL THEN
             RAISE EXCEPTION
-                'Cannot add policy % to bundle %: policy has no versioned draft or published version.',
+                'Cannot add policy % to bundle %: policy has no versioned draft or '
+                'published version.',
                 NEW.policy_id, v_bundle_id;
         END IF;
 
-        -- Verify cross-lineage integrity: the resolved version must belong to
-        -- the policy we are adding.
         IF NOT EXISTS (
             SELECT 1 FROM deployment_policy_versions
             WHERE id = v_policy_version_id AND policy_id = NEW.policy_id
@@ -210,7 +373,6 @@ BEGIN
               WHERE policy_id = OLD.policy_id
           );
 
-        -- Recompact policy_order after removal.
         WITH ordered AS (
             SELECT id,
                    (row_number() OVER (ORDER BY policy_order))::integer - 1 AS new_order
@@ -222,55 +384,12 @@ BEGIN
         FROM ordered WHERE bvp.id = ordered.id;
     END IF;
 
-    -- Mark digest as pending; Rust recomputes it.
     UPDATE compliance_bundle_versions
     SET semantic_digest = 'pending'
-    WHERE id = v_version_id AND publication_state IN ('incomplete', 'draft', 'interim');
+    WHERE id = v_version_id
+      AND publication_state IN ('incomplete', 'draft', 'interim');
 
     RETURN COALESCE(NEW, OLD);
-END;
-$$;
-
--- ── 2. Remove implicit 0.1.0 fallback from sync_policy_draft_version ─────────
--- When the pointer is null during an UPDATE the trigger now raises rather than
--- silently inserting a conflicting version identity. Derived-draft creation is
--- an explicit Rust operation.
-
-CREATE OR REPLACE FUNCTION sync_policy_draft_version()
-RETURNS TRIGGER LANGUAGE plpgsql AS $$
-DECLARE
-    v_id uuid;
-BEGIN
-    IF TG_OP = 'INSERT' THEN
-        INSERT INTO deployment_policy_versions (
-            policy_id, version, name, description, policy_type, config, semantic_digest
-        ) VALUES (
-            NEW.id, '0.1.0', NEW.name, NEW.description, NEW.policy_type, NEW.config,
-            'pending'
-        )
-        RETURNING id INTO v_id;
-        UPDATE deployment_policies SET current_draft_version_id = v_id WHERE id = NEW.id;
-
-    ELSIF TG_OP = 'UPDATE' THEN
-        IF NEW.current_draft_version_id IS NOT NULL THEN
-            UPDATE deployment_policy_versions
-            SET name = NEW.name,
-                description = NEW.description,
-                policy_type = NEW.policy_type,
-                config = NEW.config,
-                semantic_digest = 'pending'
-            WHERE id = NEW.current_draft_version_id
-              AND publication_state IN ('incomplete', 'draft', 'interim');
-        ELSE
-            -- No draft pointer: caller must create a derived draft first.
-            RAISE EXCEPTION
-                'Cannot update policy %: no mutable draft version exists. '
-                'Create a derived draft before editing.',
-                NEW.id;
-        END IF;
-    END IF;
-
-    RETURN NEW;
 END;
 $$;
 
@@ -309,6 +428,32 @@ BEGIN
                 NEW.id;
         END IF;
     END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+-- Update env-assignment insert trigger to use the renamed column.
+CREATE OR REPLACE FUNCTION sync_bundle_env_assignment_insert()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_version_id uuid;
+BEGIN
+    v_version_id := bundle_current_draft_version(NEW.bundle_id);
+    IF v_version_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    INSERT INTO compliance_bundle_assignments (
+        bundle_version_id, scope_type, environment_id, enforcement_mode,
+        assignment_overlay_digest, created_at, updated_at
+    ) VALUES (
+        v_version_id, 'environment', NEW.environment_id, 'enforce',
+        'pending', now(), now()
+    )
+    ON CONFLICT (bundle_version_id, environment_id)
+        WHERE environment_id IS NOT NULL
+    DO NOTHING;
 
     RETURN NEW;
 END;

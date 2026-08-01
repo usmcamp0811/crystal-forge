@@ -15,12 +15,14 @@ use crate::compliance::digest::{
 ///
 /// If `current_draft_version_id` is already set and mutable, returns it.
 /// If the lineage has only a published version, creates a new draft derived from
-/// it (copies metadata, membership, opaque content, `derived_from_version_id`),
+/// it (copies metadata, membership, assignments+overlays), sets
+/// `derived_from_version_id`, records `actor_id` as the creating user,
 /// updates the pointer, and returns the new version id.
 /// Returns an error if neither pointer exists.
 pub async fn ensure_bundle_draft(
     tx: &mut Transaction<'_, Postgres>,
     bundle_id: Uuid,
+    actor_id: Option<Uuid>,
 ) -> Result<Uuid> {
     #[derive(sqlx::FromRow)]
     struct BundlePointers {
@@ -87,8 +89,9 @@ pub async fn ensure_bundle_draft(
         r#"
         INSERT INTO compliance_bundle_versions (
             bundle_id, version, name, framework, framework_version,
-            description, layer, owner, semantic_digest, derived_from_version_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)
+            description, layer, owner, semantic_digest, derived_from_version_id,
+            created_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
         RETURNING id
         "#,
     )
@@ -101,6 +104,7 @@ pub async fn ensure_bundle_draft(
     .bind(&pub_ver.layer)
     .bind(&pub_ver.owner)
     .bind(published_id)
+    .bind(actor_id) // created_by
     .fetch_one(&mut **tx)
     .await?;
 
@@ -148,8 +152,9 @@ pub async fn ensure_bundle_draft(
             r#"
             INSERT INTO compliance_bundle_assignments
                 (bundle_version_id, scope_type, environment_id, system_id,
-                 enforcement_mode, provenance, assignment_overlay_digest)
-            VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+                 enforcement_mode, provenance, assignment_overlay_digest,
+                 created_by, updated_by)
+            VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $7)
             RETURNING id
             "#,
         )
@@ -159,6 +164,7 @@ pub async fn ensure_bundle_draft(
         .bind(pa.system_id)
         .bind(&pa.enforcement_mode)
         .bind(&pa.provenance)
+        .bind(actor_id) // created_by / updated_by = the actor deriving the draft
         .fetch_one(&mut **tx)
         .await?;
 
@@ -656,6 +662,7 @@ pub async fn update_bundle(
     pool: &PgPool,
     bundle_id: Uuid,
     request: UpdateComplianceBundleRequest,
+    actor_id: Option<Uuid>,
 ) -> Result<Option<ComplianceBundleSummary>> {
     let name = request.name.trim();
     let framework = request.framework.trim();
@@ -681,7 +688,7 @@ pub async fn update_bundle(
 
     // Ensure a mutable draft exists (creates a derived draft from the published
     // version when needed). (P1 #2)
-    let draft_version_id = ensure_bundle_draft(&mut tx, bundle_id).await?;
+    let draft_version_id = ensure_bundle_draft(&mut tx, bundle_id, actor_id).await?;
 
     // Load layer and owner from the current draft version (not from constants).
     let (stored_layer, stored_owner): (String, String) =
@@ -761,9 +768,22 @@ pub async fn update_bundle(
         }
     }
 
+    // Reject duplicate policy IDs in the request (P1 #2).
+    {
+        let mut seen = std::collections::HashSet::new();
+        for pid in &request.policy_ids {
+            if !seen.insert(pid) {
+                bail!("Duplicate policy lineage {pid} in request");
+            }
+        }
+    }
+
     // Update policy_order in compliance_bundle_version_policies to match the
-    // request vector (P1 #4). Use a temporary large offset to avoid the unique
+    // request vector. Use a temporary +100000 offset to avoid the unique
     // (bundle_version_id, policy_order) constraint during reordering.
+    //
+    // Join via the stored version row's policy_id so any exact version
+    // (draft, published, imported) is matched correctly (P1 #2 fix).
     //
     // Step 1: Offset all existing orders far above the final range.
     sqlx::query(
@@ -779,30 +799,40 @@ pub async fn update_bundle(
 
     // Step 2: Assign each requested lineage its exact requested position.
     for (pos, policy_lineage_id) in request.policy_ids.iter().enumerate() {
-        sqlx::query(
+        let rows_affected = sqlx::query(
             r#"
             UPDATE compliance_bundle_version_policies bvp
             SET policy_order = $1
-            FROM deployment_policies dp
+            FROM deployment_policy_versions pv
             WHERE bvp.bundle_version_id = $2
-              AND bvp.policy_version_id = dp.current_draft_version_id
-              AND dp.id = $3
+              AND pv.id = bvp.policy_version_id
+              AND pv.policy_id = $3
             "#,
         )
         .bind(pos as i32)
         .bind(draft_version_id)
         .bind(policy_lineage_id)
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .rows_affected();
+
+        if rows_affected != 1 {
+            bail!(
+                "Policy lineage {} is not a member of bundle version {} \
+                 (no version row found). Add the policy before reordering.",
+                policy_lineage_id,
+                draft_version_id
+            );
+        }
     }
 
-    // Step 3: Compact any remaining rows that were not in the request vector
-    // (should not exist after the diff, but guard defensively).
+    // Step 3: Remove the temporary offset from any rows still >=100000
+    // (guard: should not exist after correct diff, but defensively compact).
     sqlx::query(
         r#"
         WITH remaining AS (
             SELECT id,
-                   ROW_NUMBER() OVER (ORDER BY policy_order)::integer
+                   (ROW_NUMBER() OVER (ORDER BY policy_order))::integer
                        + $1 - 1 AS new_order
             FROM compliance_bundle_version_policies
             WHERE bundle_version_id = $2

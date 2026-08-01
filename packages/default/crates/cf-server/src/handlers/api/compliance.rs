@@ -137,7 +137,7 @@ pub async fn update_compliance_bundle(
     Path(bundle_id): Path<Uuid>,
     Json(payload): Json<UpdateComplianceBundleRequest>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -145,7 +145,7 @@ pub async fn update_compliance_bundle(
         return forbidden();
     }
 
-    match update_bundle_row(&pool, bundle_id, payload).await {
+    match update_bundle_row(&pool, bundle_id, payload, Some(user_id)).await {
         Ok(Some(bundle)) => (StatusCode::OK, Json(bundle)).into_response(),
         Ok(None) => not_found(),
         Err(err) if err.downcast_ref::<BundleValidationError>().is_some() => {

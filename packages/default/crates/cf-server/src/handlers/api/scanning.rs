@@ -13,9 +13,9 @@ use crate::api::models::{
 };
 use crate::handlers::api::rbac::require_admin;
 use crate::queries::scanning::{
-    ScanSchedulePolicyRow, get_scan_activity, get_scan_deployed, get_scan_queue,
-    get_scan_queue_for_system, get_scan_schedule_policy, get_scan_stats, get_scan_systems,
-    update_scan_schedule_policy,
+    InvalidCursorError, ScanSchedulePolicyRow, get_scan_activity, get_scan_deployed,
+    get_scan_queue, get_scan_queue_for_system, get_scan_schedule_policy, get_scan_stats,
+    get_scan_systems, update_scan_schedule_policy,
 };
 
 #[derive(Debug, Deserialize, Default)]
@@ -128,6 +128,15 @@ pub async fn get_scanning_deployed(
                 total: result.total,
                 has_more: result.has_more,
                 next_cursor: result.next_cursor,
+            }),
+        )
+            .into_response(),
+        Err(e) if e.downcast_ref::<InvalidCursorError>().is_some() => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(crate::api::models::ApiError {
+                error: "Bad Request".into(),
+                message: "Invalid or malformed pagination cursor.".into(),
+                details: None,
             }),
         )
             .into_response(),
