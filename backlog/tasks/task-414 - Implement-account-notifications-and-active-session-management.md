@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 13:40'
+updated_date: '2026-08-01 14:26'
 labels:
   - frontend
   - web-ui
@@ -1186,6 +1186,8 @@ Diagnosed the prior `nix build .#checks.x86_64-linux.web-ui --no-link` failure: 
 Remaining limitations: DB-backed ignored tests were not run because `CRYSTAL_FORGE_TEST_DATABASE_URL` is not set; SQLx metadata has not been refreshed in this session. Implementation remains uncommitted/unpushed pending authorization.
 
 Committed and pushed TASK-414 implementation commit `7efeaedb` (`Implement account notifications and sessions`) to branch `TASK-414-account-notifications-sessions`. Opened MR !314 for review: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/314. Task remains In Progress rather than Review because required DB-backed ignored tests have not been run locally (`CRYSTAL_FORGE_TEST_DATABASE_URL` unavailable) and SQLx metadata was not refreshed in this session; MR is open for early human/dev-server review and iteration.
+
+Review result received for MR !314: request changes with seven P1 blockers and one P2. Blocking areas: invalid immediate-email materialization SQL/idempotency key, worker marking email sent without transport acceptance, missing notification authorization boundaries, missing CSRF validation on notification mutations, email/digest production depending on notification-center GET, preference write/client response races, former-account responses populating new-account UI. P2: session last-seen config not wired from ServerConfig and retention cleanup missing. Proceeding to address these in the TASK-414 branch/MR.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
