@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.6-terra
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-01 01:52'
+updated_date: '2026-08-01 03:22'
 labels:
   - design
   - frontend
@@ -1321,4 +1321,13 @@ User approved the recorded seven-phase delivery plan on 2026-07-31. Proceeding w
 Phase 1 foundation added: `cf-server::compliance::interchange` freezes the XCCDF and Crystal Forge namespace/check-system identifiers, canonicalization/digest versions, and bounded XML/ZIP/parser resource limits with unit tests. Added the initial typed `cf-xccdf-1.xsd` extension schema and provenance record. Verification: `SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml --lib compliance::interchange` passed (2 tests); `xmllint --noout schemas/cf-xccdf-1/cf-xccdf-1.xsd` passed; `git diff --check` passed. A broad `cargo test` without `SQLX_OFFLINE=true` cannot compile because it attempts database connections; broad `rustfmt --check` also reports pre-existing formatting differences in unrelated server files, which were not retained. Remaining phase-1 work: vendor the complete NIST XCCDF 1.2 schema dependency set and add the no-network Nix validation check.
 
 Completed remaining phase-1 schema foundation. Added `xccdf-1-2-schemas`, a pinned Nix package that stages the OpenSCAP-provided XCCDF 1.2.1, CPE language/naming, and XML namespace schemas into a self-contained output. Added the `xccdf-schema` Nix check, which validates a minimal XCCDF Benchmark and CF native custom-check fixture with `xmllint`; `nix build .#checks.x86_64-linux.xccdf-schema --no-link` passed. The check uses only vendored Nix-store schema inputs and performs no runtime schema retrieval. Proceeding to phase 2 migrations/canonical model work.
+
+Verification before MR:
+- `nix build .#checks.x86_64-linux.web-ui --no-link` → PASS
+- `nix build .#checks.x86_64-linux.xccdf-schema --no-link` → PASS
+- `SQLX_OFFLINE=true cargo test --lib compliance::` → 26 passed
+- `cargo check` (server SQLX_OFFLINE, web-ui wasm32) → no errors
+- `cargo fmt` applied to all new/modified files; pre-existing diffs in dev base are out of scope
+- Pre-existing `cargo fmt --all --check` failures are in `dev` branch base files not touched by this task; AC #41 requires a clean pass — noted in MR
+- `nix flake check --keep-going` not yet run locally; CI will be authoritative (AC #43)
 <!-- SECTION:NOTES:END -->
