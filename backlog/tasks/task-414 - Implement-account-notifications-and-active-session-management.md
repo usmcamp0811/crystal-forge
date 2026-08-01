@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-01 16:09'
+updated_date: '2026-08-01 21:31'
 labels:
   - frontend
   - web-ui
@@ -1231,6 +1231,28 @@ Verification for this slice:
 Remaining limitations: DB-backed ignored tests still require a migrated `CRYSTAL_FORGE_TEST_DATABASE_URL` and were not run in this session; SQLx offline metadata has not been refreshed.
 
 Committed and pushed latest re-review-fix commit `08639ffb` (`Tighten notification delivery review fixes`) to branch `TASK-414-account-notifications-sessions` for MR !314. Worktree status after push is clean. Remaining limitations: DB-backed ignored tests require `CRYSTAL_FORGE_TEST_DATABASE_URL`; SQLx metadata has not been refreshed; `nix build .#checks.x86_64-linux.web-ui --no-link` was attempted but timed out after 900s and remains unverified.
+
+Continued MR !314 re-review fixes:
+- Added persisted email opt-in cutoffs to `user_notification_preferences` for each immediate category plus weekly digest. Preference updates now set/reset those timestamps when email-capable delivery or a category/digest is enabled/disabled.
+- Immediate email enqueue now requires the source event timestamp to be at or after the relevant email cutoff, preventing replay of older in-app-only events when a user later switches to `email`/`both` or re-enables a category.
+- Weekly digest enqueue now requires `weekly_digest_enabled_at` before the completed period start and only counts/items after the digest cutoff, preventing a newly enabled digest from sending the previous week.
+- Removed the `resolved_at IS NULL` filter from attention materialization so resolved-but-unseen occurrences after the durable preference cutoff can still create exactly one notification/delivery by occurrence id.
+- Added `public_base_url`, provider token file, and explicit loopback-only insecure HTTP development option to email configuration and NixOS options. Validation now rejects unsafe/missing public origins, non-loopback plaintext endpoints, and provider token files in `/nix/store`.
+- Email transport now sends bearer auth from the configured runtime secret file and expands stored application routes against `public_base_url` for text and HTML email links.
+- Weekly digest rendering now uses an unrestricted grouped category-count query plus a separately bounded recent-item query.
+- Topbar notification clicks now only update local read/unread state after `mark_user_notification_read` succeeds; failures preserve unread state and show a retryable error while still allowing navigation.
+- Preference save handling now rechecks pending work after relinquishing `saving`, restarts a worker if a handoff update arrived, and restores/requeues state on failed saves rather than silently dropping the failed patch.
+
+Verification for this slice:
+- `nix develop -c rustfmt --edition 2024 packages/default/crates/cf-config/src/config/server.rs packages/default/crates/cf-server/src/api/models.rs packages/default/crates/cf-server/src/handlers/api/user_notifications.rs packages/default/crates/cf-server/src/models/user_notifications.rs packages/default/crates/cf-server/src/queries/user_notifications.rs packages/default/crates/cf-server/src/tasks/user_notification_email.rs packages/web-ui/src/components/layout/topbar.rs packages/web-ui/src/views/profile.rs && git diff --check` passed.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml'` passed with existing warnings.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` passed with existing warnings.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml user_notifications --lib'` passed: 4 passed, 4 ignored.
+- `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui notification_preference_merge'` passed: 2 passed.
+- `node --check checks/web-ui/tests/integration-test.js` passed.
+- `nix develop -c bash -c 'cargo test --manifest-path packages/default/crates/cf-config/Cargo.toml server::tests --lib'` passed: 8 passed.
+
+Remaining limitations: requested DB transition tests and the existing DB-backed ignored email tests still require a migrated `CRYSTAL_FORGE_TEST_DATABASE_URL` and were not run in this session; SQLx metadata has not been refreshed; the P2 graceful worker shutdown item remains deferred because the current server background-task wiring does not expose a shutdown signal to pass through without a broader server lifecycle change.
 <!-- SECTION:NOTES:END -->
 
 ## Implementation order
