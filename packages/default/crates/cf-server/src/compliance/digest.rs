@@ -63,6 +63,9 @@ pub struct PolicyVersionCanonical {
     /// SHA-256 hex of the normalised opaque XML, or `null` when absent.
     /// Included so that different preserved XML always produces a different digest.
     pub opaque_xml_digest: Option<String>,
+    /// Whether the policy lineage is currently enabled. This is part of the
+    /// version model's default activation state for interchange.
+    pub enabled_by_default: Option<bool>,
 }
 
 impl PolicyVersionCanonical {
@@ -73,6 +76,7 @@ impl PolicyVersionCanonical {
             "config": self.config,
             "dependencies": self.dependencies,
             "description": self.description.as_deref().unwrap_or(""),
+            "enabled_by_default": self.enabled_by_default,
             "execution_phase": self.execution_phase,
             "implementation_state": self.implementation_state,
             "name": self.name,
@@ -92,6 +96,13 @@ impl PolicyVersionCanonical {
     }
 }
 
+/// A single exact membership entry with both version identity and selection state.
+#[derive(Debug, Clone)]
+pub struct BundleMembershipEntry {
+    pub policy_version_id: Uuid,
+    pub selected: bool,
+}
+
 /// All semantic fields for a bundle version digest.
 #[derive(Debug, Clone)]
 pub struct BundleVersionCanonical {
@@ -101,16 +112,21 @@ pub struct BundleVersionCanonical {
     pub description: Option<String>,
     pub layer: String,
     pub owner: String,
-    /// Ordered policy version IDs (by policy_order in compliance_bundle_version_policies).
-    pub policy_version_ids: Vec<Uuid>,
+    /// Ordered membership entries (by policy_order).
+    pub members: Vec<BundleMembershipEntry>,
 }
 
 impl BundleVersionCanonical {
     pub fn to_digest_value(&self) -> Value {
-        let ids: Vec<String> = self
-            .policy_version_ids
+        let members: Vec<Value> = self
+            .members
             .iter()
-            .map(|id| id.to_string())
+            .map(|m| {
+                json!({
+                    "policy_version_id": m.policy_version_id.to_string(),
+                    "selected": m.selected,
+                })
+            })
             .collect();
         json!({
             "canonicalization_version": "cf-model-json-1",
@@ -118,9 +134,9 @@ impl BundleVersionCanonical {
             "framework": self.framework,
             "framework_version": self.framework_version.as_deref().unwrap_or(""),
             "layer": self.layer,
+            "members": members,
             "name": self.name,
             "owner": self.owner,
-            "policy_version_ids": ids,
         })
     }
 
@@ -223,7 +239,8 @@ pub async fn write_policy_version_digest(
             execution_phase          = $7,
             config                   = $8::jsonb,
             compliance_metadata      = $9::jsonb,
-            dependencies             = $10::jsonb
+            dependencies             = $10::jsonb,
+            enabled_by_default       = $11
         WHERE id = $2
           AND publication_state IN ('incomplete', 'draft', 'interim')
         "#,
@@ -238,6 +255,7 @@ pub async fn write_policy_version_digest(
     .bind(&canonical.config)
     .bind(&canonical.compliance_metadata)
     .bind(&canonical.dependencies)
+    .bind(&canonical.enabled_by_default)
     .execute(&mut **tx)
     .await?
     .rows_affected();
@@ -248,14 +266,19 @@ pub async fn write_policy_version_digest(
     Ok(())
 }
 
-/// Load the ordered policy version IDs from the bundle version membership table.
-pub async fn load_bundle_policy_version_ids(
+/// Load the ordered membership entries including `selected`.
+pub async fn load_bundle_membership(
     tx: &mut Transaction<'_, Postgres>,
     bundle_version_id: Uuid,
-) -> Result<Vec<Uuid>> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+) -> Result<Vec<BundleMembershipEntry>> {
+    #[derive(sqlx::FromRow)]
+    struct MembershipRow {
+        policy_version_id: Uuid,
+        selected: bool,
+    }
+    let rows: Vec<MembershipRow> = sqlx::query_as(
         r#"
-        SELECT policy_version_id
+        SELECT policy_version_id, selected
         FROM compliance_bundle_version_policies
         WHERE bundle_version_id = $1
         ORDER BY policy_order ASC
@@ -264,7 +287,14 @@ pub async fn load_bundle_policy_version_ids(
     .bind(bundle_version_id)
     .fetch_all(&mut **tx)
     .await?;
-    Ok(ids)
+
+    Ok(rows
+        .into_iter()
+        .map(|r| BundleMembershipEntry {
+            policy_version_id: r.policy_version_id,
+            selected: r.selected,
+        })
+        .collect())
 }
 
 /// Write the canonical bundle version digest inside the active transaction.
@@ -478,15 +508,18 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
         compliance_metadata: Value,
         dependencies: Value,
         opaque_xml: Option<String>,
+        enabled: Option<bool>,
     }
     let pending_policies: Vec<PolicyVersionRow> = sqlx::query_as(
         r#"
-        SELECT id, policy_id, name, description, policy_type,
-               implementation_state, execution_phase, config,
-               compliance_metadata, dependencies, opaque_xml
-        FROM deployment_policy_versions
-        WHERE semantic_digest = 'pending'
-          AND publication_state IN ('incomplete', 'draft', 'interim')
+        SELECT dpv.id, dpv.policy_id, dpv.name, dpv.description, dpv.policy_type,
+               dpv.implementation_state, dpv.execution_phase, dpv.config,
+               dpv.compliance_metadata, dpv.dependencies, dpv.opaque_xml,
+               dp.enabled
+        FROM deployment_policy_versions dpv
+        JOIN deployment_policies dp ON dp.id = dpv.policy_id
+        WHERE dpv.semantic_digest = 'pending'
+          AND dpv.publication_state IN ('incomplete', 'draft', 'interim')
         "#,
     )
     .fetch_all(pool)
@@ -503,6 +536,7 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
             compliance_metadata: row.compliance_metadata.clone(),
             dependencies: row.dependencies.clone(),
             opaque_xml_digest: PolicyVersionCanonical::digest_opaque_xml(row.opaque_xml.as_deref()),
+            enabled_by_default: row.enabled,
         };
         let digest = canonical.compute_digest();
         sqlx::query(
@@ -544,9 +578,14 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
     .await?;
 
     for row in &pending_bundles {
-        let policy_ids: Vec<Uuid> = sqlx::query_scalar(
+        #[derive(sqlx::FromRow)]
+        struct MembershipRow {
+            policy_version_id: Uuid,
+            selected: bool,
+        }
+        let mem_rows: Vec<MembershipRow> = sqlx::query_as(
             r#"
-            SELECT policy_version_id
+            SELECT policy_version_id, selected
             FROM compliance_bundle_version_policies
             WHERE bundle_version_id = $1
             ORDER BY policy_order ASC
@@ -556,6 +595,14 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
         .fetch_all(pool)
         .await?;
 
+        let members: Vec<BundleMembershipEntry> = mem_rows
+            .into_iter()
+            .map(|r| BundleMembershipEntry {
+                policy_version_id: r.policy_version_id,
+                selected: r.selected,
+            })
+            .collect();
+
         let canonical = BundleVersionCanonical {
             name: row.name.clone(),
             framework: row.framework.clone(),
@@ -563,7 +610,7 @@ pub async fn backfill_pending_digests(pool: &PgPool) -> Result<()> {
             description: row.description.clone(),
             layer: row.layer.clone(),
             owner: row.owner.clone(),
-            policy_version_ids: policy_ids,
+            members,
         };
         let digest = canonical.compute_digest();
         sqlx::query(
@@ -645,6 +692,7 @@ mod tests {
             compliance_metadata: json!({}),
             dependencies: json!([]),
             opaque_xml_digest: None,
+            enabled_by_default: Some(true),
         }
     }
 
@@ -656,7 +704,13 @@ mod tests {
             description: Some("Description".into()),
             layer: "os".into(),
             owner: "Team".into(),
-            policy_version_ids: policy_ids,
+            members: policy_ids
+                .into_iter()
+                .map(|id| BundleMembershipEntry {
+                    policy_version_id: id,
+                    selected: true,
+                })
+                .collect(),
         }
     }
 
@@ -807,5 +861,22 @@ mod tests {
             effective_policy_version_ids: vec![],
         };
         assert_ne!(a.compute_digest(), b.compute_digest());
+    }
+
+    #[test]
+    fn policy_digest_changes_when_enabled_by_default_changes() {
+        assert_ne!(base_policy().compute_digest(), {
+            let mut p = base_policy();
+            p.enabled_by_default = Some(false);
+            p.compute_digest()
+        });
+    }
+
+    #[test]
+    fn bundle_digest_changes_when_selected_changes() {
+        let id = Uuid::parse_str("11111111-0000-0000-0000-000000000001").unwrap();
+        let mut b = bundle(vec![id]);
+        b.members[0].selected = false;
+        assert_ne!(bundle(vec![id]).compute_digest(), b.compute_digest());
     }
 }

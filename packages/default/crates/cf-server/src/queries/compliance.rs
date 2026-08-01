@@ -5,8 +5,8 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::compliance::digest::{
-    BundleVersionCanonical, load_bundle_policy_version_ids, write_assignment_effective_set_digest,
-    write_bundle_version_digest,
+    BundleMembershipEntry, BundleVersionCanonical, load_bundle_membership,
+    write_assignment_effective_set_digest, write_bundle_version_digest,
 };
 
 // ─── Draft-lifecycle helpers ──────────────────────────────────────────────────
@@ -274,11 +274,13 @@ pub async fn ensure_policy_draft(
         dependencies: Value,
         opaque_xml: Option<String>,
         version: String,
+        enabled_by_default: Option<bool>,
     }
     let pub_ver: PubPolicyVersion = sqlx::query_as(
         r#"
         SELECT name, description, policy_type, implementation_state, execution_phase,
-               config, compliance_metadata, dependencies, opaque_xml, version
+               config, compliance_metadata, dependencies, opaque_xml, version,
+               enabled_by_default
         FROM deployment_policy_versions
         WHERE id = $1
         "#,
@@ -295,8 +297,8 @@ pub async fn ensure_policy_draft(
             policy_id, version, name, description, policy_type,
             implementation_state, execution_phase, config,
             compliance_metadata, dependencies, opaque_xml,
-            semantic_digest, derived_from_version_id, created_by
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12, $13)
+            semantic_digest, derived_from_version_id, created_by, enabled_by_default
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12, $13, $14)
         RETURNING id
         "#,
     )
@@ -313,6 +315,7 @@ pub async fn ensure_policy_draft(
     .bind(&pub_ver.opaque_xml)
     .bind(published_id)
     .bind(actor_id)
+    .bind(&pub_ver.enabled_by_default)
     .fetch_one(&mut **tx)
     .await?;
 
@@ -566,7 +569,7 @@ pub async fn create_bundle(
     .fetch_one(&mut *tx)
     .await?;
 
-    let policy_version_ids = load_bundle_policy_version_ids(&mut tx, draft_version_id).await?;
+    let members = load_bundle_membership(&mut tx, draft_version_id).await?;
 
     let req_layer = request.layer.as_deref().unwrap_or("").trim();
     let canonical = BundleVersionCanonical {
@@ -584,7 +587,7 @@ pub async fn create_bundle(
             req_layer.to_string()
         },
         owner: stored_owner,
-        policy_version_ids,
+        members,
     };
     write_bundle_version_digest(&mut tx, bundle_id, &canonical).await?;
 
@@ -828,27 +831,31 @@ pub async fn update_bundle(
         }
     }
 
-    // Step 3: Remove the temporary offset from any rows still >=100000
-    // (guard: should not exist after correct diff, but defensively compact).
-    sqlx::query(
+    // Step 3: Assert that no temporarily-offset rows remain.  They indicate
+    // an internal synchronisation error (a lineage in the request vector did
+    // not match any membership row).  The composite key (bundle_version_id,
+    // policy_version_id) is used because the table has no surrogate id column.
+    let orphaned: i64 = sqlx::query_scalar(
         r#"
-        WITH remaining AS (
-            SELECT id,
-                   (ROW_NUMBER() OVER (ORDER BY policy_order))::integer
-                       + $1 - 1 AS new_order
-            FROM compliance_bundle_version_policies
-            WHERE bundle_version_id = $2
-              AND policy_order >= 100000
-        )
-        UPDATE compliance_bundle_version_policies bvp
-        SET policy_order = r.new_order
-        FROM remaining r WHERE bvp.id = r.id
+        SELECT COUNT(*)
+        FROM compliance_bundle_version_policies
+        WHERE bundle_version_id = $1
+          AND policy_order >= 100000
         "#,
     )
-    .bind(request.policy_ids.len() as i32)
     .bind(draft_version_id)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
+
+    if orphaned > 0 {
+        bail!(
+            "{} bundle membership row(s) still have a temporary +100000 offset in bundle version {}. \
+             This indicates a policy lineage in the request vector was not found in the stored \
+             membership. The bundle may be in an inconsistent state.",
+            orphaned,
+            draft_version_id
+        );
+    }
 
     // Diff-based environment update: preserve unchanged assignments.
     let new_env_set: std::collections::HashSet<Uuid> =
@@ -886,7 +893,7 @@ pub async fn update_bundle(
         .await?;
     }
 
-    let policy_version_ids = load_bundle_policy_version_ids(&mut tx, draft_version_id).await?;
+    let members = load_bundle_membership(&mut tx, draft_version_id).await?;
 
     let canonical = BundleVersionCanonical {
         name: name.to_string(),
@@ -903,7 +910,7 @@ pub async fn update_bundle(
             .filter(|s| !s.is_empty()),
         layer: stored_layer,
         owner: stored_owner,
-        policy_version_ids,
+        members,
     };
     write_bundle_version_digest(&mut tx, bundle_id, &canonical).await?;
 

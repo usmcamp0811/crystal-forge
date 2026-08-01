@@ -648,3 +648,87 @@ CREATE CONSTRAINT TRIGGER trigger_validate_bundle_policy_versions_on_accept
     FOR EACH ROW
     WHEN (OLD.publication_state IS DISTINCT FROM NEW.publication_state)
     EXECUTE FUNCTION validate_bundle_policy_versions_on_accept();
+
+-- ── 12. enabled_by_default column (P1 #3) ────────────────────────────────────
+-- The version model must preserve the source enabled state for interchange.
+ALTER TABLE deployment_policy_versions
+    ADD COLUMN IF NOT EXISTS enabled_by_default boolean;
+
+-- Backfill from current lineage values.
+UPDATE deployment_policy_versions dpv
+SET enabled_by_default = dp.enabled
+FROM deployment_policies dp
+WHERE dpv.policy_id = dp.id
+  AND dpv.enabled_by_default IS NULL;
+
+ALTER TABLE deployment_policy_versions
+    ALTER COLUMN enabled_by_default SET NOT NULL,
+    ALTER COLUMN enabled_by_default SET DEFAULT true;
+
+-- Update the policy draft sync trigger to propagate enabled state.
+CREATE OR REPLACE FUNCTION sync_policy_draft_version()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_id uuid;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO deployment_policy_versions (
+            policy_id, version, name, description, policy_type,
+            config, semantic_digest, enabled_by_default
+        ) VALUES (
+            NEW.id, '0.1.0', NEW.name, NEW.description, NEW.policy_type,
+            NEW.config, 'pending', NEW.enabled
+        )
+        RETURNING id INTO v_id;
+        UPDATE deployment_policies SET current_draft_version_id = v_id WHERE id = NEW.id;
+
+    ELSIF TG_OP = 'UPDATE' THEN
+        IF NEW.current_draft_version_id IS NOT NULL THEN
+            UPDATE deployment_policy_versions
+            SET name = NEW.name,
+                description = NEW.description,
+                policy_type = NEW.policy_type,
+                config = NEW.config,
+                semantic_digest = 'pending',
+                enabled_by_default = NEW.enabled
+            WHERE id = NEW.current_draft_version_id
+              AND publication_state IN ('incomplete', 'draft', 'interim');
+        ELSE
+            RAISE EXCEPTION
+                'Cannot update policy %: no mutable draft version exists. '
+                'Create a derived draft before editing.',
+                NEW.id;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+-- ── 13. Reject direct insert of immutable version states (P1 #4) ──────────────
+-- A version row inserted directly with 'accepted' or 'deprecated' bypasses
+-- the deferred lineage-pointer validation. Require new versions to begin in a
+-- mutable state.
+
+CREATE OR REPLACE FUNCTION guard_version_insert_state()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.publication_state NOT IN ('incomplete', 'draft', 'interim') THEN
+        RAISE EXCEPTION
+            'New version % cannot be created in immutable state ''%''. '
+            'Versions must begin in a mutable state (incomplete/draft/interim).',
+            NEW.id, NEW.publication_state;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trigger_guard_policy_version_insert_state
+    BEFORE INSERT ON deployment_policy_versions
+    FOR EACH ROW
+    EXECUTE FUNCTION guard_version_insert_state();
+
+CREATE TRIGGER trigger_guard_bundle_version_insert_state
+    BEFORE INSERT ON compliance_bundle_versions
+    FOR EACH ROW
+    EXECUTE FUNCTION guard_version_insert_state();

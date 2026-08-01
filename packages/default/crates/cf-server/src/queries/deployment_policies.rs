@@ -309,6 +309,7 @@ pub async fn create_deployment_policy(
         compliance_metadata: serde_json::json!({}),
         dependencies: serde_json::json!([]),
         opaque_xml_digest: None,
+        enabled_by_default: Some(policy.enabled),
     };
     write_policy_version_digest(&mut tx, policy.id, &canonical)
         .await
@@ -424,6 +425,7 @@ pub async fn update_deployment_policy(
             compliance_metadata: meta,
             dependencies: deps,
             opaque_xml_digest: PolicyVersionCanonical::digest_opaque_xml(opaque_xml.as_deref()),
+            enabled_by_default: Some(p.enabled),
         };
         write_policy_version_digest(&mut tx, p.id, &canonical)
             .await
